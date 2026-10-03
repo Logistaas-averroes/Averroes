@@ -540,20 +540,34 @@ def compute_canonical_freshness(
                 " The latest sync was partial, so the population behind this "
                 "dataset is incomplete."
             )
+            # PR-ADS-160-F2. These two returns were the only ones in this
+            # function that dropped `dependency_note`, so the one combination
+            # that reaches them — partial sync AND blocked upstream AND an
+            # unmeasured row count — lost the upstream entirely and fell from
+            # `error` to `neutral`, weaker than the `blocked_by_dependency` it
+            # displaced. Direct evidence outranking inherited evidence must
+            # never mean reporting less than the inherited state did.
+            #
+            # It is reachable whenever the row-count SELECT raises — a missing
+            # table on a partly-migrated database, a permission error, a lock
+            # timeout — which is exactly when a blocking error matters most.
+            escalate = "error" if dependency_note else None
             if row_count_supported is False:
                 return _result(
                     CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED,
                     reason=(f"Row-count query is not enabled for this dataset."
-                            f"{batch_hint}{partial_note}"),
+                            f"{batch_hint}{partial_note}{dependency_note}"),
                     next_action=("Re-run the sync to completion; implement the "
                                  "row-count diagnostic if this page depends on "
                                  "freshness."),
+                    severity=escalate,
                 )
             return _result(
                 CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT,
                 reason=(f"Row count query unavailable for this dataset."
-                        f"{batch_hint}{partial_note}"),
+                        f"{batch_hint}{partial_note}{dependency_note}"),
                 next_action="Re-run the sync to completion and re-check.",
+                severity=escalate,
             )
         if rows_in_window > 0:
             return _result(
@@ -650,10 +664,18 @@ def compute_canonical_freshness(
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
-def _result(status: str, reason: str, next_action: str) -> dict[str, Any]:
+def _result(status: str, reason: str, next_action: str,
+            severity: str | None = None) -> dict[str, Any]:
+    """A freshness verdict. `severity` overrides the status's default.
+
+    The override exists for one case (PR-ADS-160-F2): a status whose own
+    severity is weaker than the inherited state it displaced. Replacing a
+    blocking `error` with a neutral `unknown` would make direct evidence a
+    downgrade, which is the opposite of what the precedence rule is for.
+    """
     return {
         "canonical_status": status,
-        "severity": SEVERITY_MAP.get(status, "neutral"),
+        "severity": severity or SEVERITY_MAP.get(status, "neutral"),
         "reason": reason,
         "next_action": next_action,
     }

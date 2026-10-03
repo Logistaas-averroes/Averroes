@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-153E-B — Canonical Revenue Consumer Cutover (August 2026)
+**Last updated:** PR-ADS-161A-1-F4 — the gates that were unreachable on real inputs (September 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -9,7 +9,16 @@
 
 ---
 
-> ### ⚠️ Authoritative status (PR-ADS-153E-B, August 2026)
+> ### ⚠️ Read the newest sections, not this header's successor below
+>
+> The block that follows was written at PR-ADS-153E-B and was never updated as
+> the repository moved on. It is kept because its architectural content is
+> still accurate and because several documents cite it — but its **status**
+> claims stop at August 2026. The repository has since merged through
+> **PR-ADS-161A-1**; read the dated sections at the end of this file, and
+> `git log`, for what is actually true now.
+
+> ### ⚠️ Historical status snapshot (PR-ADS-153E-B, August 2026)
 >
 > This document's phase/status narrative below predates the PR-ADS-153A–D
 > sequence and is retained for its architectural content, not its status claims.
@@ -549,3 +558,355 @@ outranks inherited evidence — the dependency is named in the reason rather tha
 dropped — applied uniformly across all three configured dependency pairs.
 
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
+
+
+## PR-ADS-160-F2 — Monitoring cadence identity and partial-state truth (September 2026)
+
+Found by an independent readiness audit before production validation, not by
+CI. Every fix here was shown failing against the pre-fix code.
+
+**A cadence was a name two pipelines shared, and the healthier one won the
+verdict.** PR-ADS-160-F1 correctly stopped `compute_monitoring_status`
+discarding real `daily_incremental_sync` rows — then routed them into the same
+cadence as the legacy 06:00 pulse. Monitoring computes one failure streak, one
+`last_success_at` and one severity per cadence, so the 06:00 pulse broke the
+09:00 incremental sync's failure streak every morning (red needs 2 consecutive;
+it could never exceed 1) and advanced the clock its staleness is measured
+against. Measured on the real function: five days of incremental-sync failures
+behind a healthy pulse reported `severity: green, warnings: []`, and
+`static/app.js` renders nothing on green. No test had ever placed a `daily` row
+and a `daily_incremental_sync` row in the same list — the population production
+emits was untested. A cadence is now one pipeline; `daily_incremental_sync` has
+its own bucket, its own threshold in `config/thresholds.yaml`, and its own
+verdict. `api/server.py:_load_monitoring_thresholds` iterates
+`MONITORING_CADENCES` rather than a literal triple, and the unchosen 2-day
+fallback is gone: a cadence with no configured threshold is warned about by
+name instead of being measured against a number nobody picked.
+
+**Direct evidence reported LESS than the inherited state it displaced.** The
+PR-ADS-160-F1 §4 precedence rule promised the dependency would be named in the
+reason rather than dropped. One of five returns in
+`services/freshness_service.py` — partial sync with an unmeasured row count —
+omitted `dependency_note` entirely and fell from `blocked_by_dependency` /
+`error` to `unknown_row_count` / `neutral`, which is not in `BLOCKING_STATES`,
+so the cascade was lost too. Reachable whenever the row-count `SELECT` raises,
+which is exactly when a blocking error matters most. Both returns now carry the
+dependency, and `_result` takes a severity override that floors the verdict at
+`error` when it displaces a blocking one.
+
+**`partial` was collapsed into `failed` on two canonical sync batches.**
+`scheduler/incremental_sync.py` did this for the deal ledger and canonical geo
+under a comment asserting `sync_batches` accepts success|failed only — a
+premise PR-ADS-160 itself had made false by adding `partial` to
+`VALID_SYNC_STATUSES` and to `finish_sync_batch`. `sync_state.status` is what
+`compute_canonical_freshness` reads, so a truncated deal-ledger sync rendered
+as "Latest sync failed" on the canonical **revenue** population: retry, when
+the remedy is resume. Both sites pass the exact status through; the writer
+already withholds `last_source_date` for anything but success.
+
+**A daily pulse that failed during its pulls wrote no `runs` row at all.**
+`scheduler/daily.py` inserted the record after both pulls, so the failure path
+called `update_run(None, ...)`, which returns immediately. This is the likely
+origin of the "No daily run found in history" symptom F1 diagnosed, and the
+reason the masking above was dormant rather than active — it would have
+switched on the day the pulse started succeeding. The insert now happens
+immediately after `start_run`, before any connector import.
+
+Not fixed here, and recorded so they are not lost: `last_completed_at` has no
+UI reader (nor does any other `latest_runs` field — the banner renders
+`warnings` only); `/api/monitoring/status` still falls back to
+`runtime_logs/run_history.jsonl`, which never contains `daily_incremental_sync`,
+when a reachable database returns zero runs in 90 days; and
+`analysis/lifecycle_sql_coverage.py` still returns `cpql_publishable`
+pre-certification, retracted only by the CLI audit — a landmine for
+PR-ADS-161's consumer migration, though no product surface imports it today.
+
+Full doctrine: `docs/42_MONITORING_CADENCE_AND_PARTIAL_TRUTH.md`.
+
+
+## PR-ADS-161A-1 — Canonical SQL publication contract (September 2026)
+
+**The structural prerequisite to the PR-ADS-161 consumer cutover. No consumer
+is migrated here.**
+
+`analysis/lifecycle_sql_coverage.py::window_coverage` answers a NECESSARY
+question — could a complete total exist for this window — and sets
+`cpql_publishable` and `complete_sql_total` from that alone. The final gate
+(canonical reader reconciliation, boundary readable, incident store readable,
+source proven fresh) lived only in `scripts/audit_lifecycle_sql_coverage.py`,
+coupled to a CLI `Findings` object and unreachable from production. So the only
+publication flag a product surface could import was the intermediate one, which
+is TRUE for windows the audit refuses to certify. Nothing read it yet; the first
+executive consumer to reach for `window_coverage()` would have published a
+total the audit withholds.
+
+`analysis/sql_publication.py` is now the single decision. It takes every gate
+at once and fails closed on each — `None` withholds exactly as `False` does,
+because an outage must never certify a window. Three outcomes stay distinct to
+the caller: `published`, `withheld` (we looked and the evidence does not
+support a total) and `unavailable` (we could not look).
+`complete_sql_total` is `None` in the latter two, never `0`.
+`confirmed_sql_subset` is always present under a name that cannot be mistaken
+for a total. `scripts/audit_lifecycle_sql_coverage.py::audit_certification`
+now DELEGATES to it rather than carrying a second copy — all 141 cases in the
+PR-ADS-160 suite pass unchanged, including the PostgreSQL-backed ones, which is
+the evidence the refactor changed no behaviour.
+
+**Reader reconciliation is recorded, not recomputed per request.** Proving it
+reads the entire funnel table across 44 window/scope combinations —
+unaffordable on a dashboard request. `scripts/record_sql_reader_reconciliation.py
+--apply` runs the audit's own comparison function and writes the outcome to the
+new append-only `sql_reader_reconciliation` table; the contract reads the newest
+row with a 36-hour maximum age. No row, a stale row, or a recorded disagreement
+all withhold, and they are reported as three different reasons because the
+remedy differs. The recorder is a separate command because the coverage audit
+is read-only by contract and is run under a session-level `SET TRANSACTION READ
+ONLY` guard during production validation.
+
+**Nothing visible changes today.** No consumer reads the contract, and the
+boundary is `2026-09-21 04:34:37`, so every product window currently straddles
+or precedes it and would be withheld on the window-local gate alone. The 7d
+window becomes fully post-boundary on 2026-09-28, which is when the recorded
+reconciliation starts deciding anything — the recorder needs a scheduled home
+before then, and this PR does not give it one.
+
+**Corrected after review.** The first cut of this PR carried four defects that
+its own truth audit found, recorded here because three of them were defects in
+the GUARDS rather than the code: `publication_inputs` read `incidents` from a
+repository that returns `rows`, so the post-boundary gap gate was dead on
+arrival and one natural migration spelling would have turned a real open gap
+into a certified zero; `test_15` re-implemented a weaker predicate instead of
+calling the detector `test_14` uses, and both stayed green with that detector
+deliberately gutted; the recorder's `bool()` coercion defeated the writer's
+own guard and could write an unproven run as a recorded disagreement; and the
+claim that the refactor changed no audit behaviour was false — two reason
+strings change (stale source now reports the freshness reason, an unreadable
+contact store now reports `coverage_verdict_absent`), and the 141 green
+PR-ADS-160 cases were never evidence either way because none exercises those
+paths. All four are fixed, each with the control that proves it.
+
+Guarded by `tests/test_pr_ads_161a1_sql_publication_contract.py` (58 cases):
+every gate refusing in isolation with a positive control that proves the gate
+can publish; the named regression driven through the real `window_coverage`
+where membership is complete, certification is false and publication stays
+withheld, with its negative control; and an AST guard — not a substring search
+— asserting no module under `services/`, `api/`, `db/`, `scheduler/`,
+`connectors/` or `analysis/` imports `lifecycle_sql_coverage` or names
+`cpql_publishable`, whose negative control calls THE SAME detector the guard calls,
+over seven spellings including relative imports, `importlib` and `sys.modules`.
+
+Doctrine inventory is unchanged and says so: 25 legacy / 6 mixed / 4 canonical,
+`READY_FOR_ROADMAP`, `audit_complete: true`, 0 unclassified occurrences, 0
+registry problems. A migration claim the scanner does not support is not made.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+
+## PR-ADS-161A-1-F2 — the production freshness gate, and controls that can fail (September 2026)
+
+Round 2 of the truth audit on PR-ADS-161A-1-F1. One blocker and three majors,
+all of them in the half of the work whose job is to prove the other half safe.
+
+**Production published a certified total from a source that is not fresh.**
+F1 added an independent freshness gate to `audit_certification` and not to
+`publication_verdict`, so the audit became the better-defended caller — and the
+audit is what we point at to describe what production publishes. Measured: a
+coverage dict with `certification_eligible: True` and `source_fresh: False`
+published a total of 42 in production while the audit refused the identical
+dict. Reachable for the same reason the missing-count case is — `publication_for`
+takes `coverage` from its CALLER. `publication_verdict` now gates on
+`source_fresh` directly, and `test_29` asserts audit/production parity over the
+same dict rather than testing each side alone.
+
+**`test_23` asserted an expression against itself.** The fix for the
+future-dated reconciliation row (a negative age read as "not older than the
+limit" grants publication forever) was guarded by a test that computed
+`not (0 <= age <= max_age)` in its own body and compared it to itself. It never
+called `fetch_reader_reconciliation`. Reverting the production line left all
+4,596 tests green. This is round 1's `test_15` defect committed a second time,
+one round after it was found. The test now drives the real reader over a real
+row shape across five ages and carries the verdict through to a refusal.
+
+**`test_22` could not distinguish the naive-timestamp guard from its absence.**
+It asserted only a return value, with no database — so `get_conn()` yielded
+`None` and the writer returned False whether or not the guard existed. It now
+intercepts the cursor and asserts no statement was executed, with a positive
+control that a tz-aware instant IS written.
+
+**`test_20` did not guard the incident key it was credited with.** It called
+`window_coverage` directly and never touched `publication_inputs`. `test_19`
+now spans repository shape → service → coverage → verdict in one case, so
+reverting the key fails there too.
+
+Also: `coverage_verdict_absent` and "no counted population" had one reason
+constant between them despite needing different remedies; the `bool()`
+coercion round 1 flagged in the recorder was still present, F1 having added a
+different guard beside it; docs/43 said 34 cases for a 64-case suite and
+described its reason-delta table as exhaustive when a 1,152-case differential
+finds eight deltas, six unreachable from `run()`.
+
+Every fix is shown failing against the pre-fix line by mutation, not by
+reading: reverting the future-date fix, the naive-tz guard, the incident key
+or the production freshness gate each turns exactly the intended test red.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+## PR-ADS-161A-1-F3 — the freshness gate that was still a label (September 2026)
+
+Round 3 of the truth audit on PR-ADS-161A-1-F2. One blocker and four majors.
+Every one of them is in the freshness gate F2 added — the fix landed at the
+wrong layer, under the wrong reason, in the wrong order.
+
+**The service read freshness from the database and never gated on it.**
+`publication_inputs()` performs a real read of the contact-funnel sync state
+and assesses it. `publication_for()` stamped the result onto the verdict as a
+label and delegated to a gate that reads `coverage["source_fresh"]` — a value
+the CALLER copied in. So a caller whose coverage said fresh, over a service
+that had just read stale, published:
+
+```
+value: 42, available: True, certified: True,
+explanation: "...and the contact-funnel source is fresh"
+source_freshness_reason: "source_stale"        <- the same object
+```
+
+while `audit_certification` refused the identical inputs. That is F2's own
+blocker with one level of indirection, and it made the database read a guard
+whose absence changed nothing. `withheld_payload()` then dropped the field, so
+the contradiction was not even visible at the API boundary. Both signals must
+now say fresh, and the payload carries the fact it was judged on.
+
+**A freshness refusal was served under the reason `"eligible"`.** The gate
+reported `coverage["certification_status"]` as its reason. On the only shape
+`window_coverage` can emit with `certification_eligible: True`, that status is
+literally `not_certifiable_*`'s opposite — `"eligible"`. A consumer received a
+withheld total under a reason meaning "every prerequisite is met". The window's
+own status is now used only when it is itself about freshness.
+
+**"We could not look" was reported as "the source is stale".** The gate sat
+ahead of the store-readability and reader-reconciliation gates, so an
+`unavailable` verdict was displaced by a `withheld` one whenever the source
+also happened to be stale — sending an operator to fix a pipeline when the
+boundary store was unreadable or the readers had never been compared.
+Refusal order is now documented and tested: window-local, then readability,
+then reconciliation, then freshness, then the counted population.
+
+**The audit's relabel rewrote every other refusal.** Keyed on `source_fresh`
+alone, a pre-boundary window, an unreadable store and a reader disagreement all
+reported `source_stale`. Reachable from `run()` on ordinary windows. Only a
+refusal that IS about freshness may be relabelled, and the membership test is
+now one shared table — `sql_publication.FRESHNESS_REFUSALS` — that the gate,
+the service and the audit all consult, with `test_38` guarding it against
+drifting away from `CERT_STALE_SOURCE`.
+
+**The first fix for the blocker repeated the relabel defect one layer up.**
+Short-circuiting in the service and overriding `certification_status` meant a
+pre-boundary window was reported as a stale source. The audit had a test for
+exactly this (`test_35`) and the service did not. The freshness signal is now
+folded into the coverage the gate reads rather than short-circuited ahead of
+it, so the pure layer keeps deciding the order; `test_37` is the guard.
+
+Suite: 78 cases, up from 64. Eight counterfactuals were run — each pre-fix line
+restored, the module re-run, the named test confirmed failing. The three that
+matter most: the service fold, the gate ordering and the service relabel were
+all invisible to the 64 cases that existed before them.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+## PR-ADS-161A-1-F4 — the gates that were unreachable on real inputs (September 2026)
+
+Round 4 of the truth audit, run against the F3 commit. Two blockers and three
+further findings. **Round 4's finding was not another fabricated control** —
+every F3 guard does go red under a targeted mutation. The defect was subtler
+and worse: several of them prove their property only on input tuples
+`publication_inputs()` and `window_coverage()` cannot jointly produce, and on
+the tuples production *does* produce the property was false.
+
+**An unread boundary store was published as the claim "no coverage boundary
+exists".** `publication_inputs` sets `boundary_observed_at = None` whenever
+the store is unreadable, so a caller building coverage from it — the only
+caller shape the service supports — gets the window-local `CERT_NO_BOUNDARY`
+back, and that fired before the readability gate was ever evaluated.
+`withheld_payload` drops `boundary_id` and `boundary_observed_at`, so the two
+states were byte-identical at every surface. During an outage every SQL
+surface would state a permanent, benign, nothing-to-do condition and an
+operator would wait it out. `boundary_readable` was a parameter that changed
+nothing on any input the service can actually produce.
+
+**F3's reordering was inert on every coherent production input.** Freshness is
+gated in *two* places and only the second moved. `_certification` refuses an
+otherwise-perfect window with `CERT_STALE_SOURCE`, which arrives as a
+window-local reason at step 1 — ahead of everything F3 put in front of the
+step-4 gate. Measured with the source stale: a missing reconciliation record,
+a reader disagreement and an unreadable boundary store all still reported
+`not_certifiable_source_not_fresh`. Because the recorder still has no
+scheduled home, no reconciliation record exists, so a stale sync would have
+sent an operator to the pipeline while the refusal blocking every window went
+unreported. Step 1 now defers a freshness reason to the global gates instead
+of returning — conditional on `source_fresh is not True`, so the deferral
+cannot itself become a fail-open.
+
+**An eligible window with unresolved membership published the subset as a
+certified complete total** — `value: 42, available: True, certified: True,
+coverage_complete: False` in one object, PR-ADS-160 §2's defect verbatim. Not
+emittable by `window_coverage`; reachable only from a caller-built dict, which
+is the seam `publication_for` exposes and the reason `test_24` exists for the
+sibling missing-count case. F3 guarded "eligible with no count" (a blank) and
+left "eligible with unresolved membership" (a wrong number) open.
+
+**F3's own fold coerced `fresh: None` to `source_fresh: False`** — turning "we
+could not read the sync state" into the claim "the pipeline is stale", the
+exact distinction `sql_coverage_freshness.assess` documents. And it raised
+`TypeError` on a truthy non-mapping coverage where the F2 service returned
+`unavailable`; `test_25` proves the pure gate survives that input but routes
+nothing through the service, so the regression was invisible to it.
+
+Also: `docs/43`'s reason-delta claim gave a count without defining its input
+space, so it was not reproducible — the space is now stated (1,152 cells) and
+the measured result is 307 reason deltas in 6 classes with **0**
+`windows_certified` deltas; the F3 repo-state section said "76 cases existed
+before" when 64 did.
+
+Suite: 96 cases, up from 78. Eight counterfactuals run for the new guards,
+each confirmed failing against the pre-fix line. Every §7 test whose subject
+is a production input builds its coverage by driving the real
+`window_coverage()` from an `_inputs()` dict that mirrors
+`publication_inputs()`'s output and enforces both of its couplings — an
+unreadable boundary store cannot also hand back a boundary instant, and an
+unreadable incident store yields `None`, never `[]`. `_inputs()` mirrors that
+function rather than calling it (only `test_12` and `test_19` drive the real
+one), and `test_39`, `test_43`, `test_45` and `test_42`'s closing assertion
+deliberately bypass it, because a source scan, the caller seam's incoherent
+dicts and malformed non-mappings are states production cannot produce.
+
+**The recurring lesson, recorded because it has now cost four rounds:** a
+fixture that cannot arise from the producing code proves nothing about the
+consuming code.
+
+**Round 5 (final audit, `11605ef0`): `MERGE ASSESSMENT: no blocker found`.**
+Zero cells in 19,008 where F4 publishes something F3/`main` withheld —
+1,512-cell production-shaped space and 17,496-cell caller-seam space, both
+loading the pre-merge modules side by side; exactly one of the 1,512
+production cells publishes at all. Every load-bearing guard red under an
+independent 14-mutation sweep. The four defects it did find are all
+pre-existing in `main` and byte-identical under PR #185, so they gate
+PR-ADS-161A-2 rather than this PR: an unread boundary store still publishes
+`coverage_complete: true` on the API shape beside a real open gap
+(`lifecycle_sql_coverage.py:298` reads a null boundary instant as "no
+prospective period"); the step-5 self-consistency guard checks
+`window_total_complete` only, so a caller-built dict contradicting
+`certification_status`, `window_after_boundary` or `open_post_boundary_gaps`
+still publishes a certified total; `reconciliation_gate` raises
+`AttributeError` on a truthy non-mapping, which F4 hardened for `coverage`
+and not for `reconciliation`/`inputs`; and a withheld payload carries a blank
+`explanation` when `coverage is None` and the source is not fresh. Two claims
+were corrected in place here rather than left standing: `test_41`'s docstring
+asserted a pre-fix measurement that was never true, and "every §7 test builds
+its coverage from the real `publication_inputs()` output" overstated both the
+scope and the mechanism. `_inputs()` now enforces the incident-store coupling
+as well as the boundary one (an unreadable read is `None`, never `[]`), the
+case is carried as `test_41`'s sixth arm with its true measured value, and
+§6's `_service_inputs` — the last impossible tuple round 4 named — delegates
+to `_inputs` instead of building its own. Suite 96. See §7 of the doctrine.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.

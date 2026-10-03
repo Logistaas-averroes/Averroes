@@ -955,11 +955,18 @@ def _sync_deal_ledger(*, run_id, errors: list) -> dict:
             f"{LABEL_DEAL_LEDGER}: {status} "
             f"({result.get('error') or 'incomplete'}; "
             f"{result.get('association_failures', 0)} association failure(s))")
-    # sync_batches accepts success|failed only, so a PARTIAL sync is recorded
-    # as failed with its reason — a partial run must never look successful.
+    # PR-ADS-160-F2. The comment this replaces said sync_batches accepts
+    # success|failed only. That stopped being true in PR-ADS-160, which added
+    # `partial` to `VALID_SYNC_STATUSES` and to `finish_sync_batch`'s own
+    # validation — so the collapse was no longer preventing anything, it was
+    # just losing a state. `sync_state.status` is what
+    # `compute_canonical_freshness` reads, so a truncated deal-ledger sync was
+    # rendering as "Latest sync failed" on the canonical REVENUE population:
+    # retry when the remedy is resume. The exact status goes through; the
+    # writer already withholds `last_source_date` for anything but success.
     db_writers.finish_sync_batch(
         batch_id,
-        status=("success" if status == "success" else "failed"),
+        status=status,
         row_count=result.get("written", 0),
         error_message=(result.get("error")
                        or (None if status == "success" else status)))
@@ -1527,8 +1534,10 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
     if status != "success":
         errors.append(f"{LABEL_CANONICAL_GEO}: {status} "
                       f"({summary.get('chunks_failed', 0)} chunk(s) failed)")
+    # PR-ADS-160-F2: pass the exact status through, as above. `partial` is a
+    # state this producer really emits (google_ads_geo_sync_service).
     _batch(
-        "success" if status == "success" else "failed",
+        status,
         row_count=summary.get("rows_written", 0),
         last_source_date=(date_to if status == "success" else None),
         error_message=(None if status == "success"

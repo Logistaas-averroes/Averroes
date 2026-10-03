@@ -25,6 +25,20 @@ def run_daily_pulse():
     run_record = start_run("daily")
     run_id = None
 
+    # PR-ADS-160-F2. The insert used to sit AFTER both pulls, so a pulse that
+    # failed at pull time wrote no `runs` row at all: `update_run(None, ...)`
+    # returns immediately, and the failure left no trace. Monitoring then read
+    # an absence and said "No daily run found in history" — a complaint about
+    # a run that had in fact happened and failed.
+    #
+    # Recorded first, the way `scheduler/incremental_sync.py` already does it,
+    # so the row exists before anything can raise and the later `update_run`
+    # has an id to write the outcome to.
+    try:
+        run_id = db_writers.write_run(run_record)
+    except Exception as db_exc:  # noqa: BLE001
+        log.error("[daily] DB write of run record failed: %s", db_exc)
+
     try:
         # 1. Pull fresh data
         from connectors.google_ads_source import pull_campaign_performance
@@ -38,12 +52,6 @@ def run_daily_pulse():
         crm_summary = get_lead_quality_summary(contacts)
 
         today = datetime.utcnow().date()
-
-        # Write run record to database
-        try:
-            run_id = db_writers.write_run(run_record)
-        except Exception as db_exc:  # noqa: BLE001
-            log.error("[daily] DB write of run record failed: %s", db_exc)
 
         # Track HubSpot contacts daily sync
         if run_id is not None:

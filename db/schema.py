@@ -1498,6 +1498,51 @@ CREATE TABLE IF NOT EXISTS sql_post_boundary_incident (
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── PR-ADS-161A-1 — proof that the canonical readers agree ──────────────────
+--
+-- Publication of a COMPLETE SQL total requires that the headline, detail and
+-- operational reads of the lifecycle population return the same number for
+-- every window and scope. `scripts/audit_lifecycle_sql_coverage.py` proves
+-- that across all 44 combinations, but it reads the whole funnel table to do
+-- it: far too expensive to repeat on a dashboard request.
+--
+-- So the proof is RECORDED here and the production publication contract reads
+-- it. The row is evidence with a timestamp, not a setting:
+--
+--   * no row            → agreement was never proven → publication WITHHELD
+--   * row older than
+--     max_age_hours     → proven, but about a population that has since moved
+--                         → WITHHELD
+--   * reconciliation_
+--     complete = FALSE  → they were compared and they disagreed → WITHHELD
+--
+-- Absence is never read as assent. `observed_at` is what staleness is measured
+-- against, and it is the instant the comparison ran — not when it was written.
+CREATE TABLE IF NOT EXISTS sql_reader_reconciliation (
+  id                        SERIAL PRIMARY KEY,
+  -- The instant the 44-way comparison actually ran.
+  observed_at               TIMESTAMPTZ  NOT NULL,
+  -- TRUE only when every combination reached a proven outcome AND every
+  -- comparable one agreed. Never NULL: an unproven run is not recorded.
+  reconciliation_complete   BOOLEAN      NOT NULL,
+  combinations_expected     INTEGER,
+  combinations_compared     INTEGER,
+  combinations_mismatched   INTEGER,
+  combinations_unavailable  INTEGER,
+  -- Whether every expected combination was actually comparable. A pair that
+  -- failed closed by contract is not comparable and does not block
+  -- completeness, so this is a SEPARATE claim from the flag above.
+  all_combinations_compared BOOLEAN,
+  effective_date_basis      TEXT,
+  -- Which run produced this evidence, so a verdict can be traced back.
+  run_id                    TEXT,
+  detail                    JSONB,
+  created_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sql_reader_reconciliation_observed
+  ON sql_reader_reconciliation (observed_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_sqlpbi_status ON sql_post_boundary_incident(status);
 CREATE INDEX IF NOT EXISTS idx_sqlpbi_detected
   ON sql_post_boundary_incident(detected_at);

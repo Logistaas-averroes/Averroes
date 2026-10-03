@@ -336,17 +336,38 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     applied here:
 
       * every canonical reader must reconcile (all 44 combinations);
-      * the canonical contact-funnel source must be proven FRESH;
+      * the canonical contact-funnel source must be proven FRESH — checked
+        here explicitly as well as inside the window verdict, so this
+        function does not depend on the caller having passed the same
+        freshness object to both;
       * the audit itself must have been able to look.
 
     A window that is locally eligible is NOT certified while either fails.
     Certification is a claim that a published number is trustworthy, so every
     input to it must be proven, not merely un-contradicted.
     """
+    from analysis import lifecycle_sql_coverage as coverage
+    from analysis import sql_publication as pub
+
     reconciled = bool(reconciliation.get("reconciliation_complete"))
     boundary_readable = bool(boundary.get("available"))
     incidents_readable = bool(boundary.get("post_boundary_incidents_available"))
     source_fresh = (freshness or {}).get("fresh") is True
+
+    # PR-ADS-161A-1. The decision itself now lives in `analysis.sql_publication`,
+    # which production imports. It used to live only here, so the sole
+    # publication flag a product surface could reach was the PRE-certification
+    # one from `window_coverage` — true for windows this gate refuses. One
+    # decision, two callers: if they could drift, the audit would stop
+    # describing what production publishes.
+    #
+    # Reconciliation was computed live immediately above, so it is available
+    # and not stale by construction; the staleness arm of the gate exists for
+    # the production reader, which consults a recorded verdict.
+    recon_state = {"available": True, "stale": False,
+                   "reconciliation_complete": reconciled,
+                   "all_combinations_compared":
+                       reconciliation.get("all_combinations_compared")}
 
     def _withhold(win, label, reason):
         """A blocked window publishes NO complete total and NO CPQL.
@@ -369,22 +390,57 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     certified, blocked = [], []
     for win in windows or []:
         label = f"{win.get('window_type')}/{win.get('window')}"
-        locally_eligible = bool(win.get("certification_eligible"))
-        if not locally_eligible:
-            _withhold(win, label, win.get("certification_status"))
+        verdict = pub.publication_verdict(
+            coverage=win, reconciliation=recon_state,
+            boundary_readable=boundary_readable,
+            incidents_readable=incidents_readable,
+            window=win.get("window"), window_type=win.get("window_type"),
+            # The audit keeps its documented semantics: a pair that failed
+            # closed by contract is not comparable and has never blocked its
+            # certification. Production requires full scope coverage; this is
+            # the one explicit, named difference between the two callers.
+            require_full_scope_coverage=False)
+
+        # Freshness stays an INDEPENDENT gate here, not merely inherited from
+        # `certification_eligible`. Today `run()` hands the same freshness
+        # object to `audit_windows` and to this function, so the two can only
+        # agree — but relying on that made this an unasserted coupling rather
+        # than a gate, and a caller passing a window built with different
+        # freshness would have certified a stale source.
+        if verdict["publishable"] and not source_fresh:
+            _withhold(win, label,
+                      (freshness or {}).get("reason") or "source_not_fresh")
             continue
-        if not (reconciled and boundary_readable and incidents_readable
-                and source_fresh):
-            if not source_fresh:
-                reason = (freshness or {}).get("reason") or "source_not_fresh"
-            elif not reconciled:
-                reason = "canonical_readers_did_not_reconcile"
-            else:
-                reason = "certification_inputs_unreadable"
-            _withhold(win, label, reason)
+
+        if verdict["publishable"]:
+            certified.append(label)
+            win["certified"] = True
             continue
-        certified.append(label)
-        win["certified"] = True
+
+        reason = verdict["withheld_reason"]
+        # CHANGED BEHAVIOUR, stated as such. Before PR-ADS-161A-1 this branch
+        # was unreachable from `run()` — a window is only `locally_eligible`
+        # when its freshness says fresh, and `run()` passes ONE freshness
+        # object to both call sites — so a stale source was reported as the
+        # window's `not_certifiable_source_not_fresh`. It is now reported as
+        # the FRESHNESS reason (`source_stale`,
+        # `source_last_incremental_failed`, …), because the operator's next
+        # step is the pipeline, not the window. The refusal is identical in
+        # both; only the label an operator reads is more specific.
+        if not source_fresh and reason in pub.FRESHNESS_REFUSALS:
+            # Relabel ONLY when freshness is genuinely what blocked this
+            # window. Keying on `source_fresh` alone — as F2 first did —
+            # rewrote every other refusal whenever the source also happened
+            # to be stale: a pre-boundary window, an unreadable store and a
+            # reader disagreement all reported `source_stale`. Reachable from
+            # `run()` on ordinary windows, and it sends an operator to fix the
+            # pipeline when the real blocker is that the window precedes the
+            # boundary or that the readers do not agree.
+            #
+            # Refusals are kept apart because the remedy differs — the same
+            # rule `test_30` states for the publication layer.
+            reason = (freshness or {}).get("reason") or "source_not_fresh"
+        _withhold(win, label, reason)
 
     if certified:
         f.passed("window_certification",

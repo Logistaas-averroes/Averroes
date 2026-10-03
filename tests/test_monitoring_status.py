@@ -32,7 +32,7 @@ from api.monitoring import monitoring_cadence as _monitoring_cadence
 # Helpers
 # ---------------------------------------------------------------------------
 
-_STALE_DAYS = {"daily": 2, "weekly": 8, "monthly": 35}
+_STALE_DAYS = {"daily": 2, "daily_incremental_sync": 2, "weekly": 8, "monthly": 35}
 _CONSEC_WARNING = 2
 
 
@@ -53,6 +53,21 @@ def _run(run_type: str, status: str, days_ago: float) -> dict:
     }
 
 
+def _other_cadences_healthy(*, exclude: str = "") -> list[dict]:
+    """A recent success for every monitored cadence except `exclude`.
+
+    PR-ADS-160-F2. Production registers FOUR jobs (`api/scheduler.py:49`), so a
+    fixture carrying only three cadences is not a healthy system — it is a
+    system with a pipeline missing, and monitoring now says so. Tests that mean
+    "everything is fine except the thing under test" have to supply the whole
+    board, the way production does.
+    """
+    ages = {"daily": 0.5, "daily_incremental_sync": 0.4,
+            "weekly": 1.0, "monthly": 2.0}
+    return [_run(rt, "success", age) for rt, age in ages.items()
+            if rt != exclude]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -61,22 +76,29 @@ class TestAllSuccess:
     """All three run types have a recent success — expect green, no warnings."""
 
     def test_severity_green(self):
-        runs = [
-            _run("daily",   "success", 0.5),
-            _run("weekly",  "success", 1.0),
-            _run("monthly", "success", 2.0),
-        ]
+        runs = _other_cadences_healthy()
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
         assert result["severity"] == "green"
 
     def test_no_warnings(self):
-        runs = [
-            _run("daily",   "success", 0.5),
-            _run("weekly",  "success", 1.0),
-            _run("monthly", "success", 2.0),
-        ]
+        runs = _other_cadences_healthy()
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
         assert result["warnings"] == []
+
+    def test_a_missing_pipeline_is_not_a_healthy_system(self):
+        """The control for the helper above, and a contract in its own right.
+
+        Drop any ONE registered cadence and the verdict must stop being green.
+        A fixture that silently omits a pipeline would otherwise let this whole
+        class assert health over a system that is missing one.
+        """
+        for cadence in ("daily", "daily_incremental_sync", "weekly", "monthly"):
+            result = _compute_monitoring_status(
+                _other_cadences_healthy(exclude=cadence),
+                _STALE_DAYS, _CONSEC_WARNING)
+            assert result["severity"] != "green", cadence
+            assert any("run found in history" in w for w in result["warnings"]), \
+                (cadence, result["warnings"])
 
     def test_status_ok(self):
         runs = [_run("daily", "success", 0.1)]
@@ -341,11 +363,7 @@ class TestPartialStatus:
 
     def test_success_is_still_green(self):
         """The positive control. A guard that reddens everything is not a guard."""
-        runs = [
-            _run("daily",   "success", 0.1),
-            _run("weekly",  "success", 0.5),
-            _run("monthly", "success", 0.5),
-        ]
+        runs = _other_cadences_healthy()
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
 
         assert result["severity"] == "green"
@@ -371,9 +389,8 @@ class TestPartialStatus:
         """success ≠ partial ≠ failed, on every field a reader consumes."""
         seen = {}
         for status in ("success", "partial", "failed"):
-            runs = [_run("daily", status, 0.1),
-                    _run("weekly", "success", 0.5),
-                    _run("monthly", "success", 0.5)]
+            runs = ([_run("daily", status, 0.1)]
+                    + _other_cadences_healthy(exclude="daily"))
             r = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
             seen[status] = (r["severity"],
                             r["latest_runs"]["daily"]["last_status"],
@@ -404,64 +421,74 @@ class TestRunTypeIdentity:
     happening and their outcomes were invisible.
     """
 
-    def test_the_real_production_run_type_maps_to_the_daily_cadence(self):
-        """The defect, stated as the mapping it needed."""
+    def test_the_real_production_run_type_maps_to_its_own_cadence(self):
+        """The defect, stated as the mapping it needed.
+
+        PR-ADS-160-F2: the cadence is the incremental sync's OWN, not the
+        legacy pulse's. See `TestCadenceIsOnePipeline` for why sharing one was
+        worse than being discarded.
+        """
         from scheduler.incremental_sync import RUN_TYPE
 
         # Imported, not retyped: if the scheduler ever renames its run type this
         # fails here rather than going quietly unmonitored in production.
         assert RUN_TYPE == "daily_incremental_sync"
-        assert _monitoring_cadence(RUN_TYPE) == "daily"
+        assert _monitoring_cadence(RUN_TYPE) == "daily_incremental_sync"
+        assert _monitoring_cadence("daily") == "daily"
+        assert _monitoring_cadence(RUN_TYPE) != _monitoring_cadence("daily"), (
+            "two independent pipelines sharing one cadence share one verdict, "
+            "and the healthier one wins it")
 
     @pytest.mark.parametrize("status,expected_severity", [
         ("success", "green"),
         ("partial", "yellow"),
         ("failed", "yellow"),      # one failure is yellow; red needs the streak
     ])
-    def test_a_real_incremental_run_reaches_the_daily_bucket(
+    def test_a_real_incremental_run_reaches_monitoring(
             self, status, expected_severity):
-        """All three outcomes, under the REAL run type, on the daily cadence."""
-        runs = [
-            _run("daily_incremental_sync", status, 0.1),
-            _run("weekly",  "success", 0.5),
-            _run("monthly", "success", 0.5),
-        ]
-        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        daily = result["latest_runs"]["daily"]
+        """All three outcomes, under the REAL run type, in the real population.
 
-        assert daily["last_status"] == status, (
-            "the real incremental run never reached the daily bucket")
-        assert daily["latest_partial"] is (status == "partial")
+        The rest of the board is healthy — including the 06:00 pulse, which
+        production runs alongside this pipeline. Before PR-ADS-160-F2 that
+        neighbour is what made this test pass for the wrong reason.
+        """
+        runs = ([_run("daily_incremental_sync", status, 0.1)]
+                + _other_cadences_healthy(exclude="daily_incremental_sync"))
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+        incremental = result["latest_runs"]["daily_incremental_sync"]
+
+        assert incremental["last_status"] == status, (
+            "the real incremental run never reached monitoring")
+        assert incremental["latest_partial"] is (status == "partial")
         assert result["severity"] == expected_severity
-        # And it is NOT the "nothing found" complaint the defect produced.
-        assert not any("No daily run found" in w for w in result["warnings"]), \
+        # And it is NOT the "nothing found" complaint the F1 defect produced.
+        assert not any("run found in history" in w for w in result["warnings"]), \
             result["warnings"]
+        # The pulse's own verdict is untouched by its neighbour's outcome.
+        assert result["latest_runs"]["daily"]["last_status"] == "success"
 
     def test_two_failed_incremental_runs_still_go_red(self):
         """Failure semantics survive the mapping — the streak still reaches red."""
-        runs = [
+        runs = ([
             _run("daily_incremental_sync", "failed", 0.1),
             _run("daily_incremental_sync", "failed", 1.0),
-            _run("weekly",  "success", 0.5),
-            _run("monthly", "success", 0.5),
-        ]
+        ] + _other_cadences_healthy(exclude="daily_incremental_sync"))
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
 
-        assert result["latest_runs"]["daily"]["consecutive_failures"] == 2
+        assert result["latest_runs"]["daily_incremental_sync"][
+            "consecutive_failures"] == 2
         assert result["severity"] == "red"
 
     def test_a_partial_incremental_run_does_not_advance_the_success_clock(self):
         """The §4 contract, now reachable by the run type that needed it."""
-        runs = [
-            _run("daily_incremental_sync", "partial", 0.1),
-            _run("weekly",  "success", 0.5),
-            _run("monthly", "success", 0.5),
-        ]
-        daily = _compute_monitoring_status(
-            runs, _STALE_DAYS, _CONSEC_WARNING)["latest_runs"]["daily"]
+        runs = ([_run("daily_incremental_sync", "partial", 0.1)]
+                + _other_cadences_healthy(exclude="daily_incremental_sync"))
+        incremental = _compute_monitoring_status(
+            runs, _STALE_DAYS,
+            _CONSEC_WARNING)["latest_runs"]["daily_incremental_sync"]
 
-        assert daily["last_success_at"] is None
-        assert daily["last_completed_at"] is not None
+        assert incremental["last_success_at"] is None
+        assert incremental["last_completed_at"] is not None
 
     def test_weekly_and_monthly_are_untouched(self):
         """The mapping must not disturb the cadences that already worked."""

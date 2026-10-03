@@ -49,16 +49,17 @@ from typing import Any
 
 # Module-level defaults — overridden at call-time by config-loaded values.
 STALE_DAYS_DEFAULT: dict[str, int] = {
-    "daily":   2,
-    "weekly":  8,
-    "monthly": 35,
+    "daily":                  2,
+    "daily_incremental_sync": 2,
+    "weekly":                 8,
+    "monthly":                35,
 }
 CONSECUTIVE_FAILURE_WARNING_DEFAULT = 2
 
 
-# ── Run type → monitoring cadence (PR-ADS-160-F1) ───────────────────────────
+# ── Run type → monitoring cadence (PR-ADS-160-F1, corrected in F2) ──────────
 #
-# Monitoring reports on three CADENCES. Production emits concrete RUN TYPES,
+# Monitoring reports on CADENCES. Production emits concrete RUN TYPES,
 # and they are not always spelled like the cadence they belong to: the
 # incremental sync writes ``daily_incremental_sync``
 # (``scheduler.incremental_sync.RUN_TYPE``), which is the durable value in the
@@ -73,17 +74,55 @@ CONSECUTIVE_FAILURE_WARNING_DEFAULT = 2
 # The durable run type is NOT renamed to suit this module. This is the one place
 # the translation happens, so a reader can see the whole mapping at once instead
 # of discovering it as a string comparison somewhere downstream.
-MONITORING_CADENCES: tuple[str, ...] = ("daily", "weekly", "monthly")
+#
+# PR-ADS-160-F2. F1 stopped discarding the incremental rows but routed them into
+# the SAME cadence as the 06:00 legacy pulse, and everything below is computed
+# once per cadence: one failure streak, one `last_success_at`, one severity. Two
+# unrelated pipelines then voted on one verdict, and the healthier one won:
+#
+#   * `consecutive_failures` stops at the first success in the bucket, so a
+#     pulse succeeding at 06:00 reset the incremental sync's streak every
+#     morning. It could never reach the red threshold of 2.
+#   * `last_success_at` took the newest success of EITHER pipeline, so a pulse
+#     that proves nothing about canonical spend, the contact funnel, the deal
+#     ledger, geo or SQL coverage reset the clock their staleness is measured
+#     against — the same substitution this module forbids for `partial`.
+#
+#   Five days of incremental-sync failures behind a healthy pulse reported
+#   `severity: green, warnings: []`, and `static/app.js` renders nothing on
+#   green. Measured, not reasoned: see `tests/test_pr_ads_160_f2_*`.
+#
+# So a cadence is now one pipeline's health, not a name several pipelines share.
+# Two run types may still map to one cadence — but only where they are the same
+# pipeline, because the verdict they receive is indivisible.
+MONITORING_CADENCES: tuple[str, ...] = (
+    "daily", "daily_incremental_sync", "weekly", "monthly",
+)
 
 #: Concrete run type → cadence. Add a row here when a new scheduler starts
 #: writing to `runs`; that is a deliberate decision about whose health it
 #: reports, which is exactly why it is not inferred from the name.
 RUN_TYPE_CADENCE: dict[str, str] = {
-    "daily":                 "daily",
-    "daily_incremental_sync": "daily",
-    "weekly":                "weekly",
-    "monthly":               "monthly",
+    "daily":                  "daily",
+    "daily_incremental_sync": "daily_incremental_sync",
+    "weekly":                 "weekly",
+    "monthly":                "monthly",
 }
+
+#: Cadence → the words a human reads in a warning. `str.capitalize()` was fine
+#: while every cadence was one lowercase word; it renders the incremental
+#: cadence as "Daily_incremental_sync".
+CADENCE_LABELS: dict[str, str] = {
+    "daily":                  "Daily",
+    "daily_incremental_sync": "Daily incremental sync",
+    "weekly":                 "Weekly",
+    "monthly":                "Monthly",
+}
+
+
+def cadence_label(cadence: str) -> str:
+    """The human label for a cadence, for warning text only."""
+    return CADENCE_LABELS.get(cadence, cadence.replace("_", " ").capitalize())
 
 
 def monitoring_cadence(run_type: str | None) -> str | None:
@@ -147,7 +186,13 @@ def compute_monitoring_status(
     warnings: list[str] = []
 
     for run_type, type_runs in by_type.items():
-        threshold_days = stale_after_days.get(run_type, STALE_DAYS_DEFAULT.get(run_type, 2))
+        label = cadence_label(run_type)
+        # A cadence with no configured threshold is a decision nobody made.
+        # Say so rather than silently applying a 2-day default that happens to
+        # suit `daily`; the cadence still reports, it just cannot go stale on
+        # an invented number.
+        threshold_days = stale_after_days.get(
+            run_type, STALE_DAYS_DEFAULT.get(run_type))
 
         if not type_runs:
             latest_runs[run_type] = {
@@ -158,7 +203,7 @@ def compute_monitoring_status(
                 "consecutive_failures": 0,
                 "stale": True,
             }
-            warnings.append(f"No {run_type} run found in history.")
+            warnings.append(f"No {label.lower()} run found in history.")
             continue
 
         # Count consecutive failures from the top (newest first). A partial run
@@ -193,7 +238,15 @@ def compute_monitoring_status(
 
         # Compute stale: no successful run within the threshold window.
         stale = True
-        if last_success_at:
+        if threshold_days is None:
+            # Unmeasurable, not stale: no threshold was ever chosen for this
+            # cadence. Unknown is not a failure, the same way unknown is not
+            # zero, so it warns rather than reporting a staleness verdict.
+            stale = False
+            warnings.append(
+                f"{label} run has no staleness threshold configured — its "
+                f"freshness is not being checked.")
+        elif last_success_at:
             try:
                 ts_str = last_success_at.rstrip("Z")
                 ts = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
@@ -213,7 +266,7 @@ def compute_monitoring_status(
 
         if consecutive_failures >= consecutive_failure_warning:
             warnings.append(
-                f"{run_type.capitalize()} run has failed "
+                f"{label} run has failed "
                 f"{consecutive_failures} time{'s' if consecutive_failures != 1 else ''} in a row."
             )
         elif latest_partial:
@@ -221,11 +274,11 @@ def compute_monitoring_status(
             # run is the one outcome an operator can miss entirely: it leaves
             # fresh-looking data behind, so nothing else on the page complains.
             warnings.append(
-                f"{run_type.capitalize()} run completed partially — some "
+                f"{label} run completed partially — some "
                 f"datasets were incomplete."
             )
         elif stale:
-            warnings.append(f"{run_type.capitalize()} run data is stale.")
+            warnings.append(f"{label} run data is stale.")
 
     # Determine overall severity.
     any_repeated_failure = any(

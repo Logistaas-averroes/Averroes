@@ -3376,6 +3376,21 @@ def test_96_pg_the_api_serves_partial_rather_than_a_rounded_status(
     assert latest["finished_at"] is not None
 
 
+#: One threshold per MONITORED CADENCE. Spelled once so a cadence added to
+#: `api.monitoring.MONITORING_CADENCES` fails the invariant below rather than
+#: quietly running these tests without a threshold.
+_MONITORING_THRESHOLDS = {
+    "daily": 2, "daily_incremental_sync": 2, "weekly": 8, "monthly": 35,
+}
+
+
+def test_96b_the_monitoring_thresholds_in_this_file_cover_every_cadence():
+    """A missing key here would test monitoring under a threshold nobody set."""
+    from api.monitoring import MONITORING_CADENCES
+
+    assert set(_MONITORING_THRESHOLDS) == set(MONITORING_CADENCES)
+
+
 @_needs_pg
 def _runs_rows_verbatim(connection):
     """Every finished run row, with its run_type EXACTLY as persisted.
@@ -3421,24 +3436,31 @@ def test_97_pg_a_partial_run_does_not_make_monitoring_green(truncated_funnel):
     assert rows[0]["run_type"] == sync.RUN_TYPE == "daily_incremental_sync", (
         "this test is only meaningful over the run type production writes")
 
-    verdict = compute_monitoring_status(
-        rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
-    daily = verdict["latest_runs"]["daily"]
+    verdict = compute_monitoring_status(rows, _MONITORING_THRESHOLDS, 2)
+    incremental = verdict["latest_runs"]["daily_incremental_sync"]
 
-    assert daily["last_status"] == "partial", (
-        "the real run type never reached the daily monitoring bucket")
-    assert daily["latest_partial"] is True
+    assert incremental["last_status"] == "partial", (
+        "the real run type never reached its monitoring bucket")
+    assert incremental["latest_partial"] is True
     assert verdict["severity"] != "green", (
         "a partial run reset the system to healthy")
     assert verdict["severity"] == "yellow", "and it is not an outage either"
     assert any("partially" in w or "incomplete" in w for w in verdict["warnings"]), \
         verdict["warnings"]
-    # ...and not the "nothing ran" complaint the grouping defect produced.
-    assert not any("No daily run found" in w for w in verdict["warnings"]), \
-        verdict["warnings"]
+    # ...and not the "nothing ran" complaint the F1 grouping defect produced.
+    assert not any("No daily incremental sync run found" in w
+                   for w in verdict["warnings"]), verdict["warnings"]
     # The proven-complete coverage claim was NOT advanced by this run.
-    assert daily["last_success_at"] is None
-    assert daily["last_completed_at"] is not None
+    assert incremental["last_success_at"] is None
+    assert incremental["last_completed_at"] is not None
+
+    # PR-ADS-160-F2. This database holds no 06:00 pulse row, and monitoring
+    # says so rather than letting the incremental run stand in for it. Two
+    # pipelines, two verdicts — asserted here so a future re-merge of the
+    # cadences cannot pass this test by making one cover for the other.
+    assert verdict["latest_runs"]["daily"]["last_status"] is None
+    assert any("No daily run found" in w for w in verdict["warnings"]), \
+        verdict["warnings"]
 
 
 @_needs_pg
@@ -3469,20 +3491,19 @@ def test_97b_pg_the_pre_fix_grouping_would_have_discarded_this_run(
         "the real run type would have survived the old grouping, so this "
         "control proves nothing")
 
-    before = compute_monitoring_status(
-        pre_fix_rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
-    after = compute_monitoring_status(
-        rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
+    before = compute_monitoring_status(pre_fix_rows, _MONITORING_THRESHOLDS, 2)
+    after = compute_monitoring_status(rows, _MONITORING_THRESHOLDS, 2)
 
-    # Pre-fix: the partial run is invisible, and the daily bucket complains
-    # about ABSENCE while a real daily run had just finished partial.
+    # Pre-fix: the partial run is invisible — no cadence carries it at all.
     assert before["latest_runs"]["daily"]["last_status"] is None
-    assert before["latest_runs"]["daily"]["latest_partial"] is False
-    assert any("No daily run found" in w for w in before["warnings"])
+    assert before["latest_runs"]["daily_incremental_sync"]["last_status"] is None
+    assert not any(c["latest_partial"] for c in before["latest_runs"].values()), (
+        "the pre-fix grouping must lose the partial run entirely")
 
-    # Post-fix: the same rows, the same function, the run is seen.
-    assert after["latest_runs"]["daily"]["last_status"] == "partial"
-    assert after["latest_runs"]["daily"]["latest_partial"] is True
+    # Post-fix: the same rows, the same function, the run is seen — in its own
+    # cadence (PR-ADS-160-F2), not folded into the legacy pulse's.
+    assert after["latest_runs"]["daily_incremental_sync"]["last_status"] == "partial"
+    assert after["latest_runs"]["daily_incremental_sync"]["latest_partial"] is True
 
 
 def test_98_the_presentation_layer_never_calls_a_partial_run_fresh():

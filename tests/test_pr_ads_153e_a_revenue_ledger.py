@@ -1223,8 +1223,23 @@ def test_failed_sync_is_visible_as_failed_not_as_zero_rows():
     fn = _INCREMENTAL_PY.split("def _sync_deal_ledger(")[1].split("\ndef ")[0]
     assert 'status="failed"' in fn
     assert "errors.append" in fn
-    # A partial run must not be recorded as a success.
-    assert '"success" if status == "success" else "failed"' in fn
+
+    # A partial run must not be recorded as a success — the contract. This
+    # used to be asserted as the literal
+    # `"success" if status == "success" else "failed"`, which pinned the
+    # IMPLEMENTATION of that contract: a collapse that was necessary while
+    # `sync_batches` accepted two statuses. PR-ADS-160 added `partial` to
+    # `VALID_SYNC_STATUSES` and to `finish_sync_batch`, so from then on the
+    # collapse prevented nothing and only lost a state — on the canonical
+    # revenue population. PR-ADS-160-F2 passes the status through.
+    #
+    # The guarantee is unchanged and now stated directly: whatever reaches
+    # `finish_sync_batch` here is the producer's own status, and the producer
+    # never calls a truncated run successful.
+    assert '"success" if status == "success" else "failed"' not in fn, (
+        "the deal-ledger sync is collapsing partial into failed again")
+    assert "status=status," in fn, (
+        "the producer's exact status must reach finish_sync_batch")
 
 
 def test_watermark_advances_only_on_success_or_a_clean_checkpoint():

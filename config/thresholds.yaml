@@ -110,6 +110,9 @@ ui:
   monitoring:
     stale_after_days:
       daily: 2
+      # The incremental sync is its own cadence (PR-ADS-160-F2): it is a
+      # different pipeline from the 06:00 pulse and gets its own verdict.
+      daily_incremental_sync: 2
       weekly: 8
       monthly: 35
     consecutive_failure_warning: 2
