@@ -1057,7 +1057,20 @@ mobile `data-label`s and drawer split headers still read a bare "Junk".
   a surface must call a gate WITH a cohort, no zero-argument call may exist,
   the gate may not read page state, and the drawer may not touch the page's.
 
-Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (170), including
+**Round 3, third truth review (`3864421`): one MAJOR, two MINORs — fixed.**
+The withheld disclosure still rendered the funnel-wide reached-SQL counts
+(1,531 / 863 / 668) beside "no SQL count is published", and the exposure scan
+never looked there. They are now withheld with the cohort (`counts_withheld`),
+the scan covers them, and the UI renders them only under a published verdict
+(mutation-tested). The incident count stays visible. The legacy lead-status
+fields remain in the payload for other readers. That is now a stated exception
+(docs/44 §7), enforced by a certification check that no Campaign Evidence
+surface reads them. The fallback is now path-for-path the live shape,
+including `sql_reconciliation` and the audit keys, and `test_17c` compares it
+recursively. Also: a cohort-maturity note, the gate-call check accepting only
+real cohort identifiers (never a literal), and a stale drawer comment fixed.
+
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (176), including
 9 PostgreSQL end-to-end cases, in CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.

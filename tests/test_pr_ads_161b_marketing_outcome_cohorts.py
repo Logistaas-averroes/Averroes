@@ -531,12 +531,12 @@ def _patch_page(monkeypatch, *, contacts, fresh=True, freshness=None,
                                       "missing_created_at": 0})
     verdict = freshness if freshness is not None else (_FRESH if fresh else _STALE)
     monkeypatch.setattr(svc, "read_freshness", lambda now=None: verdict)
-    monkeypatch.setattr(svc, "lifecycle_event_disclosure", lambda: {
-        "metric_family": svc.METRIC_FAMILY_LIFECYCLE_EVENTS,
-        "window_basis": svc.WINDOW_BASIS_LIFECYCLE_EVENTS,
-        "published_on_this_page": False, "reached_sql_by_current_stage": 1531,
-        "exact_direct_timestamp": 863, "recovered_timestamp": 0,
-        "missing_exact_timestamp": 668, "open_post_boundary_incidents": 103})
+    monkeypatch.setattr(svc, "lifecycle_event_disclosure",
+                        lambda: svc.lifecycle_disclosure_skeleton(
+                            available=True, reached_sql_by_current_stage=1531,
+                            exact_direct_timestamp=863, recovered_timestamp=0,
+                            missing_exact_timestamp=668,
+                            open_post_boundary_incidents=103))
 
 
 def _page(monkeypatch, **kw):
@@ -672,6 +672,14 @@ def test_11h_a_population_not_proven_complete_withholds_sqls_and_cpql_with_its_o
     assert any("no SQL count, SQL breakdown or CPQL is published" in n
                for n in c["metadata"]["coverage_notes"])
     assert not any("cohort SQL contact(s)" in n for n in c["metadata"]["coverage_notes"])
+    # The funnel-wide reached-SQL counts are read over the same unproven funnel:
+    # withheld with the cohort (round 3, truth auditor MAJOR). The incident count
+    # is an integrity fact and is never suppressed.
+    lc = c["lifecycle_event_coverage"]
+    for k in svc.LIFECYCLE_DISCLOSURE_COUNT_FIELDS:
+        assert lc[k] is None, k
+    assert lc["counts_withheld"] is True and lc["counts_withheld_reason"] == reason
+    assert lc["open_post_boundary_incidents"] == 103
 
 
 def test_11i_positive_control_fresh_and_stale_are_the_only_publishing_verdicts():
@@ -899,13 +907,20 @@ def test_17c_the_fallback_response_has_exactly_the_live_shape(monkeypatch):
     live = _page(monkeypatch, contacts=_MIXED)
     down = unavailable_response("30d", now=NOW)
 
-    def shape(d):
-        return {k: (shape(v) if isinstance(v, dict) else type(v).__name__ == "list")
-                for k, v in d.items()}
+    def paths(d, prefix=""):
+        out = set()
+        for k, v in d.items():
+            out.add(prefix + k)
+            # `cohort.breakdown` is documented as null unless published, and
+            # by_label keys are data, not schema.
+            if isinstance(v, dict) and prefix + k != "cohort.breakdown":
+                out |= paths(v, prefix + k + ".")
+        return out
 
-    for block in ("metadata", "reconciliation", "closed_won_deals", "window_instants"):
-        assert shape(live["cohort"][block]).keys() == shape(down["cohort"][block]).keys(), block
-    assert live["cohort"].keys() == down["cohort"].keys()
+    live_paths, down_paths = paths(live), paths(down)
+    assert live_paths - down_paths == set(), sorted(live_paths - down_paths)
+    # The only extra key the fallback may carry is the outage flag itself.
+    assert down_paths - live_paths <= {"db_unavailable"}, sorted(down_paths - live_paths)
     for k in ("metric_family", "cohort", "legacy_sql", "summary", "campaigns"):
         assert k in down, k
     assert down["metric_family"] == "acquisition_cohort_outcomes"
@@ -1088,6 +1103,33 @@ def test_14k_counterfactual_a_cpql_published_over_a_withheld_count_or_zero_spend
     assert any("over zero spend" in v for v in a.violations), a.violations
 
 
+def test_14l_counterfactual_withheld_lifecycle_counts_are_an_exposure(monkeypatch):
+    """Round 3, truth auditor MAJOR: the first withheld-exposure scan never
+    looked at the lifecycle-event disclosure, which carried 1,531 / 863 / 668
+    beside "no SQL count is published"."""
+    _patch_page(monkeypatch, contacts=_MIXED,
+                freshness=_assess(_sync_row(bootstrap_status="running")))
+    from services.campaign_evidence_service import build_campaign_evidence
+    p = build_campaign_evidence("30d", now=NOW)
+    assert p["cohort"]["sql_status"] == svc.STATUS_WITHHELD
+    assert audit.withheld_exposures(p) == []
+    # Put the counts back, as the pre-fix service did: the scan must name them.
+    p["cohort"]["lifecycle_event_coverage"]["reached_sql_by_current_stage"] = 1531
+    p["cohort"]["lifecycle_event_coverage"]["missing_exact_timestamp"] = 668
+    exposed = audit.withheld_exposures(p)
+    assert "cohort.lifecycle_event_coverage.reached_sql_by_current_stage" in exposed
+    assert "cohort.lifecycle_event_coverage.missing_exact_timestamp" in exposed
+
+
+def test_14m_a_published_cohort_keeps_the_lifecycle_counts(monkeypatch):
+    """Positive control for 11h / 14l: the counts are withheld WITH the cohort,
+    not always."""
+    p = _page(monkeypatch, contacts=_MIXED)
+    lc = p["cohort"]["lifecycle_event_coverage"]
+    assert (lc["reached_sql_by_current_stage"], lc["missing_exact_timestamp"]) == (1531, 668)
+    assert lc["counts_withheld"] is False
+
+
 def test_14b_counterfactual_the_audit_fails_when_the_page_drops_an_unattributed_sql(monkeypatch):
     p = _page(monkeypatch, contacts=_MIXED)
     p["summary"]["cohort_sqls_unattributed"] -= 1
@@ -1248,10 +1290,18 @@ def _run_app(script: str, *, js: str | None = None, tmp=None):
 def _cohort_js(status, reason=None, cpql_status=None, cpql_reason=None,
                coverage="cohort_complete_event_timestamps_incomplete",
                as_of="2026-10-03T06:00:00+00:00"):
+    # The lifecycle block is ADVERSARIAL too: sentinel reached-SQL counts and
+    # `counts_withheld: false`, as a faulty backend might send them. The UI must
+    # gate them on the verdict, not on the backend's flag.
     return {"sql_status": status, "sql_reason": reason,
             "cpql_status": cpql_status or ("published" if status == "published" else status),
             "cpql_reason": cpql_reason if cpql_reason is not None else reason,
-            "metadata": {"as_of": as_of, "coverage_status": coverage}}
+            "metadata": {"as_of": as_of, "coverage_status": coverage},
+            "lifecycle_event_coverage": {
+                "metric_family": "lifecycle_stage_events", "published_on_this_page": False,
+                "reached_sql_by_current_stage": SENTINEL, "exact_direct_timestamp": SENTINEL,
+                "recovered_timestamp": SENTINEL, "missing_exact_timestamp": SENTINEL,
+                "open_post_boundary_incidents": 103, "counts_withheld": False}}
 
 
 #: Every verdict under which no SQL-derived value may be visible — the page
@@ -1339,7 +1389,7 @@ def test_15_no_surface_shows_a_withheld_sql_count_or_cpql(cohort, surface):
 def test_15b_positive_control_a_published_verdict_does_render_the_count():
     """Without this, test_15 passes for a UI that renders nothing."""
     out = _render_surfaces(_PUBLISHED_JS)
-    for surface in ("kpis", "row", "drawer"):
+    for surface in ("kpis", "disclosure", "row", "drawer"):
         assert _exposed(out, surface), surface
 
 
@@ -1479,6 +1529,10 @@ _UI_MUTATIONS = [
      "&& false) return true;", "filter"),
     ("country_split_gate", "countrySqlPub.publish ? r.confirmed_sqls", "true ? r.confirmed_sqls",
      "drawer"),
+    # Round 3 (truth auditor MAJOR): the lifecycle disclosure's reached-SQL
+    # counts are gated on the verdict.
+    ("lifecycle_counts_gate", "const lcCountsShown = pub.publish && !lc.counts_withheld;",
+     "const lcCountsShown = true;", "disclosure"),
 ]
 
 
@@ -1489,7 +1543,7 @@ def test_15n_every_ui_guard_is_load_bearing(name, old, new, check):
     mutated = js.replace(old, new, 1)
     withheld = _cohort_js("withheld", "source_bootstrap_incomplete",
                           coverage="cohort_population_not_proven")
-    if check in ("kpis", "row", "drawer"):
+    if check in ("kpis", "row", "drawer", "disclosure"):
         out = _render_surfaces(withheld, js=mutated)
         assert _exposed(out, check), f"{name}: bypassing the guard did not expose the count"
     elif check == "drawer_isolation":
@@ -1532,6 +1586,18 @@ def test_15n_every_ui_guard_is_load_bearing(name, old, new, check):
     (('const CAMPAIGN_SQL_SCOPE_LABEL = "Cohort SQLs";',
       'const CAMPAIGN_SQL_SCOPE_LABEL = "SQLs";'),
      "not named 'Cohort SQLs'"),
+    # Round 3: a surface reading a legacy SQL / CPQL field (present while the
+    # cohort is withheld) is caught.
+    (("  const junk  = c.confirmed_junk == null",
+      "  const legacy = c.confirmed_sqls;\n  const junk  = c.confirmed_junk == null"),
+     "reads legacy SQL / CPQL fields"),
+    (("  const s = _campaignSummary || {};\n  const cur",
+      "  const s = _campaignSummary || {};\n  const _o = s.overall_cpql_usd;\n  const cur"),
+     "reads legacy SQL / CPQL fields"),
+    # Round 3: a literal is not a response's cohort.
+    (("const sqlPub = campaignSqlPublication(_campaignCohort);",
+      'const sqlPub = campaignSqlPublication({sql_status: "published"});'),
+     "a literal instead of a response's cohort"),
 ])
 def test_16_the_pr_ads_157_certification_still_goes_red(tmp_path, monkeypatch,
                                                        mutation, expected):

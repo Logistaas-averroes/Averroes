@@ -858,6 +858,8 @@ RULES: list[dict] = [
                "build_campaign_evidence_row"]),
     _r("ce.service", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
        symbol=["_add_lead", "_audit_block", "_build_summary", "_canonical_sql_reconciliation",
+               # PR-ADS-161B round 3: the legacy block's shape for the fallback.
+               "_unavailable_sql_reconciliation",
                "_new_outcomes", "_outcome_status",
                "unavailable_response", "_junk_rate", "_empty_summary",
                # PR-ADS-161B: declares the legacy fields as legacy.
@@ -868,7 +870,8 @@ RULES: list[dict] = [
        symbol=["build_campaign_evidence", "_row"]),
     _r("ce.cohort", "services/campaign_evidence_service.py", CLS_CANONICAL, _CE,
        symbol=["_cohort_row_fields", "_cohort_summary_fields", "_cohort_block",
-               "_safe_lifecycle_disclosure"]),
+               "_safe_lifecycle_disclosure", "_lifecycle_disclosure_for",
+               "_unavailable_cohort_block", "cohort_verdict", "_publication"]),
     # The module docstring and LEGACY_SQL_FIELDS describe both families.
     _m("ce.module.161b", "services/campaign_evidence_service.py", CLS_MIXED, _CE,
        ["confirmed_sqls_ref", "cpql_ref", "sql_reconciliation_ref"]),
@@ -1199,8 +1202,10 @@ RULES: list[dict] = [
         "sqls_field_ref"]),
     _r("diag.parity.cli", "scripts/audit_cross_page_canonical_parity.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="main"),
+    # PR-ADS-161B round 3: the module-level regexes NAME the legacy fields in
+    # order to forbid Campaign Evidence surfaces from reading them.
     _m("diag.cert.module", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT,
-       ["cpql_ref"]),
+       ["cpql_ref", "confirmed_sqls_ref", "sql_reconciliation_ref"]),
     _r("diag.cert", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT,
        symbol=["_audit_window", "check_frontend_gates", "check_summary_population_reconciliation",
                "check_publication_rule", "check_reconciliation_scope"]),

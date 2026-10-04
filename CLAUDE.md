@@ -220,10 +220,13 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   hand-built verdict.
 
   **Withheld means absent, not hidden.** When the cohort verdict is not
-  `published`, the `/api/campaigns` payload carries no SQL count, SQL breakdown
-  or CPQL anywhere (`audit_marketing_outcome_cohorts.withheld_exposures` must be
-  empty), and `static/app.js` renders the withholding word — never the number
-  with a "not published" suffix. The gate is `campaignSqlPublication(cohort)`:
+  `published`, the `/api/campaigns` payload carries no cohort SQL count, SQL
+  breakdown, CPQL or funnel-wide reached-SQL count anywhere
+  (`audit_marketing_outcome_cohorts.withheld_exposures` must be empty), and
+  `static/app.js` renders the withholding word — never the number with a "not
+  published" suffix. The one stated exception is the legacy family declared in
+  `legacy_sql`, which no Campaign Evidence surface may read (enforced by
+  `audit_campaign_evidence_certification`). The gate is `campaignSqlPublication(cohort)`:
   the cohort is an **argument**; page surfaces pass the page response's, the
   drawer passes its own `/api/campaign-detail` response's. A gate that reads
   page-global state authorises a drawer opened from another page with another

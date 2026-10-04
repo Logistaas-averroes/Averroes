@@ -6659,12 +6659,21 @@ function renderCampaignSqlReconciliation() {
   // The event-time disclosure is shown in EVERY state — it is the reason the
   // lifecycle-event number is absent, and it must not disappear when the
   // cohort number is present.
-  const lifecycleHtml = `
-    <div class="kw-sql-coverage-title" style="margin-top:var(--space-3)">Lifecycle-event SQLs — not shown on this page · all-time, every contact, not this window</div>
-    <ul class="kw-sql-coverage">
+  // PR-ADS-161B round 3 — the reached-SQL population counts below are read
+  // over the SAME contact funnel the cohort may be withheld for. They render
+  // only under a PUBLISHED verdict (and only if the backend did not withhold
+  // them); otherwise the line says they are withheld with the cohort. The
+  // incident count is an integrity fact, never suppressed.
+  const lcCountsShown = pub.publish && !lc.counts_withheld;
+  const lcCounts = lcCountsShown ? `
       <li>Contacts whose lifecycle stage proves SQL: <strong>${dashValue(lc.reached_sql_by_current_stage, fmtCount)}</strong></li>
       <li>With an exact SQL-entry timestamp: <strong>${dashValue(lc.exact_direct_timestamp, fmtCount)}</strong> direct, <strong>${dashValue(lc.recovered_timestamp, fmtCount)}</strong> recovered</li>
-      <li>With no exact SQL-entry timestamp: <strong>${dashValue(lc.missing_exact_timestamp, fmtCount)}</strong></li>
+      <li>With no exact SQL-entry timestamp: <strong>${dashValue(lc.missing_exact_timestamp, fmtCount)}</strong></li>`
+    : `
+      <li>Reached-SQL population counts: <strong>Withheld</strong> with the cohort SQL count — they are read over the same contact funnel, which is not proven complete and consistent for this window.</li>`;
+  const lifecycleHtml = `
+    <div class="kw-sql-coverage-title" style="margin-top:var(--space-3)">Lifecycle-event SQLs — not shown on this page · all-time, every contact, not this window</div>
+    <ul class="kw-sql-coverage">${lcCounts}
       <li>Open post-boundary timestamp incidents: <strong>${dashValue(lc.open_post_boundary_incidents, fmtCount)}</strong></li>
     </ul>
     <div class="kw-sql-coverage-foot">These are global figures, not this window's, and are not a superset of the cohort: a contact whose SQL date is recorded but whose stage later moved back is in the cohort and not in the first line; a contact with no created date is in the first line and in no cohort.</div>
@@ -6692,6 +6701,7 @@ function renderCampaignSqlReconciliation() {
       <li>All-source cohort SQLs: <strong>${dashValue(s.cohort_sqls_all_sources, fmtCount)}</strong></li>
     </ul>
     ${reasonItems ? `<div class="kw-sql-coverage-foot">Unattributed / mapping missing, by reason:</div><ul class="kw-sql-coverage">${reasonItems}</ul>` : ""}
+    ${(c.metadata && c.metadata.maturity_note) ? `<div class="kw-sql-coverage-foot">${escapeHtml(c.metadata.maturity_note)}</div>` : ""}
     <div class="kw-sql-coverage-foot">A contact counts once, by HubSpot contact id, when canonical lifecycle evidence proves it reached SQL: an exact SQL-entry date, a recovered lifecycle transition, or a current stage of SQL or later. These are <strong>not Google Ads platform conversions</strong>, which are a different population reported by a different system.</div>
     ${lifecycleHtml}
   </div>`;
@@ -14412,10 +14422,10 @@ function renderCampaignDrawer(data) {
   const winLabel = CAMPAIGN_WINDOW_LABELS[camp.window] || camp.window || "selected window";
   const fxNote = (camp.spend_usd == null && camp.fx_complete === false)
     ? " · USD withheld (FX coverage incomplete)" : "";
-  // PR-ADS-157 §2 — the drawer applies the SAME publication policy as the page.
-  // It reads the cohort status the Campaign page loaded for this window: same
-  // window, same population, already in state. Reached without that state the
-  // gate reports unavailable, which is fail-closed.
+  // PR-ADS-157 §2 — the drawer applies the SAME publication POLICY as the page,
+  // to its OWN evidence: the cohort verdict returned with this
+  // /api/campaign-detail response (see `drawerCohort` below). A missing verdict
+  // is unavailable, which is fail-closed.
   //
   // PR-ADS-161B: declared HERE, before its first use. It used to be declared
   // after the status badge below read it — a `const` in its temporal dead

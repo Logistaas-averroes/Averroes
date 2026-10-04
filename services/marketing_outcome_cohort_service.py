@@ -626,6 +626,7 @@ def sql_metric_metadata(*, cohort: dict | None, freshness: dict, attribution_sta
         "coverage_notes": coverage_notes(cohort, missing_created_at=missing_created_at,
                                          publication=publication),
         "basis_label": COHORT_BASIS_LABEL,
+        "maturity_note": COHORT_MATURITY_NOTE,
     }
 
 
@@ -690,6 +691,49 @@ def build_window_outcomes(start: date | None, end: date, *, resolve_label: Label
     }
 
 
+#: The four funnel-wide SQL population counts the lifecycle-event disclosure
+#: carries. They are read over the SAME canonical contact funnel as the cohort,
+#: so they are withheld whenever the cohort SQL count is (see
+#: ``campaign_evidence_service._cohort_block``).
+LIFECYCLE_DISCLOSURE_COUNT_FIELDS = (
+    "reached_sql_by_current_stage", "exact_direct_timestamp",
+    "recovered_timestamp", "missing_exact_timestamp",
+)
+
+#: Disclosed with the cohort, and with every withheld disclosure: a recent
+#: window's contacts have had less time to reach SQL.
+COHORT_MATURITY_NOTE = (
+    "An acquisition cohort keeps maturing: contacts acquired recently have had "
+    "less time to reach SQL, so a recent window's cohort SQLs (and the CPQL "
+    "divided by them) are a snapshot as of the watermark that can still change.")
+
+
+def lifecycle_disclosure_skeleton(**values) -> dict:
+    """The full key set of the lifecycle-event disclosure — every response
+    shape (live, read failure, request fallback) carries exactly these keys."""
+    base = {
+        "metric_family": METRIC_FAMILY_LIFECYCLE_EVENTS,
+        "window_basis": WINDOW_BASIS_LIFECYCLE_EVENTS,
+        "published_on_this_page": False,
+        "governed_by": "analysis.sql_publication.publication_verdict "
+                       "(enforced by scripts/audit_sql_coverage_gate.py)",
+        **dict.fromkeys(LIFECYCLE_DISCLOSURE_COUNT_FIELDS),
+        "open_post_boundary_incidents": None,
+        "boundary_readable": None,
+        "boundary_id": None,
+        "boundary_observed_at": None,
+        "available": False,
+        "counts_withheld": False,
+        "counts_withheld_reason": None,
+        "explanation": None,
+    }
+    unknown = set(values) - set(base)
+    if unknown:
+        raise ValueError(f"not a lifecycle disclosure key: {sorted(unknown)}")
+    base.update(values)
+    return base
+
+
 def lifecycle_event_disclosure() -> dict:
     """What this page does NOT publish, and why — the event-time SQL coverage.
 
@@ -710,26 +754,22 @@ def lifecycle_event_disclosure() -> dict:
     population = repo.fetch_sql_coverage_population()
     incidents = inputs.get("open_incidents")
     readable = population.get("available") is True
-    return {
-        "metric_family": METRIC_FAMILY_LIFECYCLE_EVENTS,
-        "window_basis": WINDOW_BASIS_LIFECYCLE_EVENTS,
-        "published_on_this_page": False,
-        "governed_by": "analysis.sql_publication.publication_verdict "
-                       "(enforced by scripts/audit_sql_coverage_gate.py)",
-        "reached_sql_by_current_stage": population.get("candidates") if readable else None,
-        "exact_direct_timestamp": population.get("direct") if readable else None,
-        "recovered_timestamp": population.get("recovered") if readable else None,
-        "missing_exact_timestamp": population.get("unresolved") if readable else None,
-        "open_post_boundary_incidents": (len(incidents) if isinstance(incidents, list)
-                                         else None),
-        "boundary_readable": inputs.get("boundary_readable"),
-        "boundary_id": inputs.get("boundary_id"),
-        "boundary_observed_at": (str(inputs["boundary_observed_at"])
-                                 if inputs.get("boundary_observed_at") else None),
-        "explanation": (
+    return lifecycle_disclosure_skeleton(
+        available=readable,
+        reached_sql_by_current_stage=population.get("candidates") if readable else None,
+        exact_direct_timestamp=population.get("direct") if readable else None,
+        recovered_timestamp=population.get("recovered") if readable else None,
+        missing_exact_timestamp=population.get("unresolved") if readable else None,
+        open_post_boundary_incidents=(len(incidents) if isinstance(incidents, list)
+                                      else None),
+        boundary_readable=inputs.get("boundary_readable"),
+        boundary_id=inputs.get("boundary_id"),
+        boundary_observed_at=(str(inputs["boundary_observed_at"])
+                              if inputs.get("boundary_observed_at") else None),
+        explanation=(
             "Lifecycle-event SQLs (contacts that ENTERED SQL in a window) need "
             "an exact SQL-entry timestamp for every contact. Contacts without "
             "one, and open post-boundary incidents, keep those totals withheld. "
             "They are not shown on this page and are not replaced by the "
             "acquisition-cohort count."),
-    }
+    )

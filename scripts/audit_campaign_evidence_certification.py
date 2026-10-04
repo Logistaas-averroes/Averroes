@@ -370,6 +370,30 @@ def check_outage_propagation(f: Findings) -> None:
              "headline and both previews to be unavailable")
 
 
+#: A gate call that passes a cohort the surface actually owns: the page
+#: response's (`_campaignCohort`), the drawer response's (`drawerCohort`,
+#: `data.cohort`), or the gate's own parameter. A literal argument
+#: (`campaignSqlPublication({sql_status: "published"})`) is not a gate.
+_GATE_CALL = re.compile(
+    r"campaign(?:Row)?SqlPublication\(\s*(?:_campaignCohort|drawerCohort|data\.cohort"
+    r"|cohort)\b")
+
+#: Legacy lead-status SQL fields (declared in the payload's `legacy_sql` block).
+#: No Campaign Evidence surface may READ them: they are a different metric
+#: family, kept for other readers, and are still present while the cohort is
+#: withheld. `cohort_cpql_usd` is the cohort CPQL and is allowed.
+_LEGACY_SQL_READS = re.compile(
+    r"\.confirmed_sqls\b|(?<!cohort_)\bcpql_usd\b|overall_cpql|confirmed_sqls_total"
+    r"|mapping_coverage|sql_reconciliation")
+
+
+def _js_code_only(src: str) -> str:
+    """Strip // and /* */ comments so prose that NAMES a legacy field is not
+    mistaken for a read of it. String contents are kept."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$|(?<=[;{}),\s])//[^\n`\"']*$", "", src)
+
+
 def check_frontend_gates(f: Findings) -> None:
     """Every SQL-dependent surface must consult the one gate function."""
     try:
@@ -433,7 +457,7 @@ def check_frontend_gates(f: Findings) -> None:
         # PR-ADS-161B round 3: the gate takes the cohort of the response being
         # rendered as an ARGUMENT. A call with no argument cannot be gating on
         # anything, so it does not count.
-        if not re.search(r"campaign(?:Row)?SqlPublication\(\s*[^)\s]", body):
+        if not _GATE_CALL.search(body):
             missing.append(f"{label} ({fn} does not consult the gate)")
     if missing:
         f.violation("frontend_gates",
@@ -480,6 +504,13 @@ def check_frontend_gates(f: Findings) -> None:
     elif re.search(r"campaign(?:Row)?SqlPublication\(\s*\)", js):
         f.violation("frontend_gates",
                     "a caller invokes the publication gate with no cohort")
+    elif re.search(r"campaign(?:Row)?SqlPublication\(\s*[{\[\"'0-9]",
+                   # The narrowing helper builds the ROW's verdict from the row's
+                   # own copy — the one sanctioned object argument.
+                   js.replace(_body("campaignRowSqlPublication"), "")):
+        f.violation("frontend_gates",
+                    "a caller passes the publication gate a literal instead of a "
+                    "response's cohort")
     elif "_campaignCohort" in drawer_bodies or "data.cohort" not in drawer_bodies:
         f.violation("frontend_gates",
                     "the drawer does not gate on its own /api/campaign-detail cohort")
@@ -487,6 +518,33 @@ def check_frontend_gates(f: Findings) -> None:
         f.passed("frontend_cohort_state",
                  "the gate reads only the cohort it is given; page surfaces pass the "
                  "page response's cohort, the drawer its own detail response's")
+
+    # PR-ADS-161B round 3 — the legacy lead-status SQL / CPQL fields stay in the
+    # /api/campaigns payload for other readers, declared in `legacy_sql`, and
+    # are NOT withheld with the cohort. That is safe only while no Campaign
+    # Evidence surface reads them. The drawer's labelled Lead Quality / Country
+    # splits read the legacy qualified count through `lq` / `r`, gated, and the
+    # card's namespaced `legacy_lead_status` — never `camp.confirmed_sqls`.
+    readers = []
+    for fn in ("renderCampaignEvidenceKPIs", "renderCampaignSqlReconciliation",
+               "renderCampaignEvidenceFilters", "filterCampaignEvidence",
+               "sortCampaignEvidence", "renderCampaignEvidenceRow",
+               "renderCampaignDecisionTable", "campaignEvidenceHeader"):
+        hits = sorted(set(_LEGACY_SQL_READS.findall(_js_code_only(_body(fn)))))
+        if hits:
+            readers.append(f"{fn}: {hits}")
+    drawer_code = _js_code_only(_body("renderCampaignDrawer"))
+    drawer_hits = sorted(set(re.findall(r"camp\.(?:confirmed_sqls|cpql_usd)\b", drawer_code)))
+    if drawer_hits:
+        readers.append(f"renderCampaignDrawer: {drawer_hits}")
+    if readers:
+        f.violation("legacy_sql_not_consumed",
+                    "a Campaign Evidence surface reads legacy SQL / CPQL fields: "
+                    + "; ".join(readers))
+    else:
+        f.passed("legacy_sql_not_consumed",
+                 "no Campaign Evidence surface reads the legacy lead-status SQL / "
+                 "CPQL fields declared in legacy_sql")
 
     withheld_region = js[js.find("function campaignSqlWithheld"):]
     withheld_region = withheld_region[:withheld_region.find("\nfunction ", 40)]

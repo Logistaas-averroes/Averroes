@@ -792,8 +792,29 @@ def _cohort_block(cohort_svc, outcomes, *, summary, identity_available) -> dict:
         "window_instants": {"start_at": outcomes.get("start_at"),
                             "end_before": outcomes.get("end_before"),
                             "timezone": ACCOUNT_TZ},
-        "lifecycle_event_coverage": _safe_lifecycle_disclosure(cohort_svc),
+        "lifecycle_event_coverage": _lifecycle_disclosure_for(
+            cohort_svc, publication, published=published),
     }
+
+
+def _lifecycle_disclosure_for(cohort_svc, publication, *, published: bool) -> dict:
+    """The lifecycle-event disclosure, under the cohort's verdict.
+
+    Its four reached-SQL population counts are read over the SAME canonical
+    contact funnel the cohort is withheld for (round 3, truth auditor MAJOR):
+    showing "1,531 contacts reached SQL" beside "no SQL count is published"
+    publishes a count over an unproven population by another route. So they are
+    withheld with the cohort, and the disclosure says so. The open post-boundary
+    INCIDENT count stays: it is a data-integrity fact the coverage gate reports,
+    not an SQL total, and it is never suppressed.
+    """
+    disclosure = _safe_lifecycle_disclosure(cohort_svc)
+    if published:
+        return disclosure
+    return {**disclosure,
+            **dict.fromkeys(cohort_svc.LIFECYCLE_DISCLOSURE_COUNT_FIELDS),
+            "counts_withheld": True,
+            "counts_withheld_reason": publication[1]}
 
 
 def _unavailable_cohort_block(reason: str, *, start_at=None, end_before=None) -> dict:
@@ -821,11 +842,9 @@ def _unavailable_cohort_block(reason: str, *, start_at=None, end_before=None) ->
         "closed_won_deals": dict(cohort_svc.CLOSED_WON_NOT_PUBLISHED),
         "window_instants": {"start_at": start_at, "end_before": end_before,
                             "timezone": ACCOUNT_TZ},
-        "lifecycle_event_coverage": {
-            "metric_family": cohort_svc.METRIC_FAMILY_LIFECYCLE_EVENTS,
-            "window_basis": cohort_svc.WINDOW_BASIS_LIFECYCLE_EVENTS,
-            "published_on_this_page": False, "available": False,
-            "explanation": "not read: the request failed before it could be"},
+        "lifecycle_event_coverage": cohort_svc.lifecycle_disclosure_skeleton(
+            counts_withheld=True, counts_withheld_reason=reason,
+            explanation="not read: the request failed before it could be"),
     }
 
 
@@ -858,10 +877,8 @@ def _safe_lifecycle_disclosure(cohort_svc) -> dict:
         return cohort_svc.lifecycle_event_disclosure()
     except Exception as exc:  # noqa: BLE001
         logger.error("[campaigns] lifecycle disclosure failed: %s", exc)
-        return {"metric_family": cohort_svc.METRIC_FAMILY_LIFECYCLE_EVENTS,
-                "window_basis": cohort_svc.WINDOW_BASIS_LIFECYCLE_EVENTS,
-                "published_on_this_page": False, "available": False,
-                "explanation": "lifecycle-event coverage could not be read"}
+        return cohort_svc.lifecycle_disclosure_skeleton(
+            explanation="lifecycle-event coverage could not be read")
 
 
 def _legacy_sql_block() -> dict:
@@ -876,6 +893,25 @@ def _legacy_sql_block() -> dict:
         "published_on_this_page": False,
         "retained_because": "consumed by other readers and audits; their "
                             "removal is a separate migration",
+    }
+
+
+def _unavailable_sql_reconciliation(window_key) -> dict:
+    """The legacy reconciliation block's live key set, every value unknown —
+    built without a database read, because this is the request-failed path."""
+    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+    return {
+        "sql_definition": _canon.SQL_DEFINITION,
+        "sql_date_field": _canon.SQL_DATE_FIELD,
+        "sql_dedup_key": _canon.SQL_DEDUP_KEY,
+        "sql_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "total_all_source_sqls": None, "google_ads_source_sqls": None,
+        "campaign_attributable_sqls": None, "keyword_attributable_sqls": None,
+        "excluded_sql_contacts": None, "unmatched_sql_contacts": None,
+        "reconciliation_status": _canon.STATUS_UNAVAILABLE,
+        "window": {"window_type": _canon.WINDOW_EVIDENCE, "window_key": window_key,
+                   "start_date": None, "end_date": None,
+                   "date_field": _canon.SQL_DATE_FIELD},
     }
 
 
@@ -906,9 +942,13 @@ def unavailable_response(window: str, now: datetime | None = None) -> dict[str, 
         "metric_family": "acquisition_cohort_outcomes",
         "cohort": _unavailable_cohort_block("request_failed"),
         "legacy_sql": _legacy_sql_block(),
+        "sql_reconciliation": _unavailable_sql_reconciliation(window_key),
         "audit": {
             "spend_source": "google_ads_campaign_daily_spend (canonical)",
             "lead_source": "leads (durable · contact_created_at · deduped · paid_search)",
+            "identity_source": "google_ads_campaign_identity (approved mappings)",
+            "identity_available": None,
+            "account_timezone": ACCOUNT_TZ,
             "window_start": window_start, "window_end": window_end,
             "all_time": is_all_time, "fx_status": "unavailable",
             "spend_reconciliation_status": "unavailable",

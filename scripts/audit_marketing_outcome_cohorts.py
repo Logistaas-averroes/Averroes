@@ -204,14 +204,28 @@ _ROW_SQL_FIELDS = ("cohort_sqls", "cohort_sqls_missing_event_timestamp", "cohort
 _META_SQL_FIELDS = ("mapped_count", "unattributed_count", "excluded_non_google_count")
 _RECON_SQL_FIELDS = ("google_ads_sqls", "sum_campaign_sqls", "unattributed_google_ads_sqls",
                      "excluded_non_google_sqls", "all_source_sqls")
+#: The lifecycle-event disclosure's reached-SQL population counts. Read over
+#: the same contact funnel, so withheld with the cohort (round 3: the first
+#: version of this scan missed them, and the page showed 1,531 beside "no SQL
+#: count is published").
+_LIFECYCLE_SQL_FIELDS = ("reached_sql_by_current_stage", "exact_direct_timestamp",
+                         "recovered_timestamp", "missing_exact_timestamp")
 
 
 def withheld_exposures(payload: dict) -> list[str]:
     """Every place a withheld cohort SQL count (or its CPQL) is still present.
 
-    The page publishes nothing SQL-derived unless the verdict is ``published``:
-    not the total, not its parts, not a row, not a CPQL. An empty list means
-    the payload honours that.
+    The page publishes nothing SQL-derived from the canonical contact funnel
+    unless the verdict is ``published``: not the total, not its parts, not a
+    row, not a CPQL, not the funnel-wide reached-SQL counts in the
+    lifecycle-event disclosure. An empty list means the payload honours that.
+
+    Scope, stated rather than implied: the LEGACY lead-status fields declared in
+    ``legacy_sql`` (``confirmed_sqls``, ``cpql_usd``, ``confirmed_sqls_total``,
+    ``overall_cpql_usd``, ``mapping_coverage``, ``sql_reconciliation``) are a
+    different metric family kept for other readers. They are not checked here;
+    that no Campaign Evidence surface consumes them is enforced by
+    ``audit_campaign_evidence_certification.check_frontend_gates``.
     """
     cohort = payload.get("cohort") or {}
     summary = payload.get("summary") or {}
@@ -230,6 +244,9 @@ def withheld_exposures(payload: dict) -> list[str]:
             if recon.get(k) is not None]
     if cohort.get("breakdown") is not None:
         out.append("cohort.breakdown")
+    lc = cohort.get("lifecycle_event_coverage") or {}
+    out += [f"cohort.lifecycle_event_coverage.{k}" for k in _LIFECYCLE_SQL_FIELDS
+            if lc.get(k) is not None]
     if summary.get("cohort_cpql_status") == "published" or cohort.get("cpql_status") == "published":
         out.append("cpql_status=published")
     return out

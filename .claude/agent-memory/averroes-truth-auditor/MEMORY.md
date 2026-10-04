@@ -206,8 +206,25 @@ Defects found at a14c4d3, and their status:
   re-review judged it honest, with a residual weakness: the gate scans text,
   so a module can now read the bound through an imported name unseen. That is
   a pre-existing gate weakness, and this is now a precedent.
-- Open OBSERVATION: when SQL is withheld, rows still carry raw `cohort_sqls` in
-  the API. Only the UI gates on `sql_status`.
+- CORRECTED (third review, head 3864421): the earlier OBSERVATION that withheld
+  rows still carry raw `cohort_sqls` is FIXED — row/summary/metadata/recon/
+  breakdown/notes are null under a non-published verdict (verified by execution
+  over eight scenarios). What STILL leaks while withheld (executed probe):
+  (a) `cohort.lifecycle_event_coverage` — all-time SQL counts (reached/direct/
+  missing/incidents) — and app.js `renderCampaignSqlReconciliation` renders them
+  in the withheld branch, even under `source_bootstrap_incomplete`; the test
+  harness's cohort objects carry no such block so test_15 never sees it;
+  (b) legacy `confirmed_sqls`, `cpql_usd`, `summary.overall_cpql_usd`,
+  `mapping_coverage`, and detail `legacy_lead_status.qualified` stay in the API
+  (declared legacy; UI does not render them; `withheld_exposures` ignores them);
+  (c) fallback `lifecycle_event_coverage` lacks the five count keys, and
+  `sql_reconciliation` / three `audit` keys are absent from `unavailable_response`
+  (test_17c compares only four sub-blocks). docs/44 §7 "no SQL-derived value at
+  all" is overclaimed accordingly.
+- Round-3 verified: closed-won fully removed (no ledger read, no UI/field);
+  event gate files untouched and tests green; test_152 pin is test-only
+  (no production file changed); 157/143 edits equal-or-stronger (157's
+  call-with-argument regex accepts any argument, incl. a literal).
 
 Recurring patterns (durable):
 - A retargeted gate can keep every string pin and still drop the guarantee.

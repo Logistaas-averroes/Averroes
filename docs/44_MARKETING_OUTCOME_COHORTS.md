@@ -226,6 +226,14 @@ is not `published`:
   summary `cohort_sqls_*`, the metadata bucket counts, the reconciliation counts
   and `cohort.breakdown` are `null`; coverage notes quote no SQL count; failed
   reconciliation problems go to the server log, the page gets only their count.
+  The funnel-wide reached-SQL counts in `cohort.lifecycle_event_coverage`
+  (`reached_sql_by_current_stage`, `exact_direct_timestamp`,
+  `recovered_timestamp`, `missing_exact_timestamp`) are withheld too
+  (`counts_withheld: true`): they are read over the same contact funnel, and the
+  first round-3 commit still showed "1,531 contacts reached SQL" beside "no SQL
+  count is published" (truth auditor, MAJOR). The **open post-boundary incident
+  count stays** — it is an integrity fact the coverage gate reports, not an SQL
+  total, and it is never suppressed.
   The audit's `withheld_exposures()` lists any location that breaks this;
 * every CPQL — page and **every row, including Mapping Review and no-spend
   rows** — inherits the verdict *and its reason*. Row-only refusals (unmapped
@@ -238,6 +246,18 @@ is not `published`:
   in the cell itself (so also on narrow screens, which label cells from
   `data-label`), never a number;
 * filters do not classify and sorts do not rank by SQL or CPQL.
+
+**The one stated exception — the legacy family.** The legacy lead-status
+fields declared in `legacy_sql` (`confirmed_sqls`, `cpql_usd`,
+`confirmed_sqls_total`, `overall_cpql_usd`, `mapping_coverage`,
+`sql_reconciliation`) are a different metric family, kept in the payload for
+other readers, and are **not** withheld with the cohort. They are therefore
+present while the cohort is withheld. That is safe only because no Campaign
+Evidence surface reads them, and it is enforced, not assumed:
+`audit_campaign_evidence_certification.check_frontend_gates`
+(`legacy_sql_not_consumed`) fails if any page surface reads them or the drawer
+reads `camp.confirmed_sqls` / `camp.cpql_usd`; `test_16` shows it red under
+mutation. API consumers must treat them as legacy, as the declaration says.
 
 **One verdict, carried, never inferred.** Every row and the summary carry the
 verdict (`cohort_sql_status` / `cohort_sql_reason`). `app.js` gates every
@@ -253,6 +273,11 @@ endpoint across eleven evidence states.
 While the population is unproven `coverage_status` is
 `cohort_population_not_proven`, never `cohort_complete`; Leads acquired is
 counted over that population and is marked **partial**.
+
+**Cohort maturity.** A cohort keeps maturing: a recent window's contacts have
+had less time to reach SQL, so its cohort SQLs — and the CPQL divided by them —
+are a snapshot as of the watermark that can still change. Every response says
+so (`metadata.maturity_note`) and the disclosure renders it.
 
 The page label is literally *"SQLs from contacts created during this period,
 measured as of the canonical contact-funnel watermark"* — never *"contacts that
@@ -275,11 +300,20 @@ last-resort fallback alike, key for key (`test_17c`) — carries:
   `cohort.closed_won_deals` (the not-published declaration, §5);
 * `cohort.lifecycle_event_coverage`, declaring the other family —
   `metric_family: lifecycle_stage_events`, `window_basis: date_entered_sql`,
-  `published_on_this_page: false` — with the global coverage figures;
+  `published_on_this_page: false` — with the global coverage figures (the
+  reached-SQL counts `null` and `counts_withheld: true` unless the cohort is
+  published), always carrying the full key set of
+  `lifecycle_disclosure_skeleton()`;
 * `legacy_sql`, declaring the legacy fields still returned
   (`confirmed_sqls`, `confirmed_sqls_total`, `cpql_usd`, `overall_cpql_usd`,
   `overall_cpql_scope`, `mapping_coverage`, `sql_reconciliation`) as
   `published_on_this_page: false`.
+
+Every response also carries `sql_reconciliation` (legacy; on the fallback, the
+same keys with `null` values, built without a database read) and the same
+`audit` keys. `test_17c` compares the live and fallback responses **recursively,
+path for path**; the only permitted differences are the `db_unavailable` flag
+and `cohort.breakdown` (an object when published, otherwise `null`).
 
 Unknown values are `null`, never `0`. Every row carries `COHORT_ROW_FIELDS`
 (`cohort_contacts_acquired`, `cohort_sql_status`, `cohort_sql_reason`,
@@ -397,8 +431,11 @@ required cases plus a counterfactual for every guard:
   adversarial payload carrying a sentinel count — none may show it
   (`test_15`–`15h`, positive controls `15b`/`15f`). Eight mutations of
   `app.js`, each bypassing one guard, are each shown to expose the sentinel
-  (`test_15n`), and the tightened PR-ADS-157 certification goes red under
-  every gate mutation (`test_16`).
+  (`test_15n`, incl. the lifecycle-count gate), and the tightened PR-ADS-157
+  certification goes red under every gate mutation, a legacy-field read and a
+  literal gate argument (`test_16`). The lifecycle counts' withholding is
+  proven on the backend (`test_11h`, positive control `test_14m`) and by the
+  audit (`test_14l`).
 * **§10** end to end on PostgreSQL: the real funnel, recovered history, spend,
   FX and a won deal seeded through the production writers; the audit
   reconciling all six windows; the audit going red when the page leaks an SQL;
