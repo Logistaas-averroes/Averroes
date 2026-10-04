@@ -1070,7 +1070,14 @@ including `sql_reconciliation` and the audit keys, and `test_17c` compares it
 recursively. Also: a cohort-maturity note, the gate-call check accepting only
 real cohort identifiers (never a literal), and a stale drawer comment fixed.
 
-Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (176), including
+A fourth independent review of `fa24491` found no blocker and no unresolved
+MAJOR. It left one MINOR: the legacy-field exception was guarded by a
+hand-listed scan of eight functions. The guard is now proven by EXECUTION:
+the whole page renders over a read-recording payload with zero legacy reads,
+under every verdict. The certification scan now discovers its surfaces from
+the source, and both catch a read added through a new helper.
+
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (186), including
 9 PostgreSQL end-to-end cases, in CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.

@@ -1563,6 +1563,74 @@ def test_15n_every_ui_guard_is_load_bearing(name, old, new, check):
         assert sorted(_filter_sort(withheld, outcome="has_sql", js=mutated)) == ["a", "c"], name
 
 
+_LEGACY_KEYS = ["confirmed_sqls", "cpql_usd", "confirmed_sqls_total", "overall_cpql_usd",
+                "overall_cpql_scope", "mapping_coverage", "sql_reconciliation"]
+
+
+def _legacy_reads(page_cohort, *, js=None) -> dict:
+    """Render the WHOLE Campaign page through the real app.js over a payload
+    that records every read of a legacy lead-status SQL / CPQL key."""
+    row = dict(_leaky_row(), confirmed_sqls=SENTINEL, cpql_usd=SENTINEL)
+    summary = dict(_LEAKY_SUMMARY, confirmed_sqls_total=SENTINEL, overall_cpql_usd=SENTINEL,
+                   overall_cpql_scope="complete", mapping_coverage={"mapped_sqls": SENTINEL})
+    script = textwrap.dedent(f"""
+        const LEGACY = new Set({json.dumps(_LEGACY_KEYS)});
+        const reads = [];
+        function watch(obj, where) {{
+          return new Proxy(obj, {{ get(t, p) {{
+            if (LEGACY.has(p)) reads.push(where + "." + String(p));
+            const v = t[p];
+            return (v && typeof v === "object" && !Array.isArray(v)) ? watch(v, where + "." + String(p)) : v;
+          }} }});
+        }}
+        _campaignCohort = {json.dumps(page_cohort)};
+        _campaignEvidence = [watch({json.dumps(row)}, "row")];
+        _campaignSummary = watch({json.dumps(summary)}, "summary");
+        _campaignLoadState = "ok";
+        renderCampaignEvidencePage();
+        ({{reads, html: __els["campaign-evidence-shell"].innerHTML}})
+    """)
+    return _run_app(script, js=js)
+
+
+@pytest.mark.parametrize("cohort", [_PUBLISHED_JS] + _WITHHOLDING,
+                         ids=["published"] + _WITHHOLDING_IDS)
+def test_15o_the_campaign_page_never_reads_a_legacy_sql_field(cohort):
+    """The legacy lead-status fields stay in the payload, declared in
+    `legacy_sql`, and are NOT withheld with the cohort (docs/44 §7). That is
+    safe only if the page cannot consume them — proven by EXECUTION: the whole
+    page renders over a payload that records every legacy read."""
+    out = _legacy_reads(cohort)
+    assert out["reads"] == [], out["reads"]
+    assert "Cohort SQLs" in out["html"] and len(out["html"]) > 2000   # it really rendered
+    assert "7,919" not in out["html"] or cohort is _PUBLISHED_JS
+
+
+@pytest.mark.parametrize("old,new", [
+    # An existing renderer starts reading a legacy field…
+    ("  const s = _campaignSummary || {};\n  const cur",
+     "  const s = _campaignSummary || {};\n  const _legacy = s.overall_cpql_usd;\n  const cur"),
+    # …or a brand-new surface does, which no hand-listed check would know about.
+    ("function renderCampaignEvidencePage() {",
+     "function _newCampaignSurface() { return (_campaignSummary || {}).confirmed_sqls_total; }\n"
+     "function renderCampaignEvidencePage() {\n  _newCampaignSurface();"),
+], ids=["existing_renderer", "new_surface"])
+def test_15p_counterfactual_a_legacy_read_is_caught_by_execution_and_certification(
+        tmp_path, monkeypatch, old, new):
+    js = _APP_JS.read_text(encoding="utf-8")
+    assert js.count(old) == 1, "mutation anchor missing"
+    mutated = js.replace(old, new, 1)
+    assert _legacy_reads(_PUBLISHED_JS, js=mutated)["reads"], "execution missed the read"
+    import scripts.audit_campaign_evidence_certification as cert
+    path = tmp_path / "app.js"
+    path.write_text(mutated, encoding="utf-8")
+    monkeypatch.setattr(cert, "_APP_JS", path)
+    findings = cert.Findings()
+    cert.check_frontend_gates(findings)
+    assert any("reads legacy SQL / CPQL fields" in v for v in findings.violations), \
+        findings.violations
+
+
 @pytest.mark.parametrize("mutation,expected", [
     # The positive control: an irrelevant edit leaves the certification green.
     (("let _campaignCohort = null;", "let _campaignCohort = null; let _unused = null;"),

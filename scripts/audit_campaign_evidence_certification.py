@@ -525,11 +525,22 @@ def check_frontend_gates(f: Findings) -> None:
     # Evidence surface reads them. The drawer's labelled Lead Quality / Country
     # splits read the legacy qualified count through `lq` / `r`, gated, and the
     # card's namespaced `legacy_lead_status` — never `camp.confirmed_sqls`.
+    #
+    # The surfaces are DISCOVERED, not hand-listed: every top-level function
+    # that touches Campaign page state (`_campaignEvidence`, `_campaignSummary`,
+    # `_campaignCohort`) plus the named renderers. A new surface reading
+    # `_campaignSummary.overall_cpql_usd` is caught without anyone remembering
+    # to add it here. (tests/test_pr_ads_161b_* also proves it by EXECUTION:
+    # the whole page renders over a payload that records every legacy read.)
+    surfaces = set(re.findall(
+        r"\nfunction (\w+)\([^)]*\)\s*\{(?:(?!\nfunction ).)*?"
+        r"(?:_campaignEvidence|_campaignSummary|_campaignCohort)\b", js, flags=re.S))
+    surfaces |= {"renderCampaignEvidenceKPIs", "renderCampaignSqlReconciliation",
+                 "renderCampaignEvidenceFilters", "filterCampaignEvidence",
+                 "sortCampaignEvidence", "renderCampaignEvidenceRow",
+                 "renderCampaignDecisionTable", "campaignEvidenceHeader"}
     readers = []
-    for fn in ("renderCampaignEvidenceKPIs", "renderCampaignSqlReconciliation",
-               "renderCampaignEvidenceFilters", "filterCampaignEvidence",
-               "sortCampaignEvidence", "renderCampaignEvidenceRow",
-               "renderCampaignDecisionTable", "campaignEvidenceHeader"):
+    for fn in sorted(surfaces):
         hits = sorted(set(_LEGACY_SQL_READS.findall(_js_code_only(_body(fn)))))
         if hits:
             readers.append(f"{fn}: {hits}")
@@ -543,8 +554,8 @@ def check_frontend_gates(f: Findings) -> None:
                     + "; ".join(readers))
     else:
         f.passed("legacy_sql_not_consumed",
-                 "no Campaign Evidence surface reads the legacy lead-status SQL / "
-                 "CPQL fields declared in legacy_sql")
+                 f"none of the {len(surfaces)} Campaign Evidence surfaces reads the "
+                 "legacy lead-status SQL / CPQL fields declared in legacy_sql")
 
     withheld_region = js[js.find("function campaignSqlWithheld"):]
     withheld_region = withheld_region[:withheld_region.find("\nfunction ", 40)]

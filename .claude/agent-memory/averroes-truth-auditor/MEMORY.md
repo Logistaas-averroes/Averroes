@@ -226,6 +226,20 @@ Defects found at a14c4d3, and their status:
   (no production file changed); 157/143 edits equal-or-stronger (157's
   call-with-argument regex accepts any argument, incl. a literal).
 
+- Fourth review (head fa24491, by execution): the 3864421 MAJOR (withheld
+  disclosure rendering funnel-wide reached-SQL counts) is FIXED — backend nulls
+  `lifecycle_event_coverage` counts with `counts_withheld`, UI gates on the
+  verdict not the backend flag, `withheld_exposures` scans them; reverting the
+  five touched files fails 19 tests (test_11h, 14l/14m, 15 disclosure, 15n
+  lifecycle_counts_gate, 16 mutations 7-9, 17c). Fallback is key-for-key
+  (test_17c compares key PATHS only, not value types, and does not descend lists).
+  Residual (MINOR, declared in docs/44 §7): legacy `confirmed_sqls`,
+  `summary.confirmed_sqls_total/overall_cpql_usd/mapping_coverage` and
+  `sql_reconciliation` (event-time counts via canonical_contact_outcome_service)
+  stay in /api/campaigns while the cohort is withheld; nothing in static/ or api/
+  reads them, enforced only by a regex over eight named JS functions.
+  test_152 `now` pin is test-only (audit module untouched).
+
 Recurring patterns (durable):
 - A retargeted gate can keep every string pin and still drop the guarantee.
   Here, runtime reconciliation against an independent population became an

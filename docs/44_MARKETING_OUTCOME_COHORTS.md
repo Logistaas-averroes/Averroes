@@ -253,11 +253,21 @@ fields declared in `legacy_sql` (`confirmed_sqls`, `cpql_usd`,
 `sql_reconciliation`) are a different metric family, kept in the payload for
 other readers, and are **not** withheld with the cohort. They are therefore
 present while the cohort is withheld. That is safe only because no Campaign
-Evidence surface reads them, and it is enforced, not assumed:
-`audit_campaign_evidence_certification.check_frontend_gates`
-(`legacy_sql_not_consumed`) fails if any page surface reads them or the drawer
-reads `camp.confirmed_sqls` / `camp.cpql_usd`; `test_16` shows it red under
-mutation. API consumers must treat them as legacy, as the declaration says.
+Evidence surface reads them, and that is enforced twice, not assumed:
+
+* **by execution** — `test_15o` renders the WHOLE Campaign page through the
+  real `app.js` over a payload wrapped in a Proxy that records every read of a
+  legacy key, under the published verdict and all seven withholding verdicts:
+  zero reads. `test_15p` shows a legacy read added to an existing renderer, or
+  through a brand-new helper, recorded;
+* **statically, in CI** — `audit_campaign_evidence_certification`
+  (`legacy_sql_not_consumed`) scans every function that touches Campaign page
+  state, DISCOVERED from the source rather than hand-listed, plus the drawer's
+  `camp.` reads; `test_15p` / `test_16` show it red under each mutation.
+
+API consumers must treat these fields as legacy, as the declaration says.
+Removing them from the payload is the next step of the legacy migration
+(§11), not this PR.
 
 **One verdict, carried, never inferred.** Every row and the summary carry the
 verdict (`cohort_sql_status` / `cohort_sql_reason`). `app.js` gates every
