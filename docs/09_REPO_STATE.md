@@ -910,3 +910,180 @@ case is carried as `test_41`'s sixth arm with its true measured value, and
 to `_inputs` instead of building its own. Suite 96. See §7 of the doctrine.
 
 Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+---
+
+## PR-ADS-161B — Canonical marketing outcome cohorts and the Campaign Evidence migration (October 2026)
+
+Campaign Evidence now publishes **acquisition-cohort** outcomes: contacts
+**created** in the window, with their SQL outcome read from canonical lifecycle
+evidence as of the canonical contact-funnel watermark. The page label is
+*"SQLs from contacts created during this period, measured as of the canonical
+contact-funnel watermark"*. Closed-won deals were published in rounds 1–2 and
+**removed in round 3** (below); this PR publishes SQLs and CPQL only.
+
+**Why.** Production evidence supplied with the brief (against `main` `944af0c`;
+not re-read here): 668 of the 1,531 contacts whose lifecycle stage proves SQL
+had no exact SQL-entry timestamp. The page withheld SQL and CPQL entirely
+— gated on PR-ADS-152's legacy `leads.status_category` reconciliation — so
+those proven SQLs disappeared from every campaign decision. A cohort's window
+is creation, which is known, so they are counted once, in the period they were
+acquired, and disclosed as lifecycle-event gaps. **No SQL-entry date is
+produced or substituted** — the cohort never asks for one.
+
+**Built.**
+
+* `services/marketing_outcome_cohort_service.py` — the cohort contract. SQL is
+  proven by a direct SQL-entry date, a recovered lifecycle transition, or a
+  current stage in `stages_implying_event(EVENT_SQL)` (the repository's one
+  rule). Contacts deduplicated on `contact_id`. Every SQL lands in exactly one
+  of `campaign` / `unattributed_google_ads` / `excluded_non_google`, placed by
+  Campaign Evidence's own `_assign_lead`. One publication verdict,
+  `sql_publication()`. *(Rounds 1–2 also placed closed-won deals through the
+  ledger's display-only primary contact; removed in round 3.)*
+* `db/crm_funnel_repository.py` — `fetch_acquisition_cohort_contacts`. Both
+  SQL-entry precedence levels are selected separately from the same
+  definitions `effective_date_sql` is built from.
+* `services/campaign_evidence_service.py` — rows, KPIs, CPQL and outcome status
+  from the cohort; `cohort` block with publication status, the API metric
+  contract (`metric_family`, `window_basis`, `outcome_basis`, `dedup_key`,
+  `as_of`, `source_freshness`, `attribution_status`, `mapped_count`,
+  `unattributed_count`, `excluded_non_google_count`, `coverage_status`,
+  `coverage_notes`), reconciliation and the lifecycle-event disclosure. Legacy
+  SQL fields are still returned and declared in `legacy_sql`.
+* `static/app.js` — one publication gate, `campaignSqlPublication(cohort)`,
+  taking the response's cohort as an argument; KPI cards incl. Unattributed
+  Google Ads SQLs; Leads acquired / Cohort SQLs columns; an evidence disclosure
+  that always shows the lifecycle-event coverage the page does not publish.
+* `scripts/audit_marketing_outcome_cohorts.py` — read-only audit over all six
+  supported windows, re-deriving membership and SQL proof **in its own SQL**
+  and checking the page against it. Exit 0 / 1 / 2. Incomplete event
+  timestamps, correctly disclosed, are not a violation.
+
+**CPQL** = window Google Ads spend ÷ **all** Google Ads cohort SQLs (campaign +
+unattributed) from the same window, on account-local days for both halves.
+Never blocked by a missing SQL date; withheld on a stale or unknown source;
+`N/A` at zero.
+
+**Not changed.** `audit_sql_coverage_gate`, the boundary, the 103 open
+post-boundary incidents, canonical revenue, junk (still the lead-quality
+classification), and every other page.
+
+**Found and fixed on the way.** `_outcome_status` turned an unavailable SQL
+count into *"Spend without SQL proof"*; it now says *"Data unavailable"*. The
+Campaign drawer threw a temporal-dead-zone `ReferenceError` on open
+(`drawerSqlPub` read before its `const`); declared before use.
+
+**Retargeted — and what that loses.** Three PR-ADS-157 certification checks
+(`check_frontend_gates`) pinned the legacy gate's strings. They now pin the
+cohort contract at equal string strength, and `test_16` shows each red under a
+mutation of `app.js`. PR-ADS-143/157 tests that pinned the old labels assert
+the new ones, and every principle assertion around them is kept. What is
+**not** equivalent: the legacy gate withheld at request time when the page
+disagreed with an *independent* lifecycle population. The cohort's
+`cohort_reconciliation_failed` compares buckets built in one pass, so it fires
+only on a construction bug. The independent cross-check now lives in
+`scripts/audit_marketing_outcome_cohorts.py`, which runs on demand, not per
+request.
+
+**Review round (truth auditor, three MAJORs, all fixed).**
+(1) `assess` returns `fresh=False`, not `None`, for a missing sync state, an
+incomplete bootstrap or a failed incremental. The first commit withheld only
+on `None`, so it published cohort counts over a partial population, and the
+CPQL said "stale". There is now one verdict, `sql_publication()`: only
+`source_fresh` / `source_stale` publish, and CPQL inherits the verdict and its
+reason. (2) Zero window spend published a `$0.00` CPQL; it is now `N/A`
+(`zero_window_spend`). (3) Junk and Junk Rate sat unlabelled beside the cohort's
+Leads acquired; every junk label now names its lead-status basis. Also from
+that round: a blank original source is excluded under its own reason; the
+audit re-derives the Paid Search split independently; deals placed by a
+display-only primary contact, and the deal/contact attribution-basis
+difference, are disclosed per response; the all-time lifecycle figures are
+labelled all-time. Separately, CI's PostgreSQL step caught the audit spelling
+`known_reached_sql_by` (a new reader to `audit_sql_coverage_gate`). It now
+imports the gate's own `BOUND_COLUMN`; the gate's allow-list is unchanged.
+
+**Doctrine inventory**: 23 legacy / 8 mixed / 5 canonical (was 25 / 6 / 4);
+0 unclassified, 0 registry problems. Campaign Evidence and its drawer are
+`mixed` — the drawer's Lead Quality / Country splits and Recent Leads, and the
+legacy payload fields, still read `leads.status_category`.
+
+A second auditor pass over the fixes found no blocker and two MINORs, both
+fixed. The audit's SQL Paid Search normalisation missed tab / newline / NBSP
+spellings `classify_source` accepts (a false alarm, failing closed), and the
+mobile `data-label`s and drawer split headers still read a bare "Junk".
+
+**Review round 3 (Copilot, 1 high / 7 medium / 3 low — all resolved).**
+
+* *HIGH — raw SQL exposed while withheld.* Rows rendered the withheld count with
+  a "not published" suffix. Withheld now means **absent**: the payload carries
+  no SQL count, breakdown or CPQL anywhere when the verdict is not `published`
+  (the audit's `withheld_exposures()` must be empty), and every surface renders
+  *Withheld* / *Unavailable* in the cell itself. Proven by executing the whole
+  production `app.js` in a node `vm` against an adversarial payload carrying a
+  sentinel count, under seven verdicts, with eight guard-bypassing mutations
+  each shown to expose it.
+* *One verdict everywhere.* Row-only CPQL refusals ran before the page verdict
+  (an unmatched row said `unmapped_label_has_no_campaign_spend` during a
+  bootstrap); the verdict is now applied first, every row and the summary
+  carry it, and `test_17` asserts one verdict on summary, rows, page CPQL, row
+  CPQL, outcome status, cohort block and the detail endpoint across eleven
+  states. The drawer gated on page-global state (stale, or absent when opened
+  from the Action Queue); it now gates on its own `/api/campaign-detail`
+  response's `cohort`, and the gate function takes the cohort as an argument.
+* *Detail endpoint.* `/api/campaign-detail` rebuilt its card from a legacy
+  whitelist and dropped every cohort field. It now copies `COHORT_ROW_FIELDS`
+  (card == table row, field for field), returns the verdict, and no longer
+  carries `confirmed_sqls` / `cpql_usd` — the legacy qualified count travels
+  only as `legacy_lead_status.qualified` for the labelled split.
+* *Fallback shape.* The last-resort response had `cohort.metadata: null` and
+  missing blocks; it is now key-for-key the live shape with `null` values. The
+  database-down response no longer pairs the real verdict with a summary saying
+  `request_failed`, and now carries `metric_family`.
+* *Closed-won deals — removed.* Not certifiable in this PR: no ledger sync
+  coverage or own watermark, placement through a display-only primary contact,
+  deal attribution status derived from contacts. No ledger read, field, card,
+  column or drawer KPI remains; `cohort.closed_won_deals` declares them
+  unpublished (`deferred_until_certified`). This resolves four findings.
+* *Wording.* "as of now" / "today" / "customers" replaced: the cohort is
+  measured as of the canonical contact-funnel watermark; SQL = distinct contact,
+  closed-won deal = distinct deal, customer = not published.
+* *CI.* The blocking job's only failure was `test_pr_ads_152`'s Q4 time-bomb
+  (`current_quarter` from the wall clock against July fixtures; red on `main`
+  too). The test now injects `now`; a regression runs it under several wall
+  clocks and a counterfactual shows the unpinned call really depended on the
+  date. Production window behaviour is unchanged.
+* The PR-ADS-157 certification's frontend check is tightened, not loosened:
+  a surface must call a gate WITH a cohort, no zero-argument call may exist,
+  the gate may not read page state, and the drawer may not touch the page's.
+
+**Round 3, third truth review (`3864421`): one MAJOR, two MINORs — fixed.**
+The withheld disclosure still rendered the funnel-wide reached-SQL counts
+(1,531 / 863 / 668) beside "no SQL count is published", and the exposure scan
+never looked there. They are now withheld with the cohort (`counts_withheld`),
+the scan covers them, and the UI renders them only under a published verdict
+(mutation-tested). The incident count stays visible. The legacy lead-status
+fields remain in the payload for other readers. That is now a stated exception
+(docs/44 §7), enforced by a certification check that no Campaign Evidence
+surface reads them. The fallback is now path-for-path the live shape,
+including `sql_reconciliation` and the audit keys, and `test_17c` compares it
+recursively. Also: a cohort-maturity note, the gate-call check accepting only
+real cohort identifiers (never a literal), and a stale drawer comment fixed.
+
+A fourth independent review of `fa24491` found no blocker and no unresolved
+MAJOR. It left one MINOR: the legacy-field exception was guarded by a
+hand-listed scan of eight functions. The guard is now proven by EXECUTION:
+the whole page renders over a read-recording payload with zero legacy reads,
+under every verdict. The certification scan now discovers its surfaces from
+the source, and both catch a read added through a new helper.
+
+The final independent review of `7dae351` found no blocker and no MAJOR. Its
+one MINOR: the drawer's labelled legacy split was guarded by `test_15` but not
+by a mutation or by the certification. Both now cover it. A wording regression
+test (`test_18`) pins the watermark language and the "customers are not
+published" definition.
+
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (190), including
+9 PostgreSQL end-to-end cases, in CI's PostgreSQL step and did-run list.
+
+Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.

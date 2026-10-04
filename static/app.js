@@ -6382,18 +6382,90 @@ let _campaignMeta     = { window: null, spend_currency: "GBP", reporting_currenc
 let _campaignLoadState = "idle";  // idle | loading | ok | empty | db_unavailable | error
 const _campaignFilters = { search: "", status: "all", outcome: "all", sort: "spend" };
 
-// PR-ADS-157 §2 — the canonical SQL-scope reconciliation for the selected
-// window. /api/campaigns has always returned this block; the Campaign page
-// simply never read it, so a `mismatch`, `partial` or `unavailable`
-// reconciliation rendered exactly like a reconciled one.
-let _campaignSqlReconciliation = null;
+// PR-ADS-161B — this page no longer reads the legacy `sql_reconciliation`
+// (leads.status_category) block. The API still returns it for other readers and
+// declares it in `legacy_sql`; reading it here as well would put a second SQL
+// population on a page that publishes one.
+//
+// The acquisition-cohort block of the CURRENT page response: publication
+// status, metadata, reconciliation and the lifecycle-event coverage disclosure.
+// Set in the same assignment as the rows and summary it governs, and reset with
+// them. The gate functions below never read it themselves: every caller passes
+// the cohort of the response it is rendering — the page passes this, the
+// drawer passes its own `/api/campaign-detail` response's `cohort`.
+let _campaignCohort = null;
 
-// The population this page's SQL number represents. Not "all SQLs", not
-// "paid-search SQLs", not "Google Ads-source SQLs", and emphatically not Google
-// Ads platform conversions — those are four different numbers, and labelling
-// any of them "Confirmed SQLs" made them look like one.
-const CAMPAIGN_SQL_SCOPE_LABEL = "Campaign-attributable SQLs";
-const CAMPAIGN_SQL_SCOPE_SHORT = "Attributed SQLs";
+// The population this page's SQL number represents: contacts CREATED in the
+// window that have reached SQL as of the canonical contact-funnel watermark. Not "contacts that
+// entered SQL in the window" (a lifecycle event, which needs an exact
+// SQL-entry date), not the legacy lead-status count, and emphatically not
+// Google Ads platform conversions — four different numbers.
+const CAMPAIGN_SQL_SCOPE_LABEL = "Cohort SQLs";
+const CAMPAIGN_SQL_SCOPE_SHORT = "Cohort SQLs";
+const CAMPAIGN_COHORT_BASIS = "SQLs from contacts created during this period";
+// The drawer's Lead Quality and Country splits still read the LEGACY lead
+// population (leads.status_category). Their qualified column is that
+// classification, and is labelled as such — never as the cohort SQL count,
+// which is a different population from a different table.
+const CAMPAIGN_LEGACY_QUALIFIED_LABEL = "Qualified (lead status)";
+const CAMPAIGN_LEGACY_QUALIFIED_TITLE = "Lead-status classification from the leads table — not the Cohort SQL count above, which is read from canonical lifecycle evidence";
+
+// Watermark phrase for the basis label. Never a fabricated date: an unknown
+// watermark says so.
+function campaignCohortAsOf(cohort) {
+  const md = (cohort && cohort.metadata) || {};
+  return md.as_of ? fmtDate(md.as_of) : "an unknown data watermark";
+}
+
+// Human sentences for the machine reasons the backend withholds on.
+const CAMPAIGN_COHORT_REASONS = {
+  canonical_funnel_unreadable: "The canonical contact funnel could not be read, so no cohort SQL count exists for this window. Unavailable is not zero.",
+  cohort_reconciliation_failed: "The cohort's attribution buckets did not reconcile, so its SQL count is withheld rather than published unproven.",
+  data_watermark_unknown: "The contact-funnel sync state could not be read, so the data watermark these SQLs would be measured at is unknown.",
+  request_failed: "Campaign evidence could not be computed for this window.",
+  spend_unavailable: "Google Ads spend is unavailable for this window.",
+  spend_usd_unavailable_fx_incomplete: "USD spend is unavailable (FX coverage incomplete), so a USD CPQL cannot be computed.",
+  cohort_unavailable: "The acquisition cohort is unavailable for this window.",
+  source_not_fresh: "The contact-funnel source is stale. Spend is current but these outcomes are not, so CPQL is withheld.",
+  source_freshness_unknown: "Whether the contact-funnel source is current cannot be determined, so CPQL is withheld.",
+  zero_cohort_sqls: "No contact acquired in this window has reached SQL, so CPQL is not applicable.",
+  zero_window_spend: "No Google Ads spend is recorded for this window. Whether none was incurred or none was ingested, there is no cost to divide — CPQL is not $0.",
+  // The contact-funnel freshness verdicts that withhold the cohort itself —
+  // passed through from analysis/sql_coverage_freshness.py, never collapsed
+  // into "stale": each has a different remedy.
+  source_sync_state_missing: "The contact funnel has never recorded a sync, so the population these SQLs would be counted over is not proven. A count would be partial, not a total.",
+  source_bootstrap_incomplete: "The contact-funnel backfill is still running, so contacts acquired in this window may not all have arrived yet. A count now would be partial, not a total.",
+  source_incremental_provenance_missing: "The contact-funnel sync record predates incremental provenance, so it cannot prove the population is current. Withheld until one incremental sync records the evidence.",
+  source_last_incremental_failed: "The most recent contact-funnel incremental sync did not complete, so the population is not proven complete. A count now would be partial, not a total.",
+  source_no_successful_incremental: "No incremental contact-funnel sync has ever succeeded — a completed backfill is not a live feed — so there is no watermark these SQLs could be measured as of.",
+  campaign_attribution_unavailable: "Campaign identity mappings could not be read, so per-campaign SQLs are not reliable enough to divide spend by.",
+  no_canonical_spend_row_in_window: "No canonical Google Ads spend row exists for this campaign in this window.",
+  unmapped_label_has_no_campaign_spend: "This label has no campaign mapping, so no spend can be divided by its SQLs.",
+};
+function campaignCohortReason(code) {
+  return CAMPAIGN_COHORT_REASONS[code] || (code ? `Withheld (${code}).` : "Withheld.");
+}
+
+// PR-ADS-161B review — Leads acquired is counted over the SAME canonical
+// contact population as the cohort SQLs. When the backend says that population
+// is not proven complete, it is a partial count: still shown (an operator needs
+// it to investigate) but never as a total.
+const CAMPAIGN_PARTIAL_TITLE = "Partial — the canonical contact population is not proven complete for this window, so this is a count, not a total.";
+function campaignCohortPopulationPartial(cohort) {
+  const m = (cohort && cohort.metadata) || {};
+  return m.coverage_status === "cohort_population_not_proven";
+}
+function campaignPartialCount(html) {
+  return `<span class="campaign-sql-unreconciled" title="${escapeHtml(CAMPAIGN_PARTIAL_TITLE)}">${html}<span class="td-sub">partial</span></span>`;
+}
+
+// Junk and Junk Rate are the legacy lead-quality classification from the leads
+// table — a DIFFERENT population from "Leads acquired" (canonical funnel
+// contacts) beside them. Junk Rate's denominator is verdicted leads in that
+// table, so junk ÷ leads acquired is a figure this page never produced.
+const CAMPAIGN_LEGACY_JUNK_LABEL = "Junk (lead status)";
+const CAMPAIGN_LEGACY_JUNK_RATE_LABEL = "Junk Rate (lead status)";
+const CAMPAIGN_LEGACY_JUNK_TITLE = "Lead-quality classification from the leads table. Junk Rate = junk ÷ verdicted leads in that table — not ÷ Leads acquired, which counts canonical-funnel contacts. Different populations: do not divide one by the other.";
 
 // Outcome statuses whose meaning DEPENDS on the SQL count. When the SQL scope
 // does not reconcile, these two are conclusions the evidence no longer
@@ -6410,46 +6482,79 @@ const CAMPAIGN_SQL_DEPENDENT_STATUSES = new Set([
  * table, the filters, the sorts and the drawer cannot drift apart — which is
  * how a gate ends up applied in three places out of five.
  *
- * Returns `{ publish, state, reason, canonical }`. `publish` is true ONLY for a
- * reconciled scope. Everything else withholds, and `reason` is the sentence the
- * operator reads instead of a number.
+ * PR-ADS-161B: the gate reads the ACQUISITION-COHORT status, not the legacy
+ * lead-status reconciliation. A missing SQL-entry timestamp no longer withholds
+ * anything here — the cohort never asks for one. What still withholds: an
+ * unreadable funnel, a cohort whose buckets do not reconcile, or a watermark
+ * that cannot be stated.
+ *
+ * `cohort` is REQUIRED: the cohort block of the response being rendered. There
+ * is no global fallback — a missing argument is unavailable, which is
+ * fail-closed, so a surface can never be authorised by another request's state.
+ *
+ * Returns `{ publish, state, reason, cpql, cpqlState, cpqlReason }`. `publish`
+ * is true ONLY for a published cohort. `cpql` can never be true unless
+ * `publish` is: CPQL's denominator IS the SQL count.
  */
-function campaignSqlPublication() {
-  const r = _campaignSqlReconciliation;
-  if (!r || !r.reconciliation_status) {
+function campaignSqlPublication(cohort) {
+  const c = cohort;
+  if (!c || !c.sql_status) {
     return {
-      publish: false, state: "unavailable", canonical: null,
-      reason: "SQL reconciliation was not returned for this window, so campaign-attributable SQL totals cannot be certified.",
+      publish: false, state: "unavailable", cpql: false, cpqlState: "unavailable",
+      reason: "Acquisition-cohort SQL evidence was not returned for this window, so no SQL total can be shown. Unavailable is not zero.",
+      cpqlReason: "No cohort SQL count exists to divide spend by.",
     };
   }
-  const status = r.reconciliation_status;
-  const canonical = r.campaign_attributable_sqls != null ? r.campaign_attributable_sqls : null;
-  if (status === "reconciled") {
-    return { publish: true, state: "reconciled", reason: null, canonical };
-  }
-  if (status === "mismatch") {
+  if (c.sql_status === "published") {
+    const cpqlState = c.cpql_status || "unavailable";
     return {
-      publish: false, state: "mismatch", canonical,
-      reason: "The canonical SQL scopes do not reconcile for this window. Aggregate SQL and CPQL are withheld rather than shown as a number nothing proved.",
+      publish: true, state: "published", reason: null,
+      cpql: cpqlState === "published", cpqlState,
+      cpqlReason: cpqlState === "published" ? null : campaignCohortReason(c.cpql_reason),
     };
   }
-  if (status === "partial") {
-    return {
-      publish: false, state: "partial", canonical,
-      reason: "SQL coverage is partial for this window, so a campaign-attributable total cannot be proven. Partial evidence is not a smaller total — it is an unknown one.",
-    };
-  }
+  const state = c.sql_status === "withheld" ? "withheld" : "unavailable";
   return {
-    publish: false, state: "unavailable", canonical,
-    reason: "Canonical SQL evidence is unavailable for this window. Unavailable is not zero.",
+    publish: false, state, cpql: false, cpqlState: state,
+    reason: campaignCohortReason(c.sql_reason),
+    cpqlReason: "CPQL's denominator is the SQL count, which is not published.",
   };
 }
 
+// One row's verdict: the page (or drawer) response's verdict, narrowed by the
+// row's own copy of it. Both come from the same response; if they ever
+// disagree, the stricter one wins — a row can be withheld under a published
+// page, never published under a withheld one.
+function campaignRowSqlPublication(cohort, row) {
+  const page = campaignSqlPublication(cohort);
+  if (!page.publish) return page;
+  if (!row || row.cohort_sql_status !== "published") {
+    return campaignSqlPublication({
+      sql_status: (row && row.cohort_sql_status) || "unavailable",
+      sql_reason: row && row.cohort_sql_reason,
+    });
+  }
+  return page;
+}
+
 // The withheld rendering. Never a 0, never an empty string — the operator must
-// be able to tell "we measured none" from "we could not measure".
+// be able to tell "we measured none" from "we could not measure". The visible
+// word is in the DOM, not only in a tooltip, so it reaches every reader.
 function campaignSqlWithheld(pub, { compact = false } = {}) {
-  const label = compact ? "Unreconciled" : "Reconciliation required";
-  return `<span class="detail-unavailable" title="${escapeHtml(pub.reason || "")}">${label}</span>`;
+  const label = pub.state === "unavailable" ? "Unavailable" : "Withheld";
+  const text = compact ? label : `${label} — see evidence below`;
+  return `<span class="detail-unavailable" title="${escapeHtml(pub.reason || "")}">${text}</span>`;
+}
+
+// CPQL has its own refusals on top of the SQL gate (stale source, no spend,
+// zero SQLs). `N/A` is reserved for the genuine zero-SQL case.
+function campaignCpqlNotPublished(pub, { compact = false } = {}) {
+  if (!pub.publish) return campaignSqlWithheld(pub, { compact });
+  if (pub.cpqlState === "not_applicable") {
+    return `<span class="detail-unavailable" title="${escapeHtml(pub.cpqlReason || "")}">N/A</span>`;
+  }
+  const label = pub.cpqlState === "withheld" ? "Withheld" : "Unavailable";
+  return `<span class="detail-unavailable" title="${escapeHtml(pub.cpqlReason || "")}">${label}</span>`;
 }
 
 // Factual outcome-status → badge tone (no action verdict).
@@ -6491,10 +6596,11 @@ async function loadCampaignEvidence() {
     _campaignEvidence = data.campaigns || [];
     _campaignSummary  = data.summary || null;
     _campaignAudit    = data.audit || null;
-    // PR-ADS-157 §2: carried into state and ENFORCED, not merely stored. Null
-    // when the API did not return it, which `campaignSqlPublication()` treats
-    // as unproven — the absence of a reconciliation is not a reconciliation.
-    _campaignSqlReconciliation = data.sql_reconciliation || null;
+    // PR-ADS-157 §2 / PR-ADS-161B: carried into state and ENFORCED, not merely
+    // stored — the cohort block every page surface passes to
+    // `campaignSqlPublication(cohort)`. Null
+    // when absent, which the gate treats as unavailable, never as permission.
+    _campaignCohort = data.cohort || null;
     _campaignMeta = {
       window: data.window || getEvidenceWindow(),
       spend_currency: data.spend_currency || "GBP",
@@ -6505,7 +6611,7 @@ async function loadCampaignEvidence() {
     renderCampaignEvidencePage();
   } catch (_) {
     _campaignLoadState = "error";
-    _campaignSqlReconciliation = null;
+    _campaignCohort = null;
     shell.innerHTML = `
       <div class="evidence-empty-state">
         Campaign evidence is unavailable.<br>The underlying dataset could not be read.
@@ -6524,27 +6630,80 @@ function loadCampaigns() { return loadCampaignEvidence(); }
  * partial / unavailable applies and what has therefore been withheld.
  */
 function renderCampaignSqlReconciliation() {
-  const pub = campaignSqlPublication();
-  const r = _campaignSqlReconciliation || {};
-  if (pub.publish) {
-    return `<div class="kw-sql-note" role="note">
-      <div class="kw-sql-coverage-title">SQL scope — reconciled</div>
-      <ul class="kw-sql-coverage">
-        <li>All-source SQLs: <strong>${dashValue(r.total_all_source_sqls, fmtCount)}</strong></li>
-        <li>Google Ads-source SQLs: <strong>${dashValue(r.google_ads_source_sqls, fmtCount)}</strong></li>
-        <li>${escapeHtml(CAMPAIGN_SQL_SCOPE_LABEL)}: <strong>${dashValue(r.campaign_attributable_sqls, fmtCount)}</strong></li>
-        <li>Google Ads-source SQLs without a campaign identity: <strong>${dashValue(r.unmatched_sql_contacts, fmtCount)}</strong></li>
-      </ul>
-      <div class="kw-sql-coverage-foot">Each scope is a subset of the one above it. This page publishes the <strong>campaign-attributable</strong> subset. SQLs are HubSpot-confirmed qualified contacts on their created date — <strong>not Google Ads platform conversions</strong>, which are a different population reported by a different system.</div>
+  const pub = campaignRowSqlPublication(_campaignCohort, _campaignSummary);
+  const c = _campaignCohort || {};
+  const s = _campaignSummary || {};
+  const lc = c.lifecycle_event_coverage || {};
+  const br = c.breakdown || {};
+  const unByReason = (br.unattributed && br.unattributed.by_reason) || {};
+  const UNATTRIBUTED_REASON_LABELS = {
+    unmapped_campaign_label: "campaign label with no approved mapping",
+    missing_campaign: "no campaign label",
+    pseudo_campaign: "HubSpot traffic-source pseudo-label",
+    email_campaign: "email-send label",
+    conflicting_attribution_across_rows: "conflicting attribution",
+  };
+  const reasonItems = Object.keys(unByReason).sort().map((k) =>
+    `<li>${escapeHtml(UNATTRIBUTED_REASON_LABELS[k] || k)}: <strong>${fmtCount(unByReason[k])}</strong></li>`).join("");
+  // "Not proven Google Ads" is not "proven another channel": a blank original
+  // source is excluded under its own reason.
+  const exByReason = (br.excluded_non_google && br.excluded_non_google.by_reason) || {};
+  const EXCLUDED_REASON_LABELS = {
+    non_google_source: "original source is another channel",
+    original_source_unclassified: "original source blank or unrecognised — not proven Google Ads, not proven another channel",
+    label_mapped_not_google_ads: "campaign label approved as not Google Ads",
+  };
+  const excludedItems = Object.keys(exByReason).sort().map((k) =>
+    `<li>${escapeHtml(EXCLUDED_REASON_LABELS[k] || k)}: <strong>${fmtCount(exByReason[k])}</strong></li>`).join("");
+
+  // The event-time disclosure is shown in EVERY state — it is the reason the
+  // lifecycle-event number is absent, and it must not disappear when the
+  // cohort number is present.
+  // PR-ADS-161B round 3 — the reached-SQL population counts below are read
+  // over the SAME contact funnel the cohort may be withheld for. They render
+  // only under a PUBLISHED verdict (and only if the backend did not withhold
+  // them); otherwise the line says they are withheld with the cohort. The
+  // incident count is an integrity fact, never suppressed.
+  const lcCountsShown = pub.publish && !lc.counts_withheld;
+  const lcCounts = lcCountsShown ? `
+      <li>Contacts whose lifecycle stage proves SQL: <strong>${dashValue(lc.reached_sql_by_current_stage, fmtCount)}</strong></li>
+      <li>With an exact SQL-entry timestamp: <strong>${dashValue(lc.exact_direct_timestamp, fmtCount)}</strong> direct, <strong>${dashValue(lc.recovered_timestamp, fmtCount)}</strong> recovered</li>
+      <li>With no exact SQL-entry timestamp: <strong>${dashValue(lc.missing_exact_timestamp, fmtCount)}</strong></li>`
+    : `
+      <li>Reached-SQL population counts: <strong>Withheld</strong> with the cohort SQL count — they are read over the same contact funnel, which is not proven complete and consistent for this window.</li>`;
+  const lifecycleHtml = `
+    <div class="kw-sql-coverage-title" style="margin-top:var(--space-3)">Lifecycle-event SQLs — not shown on this page · all-time, every contact, not this window</div>
+    <ul class="kw-sql-coverage">${lcCounts}
+      <li>Open post-boundary timestamp incidents: <strong>${dashValue(lc.open_post_boundary_incidents, fmtCount)}</strong></li>
+    </ul>
+    <div class="kw-sql-coverage-foot">These are global figures, not this window's, and are not a superset of the cohort: a contact whose SQL date is recorded but whose stage later moved back is in the cohort and not in the first line; a contact with no created date is in the first line and in no cohort.</div>
+    <div class="kw-sql-coverage-foot">"How many contacts <em>entered</em> SQL in this period" needs an exact SQL-entry date for every contact. Those totals stay withheld by the lifecycle coverage gate and are not replaced by the cohort count above. No SQL-entry date is estimated or invented.</div>`;
+
+  if (!pub.publish) {
+    return `<div class="kw-sql-note kw-sql-note--warn" role="note">
+      <div class="kw-sql-coverage-title">${escapeHtml(CAMPAIGN_SQL_SCOPE_LABEL)} — ${pub.state === "withheld" ? "withheld" : "unavailable"}</div>
+      <p>${escapeHtml(pub.reason)}</p>
+      <div class="kw-sql-coverage-foot">${campaignCohortPopulationPartial(_campaignCohort)
+        ? "Spend and the lead-status junk / wrong-fit evidence (leads table) are independent of the cohort and remain published below. Leads acquired is counted over the same unproven contact population, so it is marked partial."
+        : "Spend, leads acquired, and the lead-status junk / wrong-fit evidence (leads table) are independent of the SQL count and remain published below."}</div>
+      ${lifecycleHtml}
     </div>`;
   }
-  const heading = pub.state === "mismatch" ? "Reconciliation required"
-    : pub.state === "partial" ? "SQL coverage partial"
-    : "SQL evidence unavailable";
-  return `<div class="kw-sql-note kw-sql-note--warn" role="note">
-    <div class="kw-sql-coverage-title">SQL scope — ${escapeHtml(heading)}</div>
-    <p>${escapeHtml(pub.reason)}</p>
-    <div class="kw-sql-coverage-foot">Spend, leads, confirmed junk and wrong-fit evidence are independent of SQL reconciliation and remain published below.</div>
+
+  const gap = s.cohort_sqls_missing_event_timestamp;
+  const gapHtml = gap ? `<li>Of these, proven by lifecycle stage with no exact SQL-entry timestamp: <strong>${fmtCount(gap)}</strong> — counted here in the period they were acquired; still a lifecycle-event coverage gap</li>` : "";
+  return `<div class="kw-sql-note" role="note">
+    <div class="kw-sql-coverage-title">${escapeHtml(CAMPAIGN_COHORT_BASIS)}, measured as of ${escapeHtml(campaignCohortAsOf(_campaignCohort))}</div>
+    <ul class="kw-sql-coverage">
+      <li>Google Ads cohort SQLs: <strong>${dashValue(s.cohort_sqls_google_ads, fmtCount)}</strong> = campaigns <strong>${dashValue(s.cohort_sqls_mapped, fmtCount)}</strong> + unattributed <strong>${dashValue(s.cohort_sqls_unattributed, fmtCount)}</strong></li>
+      ${gapHtml}
+      <li>Excluded — not proven Google Ads sourced: <strong>${dashValue(s.cohort_sqls_excluded_non_google, fmtCount)}</strong>${excludedItems ? `<ul class="kw-sql-coverage">${excludedItems}</ul>` : ""}</li>
+      <li>All-source cohort SQLs: <strong>${dashValue(s.cohort_sqls_all_sources, fmtCount)}</strong></li>
+    </ul>
+    ${reasonItems ? `<div class="kw-sql-coverage-foot">Unattributed / mapping missing, by reason:</div><ul class="kw-sql-coverage">${reasonItems}</ul>` : ""}
+    ${(c.metadata && c.metadata.maturity_note) ? `<div class="kw-sql-coverage-foot">${escapeHtml(c.metadata.maturity_note)}</div>` : ""}
+    <div class="kw-sql-coverage-foot">A contact counts once, by HubSpot contact id, when canonical lifecycle evidence proves it reached SQL: an exact SQL-entry date, a recovered lifecycle transition, or a current stage of SQL or later. These are <strong>not Google Ads platform conversions</strong>, which are a different population reported by a different system.</div>
+    ${lifecycleHtml}
   </div>`;
 }
 
@@ -6554,7 +6713,7 @@ function campaignEvidenceHeader() {
     <header class="campaign-evidence-head">
       <div class="campaign-evidence-head__text">
         <h2 class="campaign-evidence-title">Campaign Evidence</h2>
-        <p class="campaign-evidence-sub">Selected-window Google Ads spend reconciled with HubSpot lead-quality outcomes.</p>
+        <p class="campaign-evidence-sub">Selected-window Google Ads spend against the outcomes of the contacts acquired in that window. ${escapeHtml(CAMPAIGN_COHORT_BASIS)}, measured as of the canonical contact-funnel watermark (${escapeHtml(campaignCohortAsOf(_campaignCohort))}). Closed-won deals are not shown on this page.</p>
       </div>
       ${label ? `<span class="campaign-evidence-window" title="Selected evidence window">${escapeHtml(label)}</span>` : ""}
     </header>`;
@@ -6604,44 +6763,49 @@ function renderCampaignEvidenceKPIs() {
   const spendSub = s.spend_native != null
     ? `${fmtGbp(s.spend_native)} ${escapeHtml(cur)}`
     : "native spend unavailable";
-  // PR-ADS-157 §2 — aggregate SQL and aggregate CPQL are published ONLY on a
-  // reconciled scope. CPQL is derived from the SQL count, so an unreconciled
-  // SQL total does not produce a slightly-wrong CPQL; it produces a CPQL with
-  // no denominator anyone can vouch for.
-  const pub = campaignSqlPublication();
+  // PR-ADS-157 §2 / PR-ADS-161B — aggregate SQL and CPQL publish only through
+  // the gate. CPQL is derived from the SQL count, so a withheld SQL total does
+  // not produce a slightly-wrong CPQL; it produces a CPQL with no denominator
+  // anyone can vouch for. CPQL can additionally be withheld on its own (stale
+  // source, no spend) while the SQL count stands.
+  // The summary carries its own copy of the verdict (cohort_sql_status); it is
+  // narrowed exactly like a row, so the KPI strip can never outrun the block.
+  const pub = campaignRowSqlPublication(_campaignCohort, s);
   const sqlKpi = pub.publish
-    ? fmtCount(s.confirmed_sqls_total)
+    ? fmtCount(s.cohort_sqls_google_ads)
     : campaignSqlWithheld(pub);
   const sqlSub = pub.publish
-    ? "HubSpot-confirmed qualified contacts mapped to a Google Ads campaign identity, this window"
-    : "Withheld — see SQL scope below";
+    ? `Google Ads-sourced contacts created this period that have reached SQL, as of ${campaignCohortAsOf(_campaignCohort)}`
+    : "Withheld — see evidence below";
+  const unattributedKpi = pub.publish
+    ? fmtCount(s.cohort_sqls_unattributed)
+    : campaignSqlWithheld(pub, { compact: true });
   const cpql = !pub.publish
     ? campaignSqlWithheld(pub)
-    : (s.overall_cpql_usd != null ? fmtDollar(s.overall_cpql_usd)
-      : `<span class="detail-unavailable">N/A</span>`);
-  // CPQL label — the numerator is ALL canonical Google Ads USD spend; the
-  // denominator is mapped SQLs. Label it honestly by coverage (never "mapped
-  // campaigns only", which would misdescribe the total-spend numerator). Tooltip
-  // discloses the unmatched + not-Google-Ads SQLs excluded from the denominator.
-  const cov = s.mapping_coverage || {};
-  const cpqlSub = s.overall_cpql_scope === "mapped_only"
-    ? `<span class="detail-unavailable" title="Denominator excludes ${fmtCount(cov.unmatched_sqls)} unmatched + ${fmtCount(cov.excluded_not_google_sqls)} Not-Google-Ads SQLs">All Google Ads spend ÷ mapped SQLs</span>`
-    : "Google Ads spend ÷ confirmed SQLs";
+    : (!pub.cpql ? campaignCpqlNotPublished(pub)
+      : (s.cohort_cpql_usd != null ? fmtDollar(s.cohort_cpql_usd)
+        : `<span class="detail-unavailable">N/A</span>`));
+  // CPQL = ALL window Google Ads spend ÷ ALL Google Ads cohort SQLs (campaigns
+  // + unattributed). Numerator and denominator share one scope and one window.
+  const cpqlSub = "Google Ads spend ÷ cohort SQLs, same window";
   return `
     <div class="evidence-kpi-grid campaign-kpi-grid">
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns</div>
         <div class="dash-kpi-card__value">${fmtCount(s.campaigns)}</div>
-        <div class="dash-kpi-card__sub">With spend or lead evidence</div></div>
+        <div class="dash-kpi-card__sub">With spend, lead or outcome evidence</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Spend</div>
         <div class="dash-kpi-card__value">${spendPrimary}</div>
         <div class="dash-kpi-card__sub">${spendSub}</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">${escapeHtml(CAMPAIGN_SQL_SCOPE_LABEL)}</div>
         <div class="dash-kpi-card__value">${sqlKpi}</div>
         <div class="dash-kpi-card__sub">${escapeHtml(sqlSub)}</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed Junk</div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Unattributed Google Ads SQLs</div>
+        <div class="dash-kpi-card__value">${unattributedKpi}</div>
+        <div class="dash-kpi-card__sub">Included in Cohort SQLs — no campaign mapping</div></div>
+      <div class="dash-kpi-card" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}"><div class="dash-kpi-card__label">Confirmed Junk</div>
         <div class="dash-kpi-card__value">${fmtCount(s.confirmed_junk_total)}</div>
-        <div class="dash-kpi-card__sub">Excludes wrong-fit</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Overall CPQL</div>
+        <div class="dash-kpi-card__sub">Lead status (leads table) · not the Leads acquired population · excludes wrong-fit</div></div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">CPQL</div>
         <div class="dash-kpi-card__value">${cpql}</div>
         <div class="dash-kpi-card__sub">${cpqlSub}</div></div>
     </div>`;
@@ -6649,7 +6813,7 @@ function renderCampaignEvidenceKPIs() {
 
 function renderCampaignEvidenceFilters() {
   const f = _campaignFilters;
-  const pub = campaignSqlPublication();
+  const pub = campaignSqlPublication(_campaignCohort);
   // PR-ADS-157 §2 — a status option whose MEANING depends on the SQL count is
   // disabled when that count is not publishable. "SQL producer" and "Spend
   // without SQL proof" are conclusions drawn from the SQL number; offering them
@@ -6693,13 +6857,13 @@ function renderCampaignEvidenceFilters() {
       </select>
       <select id="campaign-outcome" class="waste-filter-select" aria-label="Outcome signal">
         <option value="all"${f.outcome === "all" ? " selected" : ""}>All outcomes</option>
-        <option value="has_sql"${f.outcome === "has_sql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Has attributed SQL</option>
-        <option value="no_sql"${f.outcome === "no_sql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>No attributed SQL</option>
+        <option value="has_sql"${f.outcome === "has_sql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Has cohort SQL</option>
+        <option value="no_sql"${f.outcome === "no_sql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>No cohort SQL</option>
         <option value="has_junk"${f.outcome === "has_junk" ? " selected" : ""}>Has confirmed junk</option>
       </select>
       <select id="campaign-sort" class="waste-filter-select" aria-label="Sort campaigns">
         <option value="spend"${f.sort === "spend" ? " selected" : ""}>Highest spend</option>
-        <option value="sqls"${f.sort === "sqls" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Most attributed SQLs</option>
+        <option value="sqls"${f.sort === "sqls" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Most cohort SQLs</option>
         <option value="junk"${f.sort === "junk" ? " selected" : ""}>Highest confirmed junk</option>
         <option value="junk_rate"${f.sort === "junk_rate" ? " selected" : ""}>Highest junk rate</option>
         <option value="cpql"${f.sort === "cpql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Highest CPQL</option>
@@ -6711,7 +6875,7 @@ function renderCampaignEvidenceFilters() {
 
 function filterCampaignEvidence(rows) {
   const f = _campaignFilters;
-  const sqlPub = campaignSqlPublication();
+  const sqlPub = campaignSqlPublication(_campaignCohort);
   return rows.filter((c) => {
     if (f.search && !(c.campaign_name || "").toLowerCase().includes(f.search.toLowerCase())) return false;
     // PR-ADS-157 §2 — refuse SQL-dependent STATUS filtering internally too.
@@ -6724,14 +6888,16 @@ function filterCampaignEvidence(rows) {
         && !sqlPub.publish) return true;
     if (f.status !== "all" && (c.outcome_status || "") !== f.status) return false;
     // Outcome filters match genuine recorded values only — an unavailable (null)
-    // metric is never classified as a zero-outcome campaign.
-    const sqls = c.confirmed_sqls;
+    // metric is never classified as a zero-outcome campaign. PR-ADS-161B: the
+    // SQL classified here is the cohort SQL the page publishes.
+    const sqls = c.cohort_sqls;
     const junk = c.confirmed_junk;
     // PR-ADS-157 §2 — the disabled <option> is a UI affordance, not a guarantee.
     // A stale state value, a restored session, or a caller invoking this
     // function directly must not be able to classify an unreconciled SQL count.
     // So the refusal lives here too, where the classification actually happens.
-    if ((f.outcome === "has_sql" || f.outcome === "no_sql") && !sqlPub.publish) return true;
+    if ((f.outcome === "has_sql" || f.outcome === "no_sql")
+        && !campaignRowSqlPublication(_campaignCohort, c).publish) return true;
     if (f.outcome === "has_sql"  && !(sqls != null && sqls > 0))  return false;
     if (f.outcome === "no_sql"   && !(sqls != null && sqls === 0)) return false;
     if (f.outcome === "has_junk" && !(junk != null && junk > 0))  return false;
@@ -6757,14 +6923,14 @@ function sortCampaignEvidence(rows) {
   // as a finding ("these are the top SQL producers") that the reconciliation
   // does not support. Fall back to spend, which is independent canonical
   // evidence and needs no SQL scope to be true.
-  if ((by === "sqls" || by === "cpql") && !campaignSqlPublication().publish) by = "spend";
+  if ((by === "sqls" || by === "cpql") && !campaignSqlPublication(_campaignCohort).publish) by = "spend";
   // Spend sort ranks by the native amount (always present when spend exists);
   // unavailable spend sinks last.
   if (by === "spend")      arr.sort(_campDescNullLast((c) => c.spend_native));
-  else if (by === "sqls")  arr.sort(_campDescNullLast((c) => c.confirmed_sqls));
+  else if (by === "sqls")  arr.sort(_campDescNullLast((c) => c.cohort_sqls));
   else if (by === "junk")  arr.sort(_campDescNullLast((c) => c.confirmed_junk));
   else if (by === "junk_rate") arr.sort(_campDescNullLast((c) => c.junk_rate_pct));
-  else if (by === "cpql")  arr.sort(_campDescNullLast((c) => c.cpql_usd));
+  else if (by === "cpql")  arr.sort(_campDescNullLast((c) => c.cohort_cpql_usd));
   else if (by === "name")  arr.sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || ""));
   return arr;
 }
@@ -6783,10 +6949,10 @@ function renderCampaignDecisionTable() {
         <th class="td--name">Campaign</th>
         <th>Status</th>
         <th class="td--num">Spend</th>
-        <th class="td--num">Leads</th>
-        <th class="td--num" title="HubSpot-confirmed qualified contacts mapped to a Google Ads campaign identity — not Google Ads platform conversions">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</th>
-        <th class="td--num">Junk</th>
-        <th class="td--num">Junk Rate</th>
+        <th class="td--num" title="Google Ads-sourced HubSpot contacts created in this window and placed on this campaign">Leads acquired</th>
+        <th class="td--num" title="${escapeHtml(CAMPAIGN_COHORT_BASIS)} that have reached SQL as of the canonical contact-funnel watermark — not Google Ads platform conversions">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</th>
+        <th class="td--num" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th>
+        <th class="td--num" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>
         <th class="td--num">CPQL</th>
         <th class="td--action"><span class="sr-only">Open evidence</span></th>
       </tr>
@@ -6827,34 +6993,46 @@ function renderCampaignEvidenceRow(c) {
                   jr < uiThresholds.junk_rate.low_pct   ? "junk--low" :
                   jr <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
   const junkRateStr = jr != null ? jr.toFixed(1) + "%" : "—";
-  const leads = c.total_leads == null ? `<span class="detail-unavailable">—</span>` : fmtCount(c.total_leads);
+  // PR-ADS-161B — "Leads acquired" is the cohort: the same population the
+  // row's SQLs and CPQL are drawn from, so the three can be read together.
+  const cohortPartial = campaignCohortPopulationPartial(_campaignCohort);
+  const leads = c.cohort_contacts_acquired == null
+    ? `<span class="detail-unavailable">—</span>`
+    : (cohortPartial ? campaignPartialCount(fmtCount(c.cohort_contacts_acquired))
+      : fmtCount(c.cohort_contacts_acquired));
   const junk  = c.confirmed_junk == null ? `<span class="detail-unavailable">—</span>` : fmtCount(c.confirmed_junk);
 
-  // PR-ADS-157 §2 — row-level SQL evidence is RAW. It stays visible when the
-  // aggregate scope does not reconcile (withholding it would destroy the
-  // per-campaign detail an operator needs to investigate the mismatch), but it
-  // is labelled unreconciled and it drives nothing: not CPQL, not the outcome
-  // status. A raw number an operator can see is honest; a derived conclusion
-  // built on it is not.
-  const pub = campaignSqlPublication();
-  const rawSql = c.confirmed_sqls == null
-    ? `<span class="detail-unavailable">—</span>` : fmtCount(c.confirmed_sqls);
-  const sqls = pub.publish ? rawSql
-    : `<span class="campaign-sql-unreconciled" title="Raw, unreconciled. ${escapeHtml(pub.reason)}">${rawSql}<span class="td-sub">unreconciled</span></span>`;
+  // PR-ADS-161B review round 3 — a withheld SQL count is NOT rendered at all.
+  // It used to stay visible with a "not published" suffix, which published the
+  // exact number the verdict refused. The backend no longer sends it either;
+  // this is the second wall, not the only one.
+  const pub = campaignRowSqlPublication(_campaignCohort, c);
+  const gapNote = (pub.publish && c.cohort_sqls_missing_event_timestamp)
+    ? `<span class="td-sub" title="Proven by lifecycle stage with no exact SQL-entry timestamp — counted here, still a lifecycle-event coverage gap">${fmtCount(c.cohort_sqls_missing_event_timestamp)} undated</span>` : "";
+  const sqls = !pub.publish ? campaignSqlWithheld(pub, { compact: true })
+    : (c.cohort_sqls == null ? `<span class="detail-unavailable">—</span>`
+      : `${fmtCount(c.cohort_sqls)}${gapNote}`);
 
-  // CPQL: withheld entirely when the SQL scope is unproven — its denominator IS
-  // the SQL count. Otherwise "—" when SQLs unavailable, "N/A" for a genuine
-  // zero, else the USD value.
-  const cpql = !pub.publish ? campaignSqlWithheld(pub, { compact: true })
-    : (c.confirmed_sqls == null ? "—"
-    : (c.confirmed_sqls === 0 ? "N/A"
-    : (c.cpql_usd != null ? fmtDollar(c.cpql_usd) : "—")));
+  // CPQL: withheld entirely when the SQL gate is closed — its denominator IS
+  // the SQL count. Otherwise the row's own CPQL status decides; "N/A" is the
+  // genuine zero-SQL case, never a zero or an infinity.
+  let cpql;
+  if (!pub.publish) {
+    cpql = campaignSqlWithheld(pub, { compact: true });
+  } else if (c.cohort_cpql_status === "published" && c.cohort_cpql_usd != null) {
+    cpql = fmtDollar(c.cohort_cpql_usd);
+  } else if (c.cohort_cpql_status === "not_applicable") {
+    cpql = "N/A";
+  } else {
+    const label = c.cohort_cpql_status === "withheld" ? "Withheld" : "—";
+    cpql = `<span class="detail-unavailable" title="${escapeHtml(campaignCohortReason(c.cohort_cpql_reason))}">${label}</span>`;
+  }
 
   // SQL-dependent outcome statuses stop publishing a confident conclusion.
-  // "Spend without SQL proof" is an accusation, and an unreconciled scope is
-  // not proof of absence.
+  // "Spend without SQL proof" is an accusation, and an unpublished SQL count
+  // is not proof of absence.
   const statusCell = (!pub.publish && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(c.outcome_status))
-    ? `<span class="campaign-status-badge campaign-status-badge--muted" title="${escapeHtml(c.outcome_status || "")} depends on the SQL count. ${escapeHtml(pub.reason)}">Reconciliation required</span>`
+    ? `<span class="campaign-status-badge campaign-status-badge--muted" title="${escapeHtml(c.outcome_status || "")} depends on the SQL count. ${escapeHtml(pub.reason)}">SQL count not published</span>`
     : campaignStatusBadge(c.outcome_status);
   const nameEnc = encodeURIComponent(c.campaign_name || "");
   // Stable key for drawer resolution — campaign_id/campaign_key, never display name alone.
@@ -6869,10 +7047,10 @@ function renderCampaignEvidenceRow(c) {
       <td class="td--name" data-label="Campaign">${escapeHtml(c.campaign_name || "—")}${aliasHint}${mapNote}</td>
       <td data-label="Status">${statusCell}</td>
       <td class="td--num" data-label="Spend">${campaignSpendCell(c)}</td>
-      <td class="td--num" data-label="Leads">${leads}</td>
+      <td class="td--num" data-label="Leads acquired">${leads}</td>
       <td class="td--num" data-label="${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}">${sqls}</td>
-      <td class="td--num" data-label="Junk">${junk}</td>
-      <td class="td--num ${junkCls}" data-label="Junk Rate">${junkRateStr}</td>
+      <td class="td--num" data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}">${junk}</td>
+      <td class="td--num ${junkCls}" data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}">${junkRateStr}</td>
       <td class="td--num ${cpql === "N/A" ? "td--na" : ""}" data-label="CPQL">${cpql}</td>
       <td class="td--action" data-label="">
         <span class="campaign-open-icon" aria-hidden="true" title="Open evidence">›</span>
@@ -14244,11 +14422,26 @@ function renderCampaignDrawer(data) {
   const winLabel = CAMPAIGN_WINDOW_LABELS[camp.window] || camp.window || "selected window";
   const fxNote = (camp.spend_usd == null && camp.fx_complete === false)
     ? " · USD withheld (FX coverage incomplete)" : "";
-  // PR-ADS-157 §2 — the drawer headline status obeys the same gate as the
-  // table: an SQL-dependent conclusion is not published on an unreconciled scope.
+  // PR-ADS-157 §2 — the drawer applies the SAME publication POLICY as the page,
+  // to its OWN evidence: the cohort verdict returned with this
+  // /api/campaign-detail response (see `drawerCohort` below). A missing verdict
+  // is unavailable, which is fail-closed.
+  //
+  // PR-ADS-161B: declared HERE, before its first use. It used to be declared
+  // after the status badge below read it — a `const` in its temporal dead
+  // zone, so every drawer with a campaign headline threw a ReferenceError
+  // (recorded as a known defect in the PR-ADS-158 SQL consumer inventory).
+  // PR-ADS-161B review round 3 — gated on THIS response's verdict
+  // (`data.cohort`, returned by /api/campaign-detail with the row), narrowed by
+  // the row's own copy. Never on the Campaign page's state: the drawer is also
+  // opened from the Action Queue, where that state may be absent or belong to
+  // an earlier request.
+  const drawerCohort = data.cohort || null;
+  const drawerSqlPub = campaignRowSqlPublication(drawerCohort, camp);
+  // The drawer headline status obeys the same gate as the table.
   const drawerStatusBadge = (!drawerSqlPub.publish
       && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(camp.outcome_status))
-    ? `<span class="campaign-status-badge campaign-status-badge--muted" title="${escapeHtml(camp.outcome_status || "")} depends on the SQL count. ${escapeHtml(drawerSqlPub.reason)}">Reconciliation required</span>`
+    ? `<span class="campaign-status-badge campaign-status-badge--muted" title="${escapeHtml(camp.outcome_status || "")} depends on the SQL count. ${escapeHtml(drawerSqlPub.reason)}">SQL count not published</span>`
     : campaignStatusBadge(camp.outcome_status);
   const headerHtml = `
     <div class="drawer-section drawer-section--header">
@@ -14258,23 +14451,18 @@ function renderCampaignDrawer(data) {
       </div>
       <div class="drawer-source-note">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        Canonical Google Ads spend reconciled with deduplicated HubSpot lead outcomes for this window${fxNote}
+        Canonical Google Ads spend against the outcomes of contacts acquired this window, as of the canonical contact-funnel watermark (${escapeHtml(campaignCohortAsOf(drawerCohort))})${fxNote}
       </div>
       ${(camp.aliases && camp.aliases.length) ? `<p class="drawer-source-note">Approved external aliases: ${camp.aliases.map((a) => escapeHtml(a)).join(", ")}</p>` : ""}
       <p class="drawer-readonly-note">Outcome status is factual, evidence-based and read-only. No Google Ads changes are made.</p>
     </div>`;
 
   // ── KPI row — selected-window totals (matches the table row exactly) ──────
-  // PR-ADS-157 §2 — the drawer applies the SAME publication policy as the page.
-  // It reads the reconciliation the Campaign page loaded for this window: same
-  // window, same canonical population, already in state. When the drawer is
-  // reached without that state the gate reports unproven, which is fail-closed
-  // — the drawer never publishes an aggregate SQL total nobody reconciled.
-  const drawerSqlPub = campaignSqlPublication();
   const cpqlStr = !drawerSqlPub.publish ? campaignSqlWithheld(drawerSqlPub)
-    : (camp.confirmed_sqls == null ? "—"
-    : (camp.confirmed_sqls === 0 ? "N/A"
-    : (camp.cpql_usd != null ? fmtDollar(camp.cpql_usd) : "—")));
+    : (camp.cohort_cpql_status === "published" && camp.cohort_cpql_usd != null
+      ? fmtDollar(camp.cohort_cpql_usd)
+      : (camp.cohort_cpql_status === "not_applicable" ? "N/A"
+        : `<span class="detail-unavailable" title="${escapeHtml(campaignCohortReason(camp.cohort_cpql_reason))}">${camp.cohort_cpql_status === "withheld" ? "Withheld" : "—"}</span>`));
   const junkStr  = camp.junk_rate_pct  != null ? camp.junk_rate_pct.toFixed(1) + "%" : "—";
   const spendVal = camp.spend_usd != null ? fmtDollar(camp.spend_usd)
     : (camp.spend_native != null ? `${fmtGbp(camp.spend_native)} ${escapeHtml(camp.spend_currency || "GBP")}`
@@ -14290,19 +14478,19 @@ function renderCampaignDrawer(data) {
           <div class="drawer-kpi__value">${spendVal}</div>${spendSub}
         </div>
         <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Leads</div>
-          <div class="drawer-kpi__value">${cnt(camp.total_leads)}</div>
+          <div class="drawer-kpi__label">Leads acquired</div>
+          <div class="drawer-kpi__value">${camp.cohort_contacts_acquired != null && campaignCohortPopulationPartial(drawerCohort) ? campaignPartialCount(cnt(camp.cohort_contacts_acquired)) : cnt(camp.cohort_contacts_acquired)}</div>
         </div>
         <div class="drawer-kpi">
           <div class="drawer-kpi__label">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</div>
-          <div class="drawer-kpi__value">${drawerSqlPub.publish ? cnt(camp.confirmed_sqls) : campaignSqlWithheld(drawerSqlPub, { compact: true })}</div>
+          <div class="drawer-kpi__value">${drawerSqlPub.publish ? cnt(camp.cohort_sqls) : campaignSqlWithheld(drawerSqlPub, { compact: true })}</div>
         </div>
         <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Junk</div>
+          <div class="drawer-kpi__label" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</div>
           <div class="drawer-kpi__value">${cnt(camp.confirmed_junk)}</div>
         </div>
         <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Junk Rate</div>
+          <div class="drawer-kpi__label" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</div>
           <div class="drawer-kpi__value">${junkStr}</div>
         </div>
         <div class="drawer-kpi">
@@ -14317,7 +14505,9 @@ function renderCampaignDrawer(data) {
   // matches the headline and the table exactly; falls back to the campaign-scoped
   // lead query only when the window card carries no lead evidence.
   const lqFromCard = (camp.total_leads != null) ? {
-    total_leads: camp.total_leads, confirmed_sqls: camp.confirmed_sqls,
+    // The legacy lead-status "qualified" count, for the labelled split only.
+    total_leads: camp.total_leads,
+    confirmed_sqls: (camp.legacy_lead_status || {}).qualified,
     in_progress: camp.in_progress, confirmed_junk: camp.confirmed_junk,
     wrong_fit: camp.wrong_fit, unknown: camp.unknown,
     verdicted_leads: camp.verdicted_leads, junk_rate_pct: camp.junk_rate_pct,
@@ -14428,14 +14618,14 @@ function _appendDrawerEvidenceSections(container, data, lq) {
     // name. Junk, wrong-fit, in-progress and unknown are INDEPENDENT canonical
     // lead evidence and stay published: a SQL reconciliation failure must not
     // take down evidence that never depended on it.
-    const lqSqlPub = campaignSqlPublication();
+    const lqSqlPub = campaignSqlPublication(data.cohort || null);
     lqHtml = `
       <div class="drawer-section">
         <div class="drawer-section__title">Lead Quality Split</div>
         <table class="drawer-table">
           <thead>
             <tr>
-              <th title="HubSpot-confirmed qualified contacts mapped to a Google Ads campaign identity">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th>
+              <th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th><th>Wrong Fit</th><th>Unknown</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>
             </tr>
           </thead>
           <tbody>
@@ -14449,7 +14639,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
             </tr>
           </tbody>
         </table>
-        <p class="drawer-source-note">Junk rate = confirmed junk ÷ verdicted leads (qualified + in-progress + junk + wrong fit). Unknown contacts are excluded from the denominator. Total in window: ${lq.total_leads}.</p>
+        <p class="drawer-source-note">Junk rate = confirmed junk ÷ verdicted leads (qualified + in-progress + junk + wrong fit). Unknown contacts are excluded from the denominator. Total in window (leads table, lead-status basis — not Leads acquired): ${lq.total_leads}.</p>
         ${lqSqlPub.publish ? "" : `<p class="drawer-source-note" style="color:var(--c-warning)">${escapeHtml(lqSqlPub.reason)} Junk, wrong-fit, in-progress and unknown counts are independent canonical lead evidence and remain published.</p>`}
       </div>`;
   }
@@ -14466,7 +14656,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
   } else {
     // Same policy, same one decision function — the country split's SQL column
     // is the campaign-attributable count sliced by country.
-    const countrySqlPub = campaignSqlPublication();
+    const countrySqlPub = campaignSqlPublication(data.cohort || null);
     const rows = countries.map((r) => {
       const junkCls = r.junk_rate_pct == null ? "" :
                       r.junk_rate_pct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
@@ -14488,7 +14678,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
         <div class="drawer-section__title">Country Breakdown</div>
         <table class="drawer-table">
           <thead>
-            <tr><th>Country</th><th>Leads</th><th title="HubSpot-confirmed qualified contacts mapped to a Google Ads campaign identity">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th></tr>
+            <tr><th>Country</th><th>Leads</th><th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th><th>Wrong Fit</th><th>Unknown</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>

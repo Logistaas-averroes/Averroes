@@ -750,8 +750,24 @@ def test_31_frontend_stores_the_reconciliation_in_campaign_state():
     contract; it is a field.
     """
     js = _APP_JS.read_text()
-    assert "let _campaignSqlReconciliation" in js
-    assert "_campaignSqlReconciliation = data.sql_reconciliation" in js
+    # PR-ADS-161B: the contract the gate depends on is now the cohort block.
+    # The legacy `sql_reconciliation` is still served (test_30) and declared
+    # legacy by the API, but this page deliberately does not store it: a block
+    # stored and never read is exactly the smell this test was written for.
+    assert "let _campaignCohort" in js
+    assert "_campaignCohort = data.cohort" in js
+    assert "_campaignSqlReconciliation" not in js
+    # PR-ADS-161B round 3: the gate takes the cohort it gates on as its
+    # ARGUMENT and reads no page state of its own (a drawer opened from another
+    # page, or after a later request, would otherwise be authorised by stale
+    # state). The stored block reaches the gate through every page caller.
+    gate = _js_region("campaignSqlPublication", source=js)
+    assert "function campaignSqlPublication(cohort)" in gate
+    assert "_campaignCohort" not in gate
+    for fn in ("renderCampaignEvidenceKPIs", "renderCampaignEvidenceFilters",
+               "filterCampaignEvidence", "sortCampaignEvidence",
+               "renderCampaignEvidenceRow"):
+        assert "_campaignCohort" in _js_region(fn, source=js), fn
 
 
 def test_32_there_is_exactly_one_publication_gate():
@@ -762,27 +778,38 @@ def test_32_there_is_exactly_one_publication_gate():
     just told them it could not certify.
     """
     js = _APP_JS.read_text()
-    assert js.count("function campaignSqlPublication()") == 1
+    # PR-ADS-161B round 3: one decision function, taking the response's cohort.
+    # `campaignRowSqlPublication` only NARROWS it (it calls the gate first and
+    # can only turn publish off), so it is not a second decision.
+    import re
+    assert js.count("function campaignSqlPublication(cohort)") == 1
+    assert len(re.findall(r"\nfunction campaign\w*Publication\(", js)) == 2
+    row_gate = _js_region("campaignRowSqlPublication", source=js)
+    assert row_gate.index("campaignSqlPublication(cohort)") < row_gate.index("return page;")
+    assert "publish: true" not in row_gate
+    assert not re.search(r"campaign(?:Row)?SqlPublication\(\s*\)", js), (
+        "a caller consults the gate with no cohort, i.e. gates on nothing")
     for fn in ("renderCampaignEvidenceKPIs", "renderCampaignEvidenceFilters",
                "filterCampaignEvidence", "sortCampaignEvidence",
                "renderCampaignEvidenceRow", "renderCampaignDrawer",
                "_appendDrawerEvidenceSections"):
-        assert "campaignSqlPublication" in _js_region(fn, source=js), (
+        assert re.search(r"campaign(?:Row)?SqlPublication\(\s*[^)\s]",
+                         _js_region(fn, source=js)), (
             f"{fn} publishes SQL-dependent output without consulting the gate")
 
 
 def test_33_gate_publishes_only_on_a_reconciled_scope():
     """Read the gate's own branches, so the rule is checked, not assumed."""
     region = _js_region("campaignSqlPublication")
-    # Exactly one branch may set publish: true, and it is the reconciled one.
+    # Exactly one branch may set publish: true, and it is the published one.
+    # PR-ADS-161B: the condition is the cohort's own status, not the legacy
+    # reconciliation; tests/test_pr_ads_161b_* executes this gate in node.
     assert region.count("publish: true") == 1
-    reconciled_at = region.index('status === "reconciled"')
+    published_at = region.index('c.sql_status === "published"')
     publish_at = region.index("publish: true")
-    assert reconciled_at < publish_at
-    for state in ("mismatch", "partial"):
-        assert f'status === "{state}"' in region
+    assert published_at < publish_at
     # A missing block is unproven, not permission.
-    assert "if (!r || !r.reconciliation_status)" in region
+    assert "if (!c || !c.sql_status)" in region
 
 
 def test_34_aggregate_sql_and_cpql_are_both_withheld_together():
@@ -793,20 +820,26 @@ def test_34_aggregate_sql_and_cpql_are_both_withheld_together():
     uncertifiable.
     """
     region = _js_region("renderCampaignEvidenceKPIs")
-    assert "pub.publish\n    ? fmtCount(s.confirmed_sqls_total)" in region
+    assert "pub.publish\n    ? fmtCount(s.cohort_sqls_google_ads)" in region
     assert "campaignSqlWithheld(pub)" in region
-    # The CPQL branch tests the gate BEFORE it ever reads overall_cpql_usd.
+    # The CPQL branch tests the SQL gate, then its own gate, BEFORE it ever
+    # reads the CPQL value (PR-ADS-161B: cohort CPQL).
     cpql_branch = region[region.index("const cpql ="):]
-    gate_at = cpql_branch.index("!pub.publish")
-    value_at = cpql_branch.index("s.overall_cpql_usd")
-    assert gate_at < value_at, "CPQL reads its value before checking the gate"
+    sql_gate_at = cpql_branch.index("!pub.publish")
+    cpql_gate_at = cpql_branch.index("!pub.cpql")
+    value_at = cpql_branch.index("s.cohort_cpql_usd")
+    assert sql_gate_at < cpql_gate_at < value_at, (
+        "CPQL reads its value before checking the gate")
+    assert "overall_cpql_usd" not in region, "the legacy CPQL is still rendered"
 
 
 def test_35_withheld_evidence_never_renders_as_zero():
     js = _APP_JS.read_text()
     region = _js_region("campaignSqlWithheld", source=js)
-    assert "Reconciliation required" in region
-    assert "Unreconciled" in region
+    # PR-ADS-161B: the words are "Withheld" / "Unavailable" — the legacy
+    # "Reconciliation required" described a reconciliation the page no longer
+    # gates on. Still words, never a number.
+    assert '"Unavailable" : "Withheld"' in region
     assert ">0<" not in region and "return 0" not in region
 
 
@@ -819,7 +852,9 @@ def test_36_sql_filters_and_sorts_cannot_classify_an_unproven_count():
     direct call reintroduces the classification the UI just hid.
     """
     filt = _js_region("filterCampaignEvidence")
-    assert "campaignSqlPublication()" in filt
+    assert "campaignSqlPublication(_campaignCohort)" in filt
+    # The has_sql / no_sql refusal is per ROW (page verdict narrowed by the row's).
+    assert "!campaignRowSqlPublication(_campaignCohort, c).publish) return true;" in filt
     assert 'f.outcome === "has_sql" || f.outcome === "no_sql"' in filt
 
     controls = _js_region("renderCampaignEvidenceFilters")
@@ -829,7 +864,7 @@ def test_36_sql_filters_and_sorts_cannot_classify_an_unproven_count():
 
     sort = _js_region("sortCampaignEvidence")
     assert 'by === "sqls" || by === "cpql"' in sort
-    assert "campaignSqlPublication().publish" in sort
+    assert "campaignSqlPublication(_campaignCohort).publish" in sort
 
 
 def test_37_independent_evidence_survives_a_sql_reconciliation_failure():
@@ -864,14 +899,17 @@ def test_38_sql_dependent_statuses_stop_concluding_when_unproven():
         region = _js_region(fn, source=js)
         assert "CAMPAIGN_SQL_DEPENDENT_STATUSES.has" in region, (
             f"{fn} publishes an SQL-dependent conclusion ungated")
-        assert "Reconciliation required" in region
+        assert "SQL count not published" in region
 
 
 def test_39_the_five_sql_populations_are_never_labelled_the_same():
     """Campaign-attributable SQLs ≠ Google Ads platform conversions."""
     js = _APP_JS.read_text()
-    assert 'CAMPAIGN_SQL_SCOPE_LABEL = "Campaign-attributable SQLs"' in js
-    assert 'CAMPAIGN_SQL_SCOPE_SHORT = "Attributed SQLs"' in js
+    # PR-ADS-161B: the page publishes the acquisition cohort, and the legacy
+    # lead-status count it still shows in the drawer carries its own label.
+    assert 'CAMPAIGN_SQL_SCOPE_LABEL = "Cohort SQLs"' in js
+    assert 'CAMPAIGN_SQL_SCOPE_SHORT = "Cohort SQLs"' in js
+    assert 'CAMPAIGN_LEGACY_QUALIFIED_LABEL = "Qualified (lead status)"' in js
     assert "Google Ads platform conversions" in js
     # And the old undefined label is gone from every rendered string.
     rendered = "\n".join(ln for ln in js.splitlines()
@@ -1429,8 +1467,12 @@ def test_62_gate_fails_closed_on_a_status_it_has_never_seen():
     region = _js_region("campaignSqlPublication")
     tail = region[region.rindex("return {"):]
     assert "publish: false" in tail
-    assert 'state: "unavailable"' in tail
-    assert "Unavailable is not zero" in tail
+    assert "cpql: false" in tail
+    # PR-ADS-161B: any status that is not "withheld" — including one never
+    # seen before — is reported as unavailable. tests/test_pr_ads_161b_*
+    # (test_15b) executes this with an unknown status in node.
+    assert 'c.sql_status === "withheld" ? "withheld" : "unavailable"' in region
+    assert "Unavailable is not zero" in region
 
 
 def test_63_withheld_states_are_announced_to_assistive_technology():
@@ -1575,7 +1617,7 @@ def test_69_filter_refuses_sql_dependent_statuses_internally():
     be able to classify by an unreconciled count.
     """
     region = _js_region("filterCampaignEvidence")
-    assert "const sqlPub = campaignSqlPublication();" in region
+    assert "const sqlPub = campaignSqlPublication(_campaignCohort);" in region
     assert "CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)" in region
     assert "!sqlPub.publish) return true;" in region
 
@@ -1620,9 +1662,10 @@ def test_71_every_unproven_reconciliation_state_gates_the_status_filter():
     """
     gate = _js_region("campaignSqlPublication")
     assert gate.count("publish: true") == 1
-    for state in ("mismatch", "partial"):
-        assert f'status === "{state}"' in gate
-    assert "if (!r || !r.reconciliation_status)" in gate      # missing block
+    # PR-ADS-161B: the unproven states are now the cohort's — withheld and
+    # unavailable — plus a missing block and any unknown status.
+    assert 'c.sql_status === "withheld"' in gate
+    assert "if (!c || !c.sql_status)" in gate                  # missing block
     tail = gate[gate.rindex("return {"):]
     assert "publish: false" in tail                            # anything else
 

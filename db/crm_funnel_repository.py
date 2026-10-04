@@ -481,6 +481,70 @@ def fetch_unresolved_sql_created_at_bounds() -> dict:
         return _unavailable(rows=[])
 
 
+# ── PR-ADS-161B — the acquisition-cohort read ───────────────────────────────
+# A cohort is the contacts CREATED in a window, with their outcome read as of
+# now. Membership is decided by `created_at` and nothing else; the SQL-entry
+# date plays no part in it. That is the whole difference from the lifecycle
+# reads above, and it is why this is a separate read rather than a parameter on
+# one of them: a reader that windows on `date_entered_sql` and a reader that
+# windows on `created_at` describe two different populations.
+#
+# Both SQL-entry precedence levels are selected SEPARATELY, from the same
+# definitions `effective_date_sql` is composed of, so the cohort can say which
+# evidence proved each SQL. Neither is ever substituted for `created_at`, and
+# `created_at` is never substituted for either.
+
+def fetch_acquisition_cohort_contacts(start_at, end_before) -> dict:
+    """Canonical contacts created in ``[start_at, end_before)``.
+
+    ``start_at`` / ``end_before`` are tz-aware instants (the caller resolves
+    the window's account-local calendar days into them). ``start_at=None``
+    means no lower bound — All Time. A contact with no ``created_at`` is in no
+    window, All Time included: it is counted in ``missing_created_at`` and
+    never placed by any other date.
+
+    Read-only.
+    """
+    direct = direct_date_sql(EVENT_SQL)
+    recovered = recovered_date_sql(EVENT_SQL)
+    a = FUNNEL_ALIAS
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[], missing_created_at=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {a}.id AS funnel_row_id,
+                           {a}.contact_id,
+                           {a}.created_at,
+                           {a}.lifecycle_stage,
+                           {direct}    AS sql_entered_direct,
+                           {recovered} AS sql_entered_recovered,
+                           {a}.hs_analytics_source,
+                           {a}.hs_analytics_source_data_1,
+                           {a}.gclid
+                    FROM {FUNNEL_TABLE} {a}
+                    {_recovery_join()}
+                    WHERE {a}.created_at IS NOT NULL
+                      AND (%s::timestamptz IS NULL OR {a}.created_at >= %s)
+                      AND {a}.created_at < %s
+                    ORDER BY {a}.contact_id, {a}.id
+                    """,
+                    (start_at, start_at, end_before),
+                )
+                rows = _rows_as_dicts(cur)
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {FUNNEL_TABLE} WHERE created_at IS NULL")
+                missing_created_at = cur.fetchone()[0]
+        return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
+                "recovery_table": RECOVERY_TABLE,
+                "missing_created_at": missing_created_at}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_acquisition_cohort_contacts failed: %s", exc)
+        return _unavailable(rows=[], missing_created_at=None)
+
+
 # ── PR-ADS-160 — the prospective coverage boundary, read side ───────────────
 #
 # Every read here returns the boundary as what it is: an UPPER BOUND on an
