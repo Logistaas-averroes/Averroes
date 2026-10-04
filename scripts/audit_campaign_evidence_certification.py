@@ -548,6 +548,19 @@ def check_frontend_gates(f: Findings) -> None:
     drawer_hits = sorted(set(re.findall(r"camp\.(?:confirmed_sqls|cpql_usd)\b", drawer_code)))
     if drawer_hits:
         readers.append(f"renderCampaignDrawer: {drawer_hits}")
+    # The drawer's labelled Lead Quality / Country splits are the ONE sanctioned
+    # reader of the legacy qualified count — and only under the drawer
+    # response's verdict. Any line naming it (dot, bracket or destructuring
+    # read alike) must be either the gated render or the namespaced card
+    # mapping; anything else is an ungated legacy read.
+    sanctioned_map = "confirmed_sqls: (camp.legacy_lead_status || {}).qualified"
+    for fn in ("renderCampaignDrawer", "_appendDrawerEvidenceSections"):
+        for line in _js_code_only(_body(fn)).splitlines():
+            if "confirmed_sqls" not in line and "legacy_lead_status" not in line:
+                continue
+            if sanctioned_map in line or re.search(r"\w+SqlPub\.publish \? (?:lq|r)\.confirmed_sqls :", line):
+                continue
+            readers.append(f"{fn}: ungated legacy qualified read: {line.strip()[:90]}")
     if readers:
         f.violation("legacy_sql_not_consumed",
                     "a Campaign Evidence surface reads legacy SQL / CPQL fields: "

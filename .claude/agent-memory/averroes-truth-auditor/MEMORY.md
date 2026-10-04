@@ -251,3 +251,18 @@ Recurring patterns (durable):
   `split()` / `strip()`.
 - My first review did not finish a full suite run and missed a PG-caught
   regression. Run the workflow's PG step, or say plainly that it was not run.
+
+## PR-ADS-161B fifth review (head 7dae351, by execution unless stated)
+- 161B test file (186 tests) green; test_12/25 PG ran (no skips); 160 + 161a1
+  suites 237 passed. Event-gate files have an empty diff vs origin/main.
+- test_15o proves by Proxy execution that the PAGE (renderCampaignEvidencePage)
+  reads no legacy key under published + 7 withholding verdicts. It does NOT
+  render the drawer. The drawer deliberately reads
+  `camp.legacy_lead_status.qualified`, `lq.confirmed_sqls`, country
+  `r.confirmed_sqls` (legacy leads table), verdict-gated and labelled
+  "Qualified (lead status)" (docs/44 §11). The certification's drawer guard is
+  only `camp.(confirmed_sqls|cpql_usd)`; `legacy_lead_status` is unguarded.
+  Static regex `\.confirmed_sqls` misses destructuring/bracket reads (the
+  execution test would catch those, but only on the page).
+- Could not run scripts/audit_*.py directly in that session (approval gate);
+  relied on the tests that call them.

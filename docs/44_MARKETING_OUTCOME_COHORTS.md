@@ -253,7 +253,10 @@ fields declared in `legacy_sql` (`confirmed_sqls`, `cpql_usd`,
 `sql_reconciliation`) are a different metric family, kept in the payload for
 other readers, and are **not** withheld with the cohort. They are therefore
 present while the cohort is withheld. That is safe only because no Campaign
-Evidence surface reads them, and that is enforced twice, not assumed:
+Evidence **page** surface reads them, and the **drawer** reads exactly one —
+the legacy qualified count, namespaced as `legacy_lead_status.qualified`, in its
+labelled Lead Quality / Country splits — and only under the drawer response's
+published verdict. Both are enforced, not assumed:
 
 * **by execution** — `test_15o` renders the WHOLE Campaign page through the
   real `app.js` over a payload wrapped in a Proxy that records every read of a
@@ -262,8 +265,14 @@ Evidence surface reads them, and that is enforced twice, not assumed:
   through a brand-new helper, recorded;
 * **statically, in CI** — `audit_campaign_evidence_certification`
   (`legacy_sql_not_consumed`) scans every function that touches Campaign page
-  state, DISCOVERED from the source rather than hand-listed, plus the drawer's
-  `camp.` reads; `test_15p` / `test_16` show it red under each mutation.
+  state, DISCOVERED from the source rather than hand-listed; in the drawer it
+  accepts a line naming the legacy qualified count only if it is the gated
+  render or the namespaced card mapping (dot, bracket or destructuring read
+  alike). `test_15p` / `test_16` show it red under each mutation;
+* **the drawer's gate itself** — `test_15` renders the drawer with a sentinel
+  legacy qualified count under every withholding verdict, and `test_15n`
+  (`lead_quality_split_gate`, `country_split_gate`) shows each split's gate
+  load-bearing.
 
 API consumers must treat these fields as legacy, as the declaration says.
 Removing them from the payload is the next step of the legacy migration

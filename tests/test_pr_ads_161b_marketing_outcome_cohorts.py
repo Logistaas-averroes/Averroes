@@ -1529,6 +1529,9 @@ _UI_MUTATIONS = [
      "&& false) return true;", "filter"),
     ("country_split_gate", "countrySqlPub.publish ? r.confirmed_sqls", "true ? r.confirmed_sqls",
      "drawer"),
+    # Final review (MINOR): the drawer's labelled legacy Lead Quality split.
+    ("lead_quality_split_gate", "lqSqlPub.publish ? lq.confirmed_sqls",
+     "true ? lq.confirmed_sqls", "drawer"),
     # Round 3 (truth auditor MAJOR): the lifecycle disclosure's reached-SQL
     # counts are gated on the verdict.
     ("lifecycle_counts_gate", "const lcCountsShown = pub.publish && !lc.counts_withheld;",
@@ -1662,6 +1665,14 @@ def test_15p_counterfactual_a_legacy_read_is_caught_by_execution_and_certificati
     (("  const s = _campaignSummary || {};\n  const cur",
       "  const s = _campaignSummary || {};\n  const _o = s.overall_cpql_usd;\n  const cur"),
      "reads legacy SQL / CPQL fields"),
+    # Final review: the drawer's legacy qualified count read outside its gate.
+    (("lqSqlPub.publish ? lq.confirmed_sqls : campaignSqlWithheld(lqSqlPub, { compact: true })",
+      "lq.confirmed_sqls"),
+     "ungated legacy qualified read"),
+    (("  _appendDrawerEvidenceSections(bodyEl, data, lqFromCard || lq);",
+      "  const _q = data.campaign.legacy_lead_status;\n"
+      "  _appendDrawerEvidenceSections(bodyEl, data, lqFromCard || lq);"),
+     "ungated legacy qualified read"),
     # Round 3: a literal is not a response's cohort.
     (("const sqlPub = campaignSqlPublication(_campaignCohort);",
       'const sqlPub = campaignSqlPublication({sql_status: "published"});'),
@@ -1957,3 +1968,30 @@ def test_26_pg_an_incomplete_bootstrap_withholds_everywhere_and_exposes_nothing(
     assert a.violations == [], a.violations
     assert all(w["sql_status"] == "withheld" for w in report["windows"])
     assert any(c["check"].endswith("withheld_not_exposed") and c["ok"] for c in a.checks)
+
+
+def test_18_no_document_or_label_overclaims_recency_or_customers():
+    """Copilot round 3 (three LOW findings): the cohort is measured as of the
+    canonical contact-funnel watermark — not "now", not "today" — and this PR
+    publishes SQL contacts only; it never claims to preserve or count customers."""
+    import ast as _ast
+    doc44 = (_ROOT / "docs" / "44_MARKETING_OUTCOME_COHORTS.md").read_text(encoding="utf-8")
+    svc_doc = _ast.get_docstring(_ast.parse(
+        (_ROOT / "services" / "marketing_outcome_cohort_service.py").read_text(encoding="utf-8")))
+    js = _APP_JS.read_text(encoding="utf-8")
+    campaign_js = "\n".join(_js_function(js, fn) for fn in (
+        "campaignEvidenceHeader", "renderCampaignEvidenceKPIs",
+        "renderCampaignSqlReconciliation", "renderCampaignDecisionTable",
+        "renderCampaignDrawer"))
+    for name, text in (("docs/44", doc44), ("cohort service docstring", svc_doc),
+                       ("Campaign Evidence UI", campaign_js)):
+        low = text.lower()
+        assert "as of now" not in low, name
+        assert "as of today" not in low and "*today*" not in low, name
+        assert "current data" not in low, name
+    assert "canonical contact-funnel watermark" in doc44
+    assert "canonical contact-funnel watermark" in svc_doc
+    # Customers: defined as NOT published, never claimed.
+    assert "real SQLs and customers" not in doc44
+    assert "**Customer** — not published" in doc44
+    assert "unique customers" not in campaign_js.lower()

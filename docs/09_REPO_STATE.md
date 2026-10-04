@@ -1077,7 +1077,13 @@ the whole page renders over a read-recording payload with zero legacy reads,
 under every verdict. The certification scan now discovers its surfaces from
 the source, and both catch a read added through a new helper.
 
-Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (186), including
+The final independent review of `7dae351` found no blocker and no MAJOR. Its
+one MINOR: the drawer's labelled legacy split was guarded by `test_15` but not
+by a mutation or by the certification. Both now cover it. A wording regression
+test (`test_18`) pins the watermark language and the "customers are not
+published" definition.
+
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (190), including
 9 PostgreSQL end-to-end cases, in CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.
