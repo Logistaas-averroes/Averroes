@@ -134,8 +134,7 @@ def _code_without_docstrings(path: Path) -> str:
 #: check someone eventually weakens.
 CLASSIFICATION_FUNCTIONS = (
     "window_instants", "_as_instant", "in_window", "sql_proof", "contact_identity",
-    "contact_bucket", "_merge_duplicates", "build_cohort", "deal_bucket",
-    "build_deal_outcomes", "build_window_outcomes",
+    "contact_bucket", "_merge_duplicates", "build_cohort", "build_window_outcomes",
 )
 
 
@@ -194,25 +193,115 @@ def check_no_write_paths(a: Audit, *, paths=(_COHORT_SERVICE,)) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 # Per-window checks (pure — every input is passed in)
 # ═════════════════════════════════════════════════════════════════════════════
-def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
-                 won_deal_ids: list[str] | None) -> dict:
+#: Every payload location a cohort SQL count (or a CPQL derived from one) can
+#: occupy. When the SQL count is not published, ALL of them must be null.
+_SUMMARY_SQL_FIELDS = (
+    "cohort_sqls_google_ads", "cohort_sqls_mapped", "cohort_sqls_unattributed",
+    "cohort_sqls_excluded_non_google", "cohort_sqls_all_sources",
+    "cohort_sqls_missing_event_timestamp", "cohort_cpql_usd",
+)
+_ROW_SQL_FIELDS = ("cohort_sqls", "cohort_sqls_missing_event_timestamp", "cohort_cpql_usd")
+_META_SQL_FIELDS = ("mapped_count", "unattributed_count", "excluded_non_google_count")
+_RECON_SQL_FIELDS = ("google_ads_sqls", "sum_campaign_sqls", "unattributed_google_ads_sqls",
+                     "excluded_non_google_sqls", "all_source_sqls")
+
+
+def withheld_exposures(payload: dict) -> list[str]:
+    """Every place a withheld cohort SQL count (or its CPQL) is still present.
+
+    The page publishes nothing SQL-derived unless the verdict is ``published``:
+    not the total, not its parts, not a row, not a CPQL. An empty list means
+    the payload honours that.
+    """
+    cohort = payload.get("cohort") or {}
+    summary = payload.get("summary") or {}
+    out = [f"summary.{k}" for k in _SUMMARY_SQL_FIELDS if summary.get(k) is not None]
+    for r in payload.get("campaigns") or []:
+        out += [f"campaigns[{r.get('campaign_key')}].{k}"
+                for k in _ROW_SQL_FIELDS if r.get(k) is not None]
+        if r.get("cohort_cpql_status") == "published":
+            out.append(f"campaigns[{r.get('campaign_key')}].cohort_cpql_status=published")
+        if r.get("cohort_sql_status") == "published":
+            out.append(f"campaigns[{r.get('campaign_key')}].cohort_sql_status=published")
+    meta = cohort.get("metadata") or {}
+    out += [f"cohort.metadata.{k}" for k in _META_SQL_FIELDS if meta.get(k) is not None]
+    recon = cohort.get("reconciliation") or {}
+    out += [f"cohort.reconciliation.{k}" for k in _RECON_SQL_FIELDS
+            if recon.get(k) is not None]
+    if cohort.get("breakdown") is not None:
+        out.append("cohort.breakdown")
+    if summary.get("cohort_cpql_status") == "published" or cohort.get("cpql_status") == "published":
+        out.append("cpql_status=published")
+    return out
+
+
+def check_closed_won_not_published(a: Audit, *, window: str, payload: dict) -> None:
+    """Closed-won deals are not published by this page (PR-ADS-161B round 3):
+    declared as such, and absent from every row and the summary."""
+    w = f"[{window}]"
+    decl = ((payload.get("cohort") or {}).get("closed_won_deals") or {})
+    leaked = [k for k in (payload.get("summary") or {}) if "closed_won" in k]
+    for r in payload.get("campaigns") or []:
+        leaked += [f"campaigns[{r.get('campaign_key')}].{k}" for k in r if "closed_won" in k]
+    if decl.get("published_on_this_page") is not False:
+        a.broken(f"{w} closed_won_not_published",
+                 "the payload does not declare closed-won deals unpublished")
+    elif leaked:
+        a.broken(f"{w} closed_won_not_published", f"closed-won fields present: {leaked[:5]}")
+    else:
+        a.holds(f"{w} closed_won_not_published",
+                "declared unpublished; no closed-won field on any row or the summary")
+
+
+def audit_window(a: Audit, *, window: str, payload: dict, independent: dict) -> dict:
     """Every per-window guarantee, against one page payload.
 
     ``independent``: ``{"contacts_acquired", "sqls", "stage_only_sqls",
     "distinct_sql_contact_ids", "paid_search_sourced_sqls"}`` computed in SQL
     by this audit.
+
+    A window whose SQL count is NOT published has nothing to reconcile. What it
+    must prove instead is that nothing SQL-derived leaked into the payload; a
+    leak is a violation. A canonical funnel the page could not read is
+    ``cannot_check`` — the audit then proves nothing about the window.
     """
     w = f"[{window}]"
     cohort = payload.get("cohort") or {}
     meta = cohort.get("metadata") or {}
     summary = payload.get("summary") or {}
     rows = payload.get("campaigns") or []
-    breakdown = cohort.get("breakdown") or {}
 
-    if cohort.get("sql_status") == "unavailable" or not breakdown:
-        a.cannot_check(f"{w} cohort", f"the cohort is unavailable "
-                       f"({cohort.get('sql_reason')}); nothing to reconcile")
-        return {"window": window, "available": False}
+    check_closed_won_not_published(a, window=window, payload=payload)
+
+    status = cohort.get("sql_status")
+    if status != "published":
+        exposed = withheld_exposures(payload)
+        if exposed:
+            a.broken(f"{w} withheld_not_exposed",
+                     f"SQL count is {status!r} ({cohort.get('sql_reason')}) but is still "
+                     f"present at: {exposed[:6]}")
+        else:
+            a.holds(f"{w} withheld_not_exposed",
+                    f"SQL count {status} ({cohort.get('sql_reason')}); no SQL count, "
+                    f"breakdown or CPQL is present anywhere in the payload")
+        if status == "unavailable" or status is None:
+            a.cannot_check(f"{w} cohort", f"the cohort is unavailable "
+                           f"({cohort.get('sql_reason')}); nothing to reconcile")
+        return {"window": window, "available": status == "withheld",
+                "published": False, "sql_status": status,
+                "sql_reason": cohort.get("sql_reason"), "as_of": meta.get("as_of"),
+                "source_fresh": (meta.get("source_freshness") or {}).get("fresh"),
+                "legacy": {
+                    "confirmed_sqls_mapped": summary.get("confirmed_sqls_total"),
+                    "overall_cpql_usd": summary.get("overall_cpql_usd"),
+                    "overall_cpql_scope": summary.get("overall_cpql_scope"),
+                }}
+
+    breakdown = cohort.get("breakdown") or {}
+    if not breakdown:
+        a.broken(f"{w} cohort", "the SQL count is published but its breakdown is "
+                 "missing, so it cannot be reconciled")
+        return {"window": window, "available": False, "published": True}
 
     # 1. window membership is contact_created_at
     if meta.get("window_basis") != "contact_created_at":
@@ -347,24 +436,6 @@ def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
                 f"status {summary.get('cohort_cpql_status')} "
                 f"({summary.get('cohort_cpql_reason') or 'published'})")
 
-    # 7. closed-won deduplicated by deal_id
-    deals = cohort.get("deals")
-    dmeta = cohort.get("deal_metadata") or {}
-    if deals is None or won_deal_ids is None:
-        a.cannot_check(f"{w} deal_dedup", "the canonical deal ledger is unavailable")
-    elif dmeta.get("dedup_key") != "deal_id":
-        a.broken(f"{w} deal_dedup", f"declared dedup key {dmeta.get('dedup_key')!r}")
-    elif deals["dedup"]["distinct_deals_examined"] != len(set(won_deal_ids) - {""}):
-        a.broken(f"{w} deal_dedup", f"examined {deals['dedup']['distinct_deals_examined']} "
-                 f"distinct deals; the ledger holds {len(set(won_deal_ids) - {''})}")
-    elif "unique customer" in (dmeta.get("label") or "").lower().replace(
-            "not unique customers", ""):
-        a.broken(f"{w} deal_label", "closed-won deals labelled as unique customers")
-    else:
-        placed = sum(b["deals"] for b in deals["buckets"].values())
-        a.holds(f"{w} deal_dedup", f"{placed} deal(s) in this cohort, one per deal_id; "
-                f"{deals['unplaceable_total']} unplaceable, disclosed")
-
     # 8. lifecycle-event gaps disclosed and counted, not dated
     gap = breakdown["all_sources"]["sqls_missing_event_timestamp"]
     stage_only = breakdown["proof_counts"].get("lifecycle_stage_implies_sql")
@@ -389,6 +460,9 @@ def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
     return {
         "window": window,
         "available": True,
+        "published": True,
+        "sql_status": status,
+        "sql_reason": None,
         "as_of": meta.get("as_of"),
         "source_fresh": (meta.get("source_freshness") or {}).get("fresh"),
         "cohort": {
@@ -398,7 +472,6 @@ def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
             "sqls_missing_event_timestamp": gap,
             "cpql_usd": summary.get("cohort_cpql_usd"),
             "cpql_status": summary.get("cohort_cpql_status"),
-            "closed_won_google_ads": summary.get("closed_won_deals_google_ads"),
         },
         "legacy": {
             "confirmed_sqls_mapped": summary.get("confirmed_sqls_total"),
@@ -521,7 +594,6 @@ def global_population_split() -> dict | None:
 # ═════════════════════════════════════════════════════════════════════════════
 def run(now: datetime | None = None) -> tuple[Audit, dict]:
     from analysis.evidence_windows import EVIDENCE_WINDOWS
-    from db import deal_ledger_repository as ledger
     from services import marketing_outcome_cohort_service as cohort_svc
     from services.campaign_evidence_service import _window_bounds, build_campaign_evidence
 
@@ -538,10 +610,6 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
     report["date_contamination"] = check_no_date_contamination(a)
     report["write_paths"] = check_no_write_paths(a)
 
-    won = ledger.fetch_won_deals(None, None)
-    won_ids = ([str(r.get("deal_id") or "").strip() for r in won.get("rows") or []]
-               if won.get("available") else None)
-
     for window in EVIDENCE_WINDOWS:
         start, end, _ = _window_bounds(window, now)
         start_at, end_before = cohort_svc.window_instants(start, end)
@@ -552,8 +620,7 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
             continue
         payload = build_campaign_evidence(window, now=now)
         report["windows"].append(audit_window(
-            a, window=window, payload=payload, independent=independent,
-            won_deal_ids=won_ids))
+            a, window=window, payload=payload, independent=independent))
 
     report["population_split"] = global_population_split()
     return a, report
@@ -574,22 +641,27 @@ def _render(report: dict, a: Audit, exit_code: int) -> None:
         if check["detail"]:
             print(f"      {check['detail']}")
 
-    rows = [w for w in report["windows"] if w.get("available")]
+    rows = [w for w in report["windows"] if w.get("legacy")]
     if rows:
         print()
         print("  Before (legacy lead status) → after (acquisition cohort), Google Ads:")
         print(f"  {'window':<9}{'legacy SQLs':>12}{'cohort SQLs':>13}"
               f"{'campaign':>10}{'unattr.':>9}{'undated':>9}"
-              f"{'legacy CPQL':>13}{'cohort CPQL':>13}{'won':>6}")
+              f"{'legacy CPQL':>13}{'cohort CPQL':>13}")
+        fmt_cpql = (lambda v: "—" if v is None else f"${v:,.2f}")
         for w in rows:
-            lg, ch = w["legacy"], w["cohort"]
-            fmt_cpql = (lambda v: "—" if v is None else f"${v:,.2f}")
+            lg = w["legacy"]
+            if not w.get("published"):
+                print(f"  {w['window']:<9}{str(lg['confirmed_sqls_mapped']):>12}"
+                      f"   cohort {w.get('sql_status')} ({w.get('sql_reason')}) — "
+                      f"nothing published{fmt_cpql(lg['overall_cpql_usd']):>13}")
+                continue
+            ch = w["cohort"]
             print(f"  {w['window']:<9}{str(lg['confirmed_sqls_mapped']):>12}"
                   f"{str(ch['google_ads_sqls']):>13}{str(ch['campaign_sqls']):>10}"
                   f"{str(ch['unattributed_sqls']):>9}"
                   f"{str(ch['sqls_missing_event_timestamp']):>9}"
-                  f"{fmt_cpql(lg['overall_cpql_usd']):>13}{fmt_cpql(ch['cpql_usd']):>13}"
-                  f"{str(ch['closed_won_google_ads']):>6}")
+                  f"{fmt_cpql(lg['overall_cpql_usd']):>13}{fmt_cpql(ch['cpql_usd']):>13}")
         print("  legacy SQLs = campaign-mapped leads.status_category = qualified;"
               " cohort SQLs = all Google Ads (campaign + unattributed).")
         print(f"  as of: {rows[0].get('as_of')}  (source fresh: {rows[0].get('source_fresh')})")
@@ -607,9 +679,15 @@ def _render(report: dict, a: Audit, exit_code: int) -> None:
     if a.unavailable:
         print(f"  {len(a.unavailable)} check(s) could not run. The audit proves "
               "nothing about those.")
+    withheld = [w["window"] for w in report["windows"]
+                if w.get("sql_status") == "withheld"]
     if not a.violations and not a.unavailable:
-        print("  Every supported window reconciles. Lifecycle-event timestamp gaps "
-              "are disclosed above and do not affect the cohort.")
+        if withheld:
+            print(f"  Every published window reconciles. Withheld (nothing published, "
+                  f"nothing exposed): {', '.join(withheld)}.")
+        else:
+            print("  Every supported window reconciles. Lifecycle-event timestamp gaps "
+                  "are disclosed above and do not affect the cohort.")
     print(f"\n  exit {exit_code}")
 
 

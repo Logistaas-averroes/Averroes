@@ -199,7 +199,8 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
 
 - **"SQLs in this period" is two different metrics.** An **acquisition
   cohort** (`acquisition_cohort_outcomes`, windowed on `contact_created_at`) asks
-  how many contacts *acquired* in the period have reached SQL as of now; it
+  how many contacts *acquired* in the period have reached SQL as of the
+  canonical contact-funnel watermark; it
   needs no SQL-entry date, so a stage-proven contact with no timestamp is
   counted. A **lifecycle event** (`lifecycle_stage_events`, windowed on
   `date_entered_sql`) asks how many *entered* SQL in the period; it needs an
@@ -217,6 +218,17 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   incremental. So a gate on `fresh is None` alone publishes a partial
   population. Drive freshness tests through the real `assess`, never a
   hand-built verdict.
+
+  **Withheld means absent, not hidden.** When the cohort verdict is not
+  `published`, the `/api/campaigns` payload carries no SQL count, SQL breakdown
+  or CPQL anywhere (`audit_marketing_outcome_cohorts.withheld_exposures` must be
+  empty), and `static/app.js` renders the withholding word — never the number
+  with a "not published" suffix. The gate is `campaignSqlPublication(cohort)`:
+  the cohort is an **argument**; page surfaces pass the page response's, the
+  drawer passes its own `/api/campaign-detail` response's. A gate that reads
+  page-global state authorises a drawer opened from another page with another
+  request's verdict. Closed-won deals are not published on Campaign Evidence
+  (`docs/44` §5); never call deals customers.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

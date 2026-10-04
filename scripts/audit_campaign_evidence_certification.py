@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -429,7 +430,10 @@ def check_frontend_gates(f: Findings) -> None:
         # Bound the scan at the next top-level function definition.
         j = js.find("\nfunction ", i + len(marker))
         body = js[i:j if j != -1 else len(js)]
-        if "campaignSqlPublication" not in body:
+        # PR-ADS-161B round 3: the gate takes the cohort of the response being
+        # rendered as an ARGUMENT. A call with no argument cannot be gating on
+        # anything, so it does not count.
+        if not re.search(r"campaign(?:Row)?SqlPublication\(\s*[^)\s]", body):
             missing.append(f"{label} ({fn} does not consult the gate)")
     if missing:
         f.violation("frontend_gates",
@@ -445,17 +449,44 @@ def check_frontend_gates(f: Findings) -> None:
     # named — retargeted at the contract the page now publishes. The legacy
     # `sql_reconciliation` block is still served and is certified per window by
     # `_audit_window`; the page simply no longer gates on it.
+    #
+    # PR-ADS-161B round 3 tightened this: the gate reads ONLY its argument
+    # (never browser-global state, which a drawer opened from another page, or
+    # after a later request, would read stale); no caller invokes it without
+    # one; page surfaces pass the page response's cohort; drawer surfaces pass
+    # their own detail response's cohort and never touch the page's.
     gate_region = js[js.find("function campaignSqlPublication"):]
     gate_region = gate_region[:gate_region.find("\nfunction ", 40)]
+
+    def _body(fn: str) -> str:
+        i = js.find(f"function {fn}")
+        if i == -1:
+            return ""
+        j = js.find("\nfunction ", i + 10)
+        return js[i:j if j != -1 else len(js)]
+
+    drawer_bodies = _body("renderCampaignDrawer") + _body("_appendDrawerEvidenceSections")
     if "_campaignCohort = data.cohort" not in js:
         f.violation("frontend_gates",
                     "the cohort block is not carried from /api/campaigns into state")
-    elif "_campaignCohort" not in gate_region:
+    elif "function campaignSqlPublication(cohort)" not in gate_region:
         f.violation("frontend_gates",
-                    "campaignSqlPublication does not read the cohort block it gates on")
+                    "campaignSqlPublication does not take the cohort block it gates on "
+                    "as its argument")
+    elif "_campaignCohort" in gate_region:
+        f.violation("frontend_gates",
+                    "campaignSqlPublication reads page-global cohort state instead of "
+                    "the response it is given")
+    elif re.search(r"campaign(?:Row)?SqlPublication\(\s*\)", js):
+        f.violation("frontend_gates",
+                    "a caller invokes the publication gate with no cohort")
+    elif "_campaignCohort" in drawer_bodies or "data.cohort" not in drawer_bodies:
+        f.violation("frontend_gates",
+                    "the drawer does not gate on its own /api/campaign-detail cohort")
     else:
         f.passed("frontend_cohort_state",
-                 "the cohort block is stored in Campaign page state and read by the gate")
+                 "the gate reads only the cohort it is given; page surfaces pass the "
+                 "page response's cohort, the drawer its own detail response's")
 
     withheld_region = js[js.find("function campaignSqlWithheld"):]
     withheld_region = withheld_region[:withheld_region.find("\nfunction ", 40)]

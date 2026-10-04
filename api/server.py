@@ -1709,6 +1709,13 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
     # grain, so the drawer Lead Quality / Countries / Recent Leads reconcile EXACTLY
     # with the table row. Keyword + waste previews are gathered from the DB below.
     campaign_card = None
+    # PR-ADS-161B — the cohort publication verdict of THIS response. The drawer
+    # gates every SQL / CPQL surface on it, never on page state from an earlier
+    # request. Unavailable until the evidence build proves otherwise.
+    from services.campaign_evidence_service import (  # noqa: PLC0415
+        COHORT_ROW_FIELDS, cohort_verdict,
+    )
+    drawer_cohort = cohort_verdict(None)
     drawer_lead_quality = None
     drawer_countries: list = []
     drawer_recent: list = []
@@ -1733,6 +1740,7 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
             # window", which is a factual claim about the campaign rather than
             # an admission that nothing could be read.
             drawer_db_unavailable = bool(ev.get("db_unavailable"))
+            drawer_cohort = ev.get("cohort") or drawer_cohort
             if row and not row.get("db_unavailable"):
                 campaign_card = {
                     "campaign_name":   row.get("campaign_name"),
@@ -1744,20 +1752,30 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
                     "spend_currency":  row.get("spend_currency"),
                     "fx_complete":     row.get("fx_complete"),
                     "total_leads":     row.get("total_leads"),
-                    "confirmed_sqls":  row.get("confirmed_sqls"),
                     "confirmed_junk":  row.get("confirmed_junk"),
                     "in_progress":     row.get("in_progress"),
                     "wrong_fit":       row.get("wrong_fit"),
                     "unknown":         row.get("unknown"),
                     "verdicted_leads": row.get("verdicted_leads"),
                     "junk_rate_pct":   row.get("junk_rate_pct"),
-                    "cpql_usd":        row.get("cpql_usd"),
                     "outcome_status":  row.get("outcome_status"),
                     "mapping_status":  row.get("mapping_status"),
                     "window":          row.get("window"),
                     "window_start":    row.get("window_start"),
                     "window_end":      row.get("window_end"),
                     "all_time":        row.get("all_time"),
+                    # PR-ADS-161B — the migrated cohort fields, exactly as the
+                    # table row carries them (one tuple names them for both).
+                    **{k: row.get(k) for k in COHORT_ROW_FIELDS},
+                    # The legacy lead-status "qualified" count, for the drawer's
+                    # labelled Lead Quality split ONLY. Namespaced so nothing can
+                    # read it as `confirmed_sqls` and mistake it for the SQL
+                    # count; the legacy `cpql_usd` is not carried at all.
+                    "legacy_lead_status": {
+                        "metric_family": "legacy_lead_status_category",
+                        "qualified": row.get("confirmed_sqls"),
+                        "published_as_sql": False,
+                    },
                 }
                 drawer_lead_quality = ev.get("lead_quality")
                 drawer_countries = ev.get("countries") or []
@@ -1789,6 +1807,7 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
         "days":          days,
         "campaign_name": campaign_name,
         "campaign":      campaign_card,
+        "cohort":        drawer_cohort,
         "lead_quality":  drawer_lead_quality,
         "countries":     drawer_countries,
         # `keywords` / `waste_terms` keep their key names so existing consumers

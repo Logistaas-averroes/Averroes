@@ -288,79 +288,66 @@ def test_07c_a_blank_contact_id_uses_the_reported_fallback_identity():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# §3 — closed-won deals (required case 8)
+# §3 — closed-won deals are NOT published (PR-ADS-161B review round 3)
 # ═════════════════════════════════════════════════════════════════════════════
+# The first two rounds published closed-won deals placed through the ledger's
+# display-only primary contact, without the ledger's own sync coverage, under
+# an attribution status derived from CONTACTS. They could not be certified in
+# this PR, so they are removed: no ledger read, no field, no card, no column —
+# and an explicit declaration that they are not published.
 
-def _deal(deal_id, *, contact="c1", gclid=None, campaign="Brand - UK",
-          group="google_ads", status="attributed", revenue=1000.0):
-    return {"deal_id": deal_id, "primary_contact_id": contact, "gclid": gclid,
-            "campaign_name_raw": campaign, "acquisition_group": group,
-            "attribution_status": status, "revenue_usd": revenue}
+def test_08_the_cohort_reads_no_deal_ledger(monkeypatch):
+    import db.deal_ledger_repository as ledger_repo
 
+    def _forbidden(*_a, **_k):
+        raise AssertionError("the deal ledger was read by the cohort page")
 
-def _deals(rows, created=None):
-    created = created if created is not None else {"c1": INSIDE, "c2": INSIDE}
-    return svc.build_deal_outcomes(rows, created_at_by_contact=created,
-                                   resolve_label=_resolver(),
-                                   start_at=START_AT, end_before=END_BEFORE)
-
-
-def test_08_one_closed_won_deal_with_several_contacts_counts_once():
-    """The ledger names ONE primary contact per deal, and repeated ledger rows
-    for the same deal_id are collapsed — never one deal per associated contact."""
-    d = _deals([_deal("D1", contact="c1"), _deal("D1", contact="c2"),
-                _deal("D1", contact="c1")])
-    assert d["buckets"][svc.BUCKET_CAMPAIGN]["deals"] == 1
-    assert d["dedup"]["duplicate_rows"] == 2
-    assert d["dedup"]["distinct_deals_examined"] == 1
-    assert d["by_campaign"]["1"]["revenue_usd_known"] == 1000.0
+    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _forbidden)
+    p = _page(monkeypatch, contacts=_MIXED)
+    assert p["cohort"]["sql_status"] == svc.STATUS_PUBLISHED
+    for name in ("build_deal_outcomes", "deal_bucket", "deal_metric_metadata"):
+        assert not hasattr(svc, name), name
 
 
-def test_08b_deal_buckets_follow_the_scope_lattice():
-    d = _deals([
-        _deal("campaign"),
-        _deal("no_campaign", campaign=None),
-        _deal("ambiguous", group="google_ads", status="ambiguous"),
-        _deal("organic", group="organic", status="attributed"),
-        _deal("gclid_only", group="organic", status="ambiguous", gclid="Cj0x"),
-    ])
-    b = d["buckets"]
-    assert b[svc.BUCKET_CAMPAIGN]["deals"] == 2         # campaign + gclid_only
-    assert b[svc.BUCKET_UNATTRIBUTED]["deals"] == 1     # no_campaign
-    assert b[svc.BUCKET_AMBIGUOUS]["deals"] == 1        # contacts disagree
-    assert b[svc.BUCKET_EXCLUDED]["deals"] == 1         # organic
-    assert d["google_ads"]["deals"] == 3
+def test_08b_no_closed_won_field_on_any_row_or_the_summary(monkeypatch):
+    p = _page(monkeypatch, contacts=_MIXED)
+    assert not [k for k in p["summary"] if "closed_won" in k]
+    for r in p["campaigns"]:
+        assert not [k for k in r if "closed_won" in k], r["campaign_key"]
+    assert "deals" not in p["cohort"] and "deal_metadata" not in p["cohort"]
 
 
-def test_08c_a_deal_that_cannot_be_placed_in_time_is_disclosed_not_windowed():
-    d = _deals([_deal("A", contact=""), _deal("B", contact="ghost"),
-                _deal("C", contact="c9")], created={"c9": None})
-    assert d["unplaceable"] == {svc.UNPLACEABLE_NO_PRIMARY_CONTACT: 1,
-                                svc.UNPLACEABLE_CONTACT_NOT_IN_FUNNEL: 1,
-                                svc.UNPLACEABLE_CONTACT_NO_CREATED_AT: 1}
-    assert sum(x["deals"] for x in d["buckets"].values()) == 0
+def test_08c_closed_won_is_declared_unpublished_and_never_customers(monkeypatch):
+    p = _page(monkeypatch, contacts=_MIXED)
+    decl = p["cohort"]["closed_won_deals"]
+    assert decl["published_on_this_page"] is False
+    assert decl["reason"] == "deferred_until_certified"
+    assert "never unique customers" in decl["note"]
+    # The same declaration on the fallback response.
+    from services.campaign_evidence_service import unavailable_response
+    assert unavailable_response("30d")["cohort"]["closed_won_deals"] == decl
 
 
-def test_08d_a_deal_whose_contact_was_acquired_outside_the_window_is_not_in_it():
-    d = _deals([_deal("A", contact="c1")], created={"c1": BEFORE})
-    assert sum(x["deals"] for x in d["buckets"].values()) == 0
-    assert d["unplaceable_total"] == 0
-
-
-def test_08e_closed_won_deals_are_never_labelled_unique_customers():
-    meta = svc.deal_metric_metadata(deals=_deals([_deal("A")]), freshness={},
-                                    attribution_status="complete",
-                                    publication=_PUBLISHED)
-    assert meta["dedup_key"] == "deal_id"
-    assert "not unique customers" in meta["label"]
+def test_08d_no_campaign_evidence_surface_renders_closed_won():
     js = _APP_JS.read_text(encoding="utf-8")
+    for fn in ("renderCampaignEvidenceKPIs", "renderCampaignDecisionTable",
+               "renderCampaignEvidenceRow", "renderCampaignDrawer"):
+        src = _js_function(js, fn)
+        assert "closed_won" not in src and "Closed-won" not in src, fn
     assert ">Unique customers<" not in js and ">Unique Customers<" not in js
 
 
-def test_08f_missing_usd_revenue_is_a_known_subset_not_zero():
-    d = _deals([_deal("A", revenue=500.0), _deal("B", revenue=None)])
-    slot = d["buckets"][svc.BUCKET_CAMPAIGN]
-    assert slot["revenue_usd_known"] == 500.0 and slot["revenue_usd_missing"] == 1
+def test_08e_counterfactual_the_audit_goes_red_if_closed_won_is_published(monkeypatch):
+    p = _page(monkeypatch, contacts=_MIXED)
+    p["summary"]["closed_won_deals_google_ads"] = 3
+    a = audit.Audit()
+    audit.audit_window(a, window="30d", payload=p, independent=_independent_for(_MIXED))
+    assert any("closed_won_not_published" in v for v in a.violations), a.violations
+    p = _page(monkeypatch, contacts=_MIXED)
+    p["cohort"]["closed_won_deals"]["published_on_this_page"] = True
+    a = audit.Audit()
+    audit.audit_window(a, window="30d", payload=p, independent=_independent_for(_MIXED))
+    assert any("closed_won_not_published" in v for v in a.violations), a.violations
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -518,11 +505,9 @@ _STALE = _assess(_sync_row(last_successful_incremental_at=NOW - timedelta(hours=
                            last_incremental_at=NOW - timedelta(hours=48)))
 
 
-def _patch_page(monkeypatch, *, contacts, deals=(), deal_created=None,
-                fresh=True, freshness=None, spend_rows=None, mappings=(),
-                lead_rows=()):
+def _patch_page(monkeypatch, *, contacts, fresh=True, freshness=None,
+                spend_rows=None, mappings=(), lead_rows=(), identity_available=True):
     import db.crm_funnel_repository as funnel_repo
-    import db.deal_ledger_repository as ledger_repo
     import db.revenue_repository as rev_repo
 
     spend_rows = spend_rows if spend_rows is not None else [
@@ -540,14 +525,10 @@ def _patch_page(monkeypatch, *, contacts, deals=(), deal_created=None,
     monkeypatch.setattr(rev_repo, "fetch_lead_quality", lambda s, e: {
         "available": True, "rows": list(lead_rows), "event_date_safe": True})
     monkeypatch.setattr(rev_repo, "fetch_campaign_identity", lambda customer_id=None: {
-        "available": True, "mappings": list(mappings)})
+        "available": identity_available, "mappings": list(mappings)})
     monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
                         lambda s, e: {"available": True, "rows": list(contacts),
                                       "missing_created_at": 0})
-    monkeypatch.setattr(funnel_repo, "fetch_contacts_created_at", lambda ids: {
-        "available": True, "created_at": dict(deal_created or {})})
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", lambda s=None, e=None: {
-        "available": True, "rows": list(deals)})
     verdict = freshness if freshness is not None else (_FRESH if fresh else _STALE)
     monkeypatch.setattr(svc, "read_freshness", lambda now=None: verdict)
     monkeypatch.setattr(svc, "lifecycle_event_disclosure", lambda: {
@@ -670,13 +651,27 @@ def test_11h_a_population_not_proven_complete_withholds_sqls_and_cpql_with_its_o
     assert p["summary"]["cohort_cpql_status"] == svc.STATUS_WITHHELD
     assert p["summary"]["cohort_cpql_reason"] == reason
     assert p["summary"]["cohort_cpql_usd"] is None
+    # EVERY row — mapped, unmapped label, no-spend — inherits the page verdict
+    # and its reason. Row-only refusals never replace it (Copilot round 3: an
+    # unmatched row used to say `unmapped_label_has_no_campaign_spend` here).
+    assert {r["mapping_status"] for r in p["campaigns"]} >= {"mapped", "unmatched"}
     for r in p["campaigns"]:
+        assert r["cohort_sql_status"] == svc.STATUS_WITHHELD
+        assert r["cohort_sql_reason"] == reason
+        assert r["cohort_sqls"] is None, r["campaign_key"]
+        assert r["cohort_sqls_missing_event_timestamp"] is None
         assert r["cohort_cpql_usd"] is None
-        assert r["cohort_cpql_status"] != svc.STATUS_PUBLISHED
-    # Never "complete" over an unproven population; the note says partial.
+        assert (r["cohort_cpql_status"], r["cohort_cpql_reason"]) == (svc.STATUS_WITHHELD, reason)
+        # The outcome status is never drawn from the withheld count.
+        assert r["outcome_status"] not in ("SQL producer", "Spend without SQL proof",
+                                           "No outcome evidence")
+    # Nothing SQL-derived anywhere: not the parts, not the breakdown, not a note.
+    assert audit.withheld_exposures(p) == []
+    assert c["breakdown"] is None
     assert c["metadata"]["coverage_status"] == svc.COVERAGE_NOT_PROVEN
-    assert any("partial, not a total" in n for n in c["metadata"]["coverage_notes"])
-    assert c["deal_metadata"]["coverage_status"] == svc.COVERAGE_NOT_PROVEN
+    assert any("no SQL count, SQL breakdown or CPQL is published" in n
+               for n in c["metadata"]["coverage_notes"])
+    assert not any("cohort SQL contact(s)" in n for n in c["metadata"]["coverage_notes"])
 
 
 def test_11i_positive_control_fresh_and_stale_are_the_only_publishing_verdicts():
@@ -747,6 +742,211 @@ def test_11g_legacy_fields_are_kept_and_declared_legacy(monkeypatch):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# §6b — ONE publication verdict on every surface, every state (round 3)
+# ═════════════════════════════════════════════════════════════════════════════
+# Summary SQL, row SQL, page CPQL, row CPQL, row outcome, the cohort block, and
+# the campaign-detail endpoint (the drawer) — built by the REAL page builder and
+# the REAL `_build_campaign_detail` — must state the same verdict for the same
+# evidence. Row-only refusals may narrow a row's CPQL; nothing may widen it.
+
+_NO_SQL_CONTACTS = [_contact("z1", stage="lead"), _contact("z2", stage="lead", label="Gulf")]
+
+
+def _scenario(name, monkeypatch):
+    """(patch kwargs, expected (sql_status, sql_reason), expected page CPQL
+    (status, reason)) for one evidence state."""
+    import db.crm_funnel_repository as funnel_repo
+    kw = {"contacts": _MIXED}
+    if name == "fresh":
+        exp = ("published", None), ("published", None)
+    elif name == "stale":
+        kw["fresh"] = False
+        exp = ("published", None), ("withheld", "source_not_fresh")
+    elif name in ("missing_sync_state", "incomplete_bootstrap", "failed_incremental"):
+        row, reason = {
+            "missing_sync_state": (None, "source_sync_state_missing"),
+            "incomplete_bootstrap": (_sync_row(bootstrap_status="running"),
+                                     "source_bootstrap_incomplete"),
+            "failed_incremental": (_sync_row(last_incremental_status="failed"),
+                                   "source_last_incremental_failed"),
+        }[name]
+        from analysis import sql_coverage_freshness as freshness_mod
+        kw["freshness"] = freshness_mod.assess({"available": True, "row": row}, now=NOW)
+        exp = ("withheld", reason), ("withheld", reason)
+    elif name == "unknown_watermark":
+        kw["freshness"] = _assess(available=False)
+        exp = ("withheld", "data_watermark_unknown"), ("withheld", "data_watermark_unknown")
+    elif name == "reconciliation_failure":
+        real = svc.reconcile_cohort
+        monkeypatch.setattr(svc, "reconcile_cohort", lambda c: ["forced"] + real(c))
+        exp = (("withheld", "cohort_reconciliation_failed"),
+               ("withheld", "cohort_reconciliation_failed"))
+    elif name == "unavailable_funnel":
+        kw["contacts"] = []
+        exp = (("unavailable", "canonical_funnel_unreadable"),
+               ("unavailable", "canonical_funnel_unreadable"))
+    elif name == "missing_campaign_identity":
+        kw["identity_available"] = False
+        exp = ("published", None), ("published", None)
+    elif name == "zero_spend":
+        kw["spend_rows"] = [{"campaign_id": "1", "campaign_name": "Brand - UK",
+                             "spend": 0.0, "spend_usd": 0.0, "fx_complete": True}]
+        exp = ("published", None), ("not_applicable", "zero_window_spend")
+    elif name == "zero_sqls":
+        kw["contacts"] = _NO_SQL_CONTACTS
+        exp = ("published", None), ("not_applicable", "zero_cohort_sqls")
+    else:                                                  # pragma: no cover
+        raise AssertionError(name)
+    _patch_page(monkeypatch, **kw)
+    if name == "unavailable_funnel":
+        monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
+                            lambda s, e: {"available": False, "rows": [],
+                                          "missing_created_at": None})
+    return exp
+
+
+_SCENARIOS = ["fresh", "stale", "missing_sync_state", "incomplete_bootstrap",
+              "failed_incremental", "unknown_watermark", "reconciliation_failure",
+              "unavailable_funnel", "missing_campaign_identity", "zero_spend", "zero_sqls"]
+
+
+def _detail(monkeypatch, campaign_key):
+    """The REAL /api/campaign-detail builder, with only its two unrelated
+    previews and the drawer's lead-detail read stubbed."""
+    import api.server as server
+    import db.revenue_repository as rev_repo
+    monkeypatch.setattr(server, "_campaign_keyword_preview",
+                        lambda w, k: {"available": False, "rows": []})
+    monkeypatch.setattr(server, "_campaign_flagged_preview",
+                        lambda w, k: {"available": False, "rows": []})
+    monkeypatch.setattr(rev_repo, "fetch_campaign_lead_detail",
+                        lambda s, e: {"available": True, "rows": []})
+    return server._build_campaign_detail("ignored", 30, window_key="all_time",
+                                         campaign_key=campaign_key)
+
+
+@pytest.mark.parametrize("name", _SCENARIOS)
+def test_17_one_publication_verdict_on_every_surface(monkeypatch, name):
+    from services.campaign_evidence_service import (COHORT_ROW_FIELDS,
+                                                    build_campaign_evidence)
+    (sql_exp, cpql_exp) = _scenario(name, monkeypatch)
+    p = build_campaign_evidence("all_time", now=NOW)
+    c, s = p["cohort"], p["summary"]
+    verdict = (c["sql_status"], c["sql_reason"])
+    assert verdict == sql_exp, (name, verdict)
+    assert (c["cpql_status"], c["cpql_reason"]) == cpql_exp, name
+    # The summary states the same verdict and the same CPQL.
+    assert (s["cohort_sql_status"], s["cohort_sql_reason"]) == verdict
+    assert (s["cohort_cpql_status"], s["cohort_cpql_reason"]) == cpql_exp
+    published = verdict[0] == "published"
+    for r in p["campaigns"]:
+        # Every row carries the page verdict, verbatim.
+        assert (r["cohort_sql_status"], r["cohort_sql_reason"]) == verdict, r["campaign_key"]
+        if not published:
+            # Withheld: no count, and the CPQL inherits the PAGE verdict exactly.
+            assert r["cohort_sqls"] is None
+            assert (r["cohort_cpql_status"], r["cohort_cpql_reason"]) == verdict
+            assert r["outcome_status"] not in ("SQL producer", "Spend without SQL proof",
+                                               "No outcome evidence")
+        # A row can narrow, never widen: no published row CPQL over a page that
+        # does not publish CPQL for a page-level reason.
+        if r["cohort_cpql_status"] == "published":
+            assert published and cpql_exp[0] == "published", (name, r)
+    if not published:
+        assert audit.withheld_exposures(p) == [], name
+    if name == "missing_campaign_identity":
+        mapped = [r for r in p["campaigns"] if r["mapping_status"] == "mapped" and r["spend_usd"]]
+        assert mapped and all(r["cohort_cpql_reason"] == "campaign_attribution_unavailable"
+                              for r in mapped)
+
+    # The detail endpoint: same verdict, same row fields, never legacy SQL.
+    target = next((r for r in p["campaigns"] if r["mapping_status"] == "mapped"), None)
+    d = _detail(monkeypatch, target["campaign_key"] if target else "1")
+    assert (d["cohort"]["sql_status"], d["cohort"]["sql_reason"]) == verdict, name
+    assert (d["cohort"]["cpql_status"], d["cohort"]["cpql_reason"]) == cpql_exp, name
+    if target is not None:
+        card = d["campaign"]
+        assert card is not None, name
+        for k in COHORT_ROW_FIELDS:
+            assert card[k] == target[k], (name, k, card[k], target[k])
+        assert "confirmed_sqls" not in card and "cpql_usd" not in card
+        assert card["legacy_lead_status"]["published_as_sql"] is False
+
+
+def test_17b_counterfactual_a_row_refusal_evaluated_first_would_contradict_the_page(
+        monkeypatch):
+    """Copilot round 3: row-only refusals used to run BEFORE the page verdict,
+    so during an incomplete bootstrap an unmatched row said
+    `unmapped_label_has_no_campaign_spend`. Asserts the shipped behaviour on
+    the unmatched rows, and pins the ordering in source; test_15n-style
+    mutation of the order is covered by test_17's per-row reason equality."""
+    from services import campaign_evidence_service as ces
+    _scenario("incomplete_bootstrap", monkeypatch)
+    p = ces.build_campaign_evidence("all_time", now=NOW)
+    un = [r for r in p["campaigns"] if r["mapping_status"] == "unmatched"]
+    assert un and all(r["cohort_cpql_reason"] == "source_bootstrap_incomplete" for r in un)
+    src = Path(ces.__file__).read_text(encoding="utf-8")
+    body = src[src.index("def _cohort_row_fields"):src.index("def _publication(")]
+    assert body.index("if not published:") < body.index('elif kind == "unmatched":'), \
+        "the page verdict must be evaluated before every row-only refusal"
+
+
+def test_17c_the_fallback_response_has_exactly_the_live_shape(monkeypatch):
+    """Copilot round 3: the fallback set `cohort.metadata` to null and omitted
+    blocks the live contract always carries. Key-for-key equal now, every
+    unknown value null — never 0."""
+    from services.campaign_evidence_service import unavailable_response
+    live = _page(monkeypatch, contacts=_MIXED)
+    down = unavailable_response("30d", now=NOW)
+
+    def shape(d):
+        return {k: (shape(v) if isinstance(v, dict) else type(v).__name__ == "list")
+                for k, v in d.items()}
+
+    for block in ("metadata", "reconciliation", "closed_won_deals", "window_instants"):
+        assert shape(live["cohort"][block]).keys() == shape(down["cohort"][block]).keys(), block
+    assert live["cohort"].keys() == down["cohort"].keys()
+    for k in ("metric_family", "cohort", "legacy_sql", "summary", "campaigns"):
+        assert k in down, k
+    assert down["metric_family"] == "acquisition_cohort_outcomes"
+    assert down["legacy_sql"]["published_on_this_page"] is False
+    c = down["cohort"]
+    assert (c["sql_status"], c["sql_reason"]) == ("unavailable", "request_failed")
+    assert (c["cpql_status"], c["cpql_reason"]) == ("unavailable", "request_failed")
+    assert c["metadata"]["metric_family"] == "acquisition_cohort_outcomes"
+    for k in ("mapped_count", "unattributed_count", "excluded_non_google_count", "as_of"):
+        assert c["metadata"][k] is None, k
+    assert all(v is None for k, v in c["reconciliation"].items()
+               if k not in ("status", "identities"))
+    s = down["summary"]
+    assert all(s[k] is None for k in s if k.startswith("cohort_sqls"))
+    assert s["cohort_cpql_usd"] is None
+    assert audit.withheld_exposures(down) == []
+
+
+def test_17d_the_db_down_response_states_one_verdict(monkeypatch):
+    """The early db-unavailable return used to pair the real verdict with an
+    empty summary saying `request_failed`."""
+    import db.crm_funnel_repository as funnel_repo
+    import db.revenue_repository as rev_repo
+    _patch_page(monkeypatch, contacts=[])
+    monkeypatch.setattr(rev_repo, "fetch_canonical_campaign_spend",
+                        lambda s, e, *a, **k: {"available": False, "rows": []})
+    monkeypatch.setattr(rev_repo, "fetch_lead_quality",
+                        lambda s, e: {"available": False, "rows": []})
+    monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
+                        lambda s, e: {"available": False, "rows": [], "missing_created_at": None})
+    from services.campaign_evidence_service import build_campaign_evidence
+    p = build_campaign_evidence("30d", now=NOW)
+    assert p["db_unavailable"] is True
+    assert p["metric_family"] == "acquisition_cohort_outcomes"
+    assert (p["summary"]["cohort_sql_status"], p["summary"]["cohort_sql_reason"]) == \
+        (p["cohort"]["sql_status"], p["cohort"]["sql_reason"]) == \
+        ("unavailable", "canonical_funnel_unreadable")
+    assert p["summary"]["cohort_cpql_reason"] == p["cohort"]["cpql_reason"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # §7 — the API metric contract
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -756,13 +956,11 @@ _REQUIRED_META = ("metric_family", "window_basis", "outcome_basis", "dedup_key",
                   "coverage_status", "coverage_notes")
 
 
-def test_13_every_sql_and_deal_response_carries_the_metric_contract(monkeypatch):
-    p = _page(monkeypatch, contacts=_MIXED,
-              deals=[_deal("D1", contact="a2")], deal_created={"a2": INSIDE})
-    md, dmd = p["cohort"]["metadata"], p["cohort"]["deal_metadata"]
+def test_13_every_sql_response_carries_the_metric_contract(monkeypatch):
+    p = _page(monkeypatch, contacts=_MIXED)
+    md = p["cohort"]["metadata"]
     for key in _REQUIRED_META:
         assert key in md, f"SQL metadata lacks {key}"
-        assert key in dmd, f"deal metadata lacks {key}"
     assert md["metric_family"] == "acquisition_cohort_outcomes"
     assert md["window_basis"] == "contact_created_at"
     assert md["outcome_basis"] == "latest_canonical_lifecycle_evidence"
@@ -770,9 +968,6 @@ def test_13_every_sql_and_deal_response_carries_the_metric_contract(monkeypatch)
     assert (md["mapped_count"], md["unattributed_count"],
             md["excluded_non_google_count"]) == (3, 2, 1)
     assert md["coverage_status"] == svc.COVERAGE_EVENT_GAPS
-    assert dmd["dedup_key"] == "deal_id"
-    assert dmd["window_basis"] == "primary_contact.contact_created_at"
-    assert p["summary"]["closed_won_deals_google_ads"] == 1
     assert p["metric_family"] == "acquisition_cohort_outcomes"
 
 
@@ -831,7 +1026,7 @@ def test_14_the_audit_passes_a_coherent_page(monkeypatch):
     p = _page(monkeypatch, contacts=_MIXED)
     a = audit.Audit()
     out = audit.audit_window(a, window="30d", payload=p,
-                             independent=_independent_for(_MIXED), won_deal_ids=[])
+                             independent=_independent_for(_MIXED))
     assert a.violations == [], a.violations
     assert out["cohort"]["google_ads_sqls"] == 5
 
@@ -849,7 +1044,7 @@ def test_14i_counterfactual_an_sql_moved_from_google_ads_to_excluded_is_caught(m
     br["unattributed"]["without_label_row"]["sqls"] -= 1
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(_MIXED), won_deal_ids=[])
+                       independent=_independent_for(_MIXED))
     assert not any("bucket_reconciliation" in v for v in a.violations), a.violations
     assert any("google_ads_split" in v for v in a.violations), a.violations
 
@@ -865,25 +1060,31 @@ def test_14j_an_approved_not_google_ads_mapping_is_the_one_sanctioned_move(monke
     assert by_reason[svc.REASON_LABEL_NOT_GOOGLE_ADS] == 1     # the move happened
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(contacts), won_deal_ids=[])
+                       independent=_independent_for(contacts))
     assert not any("google_ads_split" in v for v in a.violations), a.violations
 
 
 def test_14k_counterfactual_a_cpql_published_over_a_withheld_count_or_zero_spend_is_caught(
         monkeypatch):
+    # A payload that says "withheld" but still carries its SQL counts and a
+    # published CPQL: the audit names every place they leak.
     p = _page(monkeypatch, contacts=_MIXED)
     p["cohort"]["sql_status"] = "withheld"
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(_MIXED), won_deal_ids=[])
-    assert any("while the SQL count is 'withheld'" in v for v in a.violations), a.violations
+                       independent=_independent_for(_MIXED))
+    leak = [v for v in a.violations if "withheld_not_exposed" in v]
+    assert leak, a.violations
+    exposed = audit.withheld_exposures(p)
+    assert "summary.cohort_cpql_usd" in exposed and "cpql_status=published" in exposed
+    assert "summary.cohort_sqls_google_ads" in exposed and "cohort.breakdown" in exposed
 
     p = _page(monkeypatch, contacts=_MIXED)
     brand = next(r for r in p["campaigns"] if r["campaign_id"] == "1")
     brand["spend_usd"] = 0.0
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(_MIXED), won_deal_ids=[])
+                       independent=_independent_for(_MIXED))
     assert any("over zero spend" in v for v in a.violations), a.violations
 
 
@@ -892,7 +1093,7 @@ def test_14b_counterfactual_the_audit_fails_when_the_page_drops_an_unattributed_
     p["summary"]["cohort_sqls_unattributed"] -= 1
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(_MIXED), won_deal_ids=[])
+                       independent=_independent_for(_MIXED))
     assert a.exit_code == audit.EXIT_VIOLATION
     assert any("bucket_reconciliation" in v for v in a.violations)
 
@@ -902,8 +1103,7 @@ def test_14c_counterfactual_the_audit_fails_when_the_page_disagrees_with_sql(mon
     independent = _independent_for(_MIXED)
     independent["sqls"] += 1                  # canonical evidence proves one more
     a = audit.Audit()
-    audit.audit_window(a, window="30d", payload=p, independent=independent,
-                       won_deal_ids=[])
+    audit.audit_window(a, window="30d", payload=p, independent=independent)
     assert any("sql_proof" in v for v in a.violations)
 
 
@@ -914,7 +1114,7 @@ def test_14d_lifecycle_gaps_alone_do_not_fail_the_audit(monkeypatch):
     p = _page(monkeypatch, contacts=contacts)
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(contacts), won_deal_ids=[])
+                       independent=_independent_for(contacts))
     assert a.exit_code == audit.EXIT_OK, a.violations
 
 
@@ -923,7 +1123,7 @@ def test_14e_counterfactual_undisclosed_undated_sqls_fail_the_audit(monkeypatch)
     p["cohort"]["breakdown"]["all_sources"]["sqls_missing_event_timestamp"] = 0
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(_MIXED), won_deal_ids=[])
+                       independent=_independent_for(_MIXED))
     assert any("lifecycle_gaps_disclosed" in v for v in a.violations)
 
 
@@ -932,7 +1132,7 @@ def test_14f_counterfactual_a_cpql_not_drawn_from_cohort_sqls_fails(monkeypatch)
     p["summary"]["cohort_cpql_usd"] = p["summary"]["overall_cpql_usd"] or 1.0
     a = audit.Audit()
     audit.audit_window(a, window="30d", payload=p,
-                       independent=_independent_for(_MIXED), won_deal_ids=[])
+                       independent=_independent_for(_MIXED))
     assert any("cpql_uses_cohort_sqls" in v for v in a.violations)
 
 
@@ -960,16 +1160,63 @@ def test_14h_the_audit_covers_every_supported_campaign_evidence_window():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# §9 — the frontend gate, executed in node
+# §9 — the frontend, executed: the WHOLE real app.js in a node `vm`
 # ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-161B review round 3 (Copilot HIGH: "raw SQL exposed when the cohort is
+# withheld"). These tests load the production app.js unmodified — every helper,
+# formatter and threshold it really uses — behind a minimal DOM stub, and render
+# each Campaign Evidence surface. They are ADVERSARIAL: the payload handed to
+# the UI carries a sentinel SQL count and CPQL even though its verdict withholds
+# them (the backend no longer sends them; the UI is the second wall, and must
+# hold on its own). Each surface must not show the sentinel. Every guard is
+# then shown red against a mutated app.js that bypasses it.
+
+_VM_HARNESS = r"""const fs = require("fs"); const vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const script = fs.readFileSync(process.argv[3], "utf8");
+const H = { get: (t, p) => (p in t ? t[p] : STUB), apply: () => STUB, construct: () => STUB };
+const STUB = new Proxy(function () {}, H);
+const els = {};
+function mkEl(id) {
+  const o = { id, innerHTML: "", textContent: "", value: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    setAttribute() {}, getAttribute() { return null; }, removeAttribute() {},
+    hasAttribute() { return false; }, addEventListener() {}, removeEventListener() {},
+    querySelectorAll() { return []; }, querySelector() { return null; },
+    appendChild(c) { return c; }, append() {}, prepend() {}, remove() {},
+    insertAdjacentHTML(pos, html) { this.innerHTML += html; }, focus() {}, blur() {},
+    closest() { return null; }, scrollTo() {}, contains() { return false; },
+    getBoundingClientRect() { return {}; } };
+  return new Proxy(o, { get: (t, p) => (p in t ? t[p] : STUB),
+                        set: (t, p, v) => { t[p] = v; return true; } });
+}
+const document = new Proxy({
+  getElementById: (id) => els[id] || (els[id] = mkEl(id)),
+  querySelector: (s) => els[s] || (els[s] = mkEl(s)), querySelectorAll: () => [],
+  createElement: (t) => mkEl(t), addEventListener() {}, removeEventListener() {},
+  body: mkEl("body"), documentElement: mkEl("html"), readyState: "loading" }, H);
+const ctx = { console, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
+  clearInterval() {}, Promise, URLSearchParams, Intl, Date, Math, JSON, document,
+  localStorage: STUB, sessionStorage: STUB, navigator: STUB, location: STUB, history: STUB,
+  fetch: () => new Promise(() => {}), addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+  requestAnimationFrame: () => 0, Plotly: STUB, CustomEvent: function () {}, __els: els };
+ctx.window = ctx;
+vm.createContext(ctx);
+vm.runInContext(src, ctx, { filename: "app.js" });
+const out = vm.runInContext(script, ctx, { filename: "probe.js" });
+process.stdout.write(JSON.stringify(out === undefined ? null : out));
+"""
+
+#: A sentinel no legitimate rendering produces.
+SENTINEL = 7919
+
 
 def _js_function(js: str, name: str) -> str:
     """One top-level function, from its declaration to its own closing brace.
 
-    Top-level functions in app.js close with `}` at column 0. Slicing to the
-    next `function` instead would drag in whatever top-level declarations sit
-    between two functions. `node` parsing the result is the check that the
-    slice is whole — a truncated function is a syntax error, not a silent pass.
+    Top-level functions in app.js close with `}` at column 0. `node` parsing
+    the result is the check that the slice is whole.
     """
     i = js.find(f"\nfunction {name}(")
     assert i != -1, f"function {name} not found"
@@ -978,116 +1225,305 @@ def _js_function(js: str, name: str) -> str:
     return js[i:j + 2]
 
 
-def _run_gate(cohort, summary=None) -> dict:
+def _run_app(script: str, *, js: str | None = None, tmp=None):
+    """Evaluate ``script`` in the context of the real app.js (or a mutation of
+    it) and return its final expression, JSON-decoded. Node is a hard
+    requirement here, as it is in CI — a missing binary fails, never skips."""
     node = shutil.which("node")
-    if not node:                                          # pragma: no cover
-        pytest.skip("node is unavailable")
-    from tests.test_pr_ads_160_sql_coverage_boundary import _js_object_literal
-    js = _APP_JS.read_text(encoding="utf-8")
-    program = "\n".join([
-        "function escapeHtml(s){return String(s);}",
-        "function fmtDate(s){return 'DATE(' + s + ')';}",
-        f"let _campaignCohort = {json.dumps(cohort)};",
-        f"let _campaignSummary = {json.dumps(summary or {})};",
-        f"const CAMPAIGN_COHORT_REASONS = {_js_object_literal(js, 'CAMPAIGN_COHORT_REASONS')};",
-        _js_function(js, "campaignCohortAsOf"),
-        _js_function(js, "campaignCohortReason"),
-        _js_function(js, "campaignSqlPublication"),
-        _js_function(js, "campaignSqlWithheld"),
-        _js_function(js, "campaignCpqlNotPublished"),
-        textwrap.dedent("""
-            const pub = campaignSqlPublication();
-            console.log(JSON.stringify({
-              pub, asOf: campaignCohortAsOf(),
-              withheld: campaignSqlWithheld(pub),
-              cpql: campaignCpqlNotPublished(pub),
-            }));
-        """),
-    ])
-    out = subprocess.run([node, "-e", program], capture_output=True, text=True,
-                         timeout=30)
-    assert out.returncode == 0, out.stderr
+    assert node, "node is required: CI runs `node --check static/app.js`"
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "harness.js").write_text(_VM_HARNESS, encoding="utf-8")
+        (d / "app.js").write_text(js if js is not None else _APP_JS.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+        (d / "probe.js").write_text(script, encoding="utf-8")
+        out = subprocess.run([node, str(d / "harness.js"), str(d / "app.js"),
+                              str(d / "probe.js")], capture_output=True, text=True,
+                             timeout=60)
+    assert out.returncode == 0, out.stderr[-2000:]
     return json.loads(out.stdout)
 
 
-def test_15_the_gate_reads_the_cohort_not_the_legacy_reconciliation():
-    published = _run_gate({"sql_status": "published", "cpql_status": "published",
-                           "metadata": {"as_of": "2026-10-03T06:00:00Z"}})
-    assert published["pub"]["publish"] is True and published["pub"]["cpql"] is True
-    assert published["asOf"] == "DATE(2026-10-03T06:00:00Z)"
-    # A missing cohort block is unavailable — never permission. The legacy
-    # reconciliation is not consulted at all: the gate has no path to it.
-    missing = _run_gate(None)
-    assert missing["pub"]["publish"] is False
-    assert missing["pub"]["state"] == "unavailable"
-    assert "_campaignSqlReconciliation" not in _js_function(
-        _APP_JS.read_text(), "campaignSqlPublication")
+def _cohort_js(status, reason=None, cpql_status=None, cpql_reason=None,
+               coverage="cohort_complete_event_timestamps_incomplete",
+               as_of="2026-10-03T06:00:00+00:00"):
+    return {"sql_status": status, "sql_reason": reason,
+            "cpql_status": cpql_status or ("published" if status == "published" else status),
+            "cpql_reason": cpql_reason if cpql_reason is not None else reason,
+            "metadata": {"as_of": as_of, "coverage_status": coverage}}
 
 
-def test_15b_cpql_never_publishes_without_the_sql_count():
-    for status in ("withheld", "unavailable", "anything-else"):
-        r = _run_gate({"sql_status": status, "cpql_status": "published",
-                       "sql_reason": "data_watermark_unknown"})
-        assert r["pub"]["publish"] is False
-        assert r["pub"]["cpql"] is False, f"CPQL published over a {status} SQL count"
+#: Every verdict under which no SQL-derived value may be visible — the page
+#: (or drawer) verdicts the backend emits, each with its real reason code.
+_WITHHOLDING = [
+    _cohort_js("withheld", "source_sync_state_missing", coverage="cohort_population_not_proven"),
+    _cohort_js("withheld", "source_bootstrap_incomplete", coverage="cohort_population_not_proven"),
+    _cohort_js("withheld", "source_last_incremental_failed", coverage="cohort_population_not_proven"),
+    _cohort_js("withheld", "data_watermark_unknown", coverage="cohort_population_not_proven"),
+    _cohort_js("withheld", "cohort_reconciliation_failed", coverage="cohort_population_not_proven"),
+    _cohort_js("unavailable", "canonical_funnel_unreadable", coverage="unavailable"),
+    None,                                                     # no cohort block at all
+]
+_WITHHOLDING_IDS = ["missing_sync_state", "bootstrap_incomplete", "failed_incremental",
+                    "unknown_watermark", "reconciliation_failed", "unavailable_funnel",
+                    "no_cohort_block"]
+_PUBLISHED_JS = _cohort_js("published")
 
 
-def test_15c_withheld_and_unpublished_are_words_never_zero():
-    for cohort in ({"sql_status": "withheld", "sql_reason": "data_watermark_unknown"},
-                   {"sql_status": "unavailable", "sql_reason": "canonical_funnel_unreadable"},
-                   {"sql_status": "published", "cpql_status": "withheld",
-                    "cpql_reason": "source_not_fresh"},
-                   {"sql_status": "published", "cpql_status": "not_applicable",
-                    "cpql_reason": "zero_cohort_sqls"}):
-        r = _run_gate(cohort)
-        for html in (r["withheld"], r["cpql"]):
-            assert ">0<" not in html and "$0" not in html and "Infinity" not in html
-    zero = _run_gate({"sql_status": "published", "cpql_status": "not_applicable"})
-    assert ">N/A<" in zero["cpql"]
-    stale = _run_gate({"sql_status": "published", "cpql_status": "withheld",
-                       "cpql_reason": "source_not_fresh"})
-    assert ">Withheld<" in stale["cpql"] and "stale" in stale["cpql"]
+def _leaky_row(key="1", name="Brand - UK", spend=100.0, sqls=SENTINEL, status="SQL producer"):
+    """A row as a FAULTY backend might send it under a withheld verdict: the
+    raw count, a published-looking CPQL and its own copy of the verdict saying
+    published. The UI must not trust any of that."""
+    return {"campaign_key": key, "campaign_id": key, "campaign_name": name,
+            "spend_usd": spend, "spend_native": spend, "spend_currency": "GBP",
+            "cohort_contacts_acquired": 12, "cohort_sql_status": "published",
+            "cohort_sqls": sqls, "cohort_sqls_missing_event_timestamp": SENTINEL,
+            "cohort_cpql_usd": SENTINEL, "cohort_cpql_status": "published",
+            "confirmed_junk": 1, "junk_rate_pct": 10.0, "outcome_status": status,
+            "mapping_status": "mapped", "aliases": []}
 
 
-def test_15d_a_missing_timestamp_no_longer_renders_reconciliation_required():
-    """The brief's headline symptom. The old gate printed this whenever the
-    legacy scope failed to reconcile; the cohort never asks for a timestamp."""
-    region = "\n".join(_js_function(_APP_JS.read_text(), fn) for fn in (
-        "campaignSqlWithheld", "renderCampaignEvidenceKPIs",
-        "renderCampaignEvidenceRow", "renderCampaignDrawer"))
-    assert "Reconciliation required" not in region
+_LEAKY_SUMMARY = {"cohort_sql_status": "published", "cohort_sqls_google_ads": SENTINEL,
+                  "cohort_sqls_mapped": SENTINEL, "cohort_sqls_unattributed": SENTINEL,
+                  "cohort_sqls_excluded_non_google": SENTINEL,
+                  "cohort_sqls_all_sources": SENTINEL,
+                  "cohort_sqls_missing_event_timestamp": SENTINEL,
+                  "cohort_cpql_usd": SENTINEL, "cohort_cpql_status": "published",
+                  "spend_usd": 1000.0, "spend_native": 800.0, "campaigns": 1}
 
 
-def test_15e_the_legacy_qualified_columns_are_labelled_as_lead_status():
+def _render_surfaces(page_cohort, *, drawer_cohort="same", js=None) -> dict:
+    """Render every Campaign Evidence surface through the real app.js."""
+    drawer = page_cohort if drawer_cohort == "same" else drawer_cohort
+    script = textwrap.dedent(f"""
+        _campaignCohort = {json.dumps(page_cohort)};
+        _campaignSummary = {json.dumps(_LEAKY_SUMMARY)};
+        _campaignEvidence = [{json.dumps(_leaky_row())}];
+        const out = {{}};
+        out.kpis = renderCampaignEvidenceKPIs();
+        out.disclosure = renderCampaignSqlReconciliation();
+        out.row = renderCampaignEvidenceRow(_campaignEvidence[0]);
+        renderCampaignDrawer({{
+          campaign_name: "Brand - UK", cohort: {json.dumps(drawer)},
+          campaign: Object.assign({{}}, _campaignEvidence[0], {{
+            window: "30d", total_leads: 3, in_progress: 0, wrong_fit: 0, unknown: 0,
+            verdicted_leads: 3, legacy_lead_status: {{qualified: {SENTINEL}}} }}),
+          lead_quality: null,
+          countries: [{{country: "UK", total_leads: 3, confirmed_sqls: {SENTINEL},
+                        in_progress: 0, confirmed_junk: 1, wrong_fit: 0, unknown: 0,
+                        junk_rate_pct: 10.0}}],
+          keywords: [], waste_terms: [], recent_leads: [], label_set: []
+        }});
+        out.drawer = __els["campaign-drawer-body"].innerHTML;
+        out.sentinel = [String({SENTINEL}), fmtCount({SENTINEL}), fmtDollar({SENTINEL})];
+        out
+    """)
+    return _run_app(script, js=js)
+
+
+def _exposed(out: dict, surface: str) -> bool:
+    return any(token in out[surface] for token in out["sentinel"])
+
+
+@pytest.mark.parametrize("cohort", _WITHHOLDING, ids=_WITHHOLDING_IDS)
+@pytest.mark.parametrize("surface", ["kpis", "disclosure", "row", "drawer"])
+def test_15_no_surface_shows_a_withheld_sql_count_or_cpql(cohort, surface):
+    out = _render_surfaces(cohort)
+    assert not _exposed(out, surface), out[surface][:1500]
+    # And it says why, in words — never a blank, never a zero.
+    assert ("Withheld" in out[surface] or "Unavailable" in out[surface]
+            or "withheld" in out[surface] or "unavailable" in out[surface])
+
+
+def test_15b_positive_control_a_published_verdict_does_render_the_count():
+    """Without this, test_15 passes for a UI that renders nothing."""
+    out = _render_surfaces(_PUBLISHED_JS)
+    for surface in ("kpis", "row", "drawer"):
+        assert _exposed(out, surface), surface
+
+
+def test_15c_the_mobile_label_cell_shows_the_withholding_state():
+    """Narrow screens label each cell from `data-label` (styles.css
+    `attr(data-label)`), so the SQL and CPQL cells must carry the withholding
+    word themselves — not a number beside a "not published" suffix."""
+    import re as _re
+    out = _render_surfaces(_cohort_js("withheld", "source_bootstrap_incomplete"))
+    cells = dict(_re.findall(r'<td[^>]*data-label="([^"]*)"[^>]*>(.*?)</td>', out["row"], _re.S))
+    assert ">Withheld<" in cells["Cohort SQLs"], cells["Cohort SQLs"]
+    assert ">Withheld<" in cells["CPQL"], cells["CPQL"]
+    assert "not published</span>" not in cells["Cohort SQLs"]
+
+
+def test_15d_a_sql_dependent_status_is_not_asserted_under_a_withheld_verdict():
+    out = _render_surfaces(_cohort_js("withheld", "data_watermark_unknown"))
+    assert ">SQL count not published<" in out["row"]
+    assert ">SQL producer<" not in out["row"] and ">SQL producer<" not in out["drawer"]
+
+
+def _filter_sort(page_cohort, *, outcome="all", sort="spend", js=None):
+    rows = [_leaky_row("a", "A", spend=10.0, sqls=SENTINEL),
+            _leaky_row("b", "B", spend=99.0, sqls=0),
+            _leaky_row("c", "C", spend=50.0, sqls=3)]
+    for r in rows:
+        r["cohort_cpql_usd"] = (r["spend_usd"] / r["cohort_sqls"]) if r["cohort_sqls"] else None
+    script = textwrap.dedent(f"""
+        _campaignCohort = {json.dumps(page_cohort)};
+        _campaignFilters.outcome = {json.dumps(outcome)};
+        _campaignFilters.sort = {json.dumps(sort)};
+        _campaignFilters.status = "all";
+        sortCampaignEvidence(filterCampaignEvidence({json.dumps(rows)})).map(r => r.campaign_key)
+    """)
+    return _run_app(script, js=js)
+
+
+@pytest.mark.parametrize("cohort", _WITHHOLDING, ids=_WITHHOLDING_IDS)
+def test_15e_filters_and_sorts_never_classify_or_rank_by_a_withheld_count(cohort):
+    # has_sql / no_sql classify nothing: every row stays.
+    assert sorted(_filter_sort(cohort, outcome="has_sql")) == ["a", "b", "c"]
+    assert sorted(_filter_sort(cohort, outcome="no_sql")) == ["a", "b", "c"]
+    # SQL and CPQL sorts fall back to spend, never the hidden ordering.
+    assert _filter_sort(cohort, sort="sqls") == ["b", "c", "a"]
+    assert _filter_sort(cohort, sort="cpql") == ["b", "c", "a"]
+
+
+def test_15f_positive_control_filters_and_sorts_use_a_published_count():
+    assert _filter_sort(_PUBLISHED_JS, outcome="has_sql") == ["c", "a"]
+    assert _filter_sort(_PUBLISHED_JS, sort="sqls") == ["a", "c", "b"]
+
+
+def test_15g_the_drawer_gates_on_its_own_response_not_page_state():
+    """Copilot: the drawer read the global cohort from the last Campaign-page
+    load. It is opened from the Action Queue too, and a later detail request
+    can carry a different verdict."""
+    # Page published, drawer response withheld → the drawer withholds.
+    out = _render_surfaces(_PUBLISHED_JS,
+                           drawer_cohort=_cohort_js("withheld", "source_bootstrap_incomplete"))
+    assert not _exposed(out, "drawer")
+    # Page state absent (Action Queue), drawer response published → it publishes.
+    out = _render_surfaces(None, drawer_cohort=_PUBLISHED_JS)
+    assert _exposed(out, "drawer")
+
+
+def test_15h_a_row_withheld_by_its_own_verdict_stays_withheld_under_a_published_page():
+    script = textwrap.dedent(f"""
+        _campaignCohort = {json.dumps(_PUBLISHED_JS)};
+        const r = {json.dumps(_leaky_row())};
+        r.cohort_sql_status = "withheld"; r.cohort_sql_reason = "cohort_reconciliation_failed";
+        renderCampaignEvidenceRow(r)
+    """)
+    html = _run_app(script)
+    assert "7,919" not in html and "7919" not in html
+    assert ">Withheld<" in html
+
+
+def test_15i_the_gate_has_no_global_fallback():
     js = _APP_JS.read_text(encoding="utf-8")
-    sections = _js_function(js, "_appendDrawerEvidenceSections")
-    assert sections.count("CAMPAIGN_LEGACY_QUALIFIED_LABEL") == 2
-    assert "CAMPAIGN_SQL_SCOPE_SHORT" not in sections, (
-        "a legacy lead-status count is labelled as the cohort SQL count")
+    gate = _js_function(js, "campaignSqlPublication")
+    assert "function campaignSqlPublication(cohort)" in gate
+    assert "_campaignCohort" not in gate
+    import re as _re
+    assert not _re.search(r"campaign(?:Row)?SqlPublication\(\s*\)", js), \
+        "a caller invokes the gate with no cohort"
+    for fn in ("renderCampaignDrawer", "_appendDrawerEvidenceSections"):
+        assert "_campaignCohort" not in _js_function(js, fn), fn
+    # Missing argument = unavailable, never permission.
+    r = _run_app("campaignSqlPublication(undefined)")
+    assert r["publish"] is False and r["state"] == "unavailable"
 
 
-def test_15f_the_drawer_declares_its_gate_before_using_it():
+@pytest.mark.parametrize("status", ["withheld", "unavailable", "anything-else"])
+def test_15j_cpql_never_publishes_without_the_sql_count(status):
+    r = _run_app(f"campaignSqlPublication({json.dumps(_cohort_js(status, 'x', cpql_status='published'))})")
+    assert r["publish"] is False and r["cpql"] is False
+
+
+def test_15k_the_drawer_declares_its_gate_before_using_it():
     """The temporal-dead-zone defect PR-ADS-158's registry recorded."""
     fn = _js_function(_APP_JS.read_text(), "renderCampaignDrawer")
-    declared = fn.index("const drawerSqlPub = campaignSqlPublication();")
+    declared = fn.index("const drawerSqlPub = campaignRowSqlPublication(drawerCohort, camp);")
     first_use = fn.index("drawerSqlPub.")
     assert declared < first_use
 
 
-def test_15g_the_basis_label_names_the_cohort_and_its_watermark():
+def test_15l_the_basis_label_names_the_cohort_and_the_funnel_watermark():
     js = _APP_JS.read_text(encoding="utf-8")
     assert 'CAMPAIGN_COHORT_BASIS = "SQLs from contacts created during this period"' in js
-    assert "measured as of ${escapeHtml(campaignCohortAsOf())}" in js
+    assert "measured as of the canonical contact-funnel watermark" in js
     assert "Contacts that entered SQL during this period" not in js
+    assert _run_app('campaignCohortAsOf({metadata: {}})') == "an unknown data watermark"
+
+
+def test_15m_the_legacy_qualified_columns_are_labelled_as_lead_status():
+    js = _APP_JS.read_text(encoding="utf-8")
+    sections = _js_function(js, "_appendDrawerEvidenceSections")
+    assert sections.count("CAMPAIGN_LEGACY_QUALIFIED_LABEL") == 2
+    assert "CAMPAIGN_SQL_SCOPE_SHORT" not in sections
+
+
+#: Each mutation bypasses ONE guard in app.js. The check named beside it must
+#: then catch the sentinel — proving the guard is load-bearing, not decorative.
+_UI_MUTATIONS = [
+    ("kpi_gate", "  const sqlKpi = pub.publish\n", "  const sqlKpi = true\n", "kpis"),
+    ("row_gate", "const sqls = !pub.publish ? campaignSqlWithheld(pub, { compact: true })",
+     "const sqls = false ? campaignSqlWithheld(pub, { compact: true })", "row"),
+    ("drawer_gate", "${drawerSqlPub.publish ? cnt(camp.cohort_sqls)", "${true ? cnt(camp.cohort_sqls)",
+     "drawer"),
+    ("drawer_reads_page_state", "  const drawerCohort = data.cohort || null;",
+     "  const drawerCohort = _campaignCohort;", "drawer_isolation"),
+    ("row_narrowing", '  if (!row || row.cohort_sql_status !== "published") {',
+     "  if (false) {", "row_narrowing"),
+    ("sort_gate", '!campaignSqlPublication(_campaignCohort).publish) by = "spend";',
+     'false) by = "spend";', "sort"),
+    ("filter_gate", "&& !campaignRowSqlPublication(_campaignCohort, c).publish) return true;",
+     "&& false) return true;", "filter"),
+    ("country_split_gate", "countrySqlPub.publish ? r.confirmed_sqls", "true ? r.confirmed_sqls",
+     "drawer"),
+]
+
+
+@pytest.mark.parametrize("name,old,new,check", _UI_MUTATIONS, ids=[m[0] for m in _UI_MUTATIONS])
+def test_15n_every_ui_guard_is_load_bearing(name, old, new, check):
+    js = _APP_JS.read_text(encoding="utf-8")
+    assert js.count(old) == 1, f"mutation anchor for {name} missing or ambiguous"
+    mutated = js.replace(old, new, 1)
+    withheld = _cohort_js("withheld", "source_bootstrap_incomplete",
+                          coverage="cohort_population_not_proven")
+    if check in ("kpis", "row", "drawer"):
+        out = _render_surfaces(withheld, js=mutated)
+        assert _exposed(out, check), f"{name}: bypassing the guard did not expose the count"
+    elif check == "drawer_isolation":
+        out = _render_surfaces(_PUBLISHED_JS, drawer_cohort=withheld, js=mutated)
+        assert _exposed(out, "drawer"), name
+    elif check == "row_narrowing":
+        script = textwrap.dedent(f"""
+            _campaignCohort = {json.dumps(_PUBLISHED_JS)};
+            const r = {json.dumps(_leaky_row())};
+            r.cohort_sql_status = "withheld";
+            renderCampaignEvidenceRow(r)
+        """)
+        assert "7,919" in _run_app(script, js=mutated), name
+    elif check == "sort":
+        assert _filter_sort(withheld, sort="sqls", js=mutated) == ["a", "c", "b"], name
+    elif check == "filter":
+        assert sorted(_filter_sort(withheld, outcome="has_sql", js=mutated)) == ["a", "c"], name
 
 
 @pytest.mark.parametrize("mutation,expected", [
-    # The gate stops reading the cohort block (still stored, never consulted).
+    # The positive control: an irrelevant edit leaves the certification green.
     (("let _campaignCohort = null;", "let _campaignCohort = null; let _unused = null;"),
      None),
-    (("  const c = _campaignCohort;\n  if (!c || !c.sql_status) {",
-      "  const c = null;\n  if (!c || !c.sql_status) {"),
-     "does not read the cohort block"),
+    # The gate reads page-global state instead of its argument.
+    (("function campaignSqlPublication(cohort) {\n  const c = cohort;",
+      "function campaignSqlPublication(cohort) {\n  const c = _campaignCohort;"),
+     "reads page-global cohort state"),
+    # A caller gates on nothing.
+    (("const pub = campaignSqlPublication(_campaignCohort);\n  // PR-ADS-157 §2 — a status",
+      "const pub = campaignSqlPublication();\n  // PR-ADS-157 §2 — a status"),
+     "with no cohort"),
+    # The drawer gates on the page's state, not its own response.
+    (("  const drawerCohort = data.cohort || null;", "  const drawerCohort = _campaignCohort;"),
+     "does not gate on its own /api/campaign-detail cohort"),
     (("_campaignCohort = data.cohort || null;", "_campaignCohort = null;"),
      "not carried from /api/campaigns into state"),
     (('const label = pub.state === "unavailable" ? "Unavailable" : "Withheld";',
@@ -1097,12 +1533,10 @@ def test_15g_the_basis_label_names_the_cohort_and_its_watermark():
       'const CAMPAIGN_SQL_SCOPE_LABEL = "SQLs";'),
      "not named 'Cohort SQLs'"),
 ])
-def test_16_the_retargeted_pr_ads_157_gate_still_goes_red(tmp_path, monkeypatch,
-                                                         mutation, expected):
-    """PR-ADS-161B retargeted three of PR-ADS-157's certification checks at the
-    cohort contract. Each must still fail when the property it guards breaks —
-    otherwise retargeting would have been weakening. The first case is the
-    positive control: an irrelevant edit leaves the gate green."""
+def test_16_the_pr_ads_157_certification_still_goes_red(tmp_path, monkeypatch,
+                                                       mutation, expected):
+    """PR-ADS-157's certification checks, retargeted at the cohort contract
+    and tightened in round 3. Each must fail when the property it guards breaks."""
     import scripts.audit_campaign_evidence_certification as cert
     old, new = mutation
     js = _APP_JS.read_text(encoding="utf-8")
@@ -1175,7 +1609,9 @@ def seeded(pg, monkeypatch):  # noqa: F811
     writers.upsert_fx_rates([{"rate_date": spend_day, "base_currency": "GBP",
                               "quote_currency": "USD", "rate": 1.25,
                               "provider": "test", "source_version": "t"}])
-    # One won deal associated with THREE contacts — counted once.
+    # A real won deal IS in the ledger. Round 3 removed closed-won publication,
+    # so the page must say nothing about it (test_20) — the absence is proven
+    # against present data, not against an empty table.
     ledger.upsert_deal(_ledger_row("D-1", primary_contact_id="dated",
                                    campaign="Brand - UK", association_count=3),
                        associations=[{"contact_id": c} for c in ("dated", "undated", "unmapped")])
@@ -1198,7 +1634,9 @@ def test_20_pg_the_page_counts_proven_sqls_from_the_real_funnel(seeded):
         svc.PROOF_DIRECT: 1, svc.PROOF_RECOVERED: 1, svc.PROOF_STAGE: 3}
     assert s["cohort_cpql_status"] == "published"
     assert s["cohort_cpql_usd"] == round(1500.0 / 4, 2)       # (900+300) GBP × 1.25
-    assert s["closed_won_deals_google_ads"] == 1
+    assert not [k for k in s if "closed_won" in k]
+    assert all(not [k for k in r if "closed_won" in k] for r in p["campaigns"])
+    assert p["cohort"]["closed_won_deals"]["published_on_this_page"] is False
     assert p["cohort"]["reconciliation"]["status"] == "reconciled"
 
 
@@ -1356,3 +1794,32 @@ def test_25b_pg_counterfactual_the_first_sql_normalisation_disagreed(seeded, mon
             pre_fix_count = cur.fetchone()[0]
         conn.rollback()
     assert pre_fix_count < 9, "the pre-fix SQL already agreed; the edges test nothing"
+
+
+@_needs_pg
+def test_26_pg_an_incomplete_bootstrap_withholds_everywhere_and_exposes_nothing(seeded):
+    """The round-3 HIGH finding end to end: the real sync-state row says the
+    bootstrap is still running. The page, every row, the detail endpoint and
+    the audit must agree it is withheld — and no SQL count may be anywhere."""
+    from db import writers
+    from services.campaign_evidence_service import build_campaign_evidence
+    import api.server as server
+
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="running", last_status="partial")
+    p = build_campaign_evidence("30d")
+    assert (p["cohort"]["sql_status"], p["cohort"]["sql_reason"]) == \
+        ("withheld", "source_bootstrap_incomplete"), p["cohort"]
+    assert audit.withheld_exposures(p) == []
+    assert all(r["cohort_sqls"] is None and r["cohort_sql_status"] == "withheld"
+               for r in p["campaigns"])
+
+    d = server._build_campaign_detail("Brand - UK", 30, window_key="30d", campaign_key="1")
+    assert (d["cohort"]["sql_status"], d["cohort"]["sql_reason"]) == \
+        ("withheld", "source_bootstrap_incomplete")
+    assert d["campaign"]["cohort_sqls"] is None and d["campaign"]["cohort_cpql_usd"] is None
+
+    a, report = audit.run()
+    assert a.violations == [], a.violations
+    assert all(w["sql_status"] == "withheld" for w in report["windows"])
+    assert any(c["check"].endswith("withheld_not_exposed") and c["ok"] for c in a.checks)

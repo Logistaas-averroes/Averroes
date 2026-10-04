@@ -241,7 +241,67 @@ def test_endpoint_requires_admin():
     assert resp.status_code == 401
 
 
+def _pin_endpoint_clock(monkeypatch, now=_NOW):
+    """The endpoint resolves `business_window=current_quarter` from the wall
+    clock, and its fixture rows are dated around _NOW (July 2026). Unpinned,
+    the assertion below became false on 2026-10-01, when the real quarter moved
+    to Q4 — a test of the calendar, not of the audit. The production window
+    behaviour is unchanged: only the TEST supplies its own `now`, through the
+    service's existing `now` parameter."""
+    real_run = audit.run
+    monkeypatch.setattr(audit, "run", lambda **kw: real_run(**kw, now=now))
+
+
+def _call_endpoint(monkeypatch):
+    monkeypatch.setenv("ADMIN_API_TOKEN", "secret-token")
+    monkeypatch.setattr(
+        "db.canonical_contact_outcome_repository.fetch_canonical_inputs",
+        lambda start, end: _inputs(_seven_vs_one_rows()))
+    monkeypatch.setattr(
+        "db.revenue_repository.fetch_canonical_campaign_spend",
+        lambda s, e, *_a, **_k: {"customer_id": "X", "rows": [{"campaign_id": "1", "campaign_name": "Brand - US"}]})
+    monkeypatch.setattr(
+        "db.revenue_repository.fetch_campaign_identity",
+        lambda cid=None: {"available": True, "mappings": []})
+    client, _server = _client()
+    resp = client.get("/api/audit/sql-truth?business_window=current_quarter&evidence_window=30d",
+                      headers={"Authorization": "Bearer secret-token"})
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def _fake_wall_clock(monkeypatch, instant):
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant if tz is None else instant.astimezone(tz)
+    monkeypatch.setattr(audit, "datetime", _Clock)
+
+
+def test_endpoint_result_is_independent_of_the_wall_clock(monkeypatch):
+    """Regression for the Q4 time-bomb: with the clock pinned, the endpoint gives
+    the same answer whatever today is — including dates after the fixture's
+    quarter, which is exactly when the unpinned test began to fail."""
+    _pin_endpoint_clock(monkeypatch)
+    for wall in (datetime(2026, 10, 4, tzinfo=timezone.utc),
+                 datetime(2031, 1, 1, tzinfo=timezone.utc),
+                 datetime(2026, 7, 23, tzinfo=timezone.utc)):
+        _fake_wall_clock(monkeypatch, wall)
+        body = _call_endpoint(monkeypatch)
+        assert body["contracts"][0]["revenue_by_source"]["google_ads_qualified_contacts"] == 7, wall
+        assert body["contracts"][0]["dashboard"]["campaign_attributable_sqls"] == 1, wall
+
+
+def test_counterfactual_the_unpinned_endpoint_does_depend_on_the_wall_clock(monkeypatch):
+    """Without the pin, a wall clock in Q4 2026 empties the current quarter —
+    proving the regression above guards a real dependence, not a no-op."""
+    _fake_wall_clock(monkeypatch, datetime(2026, 10, 4, tzinfo=timezone.utc))
+    body = _call_endpoint(monkeypatch)
+    assert body["contracts"][0]["revenue_by_source"]["google_ads_qualified_contacts"] == 0
+
+
 def test_endpoint_returns_audit_with_admin_token(monkeypatch):
+    _pin_endpoint_clock(monkeypatch)
     monkeypatch.setenv("ADMIN_API_TOKEN", "secret-token")
     monkeypatch.setattr(
         "db.canonical_contact_outcome_repository.fetch_canonical_inputs",

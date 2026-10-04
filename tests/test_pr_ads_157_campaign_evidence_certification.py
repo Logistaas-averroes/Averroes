@@ -757,7 +757,17 @@ def test_31_frontend_stores_the_reconciliation_in_campaign_state():
     assert "let _campaignCohort" in js
     assert "_campaignCohort = data.cohort" in js
     assert "_campaignSqlReconciliation" not in js
-    assert "_campaignCohort" in _js_region("campaignSqlPublication", source=js)
+    # PR-ADS-161B round 3: the gate takes the cohort it gates on as its
+    # ARGUMENT and reads no page state of its own (a drawer opened from another
+    # page, or after a later request, would otherwise be authorised by stale
+    # state). The stored block reaches the gate through every page caller.
+    gate = _js_region("campaignSqlPublication", source=js)
+    assert "function campaignSqlPublication(cohort)" in gate
+    assert "_campaignCohort" not in gate
+    for fn in ("renderCampaignEvidenceKPIs", "renderCampaignEvidenceFilters",
+               "filterCampaignEvidence", "sortCampaignEvidence",
+               "renderCampaignEvidenceRow"):
+        assert "_campaignCohort" in _js_region(fn, source=js), fn
 
 
 def test_32_there_is_exactly_one_publication_gate():
@@ -768,12 +778,23 @@ def test_32_there_is_exactly_one_publication_gate():
     just told them it could not certify.
     """
     js = _APP_JS.read_text()
-    assert js.count("function campaignSqlPublication()") == 1
+    # PR-ADS-161B round 3: one decision function, taking the response's cohort.
+    # `campaignRowSqlPublication` only NARROWS it (it calls the gate first and
+    # can only turn publish off), so it is not a second decision.
+    import re
+    assert js.count("function campaignSqlPublication(cohort)") == 1
+    assert len(re.findall(r"\nfunction campaign\w*Publication\(", js)) == 2
+    row_gate = _js_region("campaignRowSqlPublication", source=js)
+    assert row_gate.index("campaignSqlPublication(cohort)") < row_gate.index("return page;")
+    assert "publish: true" not in row_gate
+    assert not re.search(r"campaign(?:Row)?SqlPublication\(\s*\)", js), (
+        "a caller consults the gate with no cohort, i.e. gates on nothing")
     for fn in ("renderCampaignEvidenceKPIs", "renderCampaignEvidenceFilters",
                "filterCampaignEvidence", "sortCampaignEvidence",
                "renderCampaignEvidenceRow", "renderCampaignDrawer",
                "_appendDrawerEvidenceSections"):
-        assert "campaignSqlPublication" in _js_region(fn, source=js), (
+        assert re.search(r"campaign(?:Row)?SqlPublication\(\s*[^)\s]",
+                         _js_region(fn, source=js)), (
             f"{fn} publishes SQL-dependent output without consulting the gate")
 
 
@@ -831,7 +852,9 @@ def test_36_sql_filters_and_sorts_cannot_classify_an_unproven_count():
     direct call reintroduces the classification the UI just hid.
     """
     filt = _js_region("filterCampaignEvidence")
-    assert "campaignSqlPublication()" in filt
+    assert "campaignSqlPublication(_campaignCohort)" in filt
+    # The has_sql / no_sql refusal is per ROW (page verdict narrowed by the row's).
+    assert "!campaignRowSqlPublication(_campaignCohort, c).publish) return true;" in filt
     assert 'f.outcome === "has_sql" || f.outcome === "no_sql"' in filt
 
     controls = _js_region("renderCampaignEvidenceFilters")
@@ -841,7 +864,7 @@ def test_36_sql_filters_and_sorts_cannot_classify_an_unproven_count():
 
     sort = _js_region("sortCampaignEvidence")
     assert 'by === "sqls" || by === "cpql"' in sort
-    assert "campaignSqlPublication().publish" in sort
+    assert "campaignSqlPublication(_campaignCohort).publish" in sort
 
 
 def test_37_independent_evidence_survives_a_sql_reconciliation_failure():
@@ -1594,7 +1617,7 @@ def test_69_filter_refuses_sql_dependent_statuses_internally():
     be able to classify by an unreconciled count.
     """
     region = _js_region("filterCampaignEvidence")
-    assert "const sqlPub = campaignSqlPublication();" in region
+    assert "const sqlPub = campaignSqlPublication(_campaignCohort);" in region
     assert "CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)" in region
     assert "!sqlPub.publish) return true;" in region
 

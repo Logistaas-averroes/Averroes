@@ -265,7 +265,6 @@ def _patch_cohort(monkeypatch, spec):
     from datetime import datetime, timedelta, timezone
 
     import db.crm_funnel_repository as funnel_repo
-    import db.deal_ledger_repository as ledger_repo
     import services.marketing_outcome_cohort_service as cohort_svc
 
     created = datetime.now(timezone.utc) - timedelta(days=1)
@@ -284,10 +283,6 @@ def _patch_cohort(monkeypatch, spec):
     monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
                         lambda s, e: {"available": True, "rows": rows,
                                       "missing_created_at": 0})
-    monkeypatch.setattr(funnel_repo, "fetch_contacts_created_at",
-                        lambda ids: {"available": True, "created_at": {}})
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals",
-                        lambda s=None, e=None: {"available": True, "rows": []})
     monkeypatch.setattr(cohort_svc, "read_freshness", lambda now=None: {
         "fresh": True, "reason": "source_fresh",
         "last_successful_incremental_at": created.isoformat()})
@@ -460,10 +455,11 @@ def test_clean_table_headers():
     region = _region(APP_JS, "function renderCampaignDecisionTable",
                      "function campaignSpendCell")
     # PR-ADS-161B: "Leads" became "Leads acquired" — the acquisition cohort, the
-    # same population as the row's SQLs — and a Closed-won column was added.
-    for h in (">Campaign<", ">Status<", ">Spend<", ">Leads acquired<",
-              ">CPQL<", ">Closed-won<"):
+    # same population as the row's SQLs. Round 3 removed the Closed-won column:
+    # closed-won deals are not published until certified (see docs/44 §5).
+    for h in (">Campaign<", ">Status<", ">Spend<", ">Leads acquired<", ">CPQL<"):
         assert h in region, f"missing clean header {h}"
+    assert "Closed-won" not in region and "closed_won" not in region
     # PR-ADS-161B review: Junk / Junk Rate are the legacy leads-table population
     # beside the cohort's "Leads acquired", so their headers name that basis —
     # emitted from constants (as the SQL header is), each with the explaining
@@ -539,12 +535,14 @@ def test_no_duplicate_source_strip_inline():
 def test_kpi_cards_are_genuine_window_kpis():
     region = _region(APP_JS, "function renderCampaignEvidenceKPIs",
                      "function renderCampaignEvidenceFilters")
-    # PR-ADS-161B: the brief's seven cards — CPQL is the cohort CPQL (the
-    # "Overall" qualifier described the legacy mapped-only scope), and the
-    # unattributed SQLs and closed-won deals get cards of their own.
+    # PR-ADS-161B: CPQL is the cohort CPQL (the "Overall" qualifier described
+    # the legacy mapped-only scope), and the unattributed SQLs get a card of
+    # their own. Round 3 removed the Closed-won deals card: closed-won deals are
+    # not published until certified (docs/44 §5).
     for label in (">Campaigns<", ">Spend<", ">Confirmed Junk<", ">CPQL<",
-                  ">Unattributed Google Ads SQLs<", ">Closed-won deals<"):
+                  ">Unattributed Google Ads SQLs<"):
         assert label in region
+    assert "Closed-won" not in region and "closed_won" not in region
     # PR-ADS-157 §2: ">Confirmed SQLs<" is a scoped label, emitted from a
     # constant. PR-ADS-161B keeps the constant and names the cohort population.
     assert "CAMPAIGN_SQL_SCOPE_LABEL" in region

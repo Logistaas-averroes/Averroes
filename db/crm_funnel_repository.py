@@ -545,34 +545,6 @@ def fetch_acquisition_cohort_contacts(start_at, end_before) -> dict:
         return _unavailable(rows=[], missing_created_at=None)
 
 
-def fetch_contacts_created_at(contact_ids) -> dict:
-    """``{contact_id: created_at}`` for the given canonical contacts.
-
-    Used to place a closed-won deal in an acquisition cohort through its
-    primary contact. A contact absent from the result is not in the canonical
-    funnel at all, which the caller must report as unplaceable — never treat as
-    "outside the window".
-    """
-    ids = sorted({str(c).strip() for c in (contact_ids or ()) if c and str(c).strip()})
-    if not ids:
-        return {"available": True, "created_at": {}}
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return _unavailable(created_at={})
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT contact_id, created_at FROM {FUNNEL_TABLE} "
-                    f"WHERE contact_id = ANY(%s)",
-                    (ids,),
-                )
-                found = {r[0]: r[1] for r in cur.fetchall()}
-        return {"available": True, "created_at": found}
-    except Exception as exc:  # noqa: BLE001
-        log.error("fetch_contacts_created_at failed: %s", exc)
-        return _unavailable(created_at={})
-
-
 # ── PR-ADS-160 — the prospective coverage boundary, read side ───────────────
 #
 # Every read here returns the boundary as what it is: an UPPER BOUND on an

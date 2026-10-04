@@ -210,8 +210,9 @@ CONSUMERS: list[dict] = [
        decision=True, executive=True, operational=True),
     _c("Campaign drawer (headline, lead quality, countries, recent leads)",
        "PR-ADS-161B: the headline KPIs are the cohort row (Leads acquired, Cohort "
-       "SQLs, CPQL, Closed-won). The Lead Quality and Country splits and Recent "
-       "Leads still read the legacy population, labelled 'Qualified (lead status)'.",
+       "SQLs, CPQL), gated on the detail response's OWN cohort verdict. The Lead "
+       "Quality and Country splits and Recent Leads still read the legacy "
+       "population, labelled 'Qualified (lead status)'. Closed-won is not shown.",
        endpoint="GET /api/campaign-detail, GET /api/campaigns/{campaign_name}/detail",
        service_function="services.campaign_evidence_service.build_campaign_drawer_evidence; api.server._build_campaign_detail",
        repository_source="db.revenue_repository.fetch_campaign_lead_detail (splits); "
@@ -227,18 +228,20 @@ CONSUMERS: list[dict] = [
                        "(renderCampaignDrawer read drawerSqlPub before its const "
                        "declaration) is FIXED in PR-ADS-161B. Remaining legacy: "
                        "fetch_campaign_lead_detail splits.",
-       truth_status="db_unavailable on envelope; drawer KPIs withheld via campaignSqlPublication()",
+       truth_status="db_unavailable on envelope; drawer KPIs withheld via "
+                    "campaignRowSqlPublication(data.cohort, camp) — the detail "
+                    "response's verdict, never page state",
        row=True, cpql=True, drawer=True, decision=True, operational=True),
     _c(_COHORT,
-       "The acquisition-cohort contract: contacts created in a window, their SQL "
-       "outcome as of the data watermark, their closed-won deals, bucketed into "
-       "campaign / unattributed / excluded with reconciliation.",
+       "The acquisition-cohort contract: contacts created in a window and their "
+       "SQL outcome as of the canonical contact-funnel watermark, bucketed into "
+       "campaign / unattributed / excluded with reconciliation, under ONE "
+       "publication verdict. Closed-won deals are not published (round 3).",
        endpoint="(service; consumed by GET /api/campaigns)",
        service_function="services.marketing_outcome_cohort_service.build_window_outcomes "
-                        "/ build_cohort / build_deal_outcomes / cpql_decision",
-       repository_source="db.crm_funnel_repository.fetch_acquisition_cohort_contacts; "
-                         "db.deal_ledger_repository.fetch_won_deals",
-       source_table=f"{LIFECYCLE_TABLE} + hubspot_lifecycle_stage_history + hubspot_deal_ledger",
+                        "/ build_cohort / sql_publication / cpql_decision",
+       repository_source="db.crm_funnel_repository.fetch_acquisition_cohort_contacts",
+       source_table=f"{LIFECYCLE_TABLE} + hubspot_lifecycle_stage_history",
        sql_definition=COHORT_DEF, date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
        windows=EVIDENCE,
        scope="all_sources ⊇ google_ads (= campaign + unattributed); excluded_non_google",
@@ -1022,9 +1025,8 @@ RULES: list[dict] = [
        symbol=["window_instants", "_as_instant", "in_window", "sql_proof",
                "contact_identity", "contact_bucket", "_new_slot", "_bump",
                "_merge_duplicates", "build_cohort", "reconcile_cohort",
-               "deal_bucket", "_new_deal_slot", "_bump_deal", "build_deal_outcomes",
                "sql_publication", "cpql_decision", "coverage_status", "coverage_notes",
-               "sql_metric_metadata", "deal_metric_metadata", "_jsonable_cohort",
+               "sql_metric_metadata", "_jsonable_cohort",
                "read_freshness", "build_window_outcomes",
                "lifecycle_event_disclosure"]),
     # The read-only audit of the above. Diagnostic: it publishes nothing.
@@ -1032,8 +1034,12 @@ RULES: list[dict] = [
        _COHORT,
        symbol=["check_no_date_contamination", "check_no_write_paths",
                "_code_without_docstrings", "_function_sources", "audit_window",
+               "withheld_exposures", "check_closed_won_not_published",
                "independent_counts", "global_population_split", "run",
                "_render", "main"]),
+    # Module-level comments naming the withheld SQL / CPQL fields it checks for.
+    _m("cohort.audit.module", "scripts/audit_marketing_outcome_cohorts.py",
+       CLS_DIAGNOSTIC, _COHORT, ["cpql_ref"]),
     _r("sqlpublication.writer", "db/writers.py", CLS_DIAGNOSTIC,
        _SQL_PUBLICATION, symbol=["record_reader_reconciliation"]),
 

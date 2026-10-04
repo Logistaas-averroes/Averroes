@@ -6,9 +6,11 @@ PR-ADS-161B — canonical marketing outcome cohorts.
 Two questions that sound alike
 ------------------------------
 1. **Acquisition cohort** — "of the contacts acquired during this period, how
-   many have reached SQL as of now?" Membership is ``contact_created_at``. The
-   outcome is whatever canonical lifecycle evidence proves *today*. This is the
-   question a paid-marketing decision asks, and the one Campaign Evidence and
+   many have reached SQL as of the canonical contact-funnel watermark?"
+   Membership is ``contact_created_at``. The outcome is what canonical lifecycle
+   evidence proves at that watermark (the last successful incremental sync —
+   which, for a stale source, is in the past and is published as such). This is
+   the question a paid-marketing decision asks, and the one Campaign Evidence and
    its CPQL answer.
 2. **Lifecycle event** — "how many contacts entered SQL during this period?"
    Membership is the SQL-entry date itself. It needs an exact timestamp for
@@ -62,8 +64,16 @@ Every cohort SQL lands in exactly one bucket, and none is dropped:
                               the label is not a Google Ads campaign.
 
 ``google_ads = campaign + unattributed_google_ads`` and
-``all_sources = google_ads + excluded_non_google`` hold by construction, and the
-audit re-proves both from raw rows.
+``all_sources = google_ads + excluded_non_google`` hold by construction. The
+audit independently re-derives membership, SQL proof and the Paid Search split
+from raw rows in its own SQL; campaign placement it checks against the page.
+
+Closed-won deals
+----------------
+Not published by PR-ADS-161B. Certifying them needs deal-ledger readiness
+(its own sync coverage and watermark), a deterministic cohort placement that is
+not the ledger's display-only primary contact, and deal-specific attribution
+status. They are deferred to a dedicated PR; see ``CLOSED_WON_NOT_PUBLISHED``.
 
 Purity
 ------
@@ -81,7 +91,6 @@ from typing import Any, Callable
 
 from analysis.account_time import ACCOUNT_TZ
 from analysis.crm_lifecycle import EVENT_SQL, normalize_lifecycle_stage, stages_implying_event
-from analysis.revenue_scope import has_campaign, is_google_ads_attributed
 from analysis.source_classification import GROUP_GOOGLE_ADS, GROUP_UNCLASSIFIED, classify_source
 from services.canonical_contact_outcome_service import campaign_disqualifier
 
@@ -93,13 +102,10 @@ METRIC_FAMILY_LIFECYCLE_EVENTS = "lifecycle_stage_events"
 
 WINDOW_BASIS_COHORT = "contact_created_at"
 WINDOW_BASIS_LIFECYCLE_EVENTS = "date_entered_sql"
-WINDOW_BASIS_DEALS = "primary_contact.contact_created_at"
 
 OUTCOME_BASIS_SQL = "latest_canonical_lifecycle_evidence"
-OUTCOME_BASIS_DEALS = "canonical_deal_ledger.hs_is_closed_won"
 
 DEDUP_KEY = "contact_id"
-DEAL_DEDUP_KEY = "deal_id"
 #: The documented fallback identity, used only when ``contact_id`` is blank.
 #: Prefixed so it can never collide with a real HubSpot id or with the legacy
 #: ``leads`` table's ``id:`` fallback.
@@ -123,9 +129,7 @@ _STAGES_IMPLYING_SQL = frozenset(stages_implying_event(EVENT_SQL))
 BUCKET_CAMPAIGN = "campaign"
 BUCKET_UNATTRIBUTED = "unattributed_google_ads"
 BUCKET_EXCLUDED = "excluded_non_google"
-BUCKET_AMBIGUOUS = "ambiguous"          # deals only: contacts disagree on source
 CONTACT_BUCKETS = (BUCKET_CAMPAIGN, BUCKET_UNATTRIBUTED, BUCKET_EXCLUDED)
-DEAL_BUCKETS = CONTACT_BUCKETS + (BUCKET_AMBIGUOUS,)
 
 REASON_UNMAPPED_LABEL = "unmapped_campaign_label"
 REASON_CONFLICTING_ROWS = "conflicting_attribution_across_rows"
@@ -134,14 +138,21 @@ REASON_NON_GOOGLE_SOURCE = "non_google_source"
 #: Ads bought it, NOT because another channel is proven.
 REASON_SOURCE_UNCLASSIFIED = "original_source_unclassified"
 REASON_LABEL_NOT_GOOGLE_ADS = "label_mapped_not_google_ads"
-REASON_DEAL_WITHOUT_CAMPAIGN = "deal_without_campaign"
-REASON_DEAL_SOURCE_AMBIGUOUS = "deal_contacts_disagree_on_source"
-REASON_DEAL_LABEL_CONTRADICTS_CLICK = "deal_gclid_but_label_mapped_not_google_ads"
 
-UNPLACEABLE_NO_PRIMARY_CONTACT = "no_primary_contact"
-UNPLACEABLE_CONTACT_NOT_IN_FUNNEL = "primary_contact_not_in_canonical_funnel"
-UNPLACEABLE_CONTACT_NO_CREATED_AT = "primary_contact_has_no_created_at"
-UNPLACEABLE_NO_DEAL_ID = "deal_without_deal_id"
+#: Closed-won deals are NOT published by this page (PR-ADS-161B review round 3).
+#: Declared on every response so their absence is an explicit statement, not a
+#: silent gap — and never relabelled as customers.
+CLOSED_WON_NOT_PUBLISHED = {
+    "published_on_this_page": False,
+    "reason": "deferred_until_certified",
+    "requires": [
+        "canonical deal-ledger sync coverage and its own as-of watermark",
+        "deterministic cohort placement (not the ledger's display-only primary contact)",
+        "deal-specific attribution status with explicit ambiguous / unattributed buckets",
+        "coverage-aware KPI publication",
+    ],
+    "note": "closed-won deals are deals, never unique customers; no customer metric is published",
+}
 
 # ── Publication vocabulary ───────────────────────────────────────────────────
 STATUS_PUBLISHED = "published"
@@ -453,129 +464,6 @@ def reconcile_cohort(cohort: dict) -> list[str]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Closed-won deals (pure)
-# ═════════════════════════════════════════════════════════════════════════════
-def deal_bucket(deal: dict, resolve_label: LabelResolver) -> tuple[str, str | None, str | None]:
-    """``(bucket, campaign_key, reason)`` for one canonical ledger row.
-
-    Google Ads evidence is the scope lattice's own predicate
-    (``analysis.revenue_scope.is_google_ads_attributed``: agreed source or a
-    GCLID). Ambiguous contact evidence is NOT attribution and stays in its own
-    bucket.
-    """
-    if is_google_ads_attributed(deal):
-        if not has_campaign(deal):
-            return BUCKET_UNATTRIBUTED, None, REASON_DEAL_WITHOUT_CAMPAIGN
-        kind, key = resolve_label(deal.get("campaign_name_raw"))
-        if kind == "google_ads":
-            return BUCKET_CAMPAIGN, str(key), None
-        if kind == "not_google_ads":
-            # A recorded click says Google Ads; an approved mapping says the
-            # label is not. Evidence that contradicts itself is not attribution.
-            return BUCKET_AMBIGUOUS, None, REASON_DEAL_LABEL_CONTRADICTS_CLICK
-        return BUCKET_UNATTRIBUTED, f"unmatched:{key}", REASON_UNMAPPED_LABEL
-    if (deal.get("attribution_status") or "") == "ambiguous":
-        return BUCKET_AMBIGUOUS, None, REASON_DEAL_SOURCE_AMBIGUOUS
-    return BUCKET_EXCLUDED, None, REASON_NON_GOOGLE_SOURCE
-
-
-def _new_deal_slot() -> dict:
-    return {"deals": 0, "revenue_usd_known": 0.0, "revenue_usd_missing": 0}
-
-
-def _bump_deal(slot: dict, deal: dict) -> None:
-    slot["deals"] += 1
-    revenue = deal.get("revenue_usd")
-    if revenue is None:
-        slot["revenue_usd_missing"] += 1
-    else:
-        slot["revenue_usd_known"] = round(slot["revenue_usd_known"] + float(revenue), 2)
-
-
-def build_deal_outcomes(deals: list[dict], *, created_at_by_contact: dict,
-                        resolve_label: LabelResolver,
-                        start_at: datetime | None, end_before: datetime) -> dict:
-    """Closed-won deals of the contacts acquired in the window, one per ``deal_id``.
-
-    A deal joins a cohort through its ledger ``primary_contact_id`` — one
-    contact per deal, so a deal associated with five contacts is still one
-    deal. Placing it by ``deal_close_date`` instead would put an event-time
-    metric on a cohort page, which is the definitional mix this module exists
-    to prevent.
-
-    A deal that cannot be placed in time is reported as unplaceable, by
-    reason. It is never assigned a window from any other date.
-
-    Limitation, disclosed rather than hidden: when several contacts share one
-    deal with identical evidence, the ledger's ``primary_contact_id`` is the
-    lowest contact id — a DISPLAY identity (``analysis.deal_truth`` rule 2),
-    not the first contact acquired. Those contacts may have been created in
-    different windows, so such a deal's window is the display contact's.
-    ``placed_by_display_contact`` counts them.
-    """
-    seen: set[str] = set()
-    placed_by_display_contact = 0
-    duplicate_rows = 0
-    unplaceable: dict[str, int] = {}
-    buckets = {b: _new_deal_slot() for b in DEAL_BUCKETS}
-    by_campaign: dict[str, dict] = {}
-    reasons: dict[str, int] = {}
-
-    for deal in deals or []:
-        deal_id = str(deal.get("deal_id") or "").strip()
-        if not deal_id:
-            unplaceable[UNPLACEABLE_NO_DEAL_ID] = unplaceable.get(UNPLACEABLE_NO_DEAL_ID, 0) + 1
-            continue
-        if deal_id in seen:
-            duplicate_rows += 1
-            continue
-        seen.add(deal_id)
-
-        contact = str(deal.get("primary_contact_id") or "").strip()
-        if not contact:
-            why = UNPLACEABLE_NO_PRIMARY_CONTACT
-        elif contact not in created_at_by_contact:
-            why = UNPLACEABLE_CONTACT_NOT_IN_FUNNEL
-        elif created_at_by_contact[contact] is None:
-            why = UNPLACEABLE_CONTACT_NO_CREATED_AT
-        else:
-            why = None
-        if why is not None:
-            unplaceable[why] = unplaceable.get(why, 0) + 1
-            continue
-        if not in_window(created_at_by_contact[contact], start_at, end_before):
-            continue
-
-        bucket, key, reason = deal_bucket(deal, resolve_label)
-        _bump_deal(buckets[bucket], deal)
-        if (deal.get("association_count") or 0) > 1:
-            placed_by_display_contact += 1
-        if bucket == BUCKET_CAMPAIGN:
-            _bump_deal(by_campaign.setdefault(key, _new_deal_slot()), deal)
-        if reason is not None:
-            reasons[reason] = reasons.get(reason, 0) + 1
-
-    google_ads = _new_deal_slot()
-    for b in (BUCKET_CAMPAIGN, BUCKET_UNATTRIBUTED):
-        google_ads["deals"] += buckets[b]["deals"]
-        google_ads["revenue_usd_known"] = round(
-            google_ads["revenue_usd_known"] + buckets[b]["revenue_usd_known"], 2)
-        google_ads["revenue_usd_missing"] += buckets[b]["revenue_usd_missing"]
-
-    return {
-        "buckets": buckets,
-        "google_ads": google_ads,
-        "by_campaign": by_campaign,
-        "reasons": reasons,
-        "unplaceable": unplaceable,
-        "unplaceable_total": sum(unplaceable.values()),
-        "placed_by_display_contact": placed_by_display_contact,
-        "dedup": {"key": DEAL_DEDUP_KEY, "duplicate_rows": duplicate_rows,
-                  "distinct_deals_examined": len(seen)},
-    }
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # Publication + metadata (pure)
 # ═════════════════════════════════════════════════════════════════════════════
 def sql_publication(*, cohort_available: bool, reconciliation_problems,
@@ -665,10 +553,18 @@ def coverage_notes(cohort: dict | None, *, missing_created_at,
                 "outcome is published"]
     notes = []
     if publication[0] != STATUS_PUBLISHED:
+        # Withheld: say WHY, and nothing derived from the SQL count. A note
+        # quoting the withheld count would publish it by another route.
         notes.append(
-            f"the cohort SQL count is withheld ({publication[1]}): the canonical "
-            f"contact population is not proven complete as of a known data "
-            f"watermark, so any count read from it is partial, not a total.")
+            f"the cohort SQL count is withheld ({publication[1]}): it is not "
+            f"proven complete and consistent as of the canonical contact-funnel "
+            f"watermark, so no SQL count, SQL breakdown or CPQL is published.")
+        if missing_created_at:
+            notes.append(
+                f"{missing_created_at} canonical contact(s) have no created date and "
+                f"belong to no acquisition window, All Time included. No other date "
+                f"is substituted.")
+        return notes
     gap = cohort["all_sources"]["sqls_missing_event_timestamp"]
     if gap:
         notes.append(
@@ -700,7 +596,12 @@ def coverage_notes(cohort: dict | None, *, missing_created_at,
 
 def sql_metric_metadata(*, cohort: dict | None, freshness: dict, attribution_status: str,
                         missing_created_at, publication: tuple[str, str | None]) -> dict:
-    """The machine-readable contract every cohort-SQL response carries."""
+    """The machine-readable contract every cohort-SQL response carries.
+
+    The bucket counts are ``None`` unless the SQL count is published: a withheld
+    total is not published through its parts either.
+    """
+    published = cohort is not None and publication[0] == STATUS_PUBLISHED
     return {
         "metric_family": METRIC_FAMILY_COHORT,
         "window_basis": WINDOW_BASIS_COHORT,
@@ -714,86 +615,17 @@ def sql_metric_metadata(*, cohort: dict | None, freshness: dict, attribution_sta
             "detail": freshness.get("detail"),
         },
         "attribution_status": attribution_status,
-        "mapped_count": (None if cohort is None
-                         else sum(s["sqls"] for s in cohort["by_campaign"].values())),
-        "unattributed_count": None if cohort is None else cohort["unattributed"]["sqls"],
-        "excluded_non_google_count": (None if cohort is None
-                                      else cohort["excluded_non_google"]["sqls"]),
+        "sql_status": publication[0],
+        "sql_reason": publication[1],
+        "mapped_count": (sum(s["sqls"] for s in cohort["by_campaign"].values())
+                         if published else None),
+        "unattributed_count": cohort["unattributed"]["sqls"] if published else None,
+        "excluded_non_google_count": (cohort["excluded_non_google"]["sqls"]
+                                      if published else None),
         "coverage_status": coverage_status(cohort, publication=publication),
         "coverage_notes": coverage_notes(cohort, missing_created_at=missing_created_at,
                                          publication=publication),
         "basis_label": COHORT_BASIS_LABEL,
-    }
-
-
-#: Deals and SQL contacts are attributed on DIFFERENT evidence, by design — each
-#: by the canonical rule for its own entity. Stated on every response so a
-#: campaign with closed-won deals and no cohort SQLs is not read as a defect.
-DEAL_ATTRIBUTION_BASIS = (
-    "closed-won deals are attributed by the revenue scope lattice "
-    "(analysis.revenue_scope: agreed Google Ads source OR a GCLID on the deal's "
-    "evidence); cohort SQLs by the contact's own original source "
-    "(hs_analytics_source). A deal "
-    "with a GCLID whose contact's original source is not Paid Search counts as a "
-    "Google Ads deal while that contact is excluded from Google Ads SQLs, so a "
-    "campaign can show closed-won deals without a matching cohort SQL.")
-
-
-def deal_metric_metadata(*, deals: dict | None, freshness: dict, attribution_status: str,
-                         publication: tuple[str, str | None]) -> dict:
-    """The same contract for closed-won deals, with their own bases named."""
-    notes = []
-    if deals is None:
-        notes.append("the canonical deal ledger could not be read")
-    else:
-        if publication[0] != STATUS_PUBLISHED:
-            notes.append(
-                f"deals are placed in a window through their contact's created "
-                f"date, and the contact population is not proven complete "
-                f"({publication[1]}); these counts are partial.")
-        if deals.get("placed_by_display_contact"):
-            notes.append(
-                f"{deals['placed_by_display_contact']} counted deal(s) have more "
-                f"than one associated contact and are placed by the ledger's "
-                f"primary contact — the lowest contact id, a display identity — "
-                f"not by the first contact acquired.")
-        if deals["unplaceable_total"]:
-            notes.append(
-                f"{deals['unplaceable_total']} closed-won deal(s) could not be "
-                f"placed in any acquisition window "
-                f"({', '.join(f'{k}: {v}' for k, v in sorted(deals['unplaceable'].items()))}); "
-                f"they are in no window and are not counted as zero.")
-        amb = deals["buckets"][BUCKET_AMBIGUOUS]["deals"]
-        if amb:
-            notes.append(f"{amb} closed-won deal(s) carry contradictory source "
-                         f"evidence and are reported as ambiguous, not attributed.")
-        missing = sum(b["revenue_usd_missing"] for b in deals["buckets"].values())
-        if missing:
-            notes.append(f"{missing} deal(s) have no USD revenue (currency "
-                         f"incomplete); revenue sums are the known subset.")
-    return {
-        "metric_family": METRIC_FAMILY_COHORT,
-        "window_basis": WINDOW_BASIS_DEALS,
-        "outcome_basis": OUTCOME_BASIS_DEALS,
-        "dedup_key": DEAL_DEDUP_KEY,
-        "as_of": freshness.get("last_successful_incremental_at"),
-        "source_freshness": {"fresh": freshness.get("fresh"),
-                             "reason": freshness.get("reason")},
-        "attribution_status": attribution_status,
-        "mapped_count": None if deals is None else deals["buckets"][BUCKET_CAMPAIGN]["deals"],
-        "unattributed_count": (None if deals is None
-                               else deals["buckets"][BUCKET_UNATTRIBUTED]["deals"]),
-        "ambiguous_count": None if deals is None else deals["buckets"][BUCKET_AMBIGUOUS]["deals"],
-        "excluded_non_google_count": (None if deals is None
-                                      else deals["buckets"][BUCKET_EXCLUDED]["deals"]),
-        "coverage_status": (
-            STATUS_UNAVAILABLE if deals is None
-            else COVERAGE_NOT_PROVEN if publication[0] != STATUS_PUBLISHED
-            else "complete" if not deals["unplaceable_total"]
-            else "partial_unplaceable_disclosed"),
-        "attribution_basis": DEAL_ATTRIBUTION_BASIS,
-        "coverage_notes": notes,
-        "label": "Closed-won deals (deduplicated by deal_id) — not unique customers",
     }
 
 
@@ -821,16 +653,15 @@ def read_freshness(now: datetime | None = None) -> dict:
 def build_window_outcomes(start: date | None, end: date, *, resolve_label: LabelResolver,
                           freshness: dict | None = None,
                           now: datetime | None = None) -> dict:
-    """Read and classify one window's acquisition cohort and its closed-won deals.
+    """Read and classify one window's acquisition cohort.
 
-    Returns ``{"available", "cohort", "deals", "missing_created_at",
+    Returns ``{"available", "cohort", "missing_created_at",
     "reconciliation_problems", "freshness", "sql_publication", "start_at",
-    "end_before"}``.
-    ``cohort`` / ``deals`` are None — never empty — when their source could
-    not be read.
+    "end_before"}``. ``cohort`` is None — never empty — when the canonical
+    funnel could not be read. No deal ledger is read: closed-won deals are not
+    published (``CLOSED_WON_NOT_PUBLISHED``).
     """
     from db import crm_funnel_repository as funnel_repo  # noqa: PLC0415
-    from db import deal_ledger_repository as ledger_repo  # noqa: PLC0415
 
     start_at, end_before = window_instants(start, end)
     freshness = freshness if freshness is not None else read_freshness(now)
@@ -843,26 +674,14 @@ def build_window_outcomes(start: date | None, end: date, *, resolve_label: Label
                               start_at=start_at, end_before=end_before)
         problems = reconcile_cohort(cohort)
 
-    deals = None
-    won = ledger_repo.fetch_won_deals(None, None)
-    if won.get("available"):
-        rows = won.get("rows") or []
-        created = funnel_repo.fetch_contacts_created_at(
-            r.get("primary_contact_id") for r in rows)
-        if created.get("available"):
-            deals = build_deal_outcomes(
-                rows, created_at_by_contact=created.get("created_at") or {},
-                resolve_label=resolve_label, start_at=start_at, end_before=end_before)
-
     return {
         "available": cohort is not None,
         "cohort": cohort,
-        "deals": deals,
         "missing_created_at": contacts.get("missing_created_at"),
         "reconciliation_problems": problems,
         "freshness": freshness,
-        # The one publication verdict; the SQL count, every CPQL and both
-        # metadata blocks read it from here.
+        # The one publication verdict; the SQL count, every CPQL, the row
+        # outcome statuses and the metadata block read it from here.
         "sql_publication": sql_publication(
             cohort_available=cohort is not None,
             reconciliation_problems=problems, freshness=freshness),
