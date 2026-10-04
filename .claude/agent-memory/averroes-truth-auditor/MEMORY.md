@@ -266,3 +266,12 @@ Recurring patterns (durable):
   execution test would catch those, but only on the page).
 - Could not run scripts/audit_*.py directly in that session (approval gate);
   relied on the tests that call them.
+
+## PR-ADS-161B final review (head 0f023b0)
+- Legacy lead-status SQL/CPQL fields remain in /api/campaigns while the cohort is
+  withheld. Safe only because the Campaign page never reads them: verified by
+  execution (test_15o Proxy-recorded reads) and by the certification's DISCOVERED
+  surface scan; drawer legacy split (`lq.confirmed_sqls`, `r.confirmed_sqls`) is
+  gated on the drawer response's verdict and mutation-tested (test_15n/16).
+  Re-check: any new reader of `legacy_lead_status`/`confirmed_sqls` in app.js.
+- Final review: 190 tests in the 161B file pass, PG tests ran (not skipped).
