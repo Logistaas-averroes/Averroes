@@ -1150,6 +1150,10 @@ RULES: list[dict] = [
        _CLOSED_WON, symbol=["fetch_closed_won_universe"]),
     _m("closedwon.svc.module", "services/canonical_customer_revenue_service.py",
        CLS_DIAGNOSTIC, _CLOSED_WON, ["contact_created_at_ref"]),
+    # The audit re-derives acquisition-cohort membership from the same
+    # snapshot rows, independently of the service, to certify it.
+    _r("closedwon.audit", "scripts/audit_customer_closed_won_truth.py",
+       CLS_DIAGNOSTIC, _CLOSED_WON, symbol=["_expected"]),
 
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),
