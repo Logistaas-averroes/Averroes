@@ -339,10 +339,16 @@ def check_no_open_post_boundary_gaps(g: Gate) -> dict:
         for row in rows:
             key = row.get("reason")
             by_reason[key] = by_reason.get(key, 0) + 1
+        # PR-ADS-161C: this used to end "These are OUR gaps, not HubSpot's" —
+        # an attribution nobody had proven. Any of them may be HubSpot never
+        # having recorded the contact at the SQL stage at all (a stage jump).
+        # Whose gap each one is, is the forensic audit's finding; the gate's
+        # verdict is unchanged either way — an open incident is a failure.
         g.broken("no_open_post_boundary_gaps",
                  f"{len(rows)} contact(s) reached SQL after the boundary with "
                  f"no exact entry timestamp: {dict(sorted(by_reason.items()))}. "
-                 f"These are OUR gaps, not HubSpot's")
+                 f"Whether each is a code-owned loss or a source with no exact "
+                 f"SQL entry: python -m scripts.audit_post_boundary_sql_incidents")
     else:
         g.holds("no_open_post_boundary_gaps",
                 "no post-boundary contact is missing an exact SQL timestamp")

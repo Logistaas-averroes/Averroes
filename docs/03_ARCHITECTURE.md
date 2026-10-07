@@ -130,6 +130,35 @@ HubSpot (lifecyclestage + hs_v2_date_entered_* + lastmodifieddate)
 
 Doctrine: `docs/33_CANONICAL_CRM_FUNNEL.md`.
 
+### Post-boundary SQL evidence (PR-ADS-160, PR-ADS-161C)
+
+```
+incremental sync ── hubspot/contact_funnel (above)
+      └── services/sql_coverage_boundary_service.detect_post_boundary_gaps
+            ├── connectors/hubspot_pull.fetch_lifecycle_stage_history   (READ-ONLY;
+            │     lifecyclestage history + the CURRENT direct SQL property)
+            ├── db/writers.apply_post_boundary_sql_evidence   (one transaction:
+            │     fill a NULL date_entered_sql, close what stored evidence proves)
+            ├── db/writers.upsert_lifecycle_stage_history      (recovered transitions)
+            └── db/writers.record_post_boundary_incidents      (incident + history shape)
+
+scripts/audit_post_boundary_sql_incidents   ── read-only forensics
+      └── services/post_boundary_sql_evidence_service.audit
+            └── analysis/post_boundary_sql_forensics            (pure classification)
+scripts/repair_post_boundary_sql_evidence   ── dry run by default
+      └── services/post_boundary_sql_evidence_service.repair   (reuses the detector's read)
+```
+
+The contact sync stays the sole **latest-state** writer of
+`hubspot_contact_funnel`. The single exception is a fill-only write of a NULL
+`date_entered_sql` with HubSpot's own direct value (plus the derived
+`latest_stage_entry_at` and `updated_at`), inside the transaction that closes
+its incident. It can never disagree with the sync's `COALESCE`, but it can move
+`lifecycle_events` freshness forward without a sync.
+
+Doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`,
+`docs/45_POST_BOUNDARY_SQL_EVIDENCE.md`.
+
 ---
 
 ## Configuration (All Decision Rules in YAML)

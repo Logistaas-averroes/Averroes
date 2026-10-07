@@ -3653,9 +3653,11 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
 
     This never writes to HubSpot — it records evidence READ from HubSpot's own
     property history into a table the contact sync does not own. It deliberately
-    does not write ``hubspot_contact_funnel.date_entered_*``: that column is
-    refreshed from the newest HubSpot read on every incremental sync, so a value
-    placed there would be erased on the next run.
+    does not write ``hubspot_contact_funnel.date_entered_*``: that column holds
+    the DIRECT property (precedence 1), and a recovered transition is
+    precedence 2 with its own lineage. (Since PR-ADS-160 the sync COALESCEs
+    those columns, so a value there is no longer erased by a sparse payload;
+    PR-ADS-161C's fill-only direct write relies on exactly that.)
 
     Idempotent on ``(contact_id, funnel_event)``: a re-run rewrites the same row
     rather than appending a second one, which is what makes a bounded command
@@ -4031,22 +4033,50 @@ def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
     contact whose incident is already RESOLVED is not reopened by a later
     observation that still lacks a date — resolution means an exact timestamp
     arrived, and that fact does not expire.
+
+    PR-ADS-161C — the forensic fields the detector saw are stored too, under
+    one rule: a pass that READ a history payload replaces the history shape as a
+    block, and a pass that did not (the request failed, the budget ran out)
+    leaves the last successfully read shape in place. A failed read is not
+    evidence, so it must never erase evidence a successful one recorded.
+    ``detected_at`` is set once, on insert, and never moved.
     """
     prepared = []
     for i in (incidents or []):
         cid = str((i or {}).get("contact_id") or "").strip()
         if not cid:
             continue
+        i = i or {}
         prepared.append((
-            cid, (i or {}).get("boundary_id"), (i or {}).get("reason"),
-            (i or {}).get("lifecycle_stage"),
-            _parse_ts_or_none((i or {}).get("contact_created_at")),
-            bool((i or {}).get("history_checked")),
-            (i or {}).get("history_state"), run_id,
+            cid, i.get("boundary_id"), i.get("reason"),
+            i.get("lifecycle_stage"),
+            _parse_ts_or_none(i.get("contact_created_at")),
+            bool(i.get("history_checked")),
+            i.get("history_state"), run_id, run_id,
+            i.get("direct_property_state"),
+            i.get("history_versions_seen"),
+            i.get("history_stage_path"),
+            i.get("stage_jump_skipped_sql"),
+            _parse_ts_or_none(i.get("last_known_below_sql_at")),
+            _parse_ts_or_none(i.get("first_observed_at_or_above_sql")),
+            i.get("observation_bounds_basis"),
         ))
 
     if not prepared:
         return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+
+    # A history-shape column is replaced only when THIS pass read a payload
+    # (`history_versions_seen` is non-null exactly then).
+    def _shape(col):
+        return (f"{col} = CASE WHEN EXCLUDED.history_versions_seen IS NOT NULL "
+                f"THEN EXCLUDED.{col} ELSE sql_post_boundary_incident.{col} END")
+
+    shape_set = ",\n                        ".join(
+        _shape(c) for c in ("history_versions_seen", "history_stage_path",
+                            "stage_jump_skipped_sql",
+                            "last_known_below_sql_at",
+                            "first_observed_at_or_above_sql",
+                            "observation_bounds_basis"))
 
     try:
         with get_conn() as conn:
@@ -4055,19 +4085,31 @@ def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
                         "error": "database_unavailable"}
             with conn.cursor() as cur:
                 cur.executemany(
-                    """
+                    f"""
                     INSERT INTO sql_post_boundary_incident (
                         contact_id, boundary_id, reason, lifecycle_stage,
                         contact_created_at, history_checked, history_state,
-                        detected_by_run_id, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open')
+                        detected_by_run_id, last_checked_by_run_id,
+                        direct_property_state, history_versions_seen,
+                        history_stage_path, stage_jump_skipped_sql,
+                        last_known_below_sql_at, first_observed_at_or_above_sql,
+                        observation_bounds_basis, last_checked_at, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, NOW(), 'open')
                     ON CONFLICT (contact_id) DO UPDATE SET
                         reason             = EXCLUDED.reason,
                         lifecycle_stage    = EXCLUDED.lifecycle_stage,
                         contact_created_at = EXCLUDED.contact_created_at,
                         history_checked    = EXCLUDED.history_checked,
                         history_state      = EXCLUDED.history_state,
-                        detected_by_run_id = EXCLUDED.detected_by_run_id,
+                        -- PR-ADS-161C review: written once, on insert, like
+                        -- detected_at. Re-checks are last_checked_by_run_id.
+                        last_checked_by_run_id = EXCLUDED.last_checked_by_run_id,
+                        last_checked_at    = NOW(),
+                        direct_property_state = COALESCE(
+                            EXCLUDED.direct_property_state,
+                            sql_post_boundary_incident.direct_property_state),
+                        {shape_set},
                         updated_at         = NOW()
                     WHERE sql_post_boundary_incident.status <> 'resolved'
                     """,
@@ -4086,9 +4128,20 @@ def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
 def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> dict:
     """Close incidents for contacts that now carry an exact SQL entry date.
 
-    ``resolved_by`` records WHICH permitted source supplied it —
-    ``direct_property`` or ``history`` — so a resolution is always traceable to
-    real evidence rather than to the passage of time.
+    ``resolved_by`` is the caller's EXPECTATION of which permitted source
+    supplied it. It is not trusted: the label written is derived in SQL from
+    the evidence actually stored — ``direct_property`` when the direct column
+    holds a date, otherwise ``history`` — because a contact dated only by a
+    recovered transition reaches this function through the detector's
+    effective-date path labelled ``direct_property`` (PR-ADS-161C review).
+
+    PR-ADS-161C — the database, not the caller, decides whether the evidence
+    exists. Before this, any id handed in was closed, so a caller bug (or a
+    stale list) could close an incident with no exact timestamp behind it and
+    the coverage gate would go green on a gap. The UPDATE now closes only where
+    the same statement reads an exact SQL entry back from the store, and it
+    copies that timestamp onto the row as ``resolution_evidence_at`` so the
+    trail survives on the incident itself.
     """
     ids = [str(c).strip() for c in (contact_ids or []) if str(c or "").strip()]
     if not ids:
@@ -4101,15 +4154,26 @@ def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> d
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE sql_post_boundary_incident
-                       SET status      = 'resolved',
-                           resolved_at = NOW(),
-                           resolved_by = %s,
-                           updated_at  = NOW()
-                     WHERE contact_id = ANY(%s)
-                       AND status <> 'resolved'
+                    UPDATE sql_post_boundary_incident i
+                       SET status                 = 'resolved',
+                           resolved_at            = NOW(),
+                           resolved_by            = CASE
+                               WHEN f.date_entered_sql IS NOT NULL
+                               THEN 'direct_property' ELSE 'history' END,
+                           resolution_evidence_at = COALESCE(
+                               f.date_entered_sql, h.entered_at),
+                           updated_at             = NOW()
+                      FROM hubspot_contact_funnel f
+                      LEFT JOIN hubspot_lifecycle_stage_history h
+                             ON h.contact_id = f.contact_id
+                            AND h.funnel_event = 'sql'
+                     WHERE i.contact_id = f.contact_id
+                       AND i.contact_id = ANY(%s)
+                       AND i.status <> 'resolved'
+                       AND COALESCE(f.date_entered_sql, h.entered_at)
+                           IS NOT NULL
                     """,
-                    (resolved_by, ids),
+                    (ids,),
                 )
                 persisted = cur.rowcount if cur.rowcount is not None else 0
             conn.commit()
@@ -4119,6 +4183,156 @@ def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> d
         log.error("resolve_post_boundary_incidents failed: %s", exc)
         return {"ok": False, "attempted": len(ids), "persisted": 0,
                 "error": str(exc)[:300]}
+
+
+# ── PR-ADS-161C — exact SQL evidence and its incident, in ONE transaction ───
+#: Resolution is decided by the DATABASE from what it now stores, never from
+#: what the caller asked for: an incident closes only where the same transaction
+#: can read an exact SQL entry back — the direct column, or a recovered
+#: lifecycle-history row. The resolver is therefore incapable of closing an
+#: incident without source evidence, whatever list of ids it is handed.
+_RESOLVE_WITH_STORED_EVIDENCE_SQL = """
+    UPDATE sql_post_boundary_incident i
+       SET status                 = 'resolved',
+           resolved_at            = NOW(),
+           resolved_by            = CASE WHEN f.date_entered_sql IS NOT NULL
+                                         THEN 'direct_property' ELSE 'history'
+                                    END,
+           resolved_by_run_id     = %s,
+           resolution_evidence_at = COALESCE(f.date_entered_sql, h.entered_at),
+           updated_at             = NOW()
+      FROM hubspot_contact_funnel f
+      LEFT JOIN hubspot_lifecycle_stage_history h
+             ON h.contact_id = f.contact_id AND h.funnel_event = 'sql'
+     WHERE i.contact_id = f.contact_id
+       AND i.contact_id = ANY(%s)
+       AND i.status <> 'resolved'
+       AND COALESCE(f.date_entered_sql, h.entered_at) IS NOT NULL
+    RETURNING i.contact_id, i.resolved_by
+"""
+
+
+def apply_post_boundary_sql_evidence(direct_rows: list, history_rows: list, *,
+                                     run_id: str,
+                                     resolve_contact_ids: list | None = None
+                                     ) -> dict:
+    """Persist exact SQL-entry evidence and close what it proves. ATOMIC.
+
+    LOCAL DATABASE ONLY — nothing here writes to HubSpot or Google Ads.
+
+    ``direct_rows``  ``{"contact_id", "date_entered_sql"}`` — HubSpot's DIRECT
+                     ``hs_v2_date_entered_salesqualifiedlead`` value. Written
+                     into ``hubspot_contact_funnel.date_entered_sql`` ONLY where
+                     that column is NULL: a repair never overwrites a stored
+                     exact date (corrections belong to the sync, which owns
+                     the column). The lineage is the column itself — precedence
+                     1 of the effective-date doctrine.
+    ``history_rows`` recovered ``salesqualifiedlead`` transitions, in the shape
+                     ``upsert_lifecycle_stage_history`` takes. Lineage:
+                     ``hubspot_lifecycle_stage_history``, precedence 2. A row
+                     identical to the stored one is not rewritten, so a rerun
+                     reports it unchanged rather than written.
+    ``resolve_contact_ids``
+                     extra contacts whose incidents should close IF the store
+                     already holds their evidence. The database decides.
+
+    Every write, and the resolution, happens in one transaction. Any failure
+    rolls ALL of it back and reports ``ok: False`` with every count zero — so an
+    incident can never be closed by evidence that did not land, and evidence can
+    never land while this call reports a failure that left it half-applied.
+
+    Returns ``{"ok", "direct_written", "direct_unchanged", "history_written",
+    "history_unchanged", "incidents_resolved", "resolved_by", "error"}``.
+    """
+    direct = []
+    for r in direct_rows or []:
+        cid = str((r or {}).get("contact_id") or "").strip()
+        ts = _parse_ts_or_none((r or {}).get("date_entered_sql"))
+        if cid and ts is not None:
+            direct.append((cid, ts))
+    history = []
+    for r in history_rows or []:
+        cid = str((r or {}).get("contact_id") or "").strip()
+        event = str((r or {}).get("funnel_event") or "").strip()
+        entered_at = _parse_ts_or_none((r or {}).get("entered_at"))
+        if not cid or not event or entered_at is None:
+            continue
+        history.append((
+            cid, event, entered_at,
+            r.get("hubspot_property") or "lifecyclestage",
+            r.get("hubspot_value"), r.get("hubspot_source_type"),
+            r.get("hubspot_source_id"), r.get("hubspot_source_label"),
+            r.get("hubspot_updated_by_user_id"),
+            r.get("lifecycle_rule_version"), run_id,
+        ))
+    ids = sorted({c for c, _ in direct} | {h[0] for h in history}
+                 | {str(c).strip() for c in (resolve_contact_ids or [])
+                    if str(c or "").strip()})
+    failed = {"ok": False, "direct_written": 0, "direct_unchanged": 0,
+              "history_written": 0, "history_unchanged": 0,
+              "incidents_resolved": 0, "resolved_by": {}}
+    if not ids:
+        return {**failed, "ok": True, "error": None}
+
+    columns = ", ".join(_STAGE_HISTORY_COLUMNS) + ", recovery_run_id"
+    placeholders = ", ".join(["%s"] * (len(_STAGE_HISTORY_COLUMNS) + 1))
+    mutable = [c for c in _STAGE_HISTORY_COLUMNS
+               if c not in ("contact_id", "funnel_event")]
+    update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in mutable)
+    changed = " OR ".join(
+        f"hubspot_lifecycle_stage_history.{c} IS DISTINCT FROM EXCLUDED.{c}"
+        for c in mutable)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {**failed, "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                direct_written = 0
+                for cid, ts in direct:
+                    cur.execute(
+                        """
+                        UPDATE hubspot_contact_funnel
+                           SET date_entered_sql      = %s,
+                               latest_stage_entry_at = GREATEST(
+                                   COALESCE(latest_stage_entry_at, %s), %s),
+                               updated_at            = NOW()
+                         WHERE contact_id = %s
+                           AND date_entered_sql IS NULL
+                        """,
+                        (ts, ts, ts, cid))
+                    direct_written += max(0, int(cur.rowcount or 0))
+                history_written = 0
+                for values in history:
+                    cur.execute(
+                        f"""
+                        INSERT INTO hubspot_lifecycle_stage_history ({columns})
+                        VALUES ({placeholders})
+                        ON CONFLICT (contact_id, funnel_event) DO UPDATE SET
+                            {update_set},
+                            recovery_run_id = EXCLUDED.recovery_run_id,
+                            recovered_at    = NOW(),
+                            updated_at      = NOW()
+                        WHERE {changed}
+                        """,
+                        values)
+                    history_written += max(0, int(cur.rowcount or 0))
+                cur.execute(_RESOLVE_WITH_STORED_EVIDENCE_SQL, (run_id, ids))
+                resolved_rows = cur.fetchall()
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.error("apply_post_boundary_sql_evidence failed: %s", exc)
+        return {**failed, "error": str(exc)[:300]}
+    resolved_by: dict = {}
+    for _cid, source in resolved_rows:
+        resolved_by[source] = resolved_by.get(source, 0) + 1
+    return {"ok": True,
+            "direct_written": direct_written,
+            "direct_unchanged": len(direct) - direct_written,
+            "history_written": history_written,
+            "history_unchanged": len(history) - history_written,
+            "incidents_resolved": len(resolved_rows),
+            "resolved_by": dict(sorted(resolved_by.items())),
+            "error": None}
 
 
 _FUNNEL_SYNC_STATE_FIELDS = {

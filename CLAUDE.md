@@ -233,6 +233,16 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   request's verdict. Closed-won deals are not published on Campaign Evidence
   (`docs/44` §5); never call deals customers.
 
+- **A post-boundary incident closes only on stored exact evidence, decided by
+  the database.** Both resolvers (`apply_post_boundary_sql_evidence`,
+  `resolve_post_boundary_incidents`) close a row only where the same statement
+  reads `date_entered_sql` or a recovered `sql` history row back. Never add a
+  closing status (`bounded_but_not_exact`, …): the gate counts `status = 'open'`,
+  so a new status silently stops blocking. `last_known_below_sql_at` /
+  `first_observed_at_or_above_sql` are BOUNDS — for a stage jump the latter is
+  an opportunity timestamp — and are never an SQL date. Whose gap an incident
+  is: `scripts/audit_post_boundary_sql_incidents.py`; see `docs/45_*`.
+
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
   `SEVERITY_MAP`, `canonical_status_display_label()`, and — as appropriate —

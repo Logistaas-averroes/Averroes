@@ -806,6 +806,76 @@ def fetch_post_boundary_incidents(*, status: str | None = "open") -> dict:
         return _unavailable(rows=[], open_count=None)
 
 
+#: PR-ADS-161C — the forensic read. Stated as data so a test can prove the
+#: transaction mode is what the audit's "performs no database writes" claim
+#: rests on, rather than a promise about the SQL that follows it.
+FORENSIC_TRANSACTION_MODE = (
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
+
+def fetch_post_boundary_incident_forensics() -> dict:
+    """Every post-boundary incident beside the contact's STORED evidence.
+
+    PR-ADS-161C §4.2. One row per incident (open and resolved), carrying the
+    incident's own record, the contact's current local state, and BOTH
+    precedence levels of stored SQL evidence read separately — the direct
+    column and the recovered lifecycle-history timestamp — from the same
+    definitions ``effective_date_sql`` is built from.
+
+    The transaction is REPEATABLE READ (one snapshot: an incident and the
+    evidence beside it describe the same instant, so a sync committing mid-read
+    cannot make a resolved contact look open with evidence, or the reverse) and
+    READ ONLY — enforced by PostgreSQL, so "the audit performs no database
+    writes" is a property of the connection, not of the SQL written after it.
+
+    ``available=False`` means the store could not be read. It is never an
+    empty list, which would read as "there are no incidents".
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(FORENSIC_TRANSACTION_MODE)
+                cur.execute(
+                    f"""
+                    SELECT i.contact_id, i.boundary_id, i.status, i.reason,
+                           i.detected_at, i.detected_by_run_id,
+                           i.last_checked_at, i.last_checked_by_run_id,
+                           i.lifecycle_stage AS lifecycle_stage_at_detection,
+                           i.contact_created_at, i.history_checked,
+                           i.history_state, i.direct_property_state,
+                           i.history_versions_seen, i.history_stage_path,
+                           i.stage_jump_skipped_sql,
+                           i.last_known_below_sql_at,
+                           i.first_observed_at_or_above_sql,
+                           i.observation_bounds_basis,
+                           i.resolved_at, i.resolved_by, i.resolved_by_run_id,
+                           i.resolution_evidence_at, i.updated_at,
+                           ({FUNNEL_ALIAS}.contact_id IS NOT NULL)
+                               AS funnel_row_present,
+                           {FUNNEL_ALIAS}.lifecycle_stage
+                               AS current_lifecycle_stage,
+                           {FUNNEL_ALIAS}.last_modified_at,
+                           {FUNNEL_ALIAS}.last_ingested_at,
+                           {FUNNEL_ALIAS}.sync_batch_id,
+                           {direct_date_sql(EVENT_SQL)} AS direct_sql_entry_at,
+                           {recovered_date_sql(EVENT_SQL)}
+                               AS recovered_sql_entry_at
+                    FROM {INCIDENT_TABLE} i
+                    LEFT JOIN {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                           ON {FUNNEL_ALIAS}.contact_id = i.contact_id
+                    {_recovery_join()}
+                    ORDER BY i.detected_at, i.contact_id
+                    """,
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_post_boundary_incident_forensics failed: %s", exc)
+        return _unavailable(rows=[])
+
+
 def boundary_candidate_population_sql() -> tuple[str, tuple]:
     """The candidate-population query and its parameters, as data.
 
