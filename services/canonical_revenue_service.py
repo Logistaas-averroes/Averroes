@@ -317,7 +317,20 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
     }
 
 
-def load_closed_won_universe(won_stage_id: str) -> dict:
+def won_window_sql_bounds(window: str, *, now=None) -> tuple:
+    """The exact ``(start, end)`` :func:`load_won_deals` queries for ``window``.
+
+    Business-window bounds, normalized to UTC exactly as that read does. Used
+    by the PR-ADS-161D audit so its in-snapshot cross-check queries the
+    production SQL with the production bounds.
+    """
+    from analysis.business_windows import get_window_bounds
+    start, end = get_window_bounds(window, now=now)
+    return _utc_bound(start), _utc_bound(end)
+
+
+def load_closed_won_universe(won_stage_id: str, *,
+                             sql_windows: dict | None = None) -> dict:
     """The all-time closed-won universe, for the PR-ADS-161D truth service.
 
     Goes through this module so the ledger is still read in exactly one place
@@ -329,12 +342,15 @@ def load_closed_won_universe(won_stage_id: str) -> dict:
     rows, computed by the one shared implementation (``check_sync_coverage``).
 
     ``won_stage_id`` is a cross-check input only — see
-    ``db.deal_ledger_repository.fetch_closed_won_universe``.
+    ``db.deal_ledger_repository.fetch_closed_won_universe``. ``sql_windows``
+    (``{key: (start, end)}``) asks for production's windowed won read in the
+    same snapshot; only the audit passes it.
     """
     from db import deal_ledger_repository as ledger_repo
     from services.revenue_reconciliation_service import check_sync_coverage
 
-    universe = ledger_repo.fetch_closed_won_universe(won_stage_id)
+    universe = ledger_repo.fetch_closed_won_universe(
+        won_stage_id, sql_windows=sql_windows)
     if not universe.get("available"):
         return {**universe, "coverage_findings": None,
                 "source": CANONICAL_SOURCE}

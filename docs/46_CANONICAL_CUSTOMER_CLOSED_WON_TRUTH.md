@@ -60,7 +60,9 @@ it is resolved at the source.
 half-open `[start, end)`.
 
 * Evidence windows (`7d` … `180d`, `all_time`): N account-local calendar dates
-  ending today (`analysis.account_time`, Europe/London), as UTC midnights.
+  ending today (`analysis.account_time`, Europe/London), bounded on
+  **Europe/London midnights** converted to UTC by Campaign Evidence's
+  `window_instants` — under BST a window starts at 23:00Z the day before.
 * Business windows (`current_quarter` … `all_time`):
   `analysis.business_windows.get_window_bounds`, unchanged.
 
@@ -69,6 +71,10 @@ deal's associated contacts. A deal is a member of a window only when **every**
 associated contact was created in it; contacts spanning the boundary make it
 `ambiguous`; a contact whose creation time is not held makes it `unresolved`;
 a failed association lookup is `unresolved`, never "no contact".
+
+Its population is the same won population minus deals whose close lies after
+"now" (they have not closed); an undated won deal stays, because contact
+creation, not a close date, proves its membership.
 
 The two are reported side by side and never combined. Nothing here computes
 ROAS or CAC: a spend window divided by close-date deals is neither.
@@ -79,7 +85,11 @@ ROAS or CAC: a spend window divided by close-date deals is neither.
 | --- | --- | --- | --- |
 | `exact_close_date` | dated, not in the future | member iff inside `[start, end)` | member |
 | `missing_close_date` | no close date | **withholds the count** (could be in any window) | member |
-| `invalid_close_date` | dated after "now" | in no window | not a member |
+| `invalid_close_date` | dated after "now" | in no window — even one whose end is still ahead, such as a window ending at tomorrow's midnight | not a member |
+
+A won flag/stage conflict follows the same rule: an undated one blocks every
+window, a dated one blocks only a window it could be a member of, and one dated
+after "now" blocks none.
 
 No ingestion, sync, record-creation, boundary or association time ever stands
 in for a close date.
@@ -204,14 +214,19 @@ Re-derives, per window and from the same snapshot, what the service claims:
 the won predicate, unique deal ids, close-date membership (independently), the
 partition sum, revenue over distinct proven deals, null discipline on withheld
 metrics, ROAS/CAC unpublished, freshness from sync coverage, and conflicts
-withholding. For every business window it also cross-checks the confirmed
-membership against the production contract's own SQL-windowed read
-(`canonical_revenue_service.load_won_deals`). Structurally it checks there is
+withholding, and that a published count is the re-derived membership's size.
+For every business window it also runs production's own windowed SQL
+(`deal_ledger_repository.WON_DEALS_WINDOW_SQL`, with `load_won_deals`' bounds)
+**inside the same READ ONLY snapshot**, drops closes after "now", and requires
+the result to equal the service's dated membership. Undated members are
+reported beside that comparison, because production's All Time is bounded
+above and its SQL returns none. Structurally it checks there is
 no external or write import, no lifecycle-stage reference, and no production
 page consuming the service.
 
 Exit **0** every contract holds (metrics may still be withheld) · **1** a
-contract is broken · **2** unavailable.
+contract is broken · **2** unavailable — the ledger could not be read, or a
+cross-check could not run (an unmeasured comparison is not a violation).
 
 ---
 
@@ -228,3 +243,8 @@ address:
   customers and revenue on it.
 * **`sql_to_customer_rate`** divides all-source won deals by
   campaign-attributable SQLs — two populations.
+* **Production's All Time drops undated won deals.** `load_won_deals("all_time")`
+  queries `deal_close_date < tomorrow`, which excludes every NULL close date;
+  this service counts them in All Time and withholds finite windows over them.
+  Its windows also end at tomorrow's UTC midnight, so a close later today is
+  admitted. The audit reports both per window.

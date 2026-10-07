@@ -9,9 +9,12 @@ closed-won revenue, across every evidence and business window.
 
 It audits ``services/canonical_customer_revenue_service.py`` by RE-DERIVING
 what that service claims from the same snapshot, independently, and by
-cross-checking each business window's confirmed membership against the
-production revenue contract's own SQL-windowed read
-(``canonical_revenue_service.load_won_deals``).
+cross-checking each business window's membership against the production
+revenue contract's own SQL-windowed read
+(``deal_ledger_repository.WON_DEALS_WINDOW_SQL``, with the bounds
+``canonical_revenue_service.load_won_deals`` uses), run INSIDE the same
+REPEATABLE READ snapshot so a sync committing mid-audit cannot fake a
+mismatch.
 
 A metric that is WITHHELD for a true reason is not a failure: missing company
 associations, unpriced deals or undated won deals are source gaps, reported as
@@ -158,6 +161,8 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
     # 14. Membership is the close date, half-open — re-derived here.
     bounds = svc.window_bounds(w["window"]["window_type"],
                                w["window"]["window_key"], now)
+    # A close after ``now`` has not happened: it is a member of no window,
+    # however far the window's end lies in the future.
     for r in members:
         close = _dt(r.get("deal_close_date"))
         if close is None:
@@ -165,16 +170,34 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
                     f"{name}: undated deal {r['deal_id']} in a finite window")
             continue
         ok = (bounds["start"] is None or close >= bounds["start"]) \
-            and close < bounds["end"]
+            and close < bounds["end"] and close <= now
         a.check("membership_uses_close_date", ok,
-                f"{name}: deal {r['deal_id']} closed outside the window")
-    expected = sorted(str(r["deal_id"]) for r in won.values()
-                      if cwt.in_window(r.get("deal_close_date"),
-                                       bounds["start"], bounds["end"])
-                      or (bounds["is_all_time"] and
-                          _dt(r.get("deal_close_date")) is None))
+                f"{name}: deal {r['deal_id']} closed outside the window "
+                f"or after now")
+    expected = sorted(
+        str(r["deal_id"]) for r in won.values()
+        if (_dt(r.get("deal_close_date")) is None and bounds["is_all_time"])
+        or (_dt(r.get("deal_close_date")) is not None
+            and _dt(r.get("deal_close_date")) <= now
+            and (bounds["start"] is None
+                 or _dt(r.get("deal_close_date")) >= bounds["start"])
+            and _dt(r.get("deal_close_date")) < bounds["end"]))
     a.check("membership_reconciles", expected == sorted(ids),
             f"{name}: re-derived membership differs")
+    # The published number is the re-derived membership's size — not merely
+    # a membership list that happens to be right beside a wrong total.
+    if pub["closed_won_deals"]["status"] == cwt.PUBLISHED:
+        a.check("membership_reconciles",
+                out["closed_won_deals"] == len(expected),
+                f"{name}: published {out['closed_won_deals']} won deals, "
+                f"re-derived membership is {len(expected)}")
+    dated_expected = sum(1 for i in expected
+                         if _dt(won[i].get("deal_close_date")) is not None)
+    a.check("membership_reconciles",
+            out["closed_won_deals_confirmed_in_window"] == dated_expected,
+            f"{name}: confirmed-in-window "
+            f"{out['closed_won_deals_confirmed_in_window']} != "
+            f"{dated_expected}")
     # 11. Undated won deals disclosed, and a finite window withheld over them.
     undated = sum(1 for r in won.values() if _dt(r.get("deal_close_date"))
                   is None)
@@ -234,24 +257,46 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
                 pub["closed_won_deals"]["status"] == cwt.UNAVAILABLE, name)
 
 
-def sql_cross_check(a: Audit, w: dict, *, now) -> dict | None:
-    """Independent SQL windowing for a business window (production contract)."""
+def sql_windows(now) -> dict:
+    """``{business_key: (start, end)}`` — the bounds production queries."""
+    from analysis.business_windows import WINDOW_KEYS  # noqa: PLC0415
     from services import canonical_revenue_service as crs  # noqa: PLC0415
+    return {k: crs.won_window_sql_bounds(k, now=now) for k in WINDOW_KEYS}
 
+
+def sql_cross_check(a: Audit, w: dict, universe: dict, *, now) -> dict | None:
+    """Production's own SQL windowing for a business window, same snapshot.
+
+    The SQL filters on the window only; a close after ``now`` is dropped here,
+    independently of the service, because it has not happened. The remaining
+    ids must be exactly the service's DATED membership. Production's All Time
+    has an upper bound, so its SQL returns no undated deal: those are reported
+    beside the comparison (``service_undated_members``), never hidden in it.
+    """
     if not w.get("available") or w["window"]["window_type"] != "business":
         return None
     key = w["window"]["window_key"]
-    res = crs.load_won_deals(key, now=now, require_ready=False)
-    if not res.get("available"):
-        a.check("sql_window_cross_check", False,
-                f"business:{key}: the production read was unavailable")
-        return None
-    sql_ids = sorted({str(r["deal_id"]) for r in res.get("deals") or []})
-    mine = w["outcomes"]["closed_won_deals_confirmed_in_window"]
-    a.check("sql_window_cross_check", len(sql_ids) == mine,
-            f"business:{key}: production read {len(sql_ids)} != {mine}")
-    return {"window": key, "production_read_deals": len(sql_ids),
-            "service_confirmed_in_window": mine}
+    rows = (universe.get("sql_windowed") or {}).get(key)
+    if rows is None:
+        # Not a measured mismatch: the comparison never ran. run() reports
+        # the audit unavailable for this, never a broken contract.
+        return {"window": key, "unavailable": True}
+    future = sorted(r["deal_id"] for r in rows
+                    if _dt(r.get("deal_close_date")) is not None
+                    and _dt(r["deal_close_date"]) > now)
+    sql_ids = sorted({r["deal_id"] for r in rows} - set(future))
+    won = {str(r["deal_id"]): r for r in universe.get("won_rows") or []}
+    members = w["membership"]["deal_ids"]
+    undated = [i for i in members
+               if _dt((won.get(i) or {}).get("deal_close_date")) is None]
+    mine = sorted(set(members) - set(undated))
+    a.check("sql_window_cross_check", sql_ids == mine,
+            f"business:{key}: production SQL {len(sql_ids)} deal(s) != "
+            f"service dated membership {len(mine)}")
+    return {"window": key, "production_sql_deals": len(sql_ids),
+            "production_sql_future_dated_excluded": len(future),
+            "service_dated_members": len(mine),
+            "service_undated_members": len(undated)}
 
 
 def run(now: datetime | None = None) -> tuple[Audit, dict]:
@@ -262,7 +307,8 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
     now = now or datetime.now(tz=timezone.utc)
     a = Audit()
     structural = structural_checks(a)
-    universe = crs.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
+    universe = crs.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID,
+                                            sql_windows=sql_windows(now))
     truth = svc.get_closed_won_truth(now=now, universe=universe)
     report = {"audit": "customer_closed_won_truth",
               "generated_at": now.isoformat(),
@@ -280,16 +326,26 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
                       exit_code=EXIT_UNAVAILABLE,
                       verdict="unavailable")
         return a, report
+    not_run = []
     for w in truth["windows"]:
         window_checks(a, w, universe, now=now)
-        cross = sql_cross_check(a, w, now=now)
+        cross = sql_cross_check(a, w, universe, now=now)
         if cross:
             report["sql_cross_checks"].append(cross)
+            if cross.get("unavailable"):
+                not_run.append(cross["window"])
     report["checks"] = a.checks
     report["violations"] = a.violations
-    report["exit_code"] = EXIT_VIOLATION if a.violations else EXIT_OK
-    report["verdict"] = ("contract_broken" if a.violations
-                         else "contracts_hold")
+    report["sql_cross_checks_not_run"] = not_run
+    if a.violations:
+        report["exit_code"], report["verdict"] = EXIT_VIOLATION, \
+            "contract_broken"
+    elif not_run:
+        # A comparison that could not run proves nothing either way.
+        report["exit_code"], report["verdict"] = EXIT_UNAVAILABLE, \
+            "unavailable"
+    else:
+        report["exit_code"], report["verdict"] = EXIT_OK, "contracts_hold"
     return a, report
 
 

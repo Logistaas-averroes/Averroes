@@ -309,3 +309,37 @@ Recurring patterns (durable):
   tests at 45fb8f5 and 79 at dfe043d. Its PG tests ran on both.
 - Lesson: the branch can move during a review. Record `git rev-parse HEAD` before
   and after each long test run.
+
+## PR-ADS-161D first review (HEAD 9184025, 2026-10-07; branch committed mid-review)
+- Closed-won truth service: `analysis/closed_won_truth.py` (pure),
+  `services/canonical_customer_revenue_service.py`, ledger read
+  `deal_ledger_repository.fetch_closed_won_universe` (REPEATABLE READ, READ ONLY).
+  Won predicate `hs_is_closed_won IS TRUE`; stage 326093516 is only a cross-check.
+  No deal→company association is ingested anywhere, so customers are withheld.
+- Production deal-row shapes (`analysis/deal_truth.resolve_deal_associations`):
+  resolved single/identical contacts → `attribution_status='attributed'` EVEN
+  when acquisition_group is 'unclassified'; association 'none' → 'unclassified';
+  lookup_failed → 'unavailable'. `tests/canonical_ledger_fixtures.ledger_row`
+  defaults to resolved+unclassified, a shape production never writes.
+  On UPDATE, a failed lookup preserves the prior association columns, so
+  `lookup_failed` exists only on first insert, with gclid NULL.
+- Window ends are midnight AFTER today (business: UTC date; evidence: London
+  date as a UTC midnight, unlike 161B's London-midnight instants). So "future
+  close date" checks must test a close LATER TODAY. evaluate_window never
+  excludes CLOSE_INVALID from members; it relies on in_window only (verified by
+  execution: same-day future deal published in every window; test_23 uses Dec 1).
+- Verified by execution at 9184025: acquisition cohort publishes over won
+  flag/stage conflicts and counts future-dated deals; under unproven coverage,
+  `closed_won_deals_confirmed_in_window`, `coverage.deal_identity.deals`,
+  `coverage.campaign_attribution` and `revenue_usd_confirmed_subset` still carry
+  the would-be totals; negative USD amounts net into published revenue; no
+  `hs_is_closed_won IS NULL` disclosure (docs/35 requires a separate count).
+- Audit `audit_customer_closed_won_truth` is largely self-referential: it uses
+  the service's own `in_window`, `window_bounds`, `revenue_is_proven` and conflict
+  list; the partition check sums the service's own coverage dict; the SQL
+  cross-check compares COUNTS only. In-process mutations NOT caught: conflicts
+  ignored, misbucketing, evidence-window bounds shifted, acquisition published
+  under unproven coverage, partition values while unavailable, revenue
+  published under unproven coverage. Caught: undated dropped from all_time.
+  test_61 mutates the output dict, not the implementation.
+- Suite: 54 passed, PG cases ran (no skips) with python3.11.

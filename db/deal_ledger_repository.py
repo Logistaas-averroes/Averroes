@@ -487,6 +487,20 @@ PRODUCTION_DEAL_COLUMNS = (
 )
 
 
+#: The production won-deal window read, as ONE statement text. Shared by
+#: :func:`fetch_won_deals` and the PR-ADS-161D audit's cross-check (run inside
+#: :func:`fetch_closed_won_universe`'s snapshot), so the audit compares against
+#: the exact SQL production runs rather than a re-typed copy of it.
+WON_DEALS_WINDOW_SQL = f"""
+    SELECT {', '.join(PRODUCTION_DEAL_COLUMNS)}
+    FROM {LEDGER_TABLE}
+    WHERE hs_is_closed_won IS TRUE
+      AND (%s::timestamptz IS NULL OR deal_close_date >= %s)
+      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
+    ORDER BY deal_close_date DESC NULLS LAST, deal_id
+    """
+
+
 def fetch_won_deals(start=None, end=None) -> dict:
     """THE production won-deal population for a business window (PR-ADS-153E-B).
 
@@ -514,17 +528,7 @@ def fetch_won_deals(start=None, end=None) -> dict:
             if conn is None:
                 return _unavailable(rows=[])
             with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT {', '.join(PRODUCTION_DEAL_COLUMNS)}
-                    FROM {LEDGER_TABLE}
-                    WHERE hs_is_closed_won IS TRUE
-                      AND (%s::timestamptz IS NULL OR deal_close_date >= %s)
-                      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
-                    ORDER BY deal_close_date DESC NULLS LAST, deal_id
-                    """,
-                    (start, start, end, end),
-                )
+                cur.execute(WON_DEALS_WINDOW_SQL, (start, start, end, end))
                 rows = [_normalise(r) for r in _rows_as_dicts(cur)]
                 for row in rows:
                     for key in ("revenue_usd", "amount_raw"):
@@ -576,7 +580,8 @@ CLOSED_WON_UNIVERSE_TRANSACTION = (
     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
 
 
-def fetch_closed_won_universe(won_stage_id: str) -> dict:
+def fetch_closed_won_universe(won_stage_id: str, *,
+                              sql_windows: dict | None = None) -> dict:
     """Every input the closed-won truth service needs, from ONE snapshot.
 
     PR-ADS-161D. Four reads, one REPEATABLE READ / READ ONLY transaction, so a
@@ -591,7 +596,12 @@ def fetch_closed_won_universe(won_stage_id: str) -> dict:
       confirmed won stage could disagree: flag TRUE, or stage = ``won_stage_id``;
     * ``acquisition_contacts`` — for each won deal, every associated contact and
       that contact's canonical ``created_at`` (NULL when the funnel holds no row);
-    * ``sync_state`` — the ledger's sync coverage row.
+    * ``sync_state`` — the ledger's sync coverage row;
+    * ``sql_windowed`` — only when ``sql_windows`` (``{key: (start, end)}``) is
+      given: for each key, the deal ids production's own
+      :data:`WON_DEALS_WINDOW_SQL` returns, with their close dates, read in the
+      SAME snapshot so the audit's cross-check cannot be broken by a sync
+      committing between two reads.
 
     The won predicate is ``hs_is_closed_won IS TRUE`` exactly as in
     :func:`fetch_won_deals`. ``won_stage_id`` is NEVER a population filter here —
@@ -649,10 +659,21 @@ def fetch_closed_won_universe(won_stage_id: str) -> dict:
                     f"association_failures, last_batch_id, updated_at "
                     f"FROM {SYNC_STATE_TABLE} WHERE scope = %s", (SYNC_SCOPE,))
                 state_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
-        return {"available": True, "won_rows": won_rows,
-                "won_definition_rows": definition_rows,
-                "acquisition_contacts": acquisition,
-                "sync_state": state_rows[0] if state_rows else None}
+                windowed = {}
+                for key, (w_start, w_end) in (sql_windows or {}).items():
+                    cur.execute(WON_DEALS_WINDOW_SQL,
+                                (w_start, w_start, w_end, w_end))
+                    windowed[key] = [
+                        {"deal_id": str(r["deal_id"]),
+                         "deal_close_date": _iso(r.get("deal_close_date"))}
+                        for r in _rows_as_dicts(cur)]
+        result = {"available": True, "won_rows": won_rows,
+                  "won_definition_rows": definition_rows,
+                  "acquisition_contacts": acquisition,
+                  "sync_state": state_rows[0] if state_rows else None}
+        if sql_windows is not None:
+            result["sql_windowed"] = windowed
+        return result
     except Exception as exc:  # noqa: BLE001
         log.warning("fetch_closed_won_universe failed: %s", exc)
         return _unavailable(won_rows=[], won_definition_rows=[],

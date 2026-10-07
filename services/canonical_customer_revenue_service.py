@@ -32,7 +32,7 @@ production page in PR-ADS-161D; PR-ADS-161E migrates readers onto it.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from analysis import closed_won_truth as cwt
 
@@ -74,17 +74,15 @@ def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-def _midnight(d: date) -> datetime:
-    return datetime.combine(d, time.min, tzinfo=timezone.utc)
-
-
 def window_bounds(window_type: str, window_key: str,
                   now: datetime | None = None) -> dict:
     """``{start, end, start_date, end_date, is_all_time, label}``, half-open.
 
     Evidence windows follow the repository's evidence convention: N account-local
     calendar dates ending today (``analysis.account_time``), so ``start`` is
-    midnight of ``today - (N-1)`` and ``end`` is midnight after today. Business
+    ACCOUNT-LOCAL midnight of ``today - (N-1)`` and ``end`` is account-local
+    midnight after today, both converted to UTC by Campaign Evidence's own
+    ``window_instants`` (so under BST a window starts at 23:00Z, not 00:00Z). Business
     windows use ``analysis.business_windows.get_window_bounds`` unchanged. Both
     are UTC instants; neither ever uses an ingestion, sync or boundary time.
     """
@@ -97,9 +95,13 @@ def window_bounds(window_type: str, window_key: str,
         resolved = resolve_evidence_window(window_key)
         today = account_today(now)
         days = resolved["days"]
+        from services.marketing_outcome_cohort_service import (  # noqa: PLC0415
+            window_instants,
+        )
         start_date = None if days is None else today - timedelta(days=days - 1)
-        return {"start": None if start_date is None else _midnight(start_date),
-                "end": _midnight(today + timedelta(days=1)),
+        start_at, end_before = window_instants(start_date, today)
+        return {"start": start_at,
+                "end": end_before,
                 "start_date": start_date.isoformat() if start_date else None,
                 "end_date": (today + timedelta(days=1)).isoformat(),
                 "is_all_time": days is None, "label": window_key}

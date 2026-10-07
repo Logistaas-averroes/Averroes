@@ -224,13 +224,25 @@ def test_21_no_ingestion_or_sync_time_ever_dates_a_deal():
 
 
 def test_22_windows_are_half_open():
-    b = svc.window_bounds(BUSINESS, "current_quarter", NOW)
+    # A COMPLETED window, so its end is not also the future-close boundary.
+    b = svc.window_bounds(BUSINESS, "last_quarter", NOW)
     at_start = ledger_row("s", deal_close_date=b["start"].isoformat())
     at_end = ledger_row("e", deal_close_date=b["end"].isoformat())
     just_before_end = ledger_row(
         "b", deal_close_date=(b["end"] - timedelta(seconds=1)).isoformat())
-    w = _one([at_start, at_end, just_before_end])
+    w = _one([at_start, at_end, just_before_end], (BUSINESS, "last_quarter"))
     assert w["membership"]["deal_ids"] == ["b", "s"]
+
+
+def test_22_b_evidence_windows_are_account_local_days_under_bst():
+    """Oct 1 London begins at Sep 30 23:00Z in BST, not at Oct 1 00:00Z."""
+    b = svc.window_bounds(EVIDENCE, "7d", NOW)
+    assert b["start"] == datetime(2026, 9, 30, 23, 0, tzinfo=timezone.utc)
+    assert b["end"] == datetime(2026, 10, 7, 23, 0, tzinfo=timezone.utc)
+    first_local_hour = ledger_row("in", deal_close_date="2026-09-30T23:30:00+00:00")
+    previous_day = ledger_row("out", deal_close_date="2026-09-30T22:30:00+00:00")
+    w = _one([first_local_hour, previous_day], (EVIDENCE, "7d"))
+    assert w["membership"]["deal_ids"] == ["in"]
 
 
 def test_23_a_future_close_date_is_disclosed_and_in_no_window():
@@ -238,6 +250,39 @@ def test_23_a_future_close_date_is_disclosed_and_in_no_window():
     w = _one([future], (BUSINESS, "all_time"))
     assert w["membership"]["deal_ids"] == []
     assert w["coverage"]["close_date"][cwt.CLOSE_INVALID] == 1
+
+
+def test_23_b_a_close_later_today_or_this_quarter_is_in_no_window():
+    """A window's end in the future does not admit a close that has not happened."""
+    earlier_today = ledger_row("a", deal_close_date="2026-10-07T11:00:00+00:00")
+    later_today = ledger_row("l", deal_close_date="2026-10-07T18:00:00+00:00")
+    next_month = ledger_row("n", deal_close_date="2026-11-15T09:00:00+00:00")
+    rows = [earlier_today, later_today, next_month]
+    for window in ((EVIDENCE, "7d"), (BUSINESS, "current_quarter"),
+                   (BUSINESS, "ytd"), (EVIDENCE, "all_time")):
+        w = _one(rows, window)
+        assert w["membership"]["deal_ids"] == ["a"], window
+        assert w["outcomes"]["closed_won_deals"] == 1, window
+        assert w["outcomes"]["revenue_usd_confirmed_subset"] == \
+            earlier_today["revenue_usd"], window
+
+
+def test_23_c_a_future_dated_conflict_blocks_nothing_an_undated_one_blocks_all():
+    rows = [ledger_row("1", deal_close_date=Q4)]
+    future_conflict = {"deal_id": "9", "deal_stage_id": cwt.CONFIRMED_WON_STAGE_ID,
+                       "hs_is_closed_won": False,
+                       "deal_close_date": "2026-12-01T00:00:00+00:00"}
+    later_today = dict(future_conflict, deal_id="8",
+                       deal_close_date="2026-10-07T18:00:00+00:00")
+    for window in ((BUSINESS, "all_time"), (BUSINESS, "current_quarter"),
+                   (EVIDENCE, "7d")):
+        w = _one(rows, window, definition_rows=_definition_rows(rows)
+                 + [future_conflict, later_today])
+        assert _status(w, "closed_won_deals") == cwt.PUBLISHED, window
+    undated = dict(future_conflict, deal_id="7", deal_close_date=None)
+    w = _one(rows, (BUSINESS, "last_quarter"),
+             definition_rows=_definition_rows(rows) + [undated])
+    assert _status(w, "closed_won_deals") == cwt.WITHHELD
 
 
 @pytest.mark.parametrize("override,state", [
@@ -412,6 +457,17 @@ def test_41_a_contact_without_creation_time_leaves_membership_unresolved():
     assert w["acquisition_cohort"]["status"] == cwt.WITHHELD
 
 
+def test_42_b_a_future_dated_deal_is_in_no_acquisition_cohort():
+    """It has not closed; an undated won deal stays, proven by its contacts."""
+    rows = [ledger_row("f", deal_close_date="2026-12-01T00:00:00+00:00"),
+            ledger_row("u", deal_close_date=None)]
+    contacts = [_contact("f", "1", "2026-10-03T00:00:00+00:00"),
+                _contact("u", "2", "2026-10-03T00:00:00+00:00")]
+    acq = _one(rows, contacts=contacts)["acquisition_cohort"]
+    assert acq["closed_won_deals_confirmed"] == 1
+    assert acq["status"] == cwt.PUBLISHED and acq["closed_won_deals"] == 1
+
+
 def test_42_a_failed_association_lookup_is_unresolved_not_contactless():
     row = ledger_row("m", deal_close_date=Q4,
                      association_status="lookup_failed")
@@ -517,6 +573,9 @@ def test_60_the_audit_passes_a_correct_window():
     # ROAS published
     (lambda w: w["publication"]["roas"].update(status="published"),
      "roas_and_cac_not_published"),
+    # a published total that is not the membership's size
+    (lambda w: w["outcomes"].update(closed_won_deals=999),
+     "membership_reconciles"),
 ])
 def test_61_each_contract_breach_is_caught(mutate, check):
     rows = _attr_rows() + [ledger_row("p", deal_close_date=Q4,
@@ -538,6 +597,76 @@ def test_62_a_finite_window_published_over_an_undated_deal_is_caught():
     w["outcomes"]["closed_won_deals"] = 1
     assert _audit_window(w, rows).checks["missing_close_dates_disclosed"] \
         is False
+
+
+def test_62_b_a_member_closing_after_now_is_caught():
+    """Counterfactual: the pre-fix membership admitted a close later today."""
+    later = ledger_row("l", deal_close_date="2026-10-07T18:00:00+00:00")
+    rows = [ledger_row("1", deal_close_date=Q4), later]
+    w = _one(rows)
+    assert w["membership"]["deal_ids"] == ["1"]
+    w["membership"]["deal_ids"] = ["1", "l"]
+    w["outcomes"]["closed_won_deals"] = 2
+    a = _audit_window(w, rows)
+    assert a.checks["membership_uses_close_date"] is False
+    assert a.checks["membership_reconciles"] is False
+
+
+def _run_audit_on(monkeypatch, universe_rows, sql_windowed):
+    from scripts import audit_customer_closed_won_truth as audit
+    from services import canonical_revenue_service as crs
+    universe = _universe(universe_rows)
+    if sql_windowed is not None:
+        universe["sql_windowed"] = sql_windowed
+    monkeypatch.setattr(crs, "load_closed_won_universe",
+                        lambda *a, **k: universe)
+    monkeypatch.setattr(svc, "campaign_resolver", lambda now=None: (None, "t"))
+    _a, report = audit.run(NOW)
+    return audit, report
+
+
+def _sql(rows, keys=("current_quarter", "last_quarter", "last_6_months",
+                     "ytd", "all_time")):
+    """What the production SQL returns per window: the window only — no
+    ``now``, and (every business window having an end) no undated deal."""
+    out = {}
+    for key in keys:
+        b = svc.window_bounds(BUSINESS, key, NOW)
+        out[key] = [{"deal_id": r["deal_id"],
+                     "deal_close_date": r["deal_close_date"]} for r in rows
+                    if cwt.in_window(r["deal_close_date"], b["start"], b["end"])]
+    return out
+
+
+def test_62_c_the_sql_cross_check_drops_future_closes_and_compares_ids(
+        monkeypatch):
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("l", deal_close_date="2026-10-07T18:00:00+00:00")]
+    audit, report = _run_audit_on(monkeypatch, rows, _sql(rows))
+    assert report["exit_code"] == audit.EXIT_OK, report["violations"]
+    cq = next(c for c in report["sql_cross_checks"]
+              if c["window"] == "current_quarter")
+    assert cq == {"window": "current_quarter", "production_sql_deals": 1,
+                  "production_sql_future_dated_excluded": 1,
+                  "service_dated_members": 1, "service_undated_members": 0}
+    # Counterfactual: production SQL holding a deal the service lacks.
+    extra = _sql(rows)
+    extra["current_quarter"].append({"deal_id": "ghost",
+                                     "deal_close_date": Q4})
+    audit, report = _run_audit_on(monkeypatch, rows, extra)
+    assert report["exit_code"] == audit.EXIT_VIOLATION
+    assert report["checks"]["sql_window_cross_check"] is False
+
+
+def test_62_d_a_cross_check_that_could_not_run_is_unavailable_not_broken(
+        monkeypatch):
+    rows = [ledger_row("1", deal_close_date=Q4)]
+    audit, report = _run_audit_on(monkeypatch, rows, None)
+    assert report["violations"] == []
+    assert report["exit_code"] == audit.EXIT_UNAVAILABLE
+    assert report["verdict"] == "unavailable"
+    assert set(report["sql_cross_checks_not_run"]) == {
+        "current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"}
 
 
 def test_63_the_audit_has_no_external_or_write_path_and_no_consumer():
@@ -697,7 +826,13 @@ def test_76_pg_the_audit_cli_holds_writes_nothing_and_cross_checks_sql(
     assert {c["window"] for c in out["sql_cross_checks"]} == {
         "current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"}
     for c in out["sql_cross_checks"]:
-        assert c["production_read_deals"] == c["service_confirmed_in_window"]
+        assert c["production_sql_deals"] == c["service_dated_members"]
+    # Production's All Time is bounded above, so its SQL drops the undated d3;
+    # the service counts it and the audit says so beside the comparison.
+    all_time = next(c for c in out["sql_cross_checks"]
+                    if c["window"] == "all_time")
+    assert all_time["production_sql_deals"] == 2
+    assert all_time["service_undated_members"] == 1
 
 
 @_needs_pg
@@ -711,6 +846,41 @@ def test_77_pg_the_human_readable_audit_renders(ledger):
     assert code == audit.EXIT_OK
     assert "won deals" in text and "missing close date" in text
     assert "company association" in text or "customer identity" in text
+
+
+@_needs_pg
+def test_79_pg_the_cross_check_runs_production_sql_in_the_audit_snapshot(
+        ledger, monkeypatch):
+    """Production's SQL admits a close later today (its windows end at
+    tomorrow's midnight); the audit drops it, the service never admits it, and
+    no second read outside the snapshot runs."""
+    from scripts import audit_customer_closed_won_truth as audit
+    from services import canonical_revenue_service as crs
+    _write(ledger, ledger_row("d1", deal_close_date=Q4))
+    _write(ledger, ledger_row("later", deal_close_date="2026-10-07T18:00:00+00:00"))
+    _write(ledger, ledger_row("next", deal_close_date="2026-11-20T09:00:00+00:00"))
+
+    def _no_second_read(*a, **k):
+        raise AssertionError("the audit read outside its snapshot")
+
+    monkeypatch.setattr(crs, "load_won_deals", _no_second_read)
+    monkeypatch.setattr(ledger, "fetch_won_deals", _no_second_read)
+    before = _snapshot()
+    _a, report = audit.run(NOW)
+    assert _snapshot() == before
+    assert report["exit_code"] == audit.EXIT_OK, report["violations"]
+    cq = next(c for c in report["sql_cross_checks"]
+              if c["window"] == "current_quarter")
+    assert cq["production_sql_future_dated_excluded"] == 1   # "later"
+    assert cq["production_sql_deals"] == cq["service_dated_members"] == 1
+
+
+def test_80_the_cross_check_and_production_share_one_sql_text():
+    import inspect
+    from db import deal_ledger_repository as repo
+    assert "WON_DEALS_WINDOW_SQL" in inspect.getsource(repo.fetch_won_deals)
+    assert "WON_DEALS_WINDOW_SQL" in inspect.getsource(
+        repo.fetch_closed_won_universe)
 
 
 def test_78_ci_runs_this_suite_in_the_postgresql_step_and_asserts_it_ran():

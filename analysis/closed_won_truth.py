@@ -395,8 +395,13 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
     undated = [r for r in won_rows
                if close_date_state(r, now) == CLOSE_MISSING]
     future = [r for r in won_rows if close_date_state(r, now) == CLOSE_INVALID]
-    members = [r for r in won_rows if in_window(r.get("deal_close_date"),
-                                                start, end)]
+    # A close date after ``now`` has not happened, whatever the window's end:
+    # a window ending at tomorrow's midnight, or a quarter's end, must not
+    # admit a deal dated later today or next month. Membership therefore
+    # requires an EXACT close date (dated, not after ``now``) inside the window.
+    members = [r for r in won_rows
+               if close_date_state(r, now) == CLOSE_EXACT
+               and in_window(r.get("deal_close_date"), start, end)]
     if is_all_time:
         # All Time contains every won deal whose identity and won state are
         # proven — an undated one included. A future-dated one has not closed.
@@ -410,7 +415,11 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
         if state == WON_DEFINITIONS_AGREE:
             continue
         close = _as_utc(d.get("deal_close_date"))
-        if close is None or in_window(close, start, end) or is_all_time:
+        # An undated conflict could belong to any window, so it blocks every
+        # one. A dated conflict blocks only a window it could be a member of —
+        # and a close after ``now`` is a member of none, All Time included.
+        if close is None or (close <= now and (
+                is_all_time or in_window(close, start, end))):
             conflicts.append({"deal_id": d.get("deal_id"), "state": state,
                               "deal_stage_id": d.get("deal_stage_id")})
 
@@ -442,17 +451,23 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
             resolved_customers |= companies
 
     # ── acquisition cohort ──────────────────────────────────────────────────
+    # The same won population as the event cohort, minus nothing but deals
+    # whose close lies after ``now`` (they have not closed). An undated deal
+    # stays: its acquisition membership is proven by contact creation, not by
+    # a close date.
+    acq_population = [r for r in won_rows
+                      if close_date_state(r, now) != CLOSE_INVALID]
     acq = {}
-    for r in won_rows:
+    for r in acq_population:
         cid = str(r.get("deal_id"))
         acq[cid] = acquisition_state(
             contacts_by_deal.get(cid) or [], start, end,
             association_status=r.get("association_status"))
-    acq_members = [r for r in won_rows
+    acq_members = [r for r in acq_population
                    if acq[str(r.get("deal_id"))] == ACQ_MEMBER]
-    acq_unresolved = [r for r in won_rows
+    acq_unresolved = [r for r in acq_population
                       if acq[str(r.get("deal_id"))] == ACQ_UNRESOLVED]
-    acq_ambiguous = [r for r in won_rows
+    acq_ambiguous = [r for r in acq_population
                      if acq[str(r.get("deal_id"))] == ACQ_AMBIGUOUS]
 
     # ── publication ─────────────────────────────────────────────────────────
