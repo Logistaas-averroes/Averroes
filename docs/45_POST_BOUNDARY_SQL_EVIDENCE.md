@@ -222,7 +222,6 @@ classification, computed, never a way to close anything:
 | code-owned | `stored_evidence_incident_open` | the date is stored; the closure was lost |
 | | `candidate_not_refreshed` | HubSpot changed after our stored copy; the sync has not re-read it |
 | | `late_property_not_refreshed` | HubSpot set the property after we last ingested that version |
-| | `writer_dropped_evidence` | set before we ingested it — the payload carried it and we lost it |
 | | `direct_property_unparseable` | HubSpot sent a value we could not parse |
 | | `history_has_exact_sql_transition` | HubSpot history holds a dated SQL version we did not store |
 | | `history_sql_timestamp_unparseable` | an SQL version whose timestamp we could not parse |
@@ -232,7 +231,23 @@ classification, computed, never a way to close anything:
 | not determined | `history_request_failed` · `history_payload_absent` · `history_not_consulted` · `cause_unresolved` | we did not look, or got no answer |
 
 Facts (several per incident) use the brief's vocabulary verbatim, plus
-`outside_detector_population` and `source_contact_not_returned`.
+`outside_detector_population`, `source_contact_not_returned` and
+`direct_property_set_before_last_ingest`.
+
+Three rules keep a classification from outrunning its evidence:
+
+* **A source verdict needs the direct property read as `absent`.** History
+  alone cannot say HubSpot holds no exact entry; defect 1 was a direct date
+  HubSpot held while history showed no SQL version. Without that read the
+  verdict is `cause_unresolved`, and the history facts are kept.
+* **`writer_dropped_evidence` is never emitted.** HubSpot having set the
+  property before our last *ingestion* does not prove the payload we *read*
+  carried it, because ingestion follows the read. Proving writer loss needs the
+  payload itself, which is not recorded. That ordering is reported as the fact
+  `direct_property_set_before_last_ingest` with `cause_unresolved`.
+* **An undated version voids adjacency.** It could sit anywhere in the order,
+  so neither bound nor a stage jump is claimed. An SQL version still proves
+  "not a skip".
 
 ---
 
@@ -254,10 +269,13 @@ code-owned loss, or a resolved incident with no stored evidence · **2**
 unavailable (counts are NULL, never 0).
 
 The local mode cannot see HubSpot, so it cannot detect the upstream-present
-causes. For incidents recorded before this PR it also has no history shape, so
-it reports `history_has_no_sql_transition` without saying whether it was a
-jump. **The first incremental sync after deploy re-checks every open incident
-and records its shape**, after which the local audit can separate stage jumps.
+causes. Incidents recorded before this PR carry no direct-property state and no
+history shape, so the local audit reports them as `cause_unresolved` (not
+determined), not as HubSpot's gap. **The first incremental sync after deploy
+re-checks every open incident**, which records both. If HubSpot holds a direct
+date, that sync persists it and closes the incident. Run the local audit after
+it, or use `--compare-hubspot`. A comparison in which any read fails exits 2:
+it is incomplete, not a finding.
 
 ### The repair — dry run first
 

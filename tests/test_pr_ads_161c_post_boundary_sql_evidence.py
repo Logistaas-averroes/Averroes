@@ -259,9 +259,31 @@ def test_07_the_classification_vocabulary_partitions_and_fails_closed():
 def test_08_local_classification_follows_the_recorded_evidence(
         reason, jump, expected):
     out = fx.classify_local({"reason": reason, "stage_jump_skipped_sql": jump,
+                             "direct_property_state": "absent",
                              "current_lifecycle_stage": "opportunity",
                              "funnel_row_present": True})
     assert out["classification"] == expected
+
+
+@pytest.mark.parametrize("direct_state", [None, "not_read"])
+def test_08b_no_source_verdict_without_reading_the_direct_property(
+        direct_state):
+    """Review: a stage jump in HISTORY does not prove HubSpot holds no date.
+
+    Defect 1 was a direct date HubSpot held while history showed no SQL
+    version. Every pre-161C incident has no direct-property state, so the
+    local audit must not call any of them HubSpot's gap.
+    """
+    out = fx.classify_local({
+        "reason": "post_boundary_history_has_no_sql_transition",
+        "stage_jump_skipped_sql": True, "direct_property_state": direct_state,
+        "current_lifecycle_stage": "opportunity", "funnel_row_present": True})
+    assert out["classification"] == fx.C_CAUSE_UNRESOLVED
+    assert out["owner"] == fx.OWNER_UNKNOWN
+    assert fx.F_HISTORY_NO_SQL in out["facts"], "the history fact is kept"
+
+    compared = fx.classify_with_source(LOCAL, _src(direct_state=direct_state))
+    assert compared["classification"] == fx.C_CAUSE_UNRESOLVED
 
 
 def test_09_stored_evidence_with_an_open_incident_outranks_every_reason():
@@ -298,11 +320,12 @@ LOCAL = {"reason": "post_boundary_history_has_no_sql_transition",
           last_modified_at=T_OPP,
           direct_sql_entry_set_at=T_OPP + timedelta(hours=2)),
      fx.C_LATE_PROPERTY),
-    # Set before we ingested that version: the payload carried it; we lost it.
+    # Set before we INGESTED it — but ingestion follows the read, so HubSpot
+    # may have set it in between. Not proof the writer dropped it.
     (_src(direct_state="present", direct_sql_entry_at=T_SQL,
           last_modified_at=T_OPP,
           direct_sql_entry_set_at=T_OPP - timedelta(hours=2)),
-     fx.C_WRITER_DROPPED),
+     fx.C_CAUSE_UNRESOLVED),
     # No instant to decide with: not picked, reported unresolved.
     (_src(direct_state="present", direct_sql_entry_at=T_SQL,
           last_modified_at=T_OPP), fx.C_CAUSE_UNRESOLVED),
@@ -320,6 +343,41 @@ LOCAL = {"reason": "post_boundary_history_has_no_sql_transition",
 def test_10_the_comparison_names_where_the_evidence_disappeared(
         source, expected):
     assert fx.classify_with_source(LOCAL, source)["classification"] == expected
+
+
+def test_10b_writer_loss_is_never_inferred_from_ingestion_time():
+    """Review: `last_ingested_at` is AFTER the read, so it cannot prove what
+    the payload carried. The ordering is recorded as a fact, not a cause."""
+    out = fx.classify_with_source(LOCAL, _src(
+        direct_state="present", direct_sql_entry_at=T_SQL,
+        last_modified_at=T_OPP,
+        direct_sql_entry_set_at=T_OPP - timedelta(hours=2)))
+    assert out["owner"] == fx.OWNER_UNKNOWN
+    assert fx.F_DIRECT_SET_BEFORE_INGEST in out["facts"]
+    assert "writer_dropped_evidence" not in fx.CLASSIFICATIONS
+
+
+def test_10c_an_undated_version_leaves_adjacency_unproven():
+    """Review: dropping an undated version can invent a lead→opportunity skip
+    that the undated version might sit inside."""
+    shape = fx.history_shape([_v("lead", T_LEAD), _v("other", None),
+                              _v("opportunity", T_OPP)])
+    assert shape["stage_jump_skipped_sql"] is None
+    assert shape["last_known_below_sql_at"] is None
+    assert shape["first_observed_at_or_above_sql"] is None
+    # An SQL version, even undated, still proves "not a skip".
+    assert fx.history_shape([_v("salesqualifiedlead", None),
+                             _v("opportunity", T_OPP)])[
+        "stage_jump_skipped_sql"] is False
+
+
+def test_10d_a_bad_sql_timestamp_is_never_also_called_no_transition():
+    """Review: defect 4, at the fact level."""
+    shape = fx.history_shape([_v("lead", T_LEAD),
+                              _v("salesqualifiedlead", None, raw="garbage")])
+    out = fx.classify_with_source(LOCAL, _src(history_shape=shape))
+    assert out["classification"] == fx.C_HISTORY_SQL_UNPARSEABLE
+    assert fx.F_HISTORY_NO_SQL not in out["facts"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -855,11 +913,11 @@ def test_44_the_comparison_classifies_against_hubspot_and_counts_its_calls(
 
     by_id = {i["contact_id"]: i["classification"] for i in report["incidents"]}
     assert by_id == {"cand": fx.C_CANDIDATE_NOT_REFRESHED,
-                     "late": fx.C_LATE_PROPERTY, "drop": fx.C_WRITER_DROPPED,
+                     "late": fx.C_LATE_PROPERTY, "drop": fx.C_CAUSE_UNRESOLVED,
                      "hist": fx.C_HISTORY_EXACT_NOT_STORED,
                      "jump": fx.C_STAGE_JUMP}
     assert report["hubspot_calls_performed"] == len(calls) == 1
-    assert report["root_cause"]["code_owned_losses"] == 4
+    assert report["root_cause"]["code_owned_losses"] == 3
     assert report["exit_code"] == evidence_svc.EXIT_VIOLATION
     comparison = next(i for i in report["incidents"]
                       if i["contact_id"] == "late")["comparison"]
@@ -889,6 +947,27 @@ def test_46_a_failed_comparison_is_unavailable_not_a_finding(monkeypatch):
     report = evidence_svc.audit(compare_hubspot=True, client=object())
     assert report["exit_code"] == evidence_svc.EXIT_UNAVAILABLE
     assert report["hubspot_calls_failed"] == 1
+
+
+def test_46b_one_failed_batch_beside_a_good_one_is_not_a_complete_audit(
+        monkeypatch):
+    """Review: a partly made comparison must not exit 0 as 'compared'."""
+    limit = hubspot.HUBSPOT_HISTORY_BATCH_LIMIT
+    _stub_store(monkeypatch, [_forensic_row(f"c{i:03d}")
+                              for i in range(limit + 1)])
+    calls = {"n": 0}
+
+    def flaky(ids, client=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("HubSpot 503")
+        return {c: _cmp() for c in ids}
+
+    monkeypatch.setattr(hubspot, "compare_sql_entry_evidence", flaky)
+    report = evidence_svc.audit(compare_hubspot=True, client=object())
+    assert report["audit_complete"] is False
+    assert report["exit_code"] == evidence_svc.EXIT_UNAVAILABLE
+    assert report["compared_incidents"] == 1, "unread contacts are not compared"
 
 
 @_needs_pg

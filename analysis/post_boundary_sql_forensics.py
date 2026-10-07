@@ -83,7 +83,12 @@ F_HISTORY_FAILED = "history_request_failed"
 F_HISTORY_EXACT = "history_has_exact_sql_transition"
 F_HISTORY_NO_SQL = "history_has_no_sql_transition"
 F_STAGE_JUMP = "stage_jump_skipped_sql"
-F_WRITER_DROPPED = "writer_dropped_evidence"
+#: PR-ADS-161C review: HubSpot set the direct property before our last
+#: INGESTION of the contact. That does not prove the payload we read carried
+#: it — ingestion happens after the read — so it is a fact, not a cause.
+#: (`writer_dropped_evidence`, the brief's name for that cause, is therefore
+#: never emitted: no timestamp this repository records can prove it.)
+F_DIRECT_SET_BEFORE_INGEST = "direct_property_set_before_last_ingest"
 F_CANDIDATE_NOT_REFRESHED = "candidate_not_refreshed"
 F_LATE_PROPERTY = "late_property_not_refreshed"
 F_CAUSE_UNRESOLVED = "cause_unresolved"
@@ -108,7 +113,7 @@ FACTS = (
     F_STORED_PRESENT, F_STORED_ABSENT,
     F_HISTORY_PRESENT, F_HISTORY_ABSENT, F_HISTORY_FAILED,
     F_HISTORY_EXACT, F_HISTORY_NO_SQL, F_STAGE_JUMP,
-    F_WRITER_DROPPED, F_CANDIDATE_NOT_REFRESHED, F_LATE_PROPERTY,
+    F_DIRECT_SET_BEFORE_INGEST, F_CANDIDATE_NOT_REFRESHED, F_LATE_PROPERTY,
     F_CAUSE_UNRESOLVED,
     F_STORED_EVIDENCE_OPEN, F_OUTSIDE_POPULATION, F_SOURCE_NOT_RETURNED,
     F_HISTORY_NOT_CONSULTED, F_HISTORY_SQL_UNPARSEABLE, F_HISTORY_SQL_UNDATED,
@@ -120,7 +125,6 @@ FACTS = (
 C_STORED_EVIDENCE_OPEN = F_STORED_EVIDENCE_OPEN
 C_CANDIDATE_NOT_REFRESHED = F_CANDIDATE_NOT_REFRESHED
 C_LATE_PROPERTY = F_LATE_PROPERTY
-C_WRITER_DROPPED = F_WRITER_DROPPED
 C_DIRECT_UNPARSEABLE = F_DIRECT_UNPARSEABLE
 C_HISTORY_EXACT_NOT_STORED = F_HISTORY_EXACT
 C_HISTORY_SQL_UNPARSEABLE = F_HISTORY_SQL_UNPARSEABLE
@@ -135,7 +139,7 @@ C_CAUSE_UNRESOLVED = F_CAUSE_UNRESOLVED
 #: HubSpot holds (or held) the evidence and our path lost it. Each is a bug.
 CODE_OWNED = (
     C_STORED_EVIDENCE_OPEN, C_CANDIDATE_NOT_REFRESHED, C_LATE_PROPERTY,
-    C_WRITER_DROPPED, C_DIRECT_UNPARSEABLE, C_HISTORY_EXACT_NOT_STORED,
+    C_DIRECT_UNPARSEABLE, C_HISTORY_EXACT_NOT_STORED,
     C_HISTORY_SQL_UNPARSEABLE,
 )
 #: HubSpot answered, and its answer contains no exact SQL entry.
@@ -258,6 +262,14 @@ def history_shape(versions) -> dict:
     last_below = (before[0] if before is not None and before_rank is not None
                   and before_rank < _SQL_RANK else None)
 
+    # A version HubSpot recorded without a usable timestamp cannot be placed
+    # in the order, so it might sit between any two dated versions — and then
+    # neither adjacency nor either bound is proven. (An SQL version still
+    # proves "not a skip".)
+    if any(v.get("timestamp") is None for v in versions):
+        first_at_or_above = last_below = None
+        streak = []
+
     if has_sql:
         jump = False
     elif streak and last_below is not None and streak[0][1] != STAGE_SQL:
@@ -369,8 +381,25 @@ def classify_local(local: dict) -> dict:
 
     if direct_state == DIRECT_ABSENT:
         facts.append(F_DIRECT_ABSENT)
+    cls = _require_direct_absence(cls, direct_state, facts)
     return {"classification": cls, "owner": owner_of(cls),
             "facts": _dedupe(facts), "basis": "local_store"}
+
+
+def _require_direct_absence(cls: str, direct_state, facts: list) -> str:
+    """A source-unresolvable verdict needs the DIRECT property read as absent.
+
+    History alone cannot say HubSpot holds no exact SQL entry: the direct
+    property is the other permitted source, and defect 1 was exactly a direct
+    date HubSpot held while history showed no SQL version. Every incident
+    recorded before PR-ADS-161C has no direct-property state at all, so until
+    a detection pass (or a comparison) reads it, its owner is not determined.
+    The history facts stay; only the verdict is withheld.
+    """
+    if cls in SOURCE_UNRESOLVABLE and direct_state != DIRECT_ABSENT:
+        facts.append(F_CAUSE_UNRESOLVED)
+        return C_CAUSE_UNRESOLVED
+    return cls
 
 
 def classify_with_source(local: dict, source: dict) -> dict:
@@ -418,8 +447,12 @@ def classify_with_source(local: dict, source: dict) -> dict:
             facts.append(F_DIRECT_UNPARSEABLE)
         if source.get("history_state") == "history_payload_present":
             facts.append(F_HISTORY_PRESENT)
-            facts.append(F_HISTORY_EXACT if shape.get("sql_version_dated")
-                         else F_HISTORY_NO_SQL)
+            if shape.get("sql_version_dated"):
+                facts.append(F_HISTORY_EXACT)
+            elif not shape.get("has_sql_version"):
+                # An SQL version with a bad or missing timestamp is NOT "no
+                # transition" — that was defect 4, at the fact level.
+                facts.append(F_HISTORY_NO_SQL)
             if shape.get("stage_jump_skipped_sql") is True:
                 facts.append(F_STAGE_JUMP)
             if shape.get("sql_version_unparseable"):
@@ -440,6 +473,11 @@ def classify_with_source(local: dict, source: dict) -> dict:
     elif direct_state == DIRECT_PRESENT:
         cls = _direct_loss_cause(local, source)
         facts.append(cls)
+        set_at = source.get("direct_sql_entry_set_at")
+        ingested_at = local.get("last_ingested_at")
+        if (cls == C_CAUSE_UNRESOLVED and set_at is not None
+                and ingested_at is not None and set_at <= ingested_at):
+            facts.append(F_DIRECT_SET_BEFORE_INGEST)
     elif F_HISTORY_ABSENT in facts:
         cls = C_HISTORY_ABSENT
     elif shape.get("sql_version_dated"):
@@ -452,6 +490,7 @@ def classify_with_source(local: dict, source: dict) -> dict:
         cls = C_STAGE_JUMP
     else:
         cls = C_HISTORY_NO_SQL
+    cls = _require_direct_absence(cls, direct_state, facts)
     if cls == C_CAUSE_UNRESOLVED:
         facts.append(F_CAUSE_UNRESOLVED)
     return {"classification": cls, "owner": owner_of(cls),
@@ -468,11 +507,13 @@ def _direct_loss_cause(local: dict, source: dict) -> str:
     * otherwise, the property's own history says when HubSpot SET it. Set
       after our last ingestion of this contact → it arrived without moving
       ``lastmodifieddate`` far enough for the watermark to re-select the
-      contact. Set at or before it → we read a payload that carried it and
-      did not store it.
+      contact.
 
-    Without both instants there is no proof either way, and the cause is
-    reported as unresolved rather than picked.
+    Set at or before our last ingestion proves nothing: ingestion happens
+    AFTER the read, so HubSpot could have set it between the two. "The writer
+    dropped it" would need the payload we actually read, which is not
+    recorded — so that case, and any case missing an instant, is reported
+    unresolved rather than picked.
     """
     upstream_modified = source.get("last_modified_at")
     stored_modified = local.get("last_modified_at")
@@ -481,9 +522,9 @@ def _direct_loss_cause(local: dict, source: dict) -> str:
         return C_CANDIDATE_NOT_REFRESHED
     set_at = source.get("direct_sql_entry_set_at")
     ingested_at = local.get("last_ingested_at")
-    if set_at is None or ingested_at is None:
-        return C_CAUSE_UNRESOLVED
-    return C_LATE_PROPERTY if set_at > ingested_at else C_WRITER_DROPPED
+    if set_at is not None and ingested_at is not None and set_at > ingested_at:
+        return C_LATE_PROPERTY
+    return C_CAUSE_UNRESOLVED
 
 
 def _dedupe(items) -> list:

@@ -320,10 +320,13 @@ def audit(*, compare_hubspot: bool = False, sample: int | None = None,
         if listed and failed == calls:
             return _audit_unavailable(report,
                                       "every HubSpot comparison read failed")
+        # Only contacts HubSpot actually answered for count as compared; a
+        # failed batch's contacts were never read.
         compared = {cid: fx.classify_with_source(
                         _local_view(next(r for r in listed
                                          if r["contact_id"] == cid)), src)
-                    for cid, src in comparison.items()}
+                    for cid, src in comparison.items()
+                    if not src.get("request_failed")}
         report["root_cause_hubspot_comparison"] = fx.summarize(
             list(compared.values()))
         report["root_cause_hubspot_comparison"]["denominator"] = (
@@ -368,6 +371,19 @@ def audit(*, compare_hubspot: bool = False, sample: int | None = None,
         f"{report.get('compared_incidents', 0)} on a HubSpot comparison, the "
         f"rest on the local store")
     code_losses = report["root_cause"]["code_owned_losses"]
+    if compare_hubspot and report["hubspot_calls_failed"]:
+        # A comparison asked for and only partly made is not a completed
+        # audit: the unread contacts would otherwise be counted on the local
+        # basis beside a verdict that reads as "compared". Results are kept for
+        # inspection; the verdict is that the audit could not finish.
+        report.update({"audit_complete": False, "verdict": V_UNAVAILABLE,
+                       "exit_code": EXIT_UNAVAILABLE,
+                       "detail": (f"{report['hubspot_calls_failed']} of "
+                                  f"{report['hubspot_calls_performed']} HubSpot "
+                                  f"comparison read(s) failed; the comparison "
+                                  f"is incomplete"),
+                       "finished_at": _utcnow().isoformat()})
+        return report
     if unbacked:
         verdict, code = V_INTEGRITY, EXIT_VIOLATION
     elif code_losses:
