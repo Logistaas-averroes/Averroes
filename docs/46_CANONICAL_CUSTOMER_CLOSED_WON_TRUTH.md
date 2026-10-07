@@ -216,7 +216,8 @@ partition sum, revenue over distinct proven deals, null discipline on withheld
 metrics, ROAS/CAC unpublished, freshness from sync coverage, and conflicts
 withholding, and that a published count is the re-derived membership's size.
 For every business window it also runs production's own windowed SQL
-(`deal_ledger_repository.WON_DEALS_WINDOW_SQL`, with `load_won_deals`' bounds)
+(`deal_ledger_repository.fetch_won_deals` on the audit's cursor, with
+`load_won_deals`' bounds)
 **inside the same READ ONLY snapshot**, drops closes after "now", and requires
 the result to equal the service's dated membership. Undated members are
 reported beside that comparison, because production's All Time is bounded

@@ -860,11 +860,18 @@ def test_79_pg_the_cross_check_runs_production_sql_in_the_audit_snapshot(
     _write(ledger, ledger_row("later", deal_close_date="2026-10-07T18:00:00+00:00"))
     _write(ledger, ledger_row("next", deal_close_date="2026-11-20T09:00:00+00:00"))
 
+    real_fetch = ledger.fetch_won_deals
+
+    def _snapshot_only(*a, cursor=None, **k):
+        if cursor is None:
+            raise AssertionError("the audit read outside its snapshot")
+        return real_fetch(*a, cursor=cursor, **k)
+
     def _no_second_read(*a, **k):
         raise AssertionError("the audit read outside its snapshot")
 
     monkeypatch.setattr(crs, "load_won_deals", _no_second_read)
-    monkeypatch.setattr(ledger, "fetch_won_deals", _no_second_read)
+    monkeypatch.setattr(ledger, "fetch_won_deals", _snapshot_only)
     before = _snapshot()
     _a, report = audit.run(NOW)
     assert _snapshot() == before
@@ -875,11 +882,10 @@ def test_79_pg_the_cross_check_runs_production_sql_in_the_audit_snapshot(
     assert cq["production_sql_deals"] == cq["service_dated_members"] == 1
 
 
-def test_80_the_cross_check_and_production_share_one_sql_text():
+def test_80_the_cross_check_runs_the_production_read_itself():
     import inspect
     from db import deal_ledger_repository as repo
-    assert "WON_DEALS_WINDOW_SQL" in inspect.getsource(repo.fetch_won_deals)
-    assert "WON_DEALS_WINDOW_SQL" in inspect.getsource(
+    assert "fetch_won_deals(w_start, w_end, cursor=cur)" in inspect.getsource(
         repo.fetch_closed_won_universe)
 
 

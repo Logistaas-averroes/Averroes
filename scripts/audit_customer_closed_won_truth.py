@@ -11,7 +11,7 @@ It audits ``services/canonical_customer_revenue_service.py`` by RE-DERIVING
 what that service claims from the same snapshot, independently, and by
 cross-checking each business window's membership against the production
 revenue contract's own SQL-windowed read
-(``deal_ledger_repository.WON_DEALS_WINDOW_SQL``, with the bounds
+(``deal_ledger_repository.fetch_won_deals``, with the bounds
 ``canonical_revenue_service.load_won_deals`` uses), run INSIDE the same
 REPEATABLE READ snapshot so a sync committing mid-audit cannot fake a
 mismatch.

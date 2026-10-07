@@ -487,21 +487,7 @@ PRODUCTION_DEAL_COLUMNS = (
 )
 
 
-#: The production won-deal window read, as ONE statement text. Shared by
-#: :func:`fetch_won_deals` and the PR-ADS-161D audit's cross-check (run inside
-#: :func:`fetch_closed_won_universe`'s snapshot), so the audit compares against
-#: the exact SQL production runs rather than a re-typed copy of it.
-WON_DEALS_WINDOW_SQL = f"""
-    SELECT {', '.join(PRODUCTION_DEAL_COLUMNS)}
-    FROM {LEDGER_TABLE}
-    WHERE hs_is_closed_won IS TRUE
-      AND (%s::timestamptz IS NULL OR deal_close_date >= %s)
-      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
-    ORDER BY deal_close_date DESC NULLS LAST, deal_id
-    """
-
-
-def fetch_won_deals(start=None, end=None) -> dict:
+def fetch_won_deals(start=None, end=None, *, cursor=None) -> dict:
     """THE production won-deal population for a business window (PR-ADS-153E-B).
 
     ``end`` is EXCLUSIVE, matching ``analysis.business_windows.get_window_bounds``.
@@ -522,18 +508,38 @@ def fetch_won_deals(start=None, end=None) -> dict:
     query, because two queries are two populations waiting to disagree.
 
     Read-only. No writes, no external calls.
+
+    ``cursor``: run on a caller's open cursor instead of a new connection — the
+    PR-ADS-161D audit runs THIS read inside its own READ ONLY snapshot. A
+    failure then propagates, so the caller's transaction fails closed.
     """
+    def _read(cur) -> list:
+        cur.execute(
+            f"""
+            SELECT {', '.join(PRODUCTION_DEAL_COLUMNS)}
+            FROM {LEDGER_TABLE}
+            WHERE hs_is_closed_won IS TRUE
+              AND (%s::timestamptz IS NULL OR deal_close_date >= %s)
+              AND (%s::timestamptz IS NULL OR deal_close_date < %s)
+            ORDER BY deal_close_date DESC NULLS LAST, deal_id
+            """,
+            (start, start, end, end),
+        )
+        rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+        for row in rows:
+            for key in ("revenue_usd", "amount_raw"):
+                if row.get(key) is not None:
+                    row[key] = float(row[key])
+        return rows
+
+    if cursor is not None:
+        return {"available": True, "rows": _read(cursor)}
     try:
         with get_conn() as conn:
             if conn is None:
                 return _unavailable(rows=[])
             with conn.cursor() as cur:
-                cur.execute(WON_DEALS_WINDOW_SQL, (start, start, end, end))
-                rows = [_normalise(r) for r in _rows_as_dicts(cur)]
-                for row in rows:
-                    for key in ("revenue_usd", "amount_raw"):
-                        if row.get(key) is not None:
-                            row[key] = float(row[key])
+                rows = _read(cur)
         return {"available": True, "rows": rows}
     except Exception as exc:  # noqa: BLE001
         log.warning("fetch_won_deals failed: %s", exc)
@@ -599,9 +605,9 @@ def fetch_closed_won_universe(won_stage_id: str, *,
     * ``sync_state`` — the ledger's sync coverage row;
     * ``sql_windowed`` — only when ``sql_windows`` (``{key: (start, end)}``) is
       given: for each key, the deal ids production's own
-      :data:`WON_DEALS_WINDOW_SQL` returns, with their close dates, read in the
-      SAME snapshot so the audit's cross-check cannot be broken by a sync
-      committing between two reads.
+      :func:`fetch_won_deals` returns, with their close dates, run on THIS
+      cursor so the audit's cross-check cannot be broken by a sync committing
+      between two reads.
 
     The won predicate is ``hs_is_closed_won IS TRUE`` exactly as in
     :func:`fetch_won_deals`. ``won_stage_id`` is NEVER a population filter here —
@@ -661,12 +667,11 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                 state_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
                 windowed = {}
                 for key, (w_start, w_end) in (sql_windows or {}).items():
-                    cur.execute(WON_DEALS_WINDOW_SQL,
-                                (w_start, w_start, w_end, w_end))
+                    production = fetch_won_deals(w_start, w_end, cursor=cur)
                     windowed[key] = [
                         {"deal_id": str(r["deal_id"]),
-                         "deal_close_date": _iso(r.get("deal_close_date"))}
-                        for r in _rows_as_dicts(cur)]
+                         "deal_close_date": r.get("deal_close_date")}
+                        for r in production["rows"]]
         result = {"available": True, "won_rows": won_rows,
                   "won_definition_rows": definition_rows,
                   "acquisition_contacts": acquisition,
