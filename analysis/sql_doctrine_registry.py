@@ -743,6 +743,7 @@ _SYNC = "HubSpot contact funnel sync (canonical ingestion)"
 _RECOVERY = "Lifecycle stage-history recovery (CLI)"
 _SQL_COVERAGE = "PR-ADS-159 lifecycle SQL coverage audit"
 _SQL_BOUNDARY = "PR-ADS-160 prospective SQL coverage boundary"
+_SQL_EVIDENCE = "PR-ADS-161C post-boundary SQL evidence forensics and repair"
 _SQL_PUBLICATION = ("PR-ADS-161A-1 canonical SQL publication contract "
                     "(the only production-facing publication verdict)")
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
@@ -1107,6 +1108,32 @@ RULES: list[dict] = [
                "check_no_boundary_timestamp_in_event_dates",
                "check_no_open_post_boundary_gaps",
                "check_certified_windows_are_resolved"]),
+
+    # ── PR-ADS-161C — post-boundary SQL evidence forensics and repair ──────
+    # Diagnostic: none of these publishes an SQL number to any surface. The
+    # forensic module classifies WHY an incident has no exact date and emits
+    # observation BOUNDS, never a date; the audit reads; the repair persists
+    # ONLY HubSpot's direct property or a genuine lifecycle-history transition.
+    _m("sqlevidence.fx.module", "analysis/post_boundary_sql_forensics.py",
+       CLS_DIAGNOSTIC, _SQL_EVIDENCE,
+       ["lifecycle_sql_column_ref", "lifecycle_sql_stage_ref"]),
+    _r("sqlevidence.fx", "analysis/post_boundary_sql_forensics.py",
+       CLS_DIAGNOSTIC, _SQL_EVIDENCE, symbol=["history_shape"]),
+    _m("sqlevidence.svc.module", "services/post_boundary_sql_evidence_service.py",
+       CLS_DIAGNOSTIC, _SQL_EVIDENCE,
+       ["lifecycle_sql_property_ref", "lifecycle_sql_stage_ref"]),
+    _r("sqlevidence.svc", "services/post_boundary_sql_evidence_service.py",
+       CLS_DIAGNOSTIC, _SQL_EVIDENCE,
+       symbol=["audit", "repair", "_incident_record", "_source_freshness"]),
+    _m("sqlevidence.audit.module", "scripts/audit_post_boundary_sql_incidents.py",
+       CLS_DIAGNOSTIC, _SQL_EVIDENCE, ["lifecycle_sql_stage_ref"]),
+    _m("sqlevidence.repair.module",
+       "scripts/repair_post_boundary_sql_evidence.py", CLS_DIAGNOSTIC,
+       _SQL_EVIDENCE, ["lifecycle_sql_property_ref", "lifecycle_sql_stage_ref"]),
+    _r("sqlevidence.repo", "db/crm_funnel_repository.py", CLS_DIAGNOSTIC,
+       _SQL_EVIDENCE, symbol=["fetch_post_boundary_incident_forensics"]),
+    _r("sqlevidence.writers", "db/writers.py", CLS_DIAGNOSTIC, _SQL_EVIDENCE,
+       symbol=["apply_post_boundary_sql_evidence"]),
 
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),

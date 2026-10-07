@@ -722,6 +722,20 @@ def parse_hubspot_timestamp(value):
 # anywhere in this module's history support.
 HUBSPOT_LIFECYCLE_HISTORY_PROPERTY = "lifecyclestage"
 
+# PR-ADS-161C §4 — the direct SQL-entry property, read on the SAME request.
+#
+# The prospective gap detector re-reads `lifecyclestage` history for every
+# undated post-boundary contact on every run, and until this PR it never
+# re-read the direct property. A `hs_v2_date_entered_salesqualifiedlead` that
+# HubSpot populated after our sync last selected the contact was therefore
+# invisible to it forever: the history held no SQL version (a stage jump, say),
+# the incident was recorded as "no SQL transition", and the one exact date that
+# existed upstream was never fetched. It now rides on the history read as a
+# CURRENT property — not history — at no extra request.
+HUBSPOT_SQL_ENTRY_PROPERTY = "hs_v2_date_entered_salesqualifiedlead"
+HISTORY_READ_CURRENT_PROPERTIES = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY,
+                                   HUBSPOT_SQL_ENTRY_PROPERTY]
+
 # HubSpot caps a batch read that requests property history well below the
 # ordinary 100-record batch limit. 50 is the documented ceiling and is used as a
 # hard bound rather than a default a caller can raise past it.
@@ -791,15 +805,18 @@ def _batch_history_body(ids):
     """
     payload_inputs = [{"id": cid} for cid in ids]
     prop = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY]
+    # PR-ADS-161C: the CURRENT value of the direct SQL-entry property rides on
+    # the same read. History is still requested for `lifecyclestage` only.
+    current = HISTORY_READ_CURRENT_PROPERTIES
     try:
         from hubspot.crm.contacts import (  # noqa: PLC0415
             BatchReadInputSimplePublicObjectId,
         )
     except Exception:  # noqa: BLE001 — pragma: no cover
-        return {"inputs": payload_inputs, "properties": prop,
+        return {"inputs": payload_inputs, "properties": current,
                 "propertiesWithHistory": prop}
     return BatchReadInputSimplePublicObjectId(
-        inputs=payload_inputs, properties=prop, properties_with_history=prop)
+        inputs=payload_inputs, properties=current, properties_with_history=prop)
 
 
 def _history_from_record(record: dict) -> dict:
@@ -811,14 +828,43 @@ def _history_from_record(record: dict) -> dict:
     history = record.get("properties_with_history")
     if history is None:
         history = record.get("propertiesWithHistory")
+    direct = _direct_sql_entry(record)
     if not isinstance(history, dict) \
             or HUBSPOT_LIFECYCLE_HISTORY_PROPERTY not in history:
-        return {"state": HISTORY_PROPERTY_ABSENT, "versions": []}
+        return {"state": HISTORY_PROPERTY_ABSENT, "versions": [],
+                "direct_sql_entry": direct}
     versions = history.get(HUBSPOT_LIFECYCLE_HISTORY_PROPERTY) or []
     if not versions:
-        return {"state": HISTORY_EMPTY, "versions": []}
+        return {"state": HISTORY_EMPTY, "versions": [],
+                "direct_sql_entry": direct}
     return {"state": HISTORY_PRESENT,
-            "versions": [_normalise_history_version(v) for v in versions]}
+            "versions": [_normalise_history_version(v) for v in versions],
+            "direct_sql_entry": direct}
+
+
+def _direct_sql_entry(record: dict) -> dict:
+    """The direct SQL-entry property as this read returned it. Pure.
+
+    PR-ADS-161C §4. Returns ``{"state", "value", "raw_present"}``:
+
+    * ``present``     — a timestamp, parsed;
+    * ``absent``      — the property came back empty;
+    * ``unparseable`` — a non-empty value we could not parse. OURS to fix, and
+      never folded into "absent", which is HubSpot's answer;
+    * ``not_read``    — the record carries no properties container at all, so
+      this read says nothing about the property either way.
+    """
+    props = record.get("properties")
+    if not isinstance(props, dict):
+        return {"state": "not_read", "value": None, "raw_present": False}
+    raw = props.get(HUBSPOT_SQL_ENTRY_PROPERTY)
+    raw_present = raw is not None and str(raw).strip() != ""
+    parsed = parse_hubspot_timestamp(raw) if raw_present else None
+    if not raw_present:
+        state = "absent"
+    else:
+        state = "present" if parsed is not None else "unparseable"
+    return {"state": state, "value": parsed, "raw_present": raw_present}
 
 
 def _as_record(result) -> dict:
@@ -915,7 +961,8 @@ def fetch_lifecycle_stage_history_single(contact_id, *, client=None) -> dict:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             record = client.crm.contacts.basic_api.get_by_id(
-                cid, properties=prop, properties_with_history=prop)
+                cid, properties=HISTORY_READ_CURRENT_PROPERTIES,
+                properties_with_history=prop)
             break
         except ApiException as exc:
             if exc.status == 404:
@@ -933,6 +980,120 @@ def fetch_lifecycle_stage_history_single(contact_id, *, client=None) -> dict:
 
     return {**_history_from_record(_as_record(record)),
             "via": HISTORY_VIA_INDIVIDUAL}
+
+
+#: PR-ADS-161C §4.3 — what the forensic comparison asks HubSpot for. Current
+#: values plus the HISTORY of both the stage and the direct property, so the
+#: audit can say not only whether HubSpot holds an SQL date but WHEN HubSpot
+#: set it — which is what separates "we never re-read it" from "we read it and
+#: dropped it". No name, email, company or other personal property is asked for.
+COMPARISON_CURRENT_PROPERTIES = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY,
+                                 HUBSPOT_SQL_ENTRY_PROPERTY,
+                                 "lastmodifieddate"]
+COMPARISON_HISTORY_PROPERTIES = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY,
+                                 HUBSPOT_SQL_ENTRY_PROPERTY]
+
+
+def _comparison_body(ids):
+    """The comparison batch body as an SDK model (see `_batch_history_body`)."""
+    payload_inputs = [{"id": cid} for cid in ids]
+    try:
+        from hubspot.crm.contacts import (  # noqa: PLC0415
+            BatchReadInputSimplePublicObjectId,
+        )
+    except Exception:  # noqa: BLE001 — pragma: no cover
+        return {"inputs": payload_inputs,
+                "properties": COMPARISON_CURRENT_PROPERTIES,
+                "propertiesWithHistory": COMPARISON_HISTORY_PROPERTIES}
+    return BatchReadInputSimplePublicObjectId(
+        inputs=payload_inputs, properties=COMPARISON_CURRENT_PROPERTIES,
+        properties_with_history=COMPARISON_HISTORY_PROPERTIES)
+
+
+def _direct_property_set_at(record: dict):
+    """When HubSpot last SET the direct SQL property to a non-empty value.
+
+    Read from the property's own history. ``None`` when the history is not
+    present or holds no dated non-empty version — unknown, never guessed.
+    """
+    history = record.get("properties_with_history")
+    if history is None:
+        history = record.get("propertiesWithHistory")
+    if not isinstance(history, dict):
+        return None
+    stamps = []
+    for version in history.get(HUBSPOT_SQL_ENTRY_PROPERTY) or []:
+        v = _normalise_history_version(version)
+        if v.get("value") not in (None, "") and v.get("timestamp") is not None:
+            stamps.append(v["timestamp"])
+    return max(stamps) if stamps else None
+
+
+def compare_sql_entry_evidence(contact_ids, *, client=None) -> dict:
+    """READ-ONLY forensic read of SQL-entry evidence for up to 50 contacts.
+
+    PR-ADS-161C §4.3. Used only by the explicitly invoked
+    ``--compare-hubspot`` audit mode — never by a scheduled path.
+
+    Returns ``{contact_id: {...}}`` with, per contact::
+
+        {"returned", "lifecycle_stage", "last_modified_at", "direct_sql_entry",
+         "direct_sql_entry_set_at", "history_state", "versions"}
+
+    A contact HubSpot did not return is ``returned: False`` — an identity
+    finding (deleted, merged, invisible to this token), never "no evidence".
+    Raises ``HubSpotRetryableError`` on a failed request: a failed read must be
+    reported as a failed read by the caller, not as fifty empty answers.
+    """
+    ids = [str(c).strip() for c in (contact_ids or []) if str(c or "").strip()]
+    if not ids:
+        return {}
+    if len(ids) > HUBSPOT_HISTORY_BATCH_LIMIT:
+        raise ValueError(
+            f"at most {HUBSPOT_HISTORY_BATCH_LIMIT} contacts per comparison "
+            f"read; got {len(ids)}")
+
+    client = client or get_client()
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.crm.contacts.batch_api.read(
+                batch_read_input_simple_public_object_id=_comparison_body(ids))
+            break
+        except ApiException as exc:
+            if exc.status == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"HubSpot SQL-evidence comparison read failed "
+                f"(status={exc.status}): {exc}") from exc
+    else:  # pragma: no cover — the loop always breaks or raises
+        raise HubSpotRetryableError("HubSpot comparison read exhausted retries")
+
+    out = {cid: {"returned": False, "lifecycle_stage": None,
+                 "last_modified_at": None,
+                 "direct_sql_entry": {"state": "not_read", "value": None,
+                                      "raw_present": False},
+                 "direct_sql_entry_set_at": None,
+                 "history_state": HISTORY_CONTACT_ABSENT, "versions": []}
+           for cid in ids}
+    for result in (getattr(response, "results", None) or []):
+        record = _as_record(result)
+        contact_id = str(record.get("id") or "").strip()
+        if not contact_id:
+            continue
+        props = record.get("properties") or {}
+        history = _history_from_record(record)
+        out[contact_id] = {
+            "returned": True,
+            "lifecycle_stage": props.get(HUBSPOT_LIFECYCLE_HISTORY_PROPERTY),
+            "last_modified_at": parse_hubspot_timestamp(
+                props.get("lastmodifieddate")),
+            "direct_sql_entry": history.get("direct_sql_entry"),
+            "direct_sql_entry_set_at": _direct_property_set_at(record),
+            "history_state": history.get("state"),
+            "versions": history.get("versions") or [],
+        }
+    return out
 
 
 def diagnose_lifecycle_history_reads(contact_ids, *, client=None) -> dict:

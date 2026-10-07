@@ -1547,6 +1547,50 @@ CREATE INDEX IF NOT EXISTS idx_sqlpbi_status ON sql_post_boundary_incident(statu
 CREATE INDEX IF NOT EXISTS idx_sqlpbi_detected
   ON sql_post_boundary_incident(detected_at);
 
+-- ── PR-ADS-161C — forensic evidence on every post-boundary incident ────────
+--
+-- PR-ADS-160 recorded THAT a post-boundary contact had no exact SQL date and a
+-- one-word reason. 113 of them later sat open with the same reason, and nothing
+-- stored could say whose gap each was: a date HubSpot never recorded (a stage
+-- jump), or a date it holds that we lost. These columns carry what the detector
+-- actually saw, so that question is answerable from the local store.
+--
+-- Forward-only and additive: every column is NULLABLE with NO default, so a
+-- legacy row reads as "not recorded" rather than as a fabricated value, and the
+-- migration is safe to run before the code that writes them, and more than
+-- once. No existing row is rewritten here — the next detection pass fills them,
+-- and production evidence repair belongs to an explicit dry-run/apply command,
+-- never to a migration.
+--
+-- THE TWO BOUNDS ARE NOT EVENT DATES. `last_known_below_sql_at` is the last
+-- instant HubSpot recorded the contact BELOW SQL; `first_observed_at_or_above_sql`
+-- the first instant of its current at-or-above-SQL run. For a stage jump the
+-- latter is an OPPORTUNITY timestamp — on the forbidden list of SQL substitutes
+-- by name. Neither is ever written to `date_entered_sql`, to the lifecycle
+-- history table, or coalesced into an effective date.
+ALTER TABLE sql_post_boundary_incident
+  ADD COLUMN IF NOT EXISTS last_checked_at                TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS last_checked_by_run_id         TEXT,
+  -- present | absent | unparseable | not_read — the DIRECT property as the
+  -- detector's read returned it. NULL = not recorded (a pre-161C row).
+  ADD COLUMN IF NOT EXISTS direct_property_state          TEXT,
+  ADD COLUMN IF NOT EXISTS history_versions_seen          INTEGER,
+  -- Ordered distinct stage values only, e.g. 'lead>opportunity'. No PII.
+  ADD COLUMN IF NOT EXISTS history_stage_path             TEXT,
+  -- TRUE = proven skip (below SQL → above SQL, no SQL version anywhere);
+  -- FALSE = an SQL version exists; NULL = not determinable.
+  ADD COLUMN IF NOT EXISTS stage_jump_skipped_sql         BOOLEAN,
+  ADD COLUMN IF NOT EXISTS last_known_below_sql_at        TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS first_observed_at_or_above_sql TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS observation_bounds_basis       TEXT,
+  -- Resolution provenance: which run closed it, and the exact timestamp that
+  -- closed it, copied from the evidence so the trail survives on the row.
+  ADD COLUMN IF NOT EXISTS resolved_by_run_id             TEXT,
+  ADD COLUMN IF NOT EXISTS resolution_evidence_at         TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_sqlpbi_boundary_status
+  ON sql_post_boundary_incident(boundary_id, status);
+
 -- PR-ADS-153D: durable LOCAL review decisions for canonical search terms.
 --
 -- One row per durable search-term identity (analysis/search_term_identity.py):

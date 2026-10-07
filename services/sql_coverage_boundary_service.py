@@ -128,9 +128,19 @@ INCIDENT_HISTORY_NO_SQL = "post_boundary_history_has_no_sql_transition"
 INCIDENT_HISTORY_UNREADABLE = "post_boundary_history_request_failed"
 #: HubSpot returned the contact with no history payload at all.
 INCIDENT_HISTORY_ABSENT = "post_boundary_history_payload_absent"
+#: PR-ADS-161C — history HOLDS a salesqualifiedlead version, and its timestamp
+#: would not parse. That is our parser failing on a value HubSpot sent. Before
+#: this PR it was recorded as "no SQL transition" — a claim about HubSpot drawn
+#: from our own parse failure.
+INCIDENT_HISTORY_SQL_UNPARSEABLE = "post_boundary_history_sql_timestamp_unparseable"
+#: PR-ADS-161C — history holds a salesqualifiedlead version and HubSpot recorded
+#: no timestamp on it. HubSpot's gap, and a different one from "no version".
+INCIDENT_HISTORY_SQL_UNDATED = "post_boundary_history_sql_version_undated"
 
 INCIDENT_REASONS = (INCIDENT_NO_DIRECT_DATE, INCIDENT_HISTORY_NO_SQL,
-                    INCIDENT_HISTORY_UNREADABLE, INCIDENT_HISTORY_ABSENT)
+                    INCIDENT_HISTORY_UNREADABLE, INCIDENT_HISTORY_ABSENT,
+                    INCIDENT_HISTORY_SQL_UNPARSEABLE,
+                    INCIDENT_HISTORY_SQL_UNDATED)
 
 VOCABULARIES = {
     "run": RUN_OUTCOMES,
@@ -411,20 +421,39 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
 
     recovered_rows: list = []
     incidents: list = []
+    # PR-ADS-161C §5.2 — contacts whose DIRECT property HubSpot now holds,
+    # although our stored copy is undated (a late-arriving property the
+    # modification watermark never re-selected). Read on the history request.
+    direct_rows: list = []
     history_requests = 0
 
     if needs_evidence:
         recovered_rows, incidents, history_requests = _consult_history(
             needs_evidence, boundary_id=boundary.get("boundary_id"),
-            client=client, budget=history_budget)
+            client=client, budget=history_budget, direct_out=direct_rows)
 
     persisted_events = 0
     incidents_written = 0
     resolved = 0
+    direct_refreshed = 0
     write_error = None
 
     if apply:
         from db import writers  # noqa: PLC0415
+
+        if direct_rows:
+            # The direct date and the closure of its incident land together or
+            # not at all (`apply_post_boundary_sql_evidence` is one
+            # transaction), so a failure here leaves nothing half-written.
+            res = writers.apply_post_boundary_sql_evidence(
+                direct_rows, [], run_id=rid)
+            if not res.get("ok"):
+                return _gap_failed(rid, started, BOUNDARY_WRITE_FAILED,
+                                   res.get("error")
+                                   or "direct-property refresh not proven",
+                                   apply=apply)
+            direct_refreshed = int(res.get("direct_written") or 0)
+            resolved += int(res.get("incidents_resolved") or 0)
 
         if recovered_rows:
             res = writers.upsert_lifecycle_stage_history(recovered_rows,
@@ -493,7 +522,46 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
                            apply=apply, evidence_persisted=persisted_events,
                            incidents_written=incidents_written,
                            incidents_resolved=resolved)
+    # PR-ADS-161C §5.2 — an incident whose contact has LEFT this run's
+    # population is never looked at again by anything above: a contact whose
+    # direct date turned out to precede the boundary is "dated, before since",
+    # and one whose stage fell below SQL is outside the stage rule. Its incident
+    # then sits open forever, even where the store already holds the exact date
+    # that should close it. Sweep those — and close only what the database can
+    # prove from evidence it already stores.
+    population_ids = {r.get("contact_id") for r in rows}
+    orphans = [r.get("contact_id") for r in (open_state.get("rows") or [])
+               if r.get("contact_id") and r.get("contact_id") not in population_ids]
+    orphans_resolved = 0
+    if apply and orphans:
+        from db import writers  # noqa: PLC0415
+
+        res = writers.apply_post_boundary_sql_evidence(
+            [], [], run_id=rid, resolve_contact_ids=orphans)
+        if not res.get("ok"):
+            return _gap_failed(rid, started, BOUNDARY_WRITE_FAILED,
+                               res.get("error")
+                               or "stranded-incident resolution not proven",
+                               apply=apply, evidence_persisted=persisted_events,
+                               incidents_written=incidents_written,
+                               incidents_resolved=resolved)
+        orphans_resolved = int(res.get("incidents_resolved") or 0)
+        resolved += orphans_resolved
+        if orphans_resolved:
+            open_state = repo.fetch_post_boundary_incidents(status="open")
+            if not open_state.get("available"):
+                return _gap_failed(rid, started, INCIDENT_STORE_UNREADABLE,
+                                   "the post-boundary incident store could not "
+                                   "be re-read after resolving stranded "
+                                   "incidents",
+                                   apply=apply,
+                                   evidence_persisted=persisted_events,
+                                   incidents_written=incidents_written,
+                                   incidents_resolved=resolved)
     open_count = open_state.get("open_count")
+    still_stranded = sum(
+        1 for r in (open_state.get("rows") or [])
+        if r.get("contact_id") and r.get("contact_id") not in population_ids)
 
     return {
         "ok": True,
@@ -511,6 +579,14 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
         "direct_sql_timestamps_present": direct_present,
         "history_timestamps_recovered": len(recovered_rows),
         "history_events_persisted": persisted_events,
+        # PR-ADS-161C: direct dates HubSpot holds that our stored copy lacked.
+        "direct_sql_timestamps_refreshable": len(direct_rows),
+        "direct_sql_timestamps_refreshed": direct_refreshed,
+        "stranded_incidents_examined": len(orphans),
+        "stranded_incidents_resolved": orphans_resolved,
+        # Open, outside the detector's population, and with no stored evidence
+        # to close them. Visible rather than silently permanent.
+        "open_incidents_outside_population": still_stranded,
         "new_undated_sql_gaps": len(incidents),
         "incidents_written": incidents_written,
         "incidents_resolved": resolved,
@@ -528,15 +604,28 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
     }
 
 
-def _consult_history(rows, *, boundary_id, client, budget):
+def _consult_history(rows, *, boundary_id, client, budget, direct_out=None):
     """Ask HubSpot for real history, once per contact, within a budget.
 
     Returns ``(recovered_rows, incidents, requests_made)``. A contact the budget
     could not fund is reported as an incident whose reason says the request was
     never made — "we did not look" is never reported as "there is nothing".
+
+    PR-ADS-161C — when ``direct_out`` is a list, a contact for which the same
+    read returned HubSpot's DIRECT SQL-entry property is appended to it as
+    ``{"contact_id", "date_entered_sql"}`` and is neither an incident nor a
+    history recovery: precedence 1 outranks precedence 2. Every incident now
+    also carries the history SHAPE the read saw — the stage path, whether the
+    contact skipped SQL, and HubSpot's own bounds around the transition — so the
+    question "whose gap is this" is answerable from the store. Those bounds are
+    never a date.
     """
+    from analysis.post_boundary_sql_forensics import (  # noqa: PLC0415
+        DIRECT_PRESENT, history_shape,
+    )
     from connectors import hubspot_pull  # noqa: PLC0415
     from services.lifecycle_history_recovery_service import (  # noqa: PLC0415
+        HISTORY_SQL_TIMESTAMP_INVALID, HISTORY_SQL_VERSION_NO_TIMESTAMP,
         PAYLOAD_PRESENT, select_recovered_events,
     )
 
@@ -601,21 +690,53 @@ def _consult_history(rows, *, boundary_id, client, budget):
                               "history_state": None,
                               "reason": INCIDENT_HISTORY_UNREADABLE})
             continue
+
+        direct = entry.get("direct_sql_entry") or {}
+        direct_state = direct.get("state")
+        if (direct_out is not None and direct_state == DIRECT_PRESENT
+                and direct.get("value") is not None):
+            direct_out.append({"contact_id": cid,
+                               "date_entered_sql": direct.get("value")})
+            continue
+        # The direct property's state is recorded on the incident: "absent"
+        # is HubSpot's answer, "unparseable" is ours, and a read that did not
+        # carry it stays NULL rather than claiming either.
+        base = {**base, "direct_property_state": (
+            direct_state if direct_state in ("absent", "unparseable") else None)}
+
         if state != PAYLOAD_PRESENT:
             incidents.append({**base, "history_checked": True,
                               "history_state": state,
                               "reason": INCIDENT_HISTORY_ABSENT})
             continue
 
-        found, _unresolved = select_recovered_events(
+        versions = entry.get("versions") or []
+        found, unresolved = select_recovered_events(
             {"contact_id": cid, "lifecycle_stage": row.get("lifecycle_stage")},
-            entry.get("versions") or [], (EVENT_SQL,))
+            versions, (EVENT_SQL,))
         if found:
             recovered.extend(found)
+            continue
+        shape = history_shape(versions)
+        reasons = {u.get("reason") for u in unresolved or []}
+        if HISTORY_SQL_TIMESTAMP_INVALID in reasons:
+            reason = INCIDENT_HISTORY_SQL_UNPARSEABLE
+        elif HISTORY_SQL_VERSION_NO_TIMESTAMP in reasons:
+            reason = INCIDENT_HISTORY_SQL_UNDATED
         else:
-            incidents.append({**base, "history_checked": True,
-                              "history_state": state,
-                              "reason": INCIDENT_HISTORY_NO_SQL})
+            reason = INCIDENT_HISTORY_NO_SQL
+        incidents.append({
+            **base, "history_checked": True, "history_state": state,
+            "reason": reason,
+            "history_versions_seen": shape["versions_seen"],
+            "history_stage_path": shape["stage_path"],
+            "stage_jump_skipped_sql": shape["stage_jump_skipped_sql"],
+            # BOUNDS, from HubSpot's own version timestamps. Not the event.
+            "last_known_below_sql_at": shape["last_known_below_sql_at"],
+            "first_observed_at_or_above_sql":
+                shape["first_observed_at_or_above_sql"],
+            "observation_bounds_basis": shape["bounds_basis"],
+        })
     return recovered, incidents, requests
 
 

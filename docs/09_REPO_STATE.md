@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161A-1-F4 — the gates that were unreachable on real inputs (September 2026)
+**Last updated:** PR-ADS-161C — post-boundary SQL evidence forensics and gap prevention (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1087,3 +1087,77 @@ Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (190), including
 9 PostgreSQL end-to-end cases, in CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.
+
+---
+
+## PR-ADS-161C — Post-boundary SQL evidence forensics and prospective gap prevention (October 2026)
+
+**Why.** Production (brief, against `dcf078c`): the coverage gate was red on
+**113** open post-boundary incidents, all `post_boundary_history_has_no_sql_transition`,
+and it called every one of them "our gap". Nothing had shown whose gap any of
+them was. This PR does not resolve that by assertion. It makes the question
+answerable per incident and fixes the code-owned losses the trace found. It does
+not claim any of the 113 is fixed: their breakdown needs production, via the
+commands below.
+
+**Four defects, each reproduced on `main`'s production code first.**
+1. The detector re-read `lifecyclestage` history for every undated contact on
+   every run, and **never the direct `hs_v2_date_entered_salesqualifiedlead`**.
+   A direct date HubSpot held but the watermark never re-selected stayed
+   invisible forever. Reproduced: HubSpot holds `T`, two runs later
+   `date_entered_sql = None`, incident open, reason "no SQL transition".
+2. **Stranded incidents.** An incident whose contact left the detector's
+   population (its direct date preceded the boundary, or its stage fell below
+   SQL) was never looked at again. Reproduced: exact date stored, incident open.
+3. **`resolve_post_boundary_incidents` closed any id it was handed**, evidence or
+   not. Reproduced: no date anywhere, `persisted: 1`, `resolved`.
+4. **A parse failure was reported as HubSpot's absence.** An SQL version with an
+   unparseable timestamp was recorded as "no SQL transition".
+
+**Built.**
+* `connectors/hubspot_pull.py` — the history read carries the direct property
+  as a current value on the same request (history still `lifecyclestage` only);
+  `_direct_sql_entry` tells present / absent / unparseable / not_read apart;
+  `compare_sql_entry_evidence` is the forensic read (stage + direct property,
+  with history of both, and `lastmodifieddate` — no personal property).
+* `services/sql_coverage_boundary_service.py` — direct dates refreshed and
+  their incidents closed atomically; two new reasons (`…sql_timestamp_unparseable`,
+  `…sql_version_undated`); every incident carries the history shape and
+  HubSpot-recorded **bounds**; stranded incidents swept, closed only on stored
+  evidence, the remainder counted as `open_incidents_outside_population`.
+* `db/writers.py` — `apply_post_boundary_sql_evidence` (one transaction:
+  fill-only direct date, history upsert, evidence-proven resolution);
+  `resolve_post_boundary_incidents` now requires stored evidence;
+  `record_post_boundary_incidents` stores the forensic fields and never lets a
+  failed read erase a good one.
+* `db/schema.py` — additive nullable columns on `sql_post_boundary_incident`,
+  no defaults, no backfill, index on `(boundary_id, status)`.
+* `analysis/post_boundary_sql_forensics.py` — pure classification: facts,
+  one root cause per incident, owner (code / source / not determined).
+* `services/post_boundary_sql_evidence_service.py`,
+  `scripts/audit_post_boundary_sql_incidents.py` (read-only; READ ONLY
+  transaction), `scripts/repair_post_boundary_sql_evidence.py` (dry run default).
+* `scripts/audit_sql_coverage_gate.py` — verdict unchanged; the message no
+  longer asserts every gap is ours, it points to the forensic audit.
+
+**Not changed.** The boundary; the gate's checks and exit codes;
+`analysis/sql_publication.py`; the PR-ADS-161A-1 guard; the acquisition
+cohort's definition and verdict; the status vocabulary (`open` / `resolved`).
+No new closing status was added, because the gate counts `open`. Observation
+bounds are stored and published but **not** consumed by certification.
+
+**Ownership.** `apply_post_boundary_sql_evidence` writes `date_entered_sql`
+outside the contact sync, fill-only from NULL with HubSpot's own value, so the
+evidence and the closure of its incident commit together. This is a narrow,
+stated exception to PR-ADS-153B §30 (docs/45 §5.3).
+
+**Suite.** `tests/test_pr_ads_161c_post_boundary_sql_evidence.py` — PG
+end-to-end cases for §8.1–§8.10 and a counterfactual for each of §9's eleven
+mutations, in CI's PostgreSQL step and did-run list.
+
+**Production validation (not executed here).** See docs/45 §7. Expected before
+any repair: cohort audit 0, campaign certification 0, SQL gate 1 while incidents
+stay open. The first incremental sync after deploy records the history shape
+for every open incident, so run the local audit after it.
+
+Full doctrine: `docs/45_POST_BOUNDARY_SQL_EVIDENCE.md`.
