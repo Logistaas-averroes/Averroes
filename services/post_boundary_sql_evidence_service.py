@@ -12,9 +12,11 @@ Two operations, one owner each
 ------------------------------
 ``audit()``  READ-ONLY. Classifies every open incident from the local store
              (no HubSpot call) or, when explicitly asked, against a fresh
-             READ-ONLY HubSpot comparison read. Writes nothing anywhere: its
-             one database read runs in a READ ONLY transaction, so that is a
-             property of the connection rather than of the code after it.
+             READ-ONLY HubSpot comparison read. Writes nothing anywhere: the
+             incident read the classifications come from runs in a READ ONLY
+             transaction, so that is a property of the connection rather than
+             of the code after it; the freshness and boundary reads are plain
+             SELECTs in their own snapshots.
 ``repair()`` DRY RUN BY DEFAULT. Re-reads HubSpot (read-only) for open
              incidents and, only with ``apply``, persists exact evidence from
              the two permitted sources and closes what that evidence proves —
@@ -531,8 +533,11 @@ def repair(*, apply: bool = False, client=None, limit: int | None = None,
             consult_rows, boundary_id=boundary.get("boundary_id"),
             client=client, budget=len(consult_rows), direct_out=direct_rows)
 
+    # Not read, or read without a history payload: PR-ADS-159 showed a
+    # missing payload can be our own request, so neither is a completed look.
     unread = [u for u in unresolved
-              if u.get("reason") == boundary_svc.INCIDENT_HISTORY_UNREADABLE]
+              if u.get("reason") in (boundary_svc.INCIDENT_HISTORY_UNREADABLE,
+                                     boundary_svc.INCIDENT_HISTORY_ABSENT)]
     report.update({
         "hubspot_requests": requests,
         "recoverable_direct_property": len(direct_rows),
@@ -594,7 +599,8 @@ def repair(*, apply: bool = False, client=None, limit: int | None = None,
                        "applied — every write and resolution landed in one "
                        "transaction" + (
                            f"; {len(unread)} contact(s) could not be read "
-                           f"from HubSpot and were left untouched"
+                           f"from HubSpot, or came back with no history "
+                           f"payload, and were left untouched"
                            if unread else ""))
 
 

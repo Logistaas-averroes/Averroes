@@ -151,8 +151,10 @@ scripts/repair_post_boundary_sql_evidence   ── dry run by default
 
 The contact sync stays the sole **latest-state** writer of
 `hubspot_contact_funnel`. The single exception is a fill-only write of a NULL
-`date_entered_sql` with HubSpot's own direct value, inside the transaction that
-closes its incident. It can never disagree with the sync's `COALESCE`.
+`date_entered_sql` with HubSpot's own direct value (plus the derived
+`latest_stage_entry_at` and `updated_at`), inside the transaction that closes
+its incident. It can never disagree with the sync's `COALESCE`, but it can move
+`lifecycle_events` freshness forward without a sync.
 
 Doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`,
 `docs/45_POST_BOUNDARY_SQL_EVIDENCE.md`.

@@ -3653,9 +3653,11 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
 
     This never writes to HubSpot — it records evidence READ from HubSpot's own
     property history into a table the contact sync does not own. It deliberately
-    does not write ``hubspot_contact_funnel.date_entered_*``: that column is
-    refreshed from the newest HubSpot read on every incremental sync, so a value
-    placed there would be erased on the next run.
+    does not write ``hubspot_contact_funnel.date_entered_*``: that column holds
+    the DIRECT property (precedence 1), and a recovered transition is
+    precedence 2 with its own lineage. (Since PR-ADS-160 the sync COALESCEs
+    those columns, so a value there is no longer erased by a sparse payload;
+    PR-ADS-161C's fill-only direct write relies on exactly that.)
 
     Idempotent on ``(contact_id, funnel_event)``: a re-run rewrites the same row
     rather than appending a second one, which is what makes a bounded command
@@ -4100,7 +4102,8 @@ def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
                         contact_created_at = EXCLUDED.contact_created_at,
                         history_checked    = EXCLUDED.history_checked,
                         history_state      = EXCLUDED.history_state,
-                        detected_by_run_id = EXCLUDED.detected_by_run_id,
+                        -- PR-ADS-161C review: written once, on insert, like
+                        -- detected_at. Re-checks are last_checked_by_run_id.
                         last_checked_by_run_id = EXCLUDED.last_checked_by_run_id,
                         last_checked_at    = NOW(),
                         direct_property_state = COALESCE(
@@ -4125,9 +4128,12 @@ def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
 def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> dict:
     """Close incidents for contacts that now carry an exact SQL entry date.
 
-    ``resolved_by`` records WHICH permitted source supplied it —
-    ``direct_property`` or ``history`` — so a resolution is always traceable to
-    real evidence rather than to the passage of time.
+    ``resolved_by`` is the caller's EXPECTATION of which permitted source
+    supplied it. It is not trusted: the label written is derived in SQL from
+    the evidence actually stored — ``direct_property`` when the direct column
+    holds a date, otherwise ``history`` — because a contact dated only by a
+    recovered transition reaches this function through the detector's
+    effective-date path labelled ``direct_property`` (PR-ADS-161C review).
 
     PR-ADS-161C — the database, not the caller, decides whether the evidence
     exists. Before this, any id handed in was closed, so a caller bug (or a
@@ -4151,7 +4157,9 @@ def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> d
                     UPDATE sql_post_boundary_incident i
                        SET status                 = 'resolved',
                            resolved_at            = NOW(),
-                           resolved_by            = %s,
+                           resolved_by            = CASE
+                               WHEN f.date_entered_sql IS NOT NULL
+                               THEN 'direct_property' ELSE 'history' END,
                            resolution_evidence_at = COALESCE(
                                f.date_entered_sql, h.entered_at),
                            updated_at             = NOW()
@@ -4165,7 +4173,7 @@ def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> d
                        AND COALESCE(f.date_entered_sql, h.entered_at)
                            IS NOT NULL
                     """,
-                    (resolved_by, ids),
+                    (ids,),
                 )
                 persisted = cur.rowcount if cur.rowcount is not None else 0
             conn.commit()

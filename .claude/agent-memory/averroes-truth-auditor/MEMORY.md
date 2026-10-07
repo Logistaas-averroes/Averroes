@@ -275,3 +275,37 @@ Recurring patterns (durable):
   gated on the drawer response's verdict and mutation-tested (test_15n/16).
   Re-check: any new reader of `legacy_lead_status`/`confirmed_sqls` in app.js.
 - Final review: 190 tests in the 161B file pass, PG tests ran (not skipped).
+
+## PR-ADS-161C first review (head 45fb8f5, 2026-10-07)
+- Post-boundary incident contract: status vocabulary is still only open/resolved;
+  gate, publication service and audit_lifecycle_sql_coverage count `status='open'`
+  and never filter on `reason`. Both resolvers (`resolve_post_boundary_incidents`,
+  `apply_post_boundary_sql_evidence`) close only where
+  `COALESCE(f.date_entered_sql, h.entered_at)` (h = history row, funnel_event='sql')
+  is non-null in the same statement, with an INNER join to the funnel row.
+- `apply_post_boundary_sql_evidence` writes date_entered_sql (fill-only WHERE NULL)
+  AND `latest_stage_entry_at` (GREATEST), which is the `lifecycle_events` freshness
+  date column. docs/45 §5.3 says it writes "one column". Its registry entry is
+  CLS_DIAGNOSTIC, but it writes a canonical column.
+- Recurring pattern: a forensic classifier that treats a NULL "not recorded"
+  column as a negative answer. `classify_local` puts a NO_SQL incident with
+  `direct_property_state IS NULL` (every pre-161C row, so all 113 production
+  incidents at merge) under `source_has_no_exact_sql_entry`, and the audit exits 0.
+  test_08 pinned it. FIXED in dfe043d, which landed mid-review: the new
+  `_require_direct_absence` requires `direct_property_state == 'absent'` before a
+  source verdict. I re-ran my probe at dfe043d and the row is now not_determined.
+  The same commit stopped emitting `writer_dropped_evidence`.
+- The detector's population is "stage implies SQL AND (undated AND not in the
+  snapshot OR effective >= boundary)", ordered by contact_id, with history_budget
+  200. The budget slice is deterministic, so the same tail is always unfunded
+  (that predates 161C). Incidents outside the population are never re-read from
+  HubSpot. The sweep only closes them on stored evidence.
+- `parse_hubspot_timestamp`: "0" is read as 1970-01-01, a date-only string as
+  midnight UTC, and an overflowing digit string raises ValueError (it is not
+  reported as unparseable). The sync path shares the parser.
+- Full suite: 4900 passed, 1 skipped (not in 160/161A-1/161C), with the 2 baseline
+  deselects. Caveat: the branch moved from 45fb8f5 to dfe043d while that run was
+  in progress, so it does not measure one commit cleanly. The 161C file has 73
+  tests at 45fb8f5 and 79 at dfe043d. Its PG tests ran on both.
+- Lesson: the branch can move during a review. Record `git rev-parse HEAD` before
+  and after each long test run.

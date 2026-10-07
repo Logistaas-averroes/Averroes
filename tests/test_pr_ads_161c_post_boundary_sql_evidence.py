@@ -412,6 +412,18 @@ def test_12_the_direct_property_states_are_told_apart(raw, state):
     assert (out["value"] is not None) is (state == "present")
 
 
+def test_12b_an_out_of_range_epoch_is_unparseable_not_a_failed_request():
+    """Truth-audit MINOR: an overflowing digit string RAISED inside the history
+    read, so one contact's bad value failed its whole 50-contact chunk as
+    `history_request_failed` — a parse error reported as a request failure."""
+    record = {"id": "1", "properties": {
+        hubspot.HUBSPOT_SQL_ENTRY_PROPERTY: "99999999999999999"},
+        "propertiesWithHistory": {"lifecyclestage": []}}
+    out = hubspot._history_from_record(record)["direct_sql_entry"]
+    assert out["state"] == "unparseable"
+    assert hubspot.parse_hubspot_timestamp(10 ** 20) is None
+
+
 def test_13_a_record_without_properties_says_nothing_about_the_direct_date():
     out = hubspot._history_from_record({"id": "1"})["direct_sql_entry"]
     assert out["state"] == "not_read", "absence of a container is not absence"
@@ -762,6 +774,31 @@ def test_30_pg_a_failed_read_never_erases_the_shape_a_good_read_recorded(
     assert inc["stage_jump_skipped_sql"] is True
     assert inc["history_stage_path"] == "lead>opportunity"
     assert inc["last_checked_by_run_id"] == "run2"
+    # Truth-audit MINOR: the detection run is written once, like detected_at.
+    assert inc["detected_by_run_id"] == "run1"
+
+
+@_needs_pg
+def test_31_pg_a_resolution_is_labelled_by_the_evidence_actually_stored(
+        seeded160, monkeypatch):
+    """Truth-audit MINOR: the detector resolves every effective-dated contact
+    as `direct_property`, including one dated only by a recovered transition.
+    The label is now derived in SQL from what the store holds."""
+    from db import writers
+
+    _establish()
+    _contact("hist", "opportunity")
+    _serve(monkeypatch, {"hist": _entry(JUMP)})
+    _detect("run1")
+    writers.upsert_lifecycle_stage_history([{
+        "contact_id": "hist", "funnel_event": "sql", "entered_at": T_SQL,
+        "hubspot_value": "salesqualifiedlead"}], run_id="rec1")
+    _detect("run2")
+
+    inc = _incident("hist")
+    assert inc["status"] == "resolved"
+    assert inc["resolved_by"] == "history"
+    assert inc["resolution_evidence_at"] == T_SQL
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1076,6 +1113,20 @@ def test_54_pg_an_unreadable_contact_makes_the_run_partial_not_complete(
         seeded160, monkeypatch):
     _repair_world(monkeypatch)
     _serve(monkeypatch, {"direct": RuntimeError("HubSpot 503")})
+    report = evidence_svc.repair(client=object())
+    assert report["status"] == evidence_svc.R_PARTIAL
+    assert report["contacts_unread"] == 3
+    assert report["exit_code"] == evidence_svc.EXIT_VIOLATION
+
+
+@_needs_pg
+def test_54b_pg_a_missing_history_payload_is_partial_not_complete(
+        seeded160, monkeypatch):
+    """Truth-audit MINOR: PR-ADS-159 showed a missing payload can be our own
+    request, so a contact answered without one is not a completed look."""
+    _repair_world(monkeypatch)
+    _serve(monkeypatch, {c: _entry(state=hubspot.HISTORY_PROPERTY_ABSENT)
+                         for c in ("direct", "hist", "jump")})
     report = evidence_svc.repair(client=object())
     assert report["status"] == evidence_svc.R_PARTIAL
     assert report["contacts_unread"] == 3

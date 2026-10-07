@@ -1152,12 +1152,26 @@ evidence and the closure of its incident commit together. This is a narrow,
 stated exception to PR-ADS-153B §30 (docs/45 §5.3).
 
 **Suite.** `tests/test_pr_ads_161c_post_boundary_sql_evidence.py` — PG
-end-to-end cases for §8.1–§8.10 and a counterfactual for each of §9's eleven
-mutations, in CI's PostgreSQL step and did-run list.
+end-to-end cases for §8.1–§8.10 and a test for each of §9's eleven mutations,
+in CI's PostgreSQL step and did-run list. Not all eleven remove a 161C guard:
+`test_60` injects a substitution and shows the invariant catches it, and
+`test_61`, `test_65` and `test_66` mutate contracts that predate this PR.
 
 **Production validation (not executed here).** See docs/45 §7. Expected before
 any repair: cohort audit 0, campaign certification 0, SQL gate 1 while incidents
-stay open. The first incremental sync after deploy records the history shape
-for every open incident, so run the local audit after it.
+stay open. The next incremental sync records the direct-property state and
+history shape for open incidents still in the detector's population (up to its
+200-contact budget); run the local audit after it, or `--compare-hubspot`.
+
+**Truth audit (`45fb8f5`): no blocker.** Its one MAJOR — the local audit
+classified every pre-161C incident, all 113 included, as HubSpot's gap and
+exited 0, with `test_08` pinning it — was fixed in `dfe043d` (with Copilot's
+review). Its MINORs were fixed after: an out-of-range epoch raised inside the
+history read and failed a whole 50-contact chunk; both resolvers now derive
+`resolved_by` from stored evidence; `detected_by_run_id` is written once; the
+repair counts a missing history payload as partial; the evidence writer is
+registered canonical; and four doc overclaims were corrected (columns written,
+which incidents a sync re-checks, how many reads the audit makes, what the
+mutation tests remove).
 
 Full doctrine: `docs/45_POST_BOUNDARY_SQL_EVIDENCE.md`.

@@ -1132,7 +1132,9 @@ RULES: list[dict] = [
        _SQL_EVIDENCE, ["lifecycle_sql_property_ref", "lifecycle_sql_stage_ref"]),
     _r("sqlevidence.repo", "db/crm_funnel_repository.py", CLS_DIAGNOSTIC,
        _SQL_EVIDENCE, symbol=["fetch_post_boundary_incident_forensics"]),
-    _r("sqlevidence.writers", "db/writers.py", CLS_DIAGNOSTIC, _SQL_EVIDENCE,
+    # Canonical, not diagnostic: it WRITES the canonical direct SQL-entry
+    # column (fill-only) and recovered lifecycle-history rows.
+    _r("sqlevidence.writers", "db/writers.py", CLS_CANONICAL, _SQL_EVIDENCE,
        symbol=["apply_post_boundary_sql_evidence"]),
 
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,

@@ -40,8 +40,8 @@ cannot place it in any window.
 
 | Precedence | Source | Stored in | Lineage marker |
 | --- | --- | --- | --- |
-| 1 | HubSpot `hs_v2_date_entered_salesqualifiedlead` | `hubspot_contact_funnel.date_entered_sql` | the column itself; on a resolved incident `resolved_by = 'direct_property'` |
-| 2 | a `salesqualifiedlead` version in HubSpot `lifecyclestage` history | `hubspot_lifecycle_stage_history` (`funnel_event = 'sql'`) | `hubspot_property`, `hubspot_source_*`, `recovery_run_id`; `resolved_by = 'history'` |
+| 1 | HubSpot `hs_v2_date_entered_salesqualifiedlead` | `hubspot_contact_funnel.date_entered_sql` | the column itself; on a resolved incident `resolved_by = 'direct_property'`, derived in SQL from the stored evidence (never the caller's label) |
+| 2 | a `salesqualifiedlead` version in HubSpot `lifecyclestage` history | `hubspot_lifecycle_stage_history` (`funnel_event = 'sql'`) | `hubspot_property`, `hubspot_source_*`, `recovery_run_id`; `resolved_by = 'history'` (derived the same way); `resolved_by_run_id` is set by the atomic writer, NULL on the detector's pre-existing resolution path |
 
 `effective_date_sql` coalesces them in that order and nothing else, unchanged.
 
@@ -168,8 +168,13 @@ Any failure rolls back all three (`test_26`, `test_53`).
 
 **A deliberate, narrow exception to single-writer ownership.** PR-ADS-153B §30
 makes the contact sync the sole latest-state writer of `hubspot_contact_funnel`.
-Step 1 writes one column outside it, and only in the one direction that cannot
-conflict: a NULL becomes HubSpot's own value of the same property. The sync's
+Step 1 writes outside it: `date_entered_sql`, only in the one direction that
+cannot conflict — a NULL becomes HubSpot's own value of the same property — and,
+derived from it in the same statement, `latest_stage_entry_at =
+GREATEST(existing, new)` and `updated_at`. `latest_stage_entry_at` is the recency
+column behind `lifecycle_events` freshness, so **that freshness signal can move
+forward without a successful sync** — by a genuine HubSpot event date, never a
+made-up one. The sync's
 `COALESCE` keeps it on a sparse payload and replaces it only with a different
 non-null HubSpot value, which is exactly what it would do had the sync read the
 value itself; `last_modified_at` is not touched, so the next sync still applies
@@ -262,20 +267,34 @@ python -m scripts.audit_post_boundary_sql_incidents --sample 25
 python -m scripts.audit_post_boundary_sql_incidents --compare-hubspot --sample 25 --json
 ```
 
-Without `--compare-hubspot` no HubSpot call is made. Its one database read runs
-in a `REPEATABLE READ, READ ONLY` transaction — PostgreSQL refuses a write
-(`test_41`). Exit **0** no code-owned loss traced (not "no incidents") · **1**
+Without `--compare-hubspot` no HubSpot call is made. It makes three database
+reads, all plain `SELECT`s: the contact-funnel freshness state, the boundary,
+and the incidents beside their stored evidence. The last — the one the
+classifications come from — runs in a `REPEATABLE READ, READ ONLY` transaction,
+where PostgreSQL refuses a write (`test_41`); the first two run in their own
+snapshots, so the reported boundary and freshness can describe a slightly
+different instant from the incident rows. Exit **0** no code-owned loss traced (not "no incidents") · **1**
 code-owned loss, or a resolved incident with no stored evidence · **2**
 unavailable (counts are NULL, never 0).
 
 The local mode cannot see HubSpot, so it cannot detect the upstream-present
 causes. Incidents recorded before this PR carry no direct-property state and no
 history shape, so the local audit reports them as `cause_unresolved` (not
-determined), not as HubSpot's gap. **The first incremental sync after deploy
-re-checks every open incident**, which records both. If HubSpot holds a direct
-date, that sync persists it and closes the incident. Run the local audit after
-it, or use `--compare-hubspot`. A comparison in which any read fails exits 2:
-it is incomplete, not a finding.
+determined), not as HubSpot's gap. **The next incremental sync re-checks the
+open incidents still in the detector's population** — current stage implies
+SQL and undated (outside the boundary snapshot), up to `history_budget` (200)
+per run, in `contact_id` order — and records both. If HubSpot holds a direct
+date, that sync persists it and closes the incident. An incident outside that
+population (stage fell below SQL, contact gone) is never re-read from HubSpot;
+the sweep closes it only on stored evidence, and it stays not determined until
+`--compare-hubspot` is run. Run the local audit after that sync, or use
+`--compare-hubspot`. A comparison in which any read fails exits 2: it is
+incomplete, not a finding.
+
+`candidate_not_refreshed` fires whenever HubSpot modified the contact after our
+stored copy — which includes ordinary latency between two daily syncs. It is
+code-owned and exits 1: noisy rather than silent, on purpose. Re-run after a
+successful sync before treating it as a watermark bug.
 
 ### The repair — dry run first
 
@@ -289,7 +308,9 @@ and selection. Reports `examined`, `recoverable_from_stored_evidence`,
 `recoverable_direct_property`, `recoverable_lifecycle_history`, `unresolved` by
 reason, `written`, `unchanged`, `incidents_resolved`, `open_before` /
 `open_after`. `--apply` is one local transaction; a failure writes nothing.
-`status` is `success` / `partial` (a contact could not be read) / `failed` /
+`status` is `success` / `partial` (a contact could not be read, or came back
+with no history payload — PR-ADS-159 showed that can be our own request) /
+`failed` /
 `unavailable`. Exit 0 / 1 / 2.
 
 ### Responding to an open incident

@@ -674,13 +674,22 @@ def parse_hubspot_timestamp(value):
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=_tz.utc)
+    # PR-ADS-161C review: an out-of-range epoch RAISED here, and inside a
+    # history read that turned one contact's bad value into a failed request
+    # for its whole 50-contact chunk. Unparseable is None, like any other.
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value) / 1000.0, tz=_tz.utc)
+        try:
+            return datetime.fromtimestamp(float(value) / 1000.0, tz=_tz.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
     text = str(value).strip()
     if not text:
         return None
     if text.isdigit():
-        return datetime.fromtimestamp(int(text) / 1000.0, tz=_tz.utc)
+        try:
+            return datetime.fromtimestamp(int(text) / 1000.0, tz=_tz.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
