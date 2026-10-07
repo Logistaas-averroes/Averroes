@@ -569,6 +569,96 @@ def fetch_won_state_counts(start=None, end=None) -> dict:
         return _unavailable(counts={})
 
 
+#: PR-ADS-161D — the one read behind the closed-won/customer truth service.
+#: Stated as data so a test can prove what "performs no database writes" and
+#: "one snapshot" rest on: PostgreSQL itself refuses a write in this mode.
+CLOSED_WON_UNIVERSE_TRANSACTION = (
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
+
+def fetch_closed_won_universe(won_stage_id: str) -> dict:
+    """Every input the closed-won truth service needs, from ONE snapshot.
+
+    PR-ADS-161D. Four reads, one REPEATABLE READ / READ ONLY transaction, so a
+    deal sync committing mid-read cannot give the won population, the
+    won-definition cross-check, the deal→contact acquisition evidence and the
+    sync coverage four different instants:
+
+    * ``won_rows`` — every deal with ``hs_is_closed_won IS TRUE``, ALL time and
+      with no window applied (a missing close date is kept, never filtered out:
+      a finite window's caller must SEE it to disclose it);
+    * ``won_definition_rows`` — every deal where HubSpot's won flag and the
+      confirmed won stage could disagree: flag TRUE, or stage = ``won_stage_id``;
+    * ``acquisition_contacts`` — for each won deal, every associated contact and
+      that contact's canonical ``created_at`` (NULL when the funnel holds no row);
+    * ``sync_state`` — the ledger's sync coverage row.
+
+    The won predicate is ``hs_is_closed_won IS TRUE`` exactly as in
+    :func:`fetch_won_deals`. ``won_stage_id`` is NEVER a population filter here —
+    it is read only so the caller can report where the two definitions disagree.
+
+    Read-only, enforced by the transaction mode. ``available=False`` on any
+    failure — never an empty population.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(won_rows=[], won_definition_rows=[],
+                                    acquisition_contacts=[], sync_state=None)
+            with conn.cursor() as cur:
+                cur.execute(CLOSED_WON_UNIVERSE_TRANSACTION)
+                cur.execute(
+                    f"""
+                    SELECT {', '.join(PRODUCTION_DEAL_COLUMNS)}
+                    FROM {LEDGER_TABLE}
+                    WHERE hs_is_closed_won IS TRUE
+                    ORDER BY deal_close_date DESC NULLS LAST, deal_id
+                    """)
+                won_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+                for row in won_rows:
+                    for key in ("revenue_usd", "amount_raw"):
+                        if row.get(key) is not None:
+                            row[key] = float(row[key])
+                cur.execute(
+                    f"""
+                    SELECT deal_id, deal_stage_id, deal_stage_label,
+                           hs_is_closed_won, deal_close_date
+                    FROM {LEDGER_TABLE}
+                    WHERE hs_is_closed_won IS TRUE OR deal_stage_id = %s
+                    ORDER BY deal_id
+                    """, (won_stage_id,))
+                definition_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+                cur.execute(
+                    f"""
+                    SELECT a.deal_id, a.contact_id,
+                           f.created_at AS contact_created_at,
+                           (f.contact_id IS NOT NULL) AS funnel_row_present
+                    FROM {ASSOCIATION_TABLE} a
+                    JOIN {LEDGER_TABLE} l
+                      ON l.deal_id = a.deal_id AND l.hs_is_closed_won IS TRUE
+                    LEFT JOIN hubspot_contact_funnel f
+                      ON f.contact_id = a.contact_id
+                    ORDER BY a.deal_id, a.contact_id
+                    """)
+                acquisition = [_normalise(r) for r in _rows_as_dicts(cur)]
+                cur.execute(
+                    f"SELECT scope, bootstrap_status, bootstrap_started_at, "
+                    f"bootstrap_completed_at, last_modified_watermark, "
+                    f"last_incremental_at, last_status, last_error, "
+                    f"last_sync_mode, deals_seen, pages_fetched, "
+                    f"association_failures, last_batch_id, updated_at "
+                    f"FROM {SYNC_STATE_TABLE} WHERE scope = %s", (SYNC_SCOPE,))
+                state_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+        return {"available": True, "won_rows": won_rows,
+                "won_definition_rows": definition_rows,
+                "acquisition_contacts": acquisition,
+                "sync_state": state_rows[0] if state_rows else None}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_closed_won_universe failed: %s", exc)
+        return _unavailable(won_rows=[], won_definition_rows=[],
+                            acquisition_contacts=[], sync_state=None)
+
+
 def fetch_sync_state() -> dict:
     try:
         with get_conn() as conn:

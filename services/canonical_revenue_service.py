@@ -317,6 +317,33 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
     }
 
 
+def load_closed_won_universe(won_stage_id: str) -> dict:
+    """The all-time closed-won universe, for the PR-ADS-161D truth service.
+
+    Goes through this module so the ledger is still read in exactly one place
+    and the won predicate is still ``hs_is_closed_won IS TRUE``. Unlike
+    :func:`load_won_deals` it applies NO window and does NOT enforce the
+    coverage gate: the caller windows the rows itself (it must SEE undated
+    deals to disclose them) and reports the gate's verdict per metric rather
+    than refusing to answer at all. The gate's findings are returned beside the
+    rows, computed by the one shared implementation (``check_sync_coverage``).
+
+    ``won_stage_id`` is a cross-check input only — see
+    ``db.deal_ledger_repository.fetch_closed_won_universe``.
+    """
+    from db import deal_ledger_repository as ledger_repo
+    from services.revenue_reconciliation_service import check_sync_coverage
+
+    universe = ledger_repo.fetch_closed_won_universe(won_stage_id)
+    if not universe.get("available"):
+        return {**universe, "coverage_findings": None,
+                "source": CANONICAL_SOURCE}
+    findings = check_sync_coverage(
+        {"available": True, "row": universe.get("sync_state")})
+    return {**universe, "coverage_findings": findings,
+            "source": CANONICAL_SOURCE}
+
+
 def summarize_deals(deals, scope=DEFAULT_SCOPE) -> dict:
     """Aggregate an already-loaded canonical row set for one scope. Pure.
 

@@ -70,7 +70,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -96,6 +96,7 @@ jobs:
             tests/test_pr_ads_161a1_sql_publication_contract.py \
             tests/test_pr_ads_161b_marketing_outcome_cohorts.py \
             tests/test_pr_ads_161c_post_boundary_sql_evidence.py \
+            tests/test_pr_ads_161d_customer_closed_won_truth.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -160,6 +161,10 @@ jobs:
                            # a failed apply rolls back, and each guard's
                            # counterfactual goes red.
                            "tests.test_pr_ads_161c_post_boundary_sql_evidence",
+                           # PR-ADS-161D. Its PG cases seed the real ledger
+                           # writer and run the real audit end to end,
+                           # including the no-writes fingerprint.
+                           "tests.test_pr_ads_161d_customer_closed_won_truth",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
