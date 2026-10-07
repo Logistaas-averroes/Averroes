@@ -343,3 +343,21 @@ Recurring patterns (durable):
   published under unproven coverage. Caught: undated dropped from all_time.
   test_61 mutates the output dict, not the implementation.
 - Suite: 54 passed, PG cases ran (no skips) with python3.11.
+- UPDATE (same review, re-verified at 0f68beb): the branch moved twice during the
+  review (c456649, 0f68beb). FIXED there and re-verified by execution: same-day
+  future closes are now in no window (members require CLOSE_EXACT; test_23_b
+  fails on the pre-fix code); the acquisition cohort drops future-dated deals;
+  evidence windows now use London-midnight instants via 161B's
+  `window_instants`; the audit's SQL cross-check runs `fetch_won_deals` on its
+  own READ ONLY cursor and compares deal IDS, not counts. STILL OPEN at
+  0f68beb: acquisition cohort publishes over won flag/stage conflicts; withheld
+  totals recoverable from coverage/confirmed fields (and the audit's
+  `membership_reconciles` now REQUIRES `closed_won_deals_confirmed_in_window`
+  to be populated under any status); audit mutations M1/M2/M5/M6/M7 and
+  evidence-window bounds still uncaught; negative amounts; no unknown-won
+  disclosure.
+- A full-suite run that straddled the moves showed 3 failures (161D test_76/77,
+  153E-B test_8). They were artifacts of files changing mid-run: both files
+  pass at 0f68beb.
+- Full suite at 0f68beb (HEAD stable across the run): 4973 passed, 1 skipped,
+  2 baseline deselects. The 161D file's PG cases ran.

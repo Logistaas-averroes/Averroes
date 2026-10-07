@@ -59,10 +59,11 @@ def _definition_rows(rows):
 
 
 def _universe(rows, *, findings=None, contacts=None, definition_rows=None,
-              sync_state=READY_SYNC_STATE):
+              sync_state=READY_SYNC_STATE, unknown=()):
     return {"available": True, "won_rows": rows,
             "won_definition_rows": (definition_rows if definition_rows
                                     is not None else _definition_rows(rows)),
+            "unknown_won_rows": list(unknown),
             "acquisition_contacts": contacts or [],
             "sync_state": sync_state,
             "coverage_findings": [] if findings is None else findings}
@@ -120,7 +121,12 @@ def test_02_the_won_flag_disagreeing_with_the_won_stage_withholds_the_count():
              definition_rows=_definition_rows(
                  [ledger_row("1", deal_close_date=Q4)]) + [stage_only])
     assert _status(w, "closed_won_deals") == cwt.WITHHELD
-    assert w["membership"]["deal_ids"] == ["1"], "stage alone adds no deal"
+    # Withheld means absent: no member ids either. The stage-only deal is a
+    # reported conflict, never a member.
+    assert w["membership"]["deal_ids"] is None
+    assert [(c["deal_id"], c["state"]) for c in
+            w["membership"]["won_definition_conflicts"]] == [
+        ("2", cwt.WON_STAGE_FLAG_NOT_TRUE)]
 
 
 def test_03_a_conflict_outside_the_window_does_not_touch_it():
@@ -208,7 +214,9 @@ def test_20_an_undated_won_deal_withholds_finite_windows_and_counts_in_all_time(
     assert finite["publication"]["closed_won_deals"]["reason"] == \
         cwt.R_UNDATED_WON_DEALS
     assert finite["outcomes"]["closed_won_deals"] is None
-    assert finite["outcomes"]["closed_won_deals_confirmed_in_window"] == 1
+    # Withheld means absent: the confirmed members would be its lower bound.
+    assert finite["outcomes"]["closed_won_deals_confirmed_in_window"] is None
+    assert finite["membership"]["deal_ids"] is None
     assert finite["membership"]["undated_won_deals"] == 1
     for w in (all_b, all_e):
         assert w["outcomes"]["closed_won_deals"] == 2
@@ -219,7 +227,9 @@ def test_21_no_ingestion_or_sync_time_ever_dates_a_deal():
     """An undated deal stays undated, whatever other timestamps it carries."""
     row = ledger_row("2", deal_close_date=None, deal_created_at=Q4)
     w = _one([row])
-    assert w["membership"]["deal_ids"] == []
+    assert w["membership"]["undated_won_deals"] == 1
+    assert w["publication"]["closed_won_deals"]["reason"] == \
+        cwt.R_UNDATED_WON_DEALS
     assert cwt.close_date_state(row, NOW) == cwt.CLOSE_MISSING
 
 
@@ -263,7 +273,7 @@ def test_23_b_a_close_later_today_or_this_quarter_is_in_no_window():
         w = _one(rows, window)
         assert w["membership"]["deal_ids"] == ["a"], window
         assert w["outcomes"]["closed_won_deals"] == 1, window
-        assert w["outcomes"]["revenue_usd_confirmed_subset"] == \
+        assert w["outcomes"]["revenue_usd"] == \
             earlier_today["revenue_usd"], window
 
 
@@ -285,12 +295,18 @@ def test_23_c_a_future_dated_conflict_blocks_nothing_an_undated_one_blocks_all()
     assert _status(w, "closed_won_deals") == cwt.WITHHELD
 
 
+_UNPROVEN = {"revenue_usd": None, "currency_status": "unavailable",
+             "currency_reason": "unknown_currency"}
+
+
 @pytest.mark.parametrize("override,state", [
-    ({"amount_raw": 500.0}, cwt.AMOUNT_POSITIVE),
-    ({"amount_raw": 0.0}, cwt.AMOUNT_ZERO),
-    ({"amount_raw": None}, cwt.AMOUNT_MISSING),
-    ({"amount_raw": "abc"}, cwt.AMOUNT_INVALID),
-    ({"amount_raw": -10.0}, cwt.AMOUNT_NEGATIVE),
+    ({"amount_raw": 500.0, "revenue_usd": 500.0}, cwt.AMOUNT_POSITIVE),
+    ({"amount_raw": 0.0, "revenue_usd": 0.0}, cwt.AMOUNT_ZERO),
+    ({"amount_raw": None, **_UNPROVEN}, cwt.AMOUNT_MISSING),
+    ({"amount_raw": "abc", **_UNPROVEN}, cwt.AMOUNT_INVALID),
+    ({"amount_raw": -10.0, "revenue_usd": -10.0}, cwt.AMOUNT_NEGATIVE),
+    # A home-currency deal: no raw amount, but proven USD — the summed value.
+    ({"amount_raw": None, "revenue_usd": 500.0}, cwt.AMOUNT_POSITIVE),
 ])
 def test_24_amount_states_are_told_apart(override, state):
     assert cwt.amount_state(ledger_row("1", **override)) == state
@@ -304,7 +320,11 @@ def test_25_a_missing_amount_withholds_revenue_but_not_the_deal_count():
     w = _one(rows)
     assert w["outcomes"]["closed_won_deals"] == 2
     assert w["outcomes"]["revenue_usd"] is None
-    assert w["outcomes"]["revenue_usd_confirmed_subset"] == 1000.0
+    # No partial sum anywhere — the known 1000 would read as the total.
+    assert "revenue_usd_confirmed_subset" not in w["outcomes"]
+    assert w["outcomes"]["deals_without_proven_usd"] == 1
+    assert all(b["revenue_usd"] is None
+               for b in w["attribution"]["partition"].values())
     assert w["publication"]["revenue_usd"] == {
         "status": cwt.WITHHELD, "reason": cwt.R_REVENUE_UNPROVEN}
     assert w["coverage"]["currency"][cwt.CURRENCY_NOT_APPLICABLE] == 1
@@ -342,6 +362,17 @@ def test_28_an_unrecognised_currency_status_is_never_usd():
     row = ledger_row("1", currency_status="mystery", currency_reason=None)
     assert cwt.currency_state(row) == cwt.CURRENCY_UNSUPPORTED
     assert cwt.revenue_is_proven(row) is False
+
+
+def test_29_a_negative_won_amount_is_invalid_evidence_never_netted_off():
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=Q4, amount_raw=-900.0,
+                       revenue_usd=-900.0)]
+    w = _one(rows)
+    assert cwt.amount_state(rows[1]) == cwt.AMOUNT_NEGATIVE
+    assert cwt.revenue_is_proven(rows[1]) is False
+    assert w["outcomes"]["revenue_usd"] is None      # never 1000 - 900 = 100
+    assert w["publication"]["revenue_usd"]["reason"] == cwt.R_REVENUE_UNPROVEN
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -392,10 +423,22 @@ def test_30_every_won_deal_lands_in_exactly_one_bucket():
 def test_31_conflicting_campaign_contacts_are_ambiguous_never_split():
     w = _one(_attr_rows(), resolver=RESOLVER)
     assert w["attribution"]["partition"][cwt.BUCKET_AMBIGUOUS]["deals"] == 1
+    placed = [r for r in _attr_rows() if r["deal_id"] != "u"]   # all placed
+    w = _one(placed, resolver=RESOLVER)
     assert w["attribution"]["by_campaign"] == {
         "111": {"deals": 1, "revenue_usd": 1000.0,
-                "revenue_usd_confirmed_subset": 1000.0,
                 "deals_without_proven_usd": 0}}
+
+
+def test_31_b_campaign_revenue_is_withheld_while_a_google_ads_deal_is_unplaced():
+    """An unmapped Google Ads deal could belong to any campaign: every
+    per-campaign figure would be a lower bound published as a total."""
+    w = _one(_attr_rows(), resolver=RESOLVER)
+    assert w["coverage"]["campaign_attribution"][
+        cwt.BUCKET_GOOGLE_ADS_UNPLACED] == 1
+    assert w["publication"]["campaign_revenue"] == {
+        "status": cwt.WITHHELD, "reason": cwt.R_CAMPAIGN_UNPLACED}
+    assert w["attribution"]["by_campaign"] is None
 
 
 def test_32_unattributed_and_contactless_deals_stay_in_all_source():
@@ -445,7 +488,7 @@ def test_40_a_deal_is_in_an_acquisition_window_only_if_every_contact_is():
                 _contact("s", "3", Q3)]
     w = _one(rows, contacts=contacts)
     acq = w["acquisition_cohort"]
-    assert acq["closed_won_deals_confirmed"] == 1
+    assert "closed_won_deals_confirmed" not in acq   # its lower bound: absent
     assert acq["ambiguous_membership"] == 1
     assert acq["status"] == cwt.WITHHELD and acq["closed_won_deals"] is None
 
@@ -464,8 +507,40 @@ def test_42_b_a_future_dated_deal_is_in_no_acquisition_cohort():
     contacts = [_contact("f", "1", "2026-10-03T00:00:00+00:00"),
                 _contact("u", "2", "2026-10-03T00:00:00+00:00")]
     acq = _one(rows, contacts=contacts)["acquisition_cohort"]
-    assert acq["closed_won_deals_confirmed"] == 1
     assert acq["status"] == cwt.PUBLISHED and acq["closed_won_deals"] == 1
+
+
+def test_42_c_a_won_flag_stage_conflict_withholds_the_acquisition_cohort():
+    """Acquisition membership ignores the close date, so a conflict that has
+    happened touches every acquisition window (docs/46 §2)."""
+    other_stage = ledger_row("1", deal_close_date=Q4, deal_stage_id="999")
+    w = _one([other_stage], contacts=[_contact("1", "c", "2026-10-03T00:00:00+00:00")])
+    acq = w["acquisition_cohort"]
+    assert acq["status"] == cwt.WITHHELD
+    assert acq["reason"] == cwt.R_WON_DEFINITION_CONFLICT
+    assert acq["closed_won_deals"] is None and acq["revenue_usd"] is None
+    # The stage without the flag withholds it too — even from another window.
+    rows = [ledger_row("2", deal_close_date=Q4)]
+    stage_only = {"deal_id": "9", "deal_stage_id": cwt.CONFIRMED_WON_STAGE_ID,
+                  "hs_is_closed_won": False, "deal_close_date": Q3}
+    w = _one(rows, contacts=[_contact("2", "c", "2026-10-03T00:00:00+00:00")],
+             definition_rows=_definition_rows(rows) + [stage_only])
+    assert _status(w, "closed_won_deals") == cwt.PUBLISHED   # Q3: not this window
+    assert w["acquisition_cohort"]["status"] == cwt.WITHHELD
+
+
+def test_42_d_acquisition_revenue_has_its_own_verdict():
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=Q4, amount_raw=None,
+                       revenue_usd=None, currency_status="unavailable",
+                       currency_reason="no_amount")]
+    contacts = [_contact("1", "a", "2026-10-03T00:00:00+00:00"),
+                _contact("2", "b", "2026-10-03T00:00:00+00:00")]
+    acq = _one(rows, contacts=contacts)["acquisition_cohort"]
+    assert acq["status"] == cwt.PUBLISHED and acq["closed_won_deals"] == 2
+    assert acq["revenue_status"] == cwt.WITHHELD
+    assert acq["revenue_reason"] == cwt.R_REVENUE_UNPROVEN
+    assert acq["revenue_usd"] is None
 
 
 def test_42_a_failed_association_lookup_is_unresolved_not_contactless():
@@ -527,6 +602,81 @@ def test_52_an_unreadable_ledger_is_unavailable_everywhere_never_zero():
     for w in t["windows"]:
         assert all(v is None for v in w["outcomes"].values())
         assert _status(w, "closed_won_deals") == cwt.UNAVAILABLE
+
+
+def test_52_b_a_universe_without_a_coverage_verdict_fails_closed():
+    universe = _universe([ledger_row("1", deal_close_date=Q4)])
+    del universe["coverage_findings"]
+    w = svc.get_closed_won_truth([(BUSINESS, "current_quarter")], now=NOW,
+                                 universe=universe, resolver=None,
+                                 resolver_detail="t")["windows"][0]
+    assert _status(w, "closed_won_deals") == cwt.UNAVAILABLE
+    assert w["outcomes"]["closed_won_deals"] is None
+
+
+def _all_numbers(value, path=""):
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return []
+    if isinstance(value, (int, float)):
+        return [path]
+    if isinstance(value, dict):
+        return [p for k, v in value.items() for p in _all_numbers(v, f"{path}.{k}")]
+    if isinstance(value, (list, tuple)):
+        return [path] if value else []
+    return []
+
+
+def test_52_c_unproven_coverage_leaves_no_number_anywhere():
+    """Withheld means absent: under unproven coverage nothing — no bucket, no
+    coverage distribution, no confirmed count — lets the number be rebuilt."""
+    finding = [{"code": "bootstrap_not_complete", "message": "x"}]
+    rows = [ledger_row(str(i), deal_close_date=Q4) for i in range(5)]
+    w = _one(rows, findings=finding, unknown=[{"deal_id": "u",
+                                               "deal_close_date": Q4}])
+    leaked = [p for k, v in w.items()
+              if k not in ("window", "definitions", "publication", "available")
+              for p in _all_numbers(v, k)
+              if not p.startswith("coverage.source_freshness")]
+    assert leaked == []
+    for metric, p in w["publication"].items():
+        if metric not in ("roas", "cac"):
+            assert p["status"] == cwt.UNAVAILABLE, metric
+
+
+def test_52_d_a_withheld_count_cannot_be_rebuilt_from_its_disclosures():
+    other_stage = ledger_row("9", deal_close_date=Q4, deal_stage_id="999")
+    rows = [ledger_row(str(i), deal_close_date=Q4) for i in range(4)] + \
+        [other_stage]
+    w = _one(rows)
+    assert _status(w, "closed_won_deals") == cwt.WITHHELD
+    leaked = _all_numbers(w["attribution"], "attribution") + \
+        _all_numbers(w["outcomes"], "outcomes") + \
+        _all_numbers(w["membership"]["deal_ids"], "ids") + \
+        [p for k in ("deal_identity", "close_date_of_members", "amount",
+                     "currency", "customer_identity", "contact_association",
+                     "campaign_attribution")
+         for p in _all_numbers(w["coverage"][k], k)]
+    assert leaked == []
+
+
+def test_52_e_unknown_won_state_is_disclosed_never_zeroed():
+    rows = [ledger_row("1", deal_close_date=Q4)]
+    unknown = [{"deal_id": "u1", "deal_close_date": Q4},
+               {"deal_id": "u2", "deal_close_date": Q3},
+               {"deal_id": "u3", "deal_close_date": None}]
+    t = _truth(rows, ((BUSINESS, "current_quarter"), (BUSINESS, "all_time")),
+               unknown=unknown)
+    cq, at = t["windows"]
+    assert cq["membership"]["unknown_won_state_deals"] == 1
+    assert at["membership"]["unknown_won_state_deals"] == 3
+    assert cq["membership"]["unknown_won_state_undated"] == 1
+    # Not read is not zero.
+    universe = _universe(rows)
+    del universe["unknown_won_rows"]
+    w = svc.get_closed_won_truth([(BUSINESS, "current_quarter")], now=NOW,
+                                 universe=universe, resolver=None,
+                                 resolver_detail="t")["windows"][0]
+    assert w["membership"]["unknown_won_state_deals"] is None
 
 
 def test_53_every_supported_window_is_evaluated():
@@ -648,7 +798,7 @@ def test_62_c_the_sql_cross_check_drops_future_closes_and_compares_ids(
               if c["window"] == "current_quarter")
     assert cq == {"window": "current_quarter", "production_sql_deals": 1,
                   "production_sql_future_dated_excluded": 1,
-                  "service_dated_members": 1, "service_undated_members": 0}
+                  "dated_members": 1, "undated_members": 0}
     # Counterfactual: production SQL holding a deal the service lacks.
     extra = _sql(rows)
     extra["current_quarter"].append({"deal_id": "ghost",
@@ -667,6 +817,93 @@ def test_62_d_a_cross_check_that_could_not_run_is_unavailable_not_broken(
     assert report["verdict"] == "unavailable"
     assert set(report["sql_cross_checks_not_run"]) == {
         "current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"}
+
+
+# Implementation mutations: break the CODE, not the output dict, and require
+# the audit to notice. Each would pass an audit that re-ran the service's own
+# logic (the truth auditor's M3).
+
+def _audit_after_mutation(monkeypatch, rows, patches, window=(BUSINESS,
+                                                             "current_quarter"),
+                          **kw):
+    for target, name, value in patches:
+        monkeypatch.setattr(target, name, value)
+    w = _one(rows, window, **kw)
+    from scripts import audit_customer_closed_won_truth as audit
+    a = audit.Audit()
+    kw.pop("resolver", None)
+    audit.window_checks(a, w, _universe(rows, **kw), now=NOW)
+    return a
+
+
+def test_65_a_disabled_conflict_detector_is_caught(monkeypatch):
+    rows = [ledger_row("1", deal_close_date=Q4, deal_stage_id="999")]
+    a = _audit_after_mutation(monkeypatch, rows, [
+        (cwt, "won_definition_state",
+         lambda d: cwt.WON_DEFINITIONS_AGREE)])
+    assert a.checks["won_definition_conflict_withholds"] is False
+
+
+def test_65_b_a_campaign_deal_moved_to_another_bucket_is_caught(monkeypatch):
+    real = cwt.attribution_bucket
+
+    def moved(row, resolve_label=None):
+        bucket, cid, reason = real(row, resolve_label)
+        if bucket == cwt.BUCKET_CAMPAIGN:
+            return cwt.BUCKET_OTHER_SOURCE, None, "moved"
+        return bucket, cid, reason
+
+    a = _audit_after_mutation(monkeypatch, _attr_rows(), [
+        (cwt, "attribution_bucket", moved)], resolver=RESOLVER)
+    assert a.checks["attribution_partition_reconciles"] is False
+
+
+def test_65_c_widened_evidence_bounds_are_caught(monkeypatch):
+    real = svc.window_bounds
+
+    def wider(window_type, window_key, now=None):
+        b = dict(real(window_type, window_key, now))
+        if b["start"] is not None:
+            b["start"] = b["start"] - timedelta(days=1)
+        return b
+
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("edge", deal_close_date="2026-09-30T12:00:00+00:00")]
+    a = _audit_after_mutation(monkeypatch, rows, [(svc, "window_bounds", wider)],
+                              window=(EVIDENCE, "7d"))
+    assert a.checks["membership_uses_close_date"] is False
+
+
+def test_65_d_an_unpriced_deal_summed_as_proven_is_caught(monkeypatch):
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=Q4, amount_raw=-900.0,
+                       revenue_usd=-900.0)]
+    a = _audit_after_mutation(monkeypatch, rows, [
+        (cwt, "revenue_is_proven",
+         lambda r: r.get("revenue_usd") is not None)])
+    assert a.checks["revenue_only_published_when_every_deal_proven"] is False
+
+
+def test_65_e_disclosures_left_unredacted_are_caught(monkeypatch):
+    finding = [{"code": "bootstrap_not_complete", "message": "x"}]
+    a = _audit_after_mutation(
+        monkeypatch, [ledger_row("1", deal_close_date=Q4)],
+        [(cwt, "_redact", lambda v: v)], findings=finding)
+    assert a.checks["unproven_coverage_withholds"] is False
+
+
+def test_65_f_an_acquisition_cohort_ignoring_conflicts_is_caught(monkeypatch):
+    rows = [ledger_row("1", deal_close_date=Q4, deal_stage_id="999")]
+    contacts = [_contact("1", "c", "2026-10-03T00:00:00+00:00")]
+    real = cwt.evaluate_window
+
+    def ignores_conflicts(**kw):
+        kw["definition_rows"] = []
+        return real(**kw)
+
+    a = _audit_after_mutation(monkeypatch, rows, [
+        (cwt, "evaluate_window", ignores_conflicts)], contacts=contacts)
+    assert a.checks["won_definition_conflict_withholds"] is False
 
 
 def test_63_the_audit_has_no_external_or_write_path_and_no_consumer():
@@ -692,6 +929,23 @@ def test_64_the_structural_check_catches_a_production_consumer(monkeypatch):
     a = audit.Audit()
     audit.structural_checks(a)
     assert a.checks["no_production_page_changed"] is False
+
+
+def test_64_b_a_function_level_import_in_a_scheduler_is_a_consumer(monkeypatch):
+    from scripts import audit_customer_closed_won_truth as audit
+    real = Path.read_text
+
+    def fake(self, *a, **k):
+        text = real(self, *a, **k)
+        if self.name == "daily.py" and self.parent.name == "scheduler":
+            text += ("\ndef _x():\n"
+                     "    from services import canonical_customer_revenue_service\n")
+        return text
+
+    monkeypatch.setattr(Path, "read_text", fake)
+    a = audit.Audit()
+    out = audit.structural_checks(a)
+    assert "scheduler/daily.py" in out["production_consumers"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -744,6 +998,8 @@ def test_70_pg_open_lost_and_unknown_deals_are_never_closed_won(ledger):
     w = svc.get_window_outcome(BUSINESS, "current_quarter", now=NOW)
     assert w["membership"]["deal_ids"] == ["won"]
     assert w["outcomes"]["closed_won_deals"] == 1
+    # Neither won nor lost: in no count, but disclosed (docs/35 §3).
+    assert w["membership"]["unknown_won_state_deals"] == 1
 
 
 @_needs_pg
@@ -826,13 +1082,13 @@ def test_76_pg_the_audit_cli_holds_writes_nothing_and_cross_checks_sql(
     assert {c["window"] for c in out["sql_cross_checks"]} == {
         "current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"}
     for c in out["sql_cross_checks"]:
-        assert c["production_sql_deals"] == c["service_dated_members"]
+        assert c["production_sql_deals"] == c["dated_members"]
     # Production's All Time is bounded above, so its SQL drops the undated d3;
     # the service counts it and the audit says so beside the comparison.
     all_time = next(c for c in out["sql_cross_checks"]
                     if c["window"] == "all_time")
     assert all_time["production_sql_deals"] == 2
-    assert all_time["service_undated_members"] == 1
+    assert all_time["undated_members"] == 1
 
 
 @_needs_pg
@@ -879,7 +1135,54 @@ def test_79_pg_the_cross_check_runs_production_sql_in_the_audit_snapshot(
     cq = next(c for c in report["sql_cross_checks"]
               if c["window"] == "current_quarter")
     assert cq["production_sql_future_dated_excluded"] == 1   # "later"
-    assert cq["production_sql_deals"] == cq["service_dated_members"] == 1
+    assert cq["production_sql_deals"] == cq["dated_members"] == 1
+
+
+@_needs_pg
+def test_75_b_pg_the_universe_read_opens_read_only_before_any_query(
+        ledger, monkeypatch):
+    """test_75 proves the mode refuses writes; this proves the universe read
+    actually sets it, first."""
+    real = ledger.get_conn
+    executed = []
+
+    class _Cur:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, sql, *a, **k):
+            executed.append(" ".join(str(sql).split()))
+            return self._cur.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._cur, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._cur.__exit__(*exc)
+
+    class _Conn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def cursor(self, *a, **k):
+            return _Cur(self._conn.cursor(*a, **k))
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def recording():
+        with real() as conn:
+            yield _Conn(conn) if conn is not None else None
+
+    monkeypatch.setattr(ledger, "get_conn", recording)
+    assert ledger.fetch_closed_won_universe("326093516")["available"]
+    assert executed[0] == ledger.CLOSED_WON_UNIVERSE_TRANSACTION
 
 
 def test_80_the_cross_check_runs_the_production_read_itself():

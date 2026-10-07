@@ -228,7 +228,8 @@ def _unavailable_window(window_type, window_key, bounds, reason, detail,
                         freshness) -> dict:
     statuses = {k: {"status": cwt.UNAVAILABLE, "reason": reason}
                 for k in ("closed_won_deals", "revenue_usd", "customers",
-                          "campaign_revenue", "acquisition_cohort")}
+                          "campaign_revenue", "acquisition_cohort",
+                          "acquisition_revenue")}
     statuses["roas"] = {"status": cwt.NOT_PUBLISHED,
                         "reason": cwt.R_ROAS_NOT_CERTIFIED}
     statuses["cac"] = {"status": cwt.NOT_PUBLISHED,
@@ -296,7 +297,12 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
         return {**base, "available": False, "windows": out,
                 "freshness": freshness}
 
-    findings = universe.get("coverage_findings") or []
+    findings = universe.get("coverage_findings")
+    if findings is None:
+        # A universe without the gate's verdict has not been proven covered.
+        # Absent is not "no findings" — fail closed.
+        findings = [{"code": "coverage_verdict_missing",
+                     "message": "the ledger coverage gate returned no verdict"}]
     freshness = freshness_block(universe.get("sync_state"), findings, now)
     contacts = _contacts_by_deal(universe.get("acquisition_contacts"))
     out = []
@@ -308,7 +314,8 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
             contacts_by_deal=contacts, start=bounds["start"],
             end=bounds["end"], is_all_time=bounds["is_all_time"], now=now,
             coverage_findings=findings, resolve_label=resolver,
-            company_ids_by_deal=None)
+            company_ids_by_deal=None,
+            unknown_won_rows=universe.get("unknown_won_rows"))
         result["coverage"]["source_freshness"] = freshness
         out.append({"available": True,
                     "window": _window_meta(wtype, wkey, bounds),

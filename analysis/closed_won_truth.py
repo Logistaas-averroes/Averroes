@@ -151,6 +151,7 @@ R_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
 R_DEALS_WITHHELD = "closed_won_deal_count_withheld"
 R_REVENUE_WITHHELD = "closed_won_revenue_withheld"
 R_ACQ_UNRESOLVED = "acquisition_membership_unresolved"
+R_CAMPAIGN_UNPLACED = "google_ads_deals_not_placed_on_a_campaign"
 R_ROAS_NOT_CERTIFIED = ("roas_requires_compatible_numerator_and_denominator_"
                         "cohorts_pr_ads_161e")
 R_CAC_NOT_CERTIFIED = "cac_requires_acquisition_cohort_spend_pr_ads_161e"
@@ -191,7 +192,15 @@ def close_date_state(row: dict, now: datetime) -> str:
 
 
 def amount_state(row: dict) -> str:
-    raw = row.get("amount_raw")
+    """The state of the amount that would be SUMMED.
+
+    A deal whose currency the ledger proved carries that proof in
+    ``revenue_usd`` (a home-currency deal may have no raw ``amount`` at all), so
+    that value is classified; otherwise the raw HubSpot ``amount`` is.
+    """
+    proven = is_summable(row.get("currency_status")) and \
+        row.get("revenue_usd") is not None
+    raw = row.get("revenue_usd") if proven else row.get("amount_raw")
     if raw is None:
         return AMOUNT_MISSING
     try:
@@ -228,9 +237,12 @@ def currency_state(row: dict) -> str:
 
 
 def revenue_is_proven(row: dict) -> bool:
-    """May this deal's ``revenue_usd`` be summed? The ledger's own rule."""
+    """May this deal's ``revenue_usd`` be summed? The ledger's own currency
+    rule, plus: a won deal's value is never negative — a negative amount is
+    invalid evidence, not a refund to net off the total. Fails closed."""
     return is_summable(row.get("currency_status")) and \
-        row.get("revenue_usd") is not None
+        row.get("revenue_usd") is not None and \
+        amount_state(row) in (AMOUNT_POSITIVE, AMOUNT_ZERO)
 
 
 def customer_identity_state(company_ids, *, source_available: bool) -> str:
@@ -371,13 +383,30 @@ def _bucket_totals(rows) -> dict:
     complete = len(priced) == len(rows)
     return {"deals": len(rows),
             "revenue_usd": _revenue(rows) if complete else None,
-            "revenue_usd_confirmed_subset": _revenue(rows),
             "deals_without_proven_usd": len(rows) - len(priced)}
+
+
+def _redact(value):
+    """Every number (and id list) in ``value`` replaced by None, recursively.
+
+    Withheld means absent, not hidden: a payload whose headline is withheld
+    must not let the number be re-assembled from its disclosures.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return None
+    if isinstance(value, dict):
+        return {k: _redact(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return None
+    return value
 
 
 def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                     is_all_time: bool, now: datetime, coverage_findings,
-                    resolve_label=None, company_ids_by_deal=None) -> dict:
+                    resolve_label=None, company_ids_by_deal=None,
+                    unknown_won_rows=None) -> dict:
     """The closed-won truth for one window. Pure.
 
     ``won_rows``           every ``hs_is_closed_won IS TRUE`` deal, all time.
@@ -387,6 +416,8 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
     ``resolve_label``      the campaign resolver, or None when unavailable.
     ``company_ids_by_deal`` deal_id → company ids, or None when the repository
                            holds no company associations at all.
+    ``unknown_won_rows``   deals whose ``hs_is_closed_won`` IS NULL — neither
+                           won nor lost; disclosed beside the count (docs/35 §3).
     """
     findings = list(coverage_findings or [])
     company_source = company_ids_by_deal is not None
@@ -470,6 +501,24 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
     acq_ambiguous = [r for r in acq_population
                      if acq[str(r.get("deal_id"))] == ACQ_AMBIGUOUS]
 
+    # Acquisition membership does not depend on the close date, so every
+    # conflict that has happened (dated up to now, or undated) can touch it.
+    acq_conflicts = [d for d in definition_rows or []
+                     if won_definition_state(d) != WON_DEFINITIONS_AGREE
+                     and close_date_state(d, now) != CLOSE_INVALID]
+
+    # Deals whose won state HubSpot has not told us: disclosed, never folded
+    # into won or lost (docs/35 §3, as ``load_won_deals`` reports them).
+    unknown_read = unknown_won_rows is not None   # None: not read — never 0
+    unknown = list(unknown_won_rows or [])
+    unknown_in_window = [d for d in unknown
+                         if close_date_state(d, now) == CLOSE_EXACT
+                         and in_window(d.get("deal_close_date"), start, end)]
+    unknown_undated = [d for d in unknown
+                       if close_date_state(d, now) == CLOSE_MISSING]
+    if is_all_time:
+        unknown_in_window = unknown_in_window + unknown_undated
+
     # ── publication ─────────────────────────────────────────────────────────
     if findings:
         deal_status, deal_reason = UNAVAILABLE, R_COVERAGE_NOT_PROVEN
@@ -510,28 +559,44 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
             else R_REVENUE_WITHHELD
     elif resolve_label is None:
         camp_status, camp_reason = WITHHELD, R_CAMPAIGN_IDENTITY_UNAVAILABLE
+    elif partition[BUCKET_GOOGLE_ADS_UNPLACED]:
+        # A Google Ads deal on no campaign could belong to any of them: every
+        # per-campaign figure would be a lower bound presented as a total.
+        camp_status, camp_reason = WITHHELD, R_CAMPAIGN_UNPLACED
     else:
         camp_status, camp_reason = PUBLISHED, None
 
-    acq_priced = all(revenue_is_proven(r) for r in acq_members)
     if findings:
         acq_status, acq_reason = UNAVAILABLE, R_COVERAGE_NOT_PROVEN
+    elif acq_conflicts:
+        acq_status, acq_reason = WITHHELD, R_WON_DEFINITION_CONFLICT
     elif acq_unresolved or acq_ambiguous:
         acq_status, acq_reason = WITHHELD, R_ACQ_UNRESOLVED
     else:
         acq_status, acq_reason = PUBLISHED, None
+    if acq_status != PUBLISHED:
+        acq_rev_status = acq_status
+        acq_rev_reason = acq_reason if acq_status == UNAVAILABLE \
+            else R_DEALS_WITHHELD
+    elif not all(revenue_is_proven(r) for r in acq_members):
+        acq_rev_status, acq_rev_reason = WITHHELD, R_REVENUE_UNPROVEN
+    else:
+        acq_rev_status, acq_rev_reason = PUBLISHED, None
 
     publishes = deal_status == PUBLISHED
     revenue_published = rev_status == PUBLISHED
     customers_published = cust_status == PUBLISHED
     campaign_published = camp_status == PUBLISHED
+    acq_published = acq_status == PUBLISHED
 
-    def _bucket(name):
-        totals = _bucket_totals(partition[name])
-        if not publishes:
-            totals["deals"] = None
+    def _totals(rows):
+        totals = _bucket_totals(rows)
         if not revenue_published:
             totals["revenue_usd"] = None
+        return totals
+
+    def _bucket(name):
+        totals = _totals(partition[name])
         totals["reasons"] = reasons[name]
         return totals
 
@@ -539,79 +604,34 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                        and r.get("attribution_status") != "ambiguous"]
     paid_rows = [r for r in members if is_paid_search_source(r)]
 
-    def _scope(rows):
-        totals = _bucket_totals(rows)
-        if not publishes:
-            totals["deals"] = None
-        if not revenue_published:
-            totals["revenue_usd"] = None
-        return totals
-
-    return {
-        "membership": {
-            "deal_ids": sorted(ids),
-            "undated_won_deals": len(undated),
-            "undated_included": bool(is_all_time),
-            "future_dated_won_deals": len(future),
-            "won_definition_conflicts": conflicts,
-        },
+    # Everything below is derived from the window's MEMBERSHIP. When the count
+    # is not published it is redacted as a whole, so the withheld number cannot
+    # be re-assembled from ids, buckets or coverage distributions.
+    membership_derived = {
+        "membership_ids": sorted(ids),
         "outcomes": {
-            "closed_won_deals": len(members) if publishes else None,
+            "closed_won_deals": len(members),
             "closed_won_deals_confirmed_in_window": len(
-                [r for r in members if in_window(r.get("deal_close_date"),
-                                                 start, end)]),
-            "customers": (len(resolved_customers) if customers_published
-                          else None),
+                [r for r in members if close_date_state(r, now) == CLOSE_EXACT]),
             # A count of PROVEN identities. NULL when no identity source exists
             # at all — "we could not look" is not "zero customers".
             "confirmed_customer_lower_bound": (len(resolved_customers)
                                                if company_source else None),
             "unresolved_customer_identity": len(unresolved_identity),
-            "revenue_usd": _revenue(members) if revenue_published else None,
-            "revenue_usd_confirmed_subset": _revenue(members),
             "deals_without_proven_usd": len(unpriced),
         },
         "attribution": {
-            "all_source": _scope(members),
-            "paid_search_source": _scope(paid_rows),
-            "google_ads_source": _scope(google_ads_rows),
+            "all_source": _totals(members),
+            "paid_search_source": _totals(paid_rows),
+            "google_ads_source": _totals(google_ads_rows),
             "partition": {b: _bucket(b) for b in ATTRIBUTION_BUCKETS},
-            "by_campaign": ({cid: _bucket_totals(rows)
-                             for cid, rows in sorted(by_campaign.items())}
-                            if campaign_published else None),
-        },
-        "acquisition_cohort": {
-            "membership_date_field": "contact_created_at",
-            "membership_rule": ("every associated contact created inside the "
-                                "window"),
-            "status": acq_status,
-            "reason": acq_reason,
-            "closed_won_deals": (len(acq_members)
-                                 if acq_status == PUBLISHED else None),
-            "closed_won_deals_confirmed": len(acq_members),
-            "revenue_usd": (_revenue(acq_members)
-                            if acq_status == PUBLISHED and acq_priced
-                            else None),
-            "unresolved_membership": len(acq_unresolved),
-            "ambiguous_membership": len(acq_ambiguous),
-            "deals_without_contact": sum(1 for v in acq.values()
-                                         if v == ACQ_NO_CONTACT),
         },
         "coverage": {
-            # Disclosure over the deals CONFIRMED in this window (plus, for All
-            # Time, the undated ones). Never a published total: when the deal
-            # count is withheld, these say what is known, not what is complete.
-            "basis": "confirmed_members_of_this_window",
             "deal_identity": {"deals": len(members),
                               "distinct_deal_ids": len(set(ids)),
                               "duplicate_deal_ids": len(ids) - len(set(ids))},
-            "close_date": {
-                CLOSE_EXACT: sum(1 for r in members
-                                 if close_date_state(r, now) == CLOSE_EXACT),
-                CLOSE_MISSING: len(undated),
-                CLOSE_INVALID: len(future),
-                "missing_included_in_this_window": bool(is_all_time),
-            },
+            "close_date_of_members": _count(close_date_state(r, now)
+                                            for r in members),
             "customer_identity": _count(identity.values()),
             "amount": _count(amount_state(r) for r in members),
             "currency": _count(currency_state(r) for r in members),
@@ -619,6 +639,62 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                 (r.get("association_status") or "unknown") for r in members),
             "campaign_attribution": {b: len(partition[b])
                                      for b in ATTRIBUTION_BUCKETS},
+        },
+    }
+    if not publishes:
+        membership_derived = _redact(membership_derived)
+    outcomes = membership_derived["outcomes"]
+    outcomes["customers"] = (len(resolved_customers) if customers_published
+                             else None)
+    outcomes["revenue_usd"] = _revenue(members) if revenue_published else None
+    attribution = membership_derived["attribution"]
+    attribution["by_campaign"] = (
+        {cid: _bucket_totals(rows) for cid, rows in sorted(by_campaign.items())}
+        if campaign_published else None)
+
+    acquisition = {
+        "membership_date_field": "contact_created_at",
+        "membership_rule": ("every associated contact created inside the "
+                            "window"),
+        "status": acq_status,
+        "reason": acq_reason,
+        "closed_won_deals": len(acq_members) if acq_published else None,
+        "revenue_usd": (_revenue(acq_members)
+                        if acq_rev_status == PUBLISHED else None),
+        "revenue_status": acq_rev_status,
+        "revenue_reason": acq_rev_reason,
+        # Why it is withheld — counts of deals whose membership is unknown.
+        # Never the confirmed members: those would be the withheld number's
+        # lower bound.
+        "unresolved_membership": len(acq_unresolved),
+        "ambiguous_membership": len(acq_ambiguous),
+        "won_definition_conflicts": len(acq_conflicts),
+    }
+
+    result = {
+        "membership": {
+            "deal_ids": membership_derived["membership_ids"],
+            "undated_won_deals": len(undated),
+            "undated_included": bool(is_all_time),
+            "future_dated_won_deals": len(future),
+            "won_definition_conflicts": conflicts,
+            # docs/35 §3: neither won nor lost, so in no count — disclosed.
+            "unknown_won_state_deals": (len(unknown_in_window)
+                                        if unknown_read else None),
+            "unknown_won_state_undated": (len(unknown_undated)
+                                          if unknown_read else None),
+        },
+        "outcomes": outcomes,
+        "attribution": attribution,
+        "acquisition_cohort": acquisition,
+        "coverage": {
+            # Disclosure over the deals CONFIRMED in this window (plus, for All
+            # Time, the undated ones) — redacted with the count when withheld.
+            "basis": "confirmed_members_of_this_window",
+            **membership_derived["coverage"],
+            "close_date": {CLOSE_MISSING: len(undated),
+                           CLOSE_INVALID: len(future),
+                           "missing_included_in_this_window": bool(is_all_time)},
             "won_definition": {"conflicts_touching_window": len(conflicts)},
         },
         "publication": {
@@ -627,7 +703,20 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
             "customers": {"status": cust_status, "reason": cust_reason},
             "campaign_revenue": {"status": camp_status, "reason": camp_reason},
             "acquisition_cohort": {"status": acq_status, "reason": acq_reason},
+            "acquisition_revenue": {"status": acq_rev_status,
+                                    "reason": acq_rev_reason},
             "roas": {"status": NOT_PUBLISHED, "reason": R_ROAS_NOT_CERTIFIED},
             "cac": {"status": NOT_PUBLISHED, "reason": R_CAC_NOT_CERTIFIED},
         },
     }
+    if findings:
+        # Coverage unproven: the rows are an unknown fraction of history, so
+        # no number they yield is evidence of anything — not even a disclosure.
+        for key in ("membership", "outcomes", "attribution",
+                    "acquisition_cohort"):
+            result[key] = _redact(result[key])
+        result["coverage"] = {"basis": result["coverage"]["basis"],
+                              **_redact({k: v for k, v in
+                                         result["coverage"].items()
+                                         if k != "basis"})}
+    return result

@@ -1201,8 +1201,10 @@ migrates readers.
   `REPEATABLE READ, READ ONLY` transaction (won rows, flag/stage cross-check
   rows, deal→contact creation times, sync state).
 * `scripts/audit_customer_closed_won_truth.py` — read-only, `--json`, exit
-  0/1/2; re-derives every window independently and cross-checks business
-  windows against `canonical_revenue_service.load_won_deals`.
+  0/1/2; re-derives every window from the snapshot's raw rows (shared with
+  production only: business-window bounds and the Google Ads lattice
+  predicate) and runs production's own `fetch_won_deals` inside the same
+  snapshot as a cross-check.
 
 **Decisions that depart from the brief.**
 1. The predicate stays `hs_is_closed_won IS TRUE` (docs/35 §3 forbids a
@@ -1214,6 +1216,18 @@ migrates readers.
    sync change plus a re-sync — out of scope here.
 3. **No staleness threshold exists** for the deal ledger, so age is reported
    and not judged (`staleness_assessed: false`).
+
+**Review (Copilot, truth auditor).** Fixed: closes later today admitted
+to every window; a published count unchecked against membership; UTC instead of
+London evidence bounds; a cross-check outside the snapshot; the acquisition
+cohort published over won flag/stage conflicts; withheld counts recoverable
+from coverage and bucket fields (now redacted — withheld means absent); unknown
+won state undisclosed; per-campaign lower bounds published while Google Ads
+deals were unplaced; negative amounts netted off revenue; an audit that re-ran
+the service's own logic (now re-derived from raw rows, each shown by an
+implementation mutation). Found, not changed: production's
+`load_won_deals("all_time")` is bounded above, so it drops undated won deals
+and admits closes later today — PR-ADS-161E.
 
 **Not changed.** Every existing reader, route and `static/app.js`; the won
 predicate in `analysis.deal_truth`; the coverage gate. No ROAS or CAC.

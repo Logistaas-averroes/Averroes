@@ -98,8 +98,12 @@ in for a close date.
 
 ## 4. Amount and currency
 
-Amount: `positive_amount` · `zero_amount` (a real zero) · `missing_amount`
-(unknown — never zero) · `invalid_amount` · `negative_amount`.
+Amount — the state of the value that would be **summed** (`revenue_usd` when
+its currency is proven, since a home-currency deal may carry no raw `amount`;
+otherwise the raw amount): `positive_amount` · `zero_amount` (a real zero) ·
+`missing_amount` (unknown — never zero) · `invalid_amount` · `negative_amount`.
+A negative value on a won deal is invalid evidence, not a refund: it is never
+netted off the total, and withholds revenue like any unproven amount.
 
 Currency, from the ledger's own resolution (`analysis.deal_currency`):
 `canonical_usd` · `converted_to_usd_with_proven_fx` · `missing_currency` ·
@@ -107,9 +111,10 @@ Currency, from the ledger's own resolution (`analysis.deal_currency`):
 closed) · `not_applicable_no_amount`.
 
 Revenue is published only when every deal in the window has proven USD. Otherwise
-`revenue_usd` is NULL with `closed_won_deals_missing_proven_usd_amount`, and the
-partial sum is carried under its own name, `revenue_usd_confirmed_subset` —
-never labelled a total.
+`revenue_usd` is NULL with `closed_won_deals_missing_proven_usd_amount`, and
+`deals_without_proven_usd` says how many. **No partial sum is carried anywhere**
+— not on the window, not on a bucket, not on a scope: the known part of a total
+reads as the total.
 
 ---
 
@@ -167,11 +172,20 @@ objection, answered at the evidence level).
 Campaign placement uses Campaign Evidence's resolver, `_assign_lead`: an
 approved durable mapping, else an exact normalized match to exactly one
 all-time canonical spend campaign. Never fuzzy. With no resolver, campaign
-revenue is withheld.
+revenue is withheld. It is also withheld (`google_ads_deals_not_placed_on_a_campaign`)
+while **any** Google Ads deal in the window is unplaced: that deal could belong
+to any campaign, so every per-campaign figure would be a lower bound published
+as a total.
+
+The all-time spend names are deliberate — a deal's campaign must not depend on
+which window is asked — and differ from Campaign Evidence's page, which matches
+against the window's spend; the same label can place differently on the two.
 
 Nested scopes are reported beside the partition: `all_source`,
 `paid_search_source` (original source `PAID_SEARCH`, unambiguous evidence) and
-`google_ads_source` (the existing lattice predicate, excluding ambiguous).
+`google_ads_source` (the existing lattice predicate, excluding ambiguous). The
+scope is the lattice's question, not the partition's: it includes deals whose
+label an approved mapping excludes from Google Ads.
 
 ---
 
@@ -180,7 +194,8 @@ Nested scopes are reported beside the partition: `all_source`,
 From `hubspot_deal_sync_state` through the shared coverage gate
 (`check_sync_coverage`): bootstrap complete, a successful INCREMENTAL after it,
 last status success. `latest_successful_incremental_at` is reported only when
-that is proven. The newest deal row is never the signal.
+that is proven. The newest deal row is never the signal, and a universe that
+carries no verdict at all is treated as unproven.
 
 **No staleness threshold is configured for the deal ledger** anywhere in the
 repository. Age is reported and not judged (`staleness_assessed: false`). An
@@ -196,10 +211,22 @@ unproven coverage gate makes every metric `unavailable`.
 | `revenue_usd` | deals published and every deal has proven USD |
 | `customers` | deals published, company identity ingested, every deal resolved |
 | `campaign_revenue` | revenue published and the campaign resolver available |
-| `acquisition_cohort` | coverage proven; no unresolved or ambiguous membership |
+| `campaign_revenue` (above) | … and no Google Ads deal in the window left unplaced |
+| `acquisition_cohort` | coverage proven; no won flag/stage conflict dated up to now (or undated) — acquisition membership ignores the close date, so any such conflict touches it; no unresolved or ambiguous membership |
+| `acquisition_revenue` | the acquisition cohort published and every member has proven USD |
 | `roas`, `cac` | **never** in this PR (`not_published`) |
 
-A status other than `published` always carries a NULL value.
+**Withheld means absent, not hidden.** A status other than `published` carries
+a NULL value, and so does everything the number could be rebuilt from: when the
+deal count is not published, member ids, bucket and scope counts, coverage
+distributions over members and the confirmed-in-window count are all NULL; when
+coverage is unproven, every number in the window is. What remains is why:
+reasons, the undated and future-dated counts, the conflicts list.
+
+**Unknown won state** (`hs_is_closed_won IS NULL`) is neither won nor lost, so it
+is in no count; it is disclosed per window as `unknown_won_state_deals` (and
+`unknown_won_state_undated`), as `load_won_deals` reports it (docs/35 §3) — NULL
+when it could not be read, never 0.
 
 ---
 
@@ -210,11 +237,18 @@ python -m scripts.audit_customer_closed_won_truth
 python -m scripts.audit_customer_closed_won_truth --json
 ```
 
-Re-derives, per window and from the same snapshot, what the service claims:
-the won predicate, unique deal ids, close-date membership (independently), the
-partition sum, revenue over distinct proven deals, null discipline on withheld
-metrics, ROAS/CAC unpublished, freshness from sync coverage, and conflicts
-withholding, and that a published count is the re-derived membership's size.
+Re-derives, per window and from the same snapshot's **raw rows**, what the
+service claims — without calling the 161D analysis module's decision functions:
+evidence-window bounds (Europe/London midnights, computed itself), close-date
+membership and the published count, the flag/stage conflicts (from the raw
+definition rows), unknown-won-state disclosure, proven USD (the ledger's two
+proven statuses, non-negative), the partition's ambiguous and Google Ads
+families, acquisition-cohort membership (from contact creation), and that no
+withheld or unavailable number is recoverable anywhere in the payload. Two
+inputs are shared because they ARE the definition, not 161D logic: the business
+windows (`analysis.business_windows`) and the Google Ads lattice predicate
+(`analysis.revenue_scope`). Each independence is shown by a test that breaks the
+implementation, not the output (`test_65_*`).
 For every business window it also runs production's own windowed SQL
 (`deal_ledger_repository.fetch_won_deals` on the audit's cursor, with
 `load_won_deals`' bounds)

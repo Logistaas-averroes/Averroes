@@ -590,7 +590,7 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                               sql_windows: dict | None = None) -> dict:
     """Every input the closed-won truth service needs, from ONE snapshot.
 
-    PR-ADS-161D. Four reads, one REPEATABLE READ / READ ONLY transaction, so a
+    PR-ADS-161D. Five reads, one REPEATABLE READ / READ ONLY transaction, so a
     deal sync committing mid-read cannot give the won population, the
     won-definition cross-check, the deal→contact acquisition evidence and the
     sync coverage four different instants:
@@ -600,6 +600,8 @@ def fetch_closed_won_universe(won_stage_id: str, *,
       a finite window's caller must SEE it to disclose it);
     * ``won_definition_rows`` — every deal where HubSpot's won flag and the
       confirmed won stage could disagree: flag TRUE, or stage = ``won_stage_id``;
+    * ``unknown_won_rows`` — every deal whose ``hs_is_closed_won`` IS NULL (id and
+      close date), so the caller can disclose them rather than drop them;
     * ``acquisition_contacts`` — for each won deal, every associated contact and
       that contact's canonical ``created_at`` (NULL when the funnel holds no row);
     * ``sync_state`` — the ledger's sync coverage row;
@@ -620,6 +622,7 @@ def fetch_closed_won_universe(won_stage_id: str, *,
         with get_conn() as conn:
             if conn is None:
                 return _unavailable(won_rows=[], won_definition_rows=[],
+                                    unknown_won_rows=[],
                                     acquisition_contacts=[], sync_state=None)
             with conn.cursor() as cur:
                 cur.execute(CLOSED_WON_UNIVERSE_TRANSACTION)
@@ -644,6 +647,14 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                     ORDER BY deal_id
                     """, (won_stage_id,))
                 definition_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+                cur.execute(
+                    f"""
+                    SELECT deal_id, deal_close_date
+                    FROM {LEDGER_TABLE}
+                    WHERE hs_is_closed_won IS NULL
+                    ORDER BY deal_id
+                    """)
+                unknown_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
                 cur.execute(
                     f"""
                     SELECT a.deal_id, a.contact_id,
@@ -674,6 +685,7 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                         for r in production["rows"]]
         result = {"available": True, "won_rows": won_rows,
                   "won_definition_rows": definition_rows,
+                  "unknown_won_rows": unknown_rows,
                   "acquisition_contacts": acquisition,
                   "sync_state": state_rows[0] if state_rows else None}
         if sql_windows is not None:
@@ -682,6 +694,7 @@ def fetch_closed_won_universe(won_stage_id: str, *,
     except Exception as exc:  # noqa: BLE001
         log.warning("fetch_closed_won_universe failed: %s", exc)
         return _unavailable(won_rows=[], won_definition_rows=[],
+                            unknown_won_rows=[],
                             acquisition_contacts=[], sync_state=None)
 
 
