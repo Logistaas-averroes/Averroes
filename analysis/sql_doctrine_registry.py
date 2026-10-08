@@ -743,6 +743,8 @@ _SYNC = "HubSpot contact funnel sync (canonical ingestion)"
 _RECOVERY = "Lifecycle stage-history recovery (CLI)"
 _SQL_COVERAGE = "PR-ADS-159 lifecycle SQL coverage audit"
 _SQL_BOUNDARY = "PR-ADS-160 prospective SQL coverage boundary"
+_CLOSED_WON = ("PR-ADS-161D closed-won truth (acquisition-cohort membership by "
+               "contact creation; reads no SQL)")
 _SQL_EVIDENCE = "PR-ADS-161C post-boundary SQL evidence forensics and repair"
 _SQL_PUBLICATION = ("PR-ADS-161A-1 canonical SQL publication contract "
                     "(the only production-facing publication verdict)")
@@ -1136,6 +1138,22 @@ RULES: list[dict] = [
     # column (fill-only) and recovered lifecycle-history rows.
     _r("sqlevidence.writers", "db/writers.py", CLS_CANONICAL, _SQL_EVIDENCE,
        symbol=["apply_post_boundary_sql_evidence"]),
+
+    # ── PR-ADS-161D — closed-won deals, customers and revenue ──────────────
+    # Diagnostic: no surface consumes these in 161D, and none reads an SQL
+    # count. `contact_created_at` is the ACQUISITION-cohort membership date for
+    # won deals (a contact's creation), named so it is never confused with the
+    # deal close date that windows the closed-won event cohort.
+    _r("closedwon.fx", "analysis/closed_won_truth.py", CLS_DIAGNOSTIC,
+       _CLOSED_WON, symbol=["acquisition_state", "evaluate_window"]),
+    _r("closedwon.repo", "db/deal_ledger_repository.py", CLS_DIAGNOSTIC,
+       _CLOSED_WON, symbol=["fetch_closed_won_universe"]),
+    _m("closedwon.svc.module", "services/canonical_customer_revenue_service.py",
+       CLS_DIAGNOSTIC, _CLOSED_WON, ["contact_created_at_ref"]),
+    # The audit re-derives acquisition-cohort membership from the same
+    # snapshot rows, independently of the service, to certify it.
+    _r("closedwon.audit", "scripts/audit_customer_closed_won_truth.py",
+       CLS_DIAGNOSTIC, _CLOSED_WON, symbol=["_expected"]),
 
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),

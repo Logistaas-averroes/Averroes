@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161C — post-boundary SQL evidence forensics and gap prevention (October 2026)
+**Last updated:** PR-ADS-161D — canonical closed-won deals, customers and revenue truth (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1175,3 +1175,67 @@ which incidents a sync re-checks, how many reads the audit makes, what the
 mutation tests remove).
 
 Full doctrine: `docs/45_POST_BOUNDARY_SQL_EVIDENCE.md`.
+
+---
+
+## PR-ADS-161D — Canonical closed-won deals, customers and revenue truth (October 2026)
+
+**Why.** Every reader that publishes "customers" counts won **deals**; revenue
+readers disagree on population, window and gate; and nothing reported whether a
+closed-won number was proven. This PR builds one read-only definition and an
+audit that certifies it. **No production page reads it yet** — PR-ADS-161E
+migrates readers.
+
+**Built.**
+* `analysis/closed_won_truth.py` — pure: won-definition, close-date, amount,
+  currency and customer-identity states; half-open window membership; a
+  six-bucket attribution partition that always sums to the all-source total;
+  the acquisition cohort (contact creation) beside, never mixed with, the
+  close-date cohort; a publication verdict per metric, NULL when not published.
+* `services/canonical_customer_revenue_service.py` — evidence windows
+  (7d…180d, all_time; Europe/London days) and business windows
+  (`get_window_bounds`), freshness from sync coverage, campaign placement via
+  Campaign Evidence's `_assign_lead` (never fuzzy).
+* `canonical_revenue_service.load_closed_won_universe` →
+  `deal_ledger_repository.fetch_closed_won_universe` — one
+  `REPEATABLE READ, READ ONLY` transaction (won rows, flag/stage cross-check
+  rows, deal→contact creation times, sync state).
+* `scripts/audit_customer_closed_won_truth.py` — read-only, `--json`, exit
+  0/1/2; re-derives every window from the snapshot's raw rows (shared with
+  production only: business-window bounds and the Google Ads lattice
+  predicate) and runs production's own `fetch_won_deals` inside the same
+  snapshot as a cross-check.
+
+**Decisions that depart from the brief.**
+1. The predicate stays `hs_is_closed_won IS TRUE` (docs/35 §3 forbids a
+   stage-id filter). Stage `326093516` is a **cross-check**: any disagreement
+   touching a window withholds its count.
+2. **Customers are withheld everywhere.** No deal→company association exists in
+   the repository; identity is `association_unavailable`, reason
+   `company_associations_not_ingested`, lower bound NULL. Unblocking needs a
+   sync change plus a re-sync — out of scope here.
+3. **No staleness threshold exists** for the deal ledger, so age is reported
+   and not judged (`staleness_assessed: false`).
+
+**Review (Copilot, truth auditor).** Fixed: closes later today admitted
+to every window; a published count unchecked against membership; UTC instead of
+London evidence bounds; a cross-check outside the snapshot; the acquisition
+cohort published over won flag/stage conflicts; withheld counts recoverable
+from coverage and bucket fields (now redacted — withheld means absent); unknown
+won state undisclosed; per-campaign lower bounds published while Google Ads
+deals were unplaced; negative amounts netted off revenue; an audit that re-ran
+the service's own logic (now re-derived from raw rows, each shown by an
+implementation mutation). Found, not changed: production's
+`load_won_deals("all_time")` is bounded above, so it drops undated won deals
+and admits closes later today — PR-ADS-161E.
+
+**Not changed.** Every existing reader, route and `static/app.js`; the won
+predicate in `analysis.deal_truth`; the coverage gate. No ROAS or CAC.
+No HubSpot or Google Ads call; no database write.
+
+**Suite.** `tests/test_pr_ads_161d_customer_closed_won_truth.py` — pure cases
+for every state and bucket, audit counterfactuals (each mutation shown failing
+the audit), PG end-to-end cases including the audit CLI and a no-writes
+fingerprint; in CI's PostgreSQL step and did-run list.
+
+Full doctrine: `docs/46_CANONICAL_CUSTOMER_CLOSED_WON_TRUTH.md`.

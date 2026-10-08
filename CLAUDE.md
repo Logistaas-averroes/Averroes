@@ -243,6 +243,14 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   an opportunity timestamp — and are never an SQL date. Whose gap an incident
   is: `scripts/audit_post_boundary_sql_incidents.py`; see `docs/45_*`.
 
+- **A won deal is not a customer.** A customer is a distinct HubSpot company
+  id; the repository ingests no deal→company association, so
+  `services/canonical_customer_revenue_service` withholds customer counts
+  (`company_associations_not_ingested`, lower bound NULL). Many existing readers
+  still call won deals "customers" — PR-ADS-161E migrates them. The won
+  predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a cross-check
+  whose disagreement withholds, never a filter. See `docs/46_*`.
+
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
   `SEVERITY_MAP`, `canonical_status_display_label()`, and — as appropriate —
