@@ -236,9 +236,12 @@ def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
             seen = _dt(o.get("last_success_started_at"))
             if seen is None or seen < scan_start:
                 behind.append(deal_id)
-    # A deal won after the last complete scan has not been covered by it. That
-    # is a coverage gap (the next scheduled scan closes it), reported — and it
-    # already withholds customers in its windows as unavailable or stale.
+    # A complete scan must have covered every won deal: a deal whose latest
+    # success predates the scan's start was NOT observed by it, so the scan's
+    # claim of completeness is false for that deal.
+    a.check("complete_scan_covers_every_won_deal", not behind,
+            f"{len(behind)} won deal(s) lack a successful observation since "
+            f"the recorded complete scan started")
     return {"scan_current": current, "scan_not_current_reason": why,
             "scan_max_age_hours": max_age_hours,
             "never_observed": len(never),

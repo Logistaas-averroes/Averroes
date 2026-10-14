@@ -717,6 +717,42 @@ def test_29_b_observations_are_ordered_by_the_database_clock(
     assert started < ahead - timedelta(days=300)
 
 
+@_needs_pg
+def test_29_c_an_older_run_committing_late_cannot_overwrite_a_newer_verdict(
+        ledger):
+    """Copilot #190: run state ordered by RUN START, not commit order. A newer
+    scan failed; an older successful one commits after it."""
+    from db import deal_company_association_repository as repo
+    assert repo.record_sync_run(mode="incremental", status="failed",
+                                started_at=_t(10), full_population=True,
+                                error="boom")["available"]
+    assert repo.record_sync_run(mode="incremental", status="success",
+                                started_at=_t(5), complete=True,
+                                full_population=True)["available"]
+    state = repo.fetch_sync_state()["row"]
+    assert (state["last_run_status"], state["last_full_run_status"]) == \
+        ("failed", "failed")
+    assert state["last_error"] == "boom"
+
+
+@_needs_pg
+def test_29_d_the_run_start_comes_from_the_database_clock(ledger, monkeypatch):
+    """Copilot #190: a host clock running ahead must not stamp the run start —
+    a future start could never be superseded and would freeze the scan gate."""
+    from db import deal_company_association_repository as repo
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    ahead = datetime.now(tz=timezone.utc) + timedelta(days=365)
+    sync_deal_company_associations(mode="incremental", now_fn=lambda: ahead)
+    state = repo.fetch_sync_state()["row"]
+    for key in ("last_run_started_at", "last_full_run_started_at",
+                "last_complete_scan_started_at"):
+        assert svc._parse(state[key]) < ahead - timedelta(days=300), key
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # §4 — sync service, backfill command, scheduler
 # ═════════════════════════════════════════════════════════════════════════════
@@ -831,6 +867,25 @@ def test_32_the_backfill_checkpoints_resumes_and_proves_completion(
     # (subsets) never did.
     assert (state["last_full_run_status"], state["last_full_run_complete"]) == \
         ("success", True)
+
+
+@_needs_pg
+def test_32_b_the_generation_anchor_is_on_the_database_clock(
+        ledger, monkeypatch):
+    """Copilot #190: the anchor is compared with DB-clock observation starts,
+    so it must be on the same clock — or a host running ahead leaves every
+    deal pending forever."""
+    from db import deal_company_association_repository as repo
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    code, out = _backfill(["--apply"])
+    assert code == 0, out
+    anchor = svc._parse(out["generation_started_at"])
+    assert anchor <= _obs("1")["last_success_started_at"]
+    src = (_ROOT / "scripts/backfill_deal_company_associations.py").read_text(
+        encoding="utf-8")
+    assert "datetime.now" not in src and "repo.db_now()" in src
+    assert repo.fetch_sync_state()["row"]["backfill_status"] == "complete"
 
 
 @_needs_pg
@@ -998,6 +1053,27 @@ def test_41_the_coverage_audit_catches_broken_storage(ledger, monkeypatch):
     assert out["checks"]["paths_reconcile_with_observation"] is False
 
 
+@_needs_pg
+def test_41_b_a_complete_scan_that_did_not_cover_a_deal_fails_the_audit(
+        ledger, monkeypatch):
+    """Copilot #190: a recorded complete scan whose start post-dates a won
+    deal's latest success did not observe that deal — its claim is false."""
+    from db import deal_company_association_repository as repo
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    assert sync_deal_company_associations(mode="incremental")["complete"]
+    assert _coverage_audit()[0] == 0
+    later = repo.db_now()["now"] + timedelta(minutes=5)
+    repo.record_sync_run(mode="incremental", status="success",
+                         started_at=later, complete=True, full_population=True)
+    code, out = _coverage_audit()
+    assert code == 1
+    assert out["checks"]["complete_scan_covers_every_won_deal"] is False
+
+
 def test_42_the_coverage_audit_has_no_external_or_write_path():
     from scripts import audit_deal_company_association_coverage as audit
     a = audit.Audit()
@@ -1142,6 +1218,25 @@ def test_46_the_coverage_audit_fails_while_the_scan_is_not_current(
     code, out = _coverage_audit()
     assert code == 1
     assert out["checks"]["association_scan_is_current"] is False
+
+
+def test_47_a_zero_lower_bound_over_nothing_observed_is_caught():
+    """Copilot #190: the lower bound is checked unconditionally. With every
+    member unobserved it must be NULL; a 0 there is a finding nobody made."""
+    from scripts import audit_customer_closed_won_truth as audit
+    rows = [ledger_row("1", deal_close_date=Q4)]
+    universe = _universe(rows, [], [])
+    w = svc.get_closed_won_truth([(BUSINESS, "current_quarter")], now=NOW,
+                                 universe=universe, resolver=None,
+                                 resolver_detail="t")["windows"][0]
+    assert w["outcomes"]["confirmed_customer_lower_bound"] is None
+    a = audit.Audit()
+    audit.window_checks(a, w, universe, now=NOW)
+    assert a.checks["customer_lower_bound_is_confirmed_companies"] is True
+    w["outcomes"]["confirmed_customer_lower_bound"] = 0
+    a = audit.Audit()
+    audit.window_checks(a, w, universe, now=NOW)
+    assert a.checks["customer_lower_bound_is_confirmed_companies"] is False
 
 
 # ═════════════════════════════════════════════════════════════════════════════

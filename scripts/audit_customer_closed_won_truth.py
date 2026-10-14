@@ -467,17 +467,24 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
     else:
         a.check("withheld_is_never_a_number", out["customers"] is None,
                 f"{name}: customers={out['customers']} while withheld")
+    # The lower bound is checked UNCONDITIONALLY against what the evidence
+    # allows — a wrong 0 is as false as a wrong 7.
     lower = out.get("confirmed_customer_lower_bound")
-    if lower is not None:
-        a.check("customer_lower_bound_is_confirmed_companies", scan_current,
-                f"{name}: a lower bound published with no current scan")
-        confirmed = {c for d in member_ids
-                     if identity.get(d, {}).get("state") in RESOLVED
-                     and not identity.get(d, {}).get("stale")
-                     for c in identity[d]["companies"]}
-        a.check("customer_lower_bound_is_confirmed_companies",
-                lower == len(confirmed),
-                f"{name}: lower bound {lower}, re-derived {len(confirmed)}")
+    confirmed = {c for d in member_ids
+                 if identity.get(d, {}).get("state") in RESOLVED
+                 and not identity.get(d, {}).get("stale")
+                 for c in identity[d]["companies"]}
+    anything_observed = not member_ids or any(
+        identity.get(d, {}).get("state") != "association_unavailable"
+        for d in member_ids)
+    if not (count_published and evidence.get("available") and scan_current
+            and anything_observed):
+        expected_lower = None
+    else:
+        expected_lower = len(confirmed)
+    a.check("customer_lower_bound_is_confirmed_companies",
+            lower == expected_lower,
+            f"{name}: lower bound {lower}, the evidence allows {expected_lower}")
     # Campaign revenue: only over published revenue with every Google Ads
     # deal placed — otherwise each campaign figure is a lower bound.
     if pub["campaign_revenue"]["status"] == PUBLISHED:
@@ -693,7 +700,8 @@ def _render(report: dict) -> None:
     print(f"    association coverage          complete_scan_proven="
           f"{cfresh.get('complete_scan_proven')} last_run="
           f"{cfresh.get('last_run_status')} age_h={cfresh.get('age_hours')} "
-          f"(threshold not configured)")
+          f"(threshold {cfresh.get('staleness_threshold_hours')}h; current="
+          f"{(cfresh.get('scan_current') or {}).get('current')})")
     print(f"    customer publication rule     "
           f"{truth.get('customer_identity_gap')}")
     if report.get("violations"):

@@ -156,7 +156,11 @@ from the **database clock** (`clock_timestamp()`), so two hosts with different
 clocks cannot misorder each other. A success applies only if it started at or
 after the stored latest success; an attempt outcome only if at or after the
 stored latest attempt. A slow historical pass cannot overwrite a newer
-observation, whatever the commit order.
+observation, whatever the commit order. The same holds one level up: every
+run-state field (last run, last full run, complete scan) and the backfill
+generation anchor are stamped on the database clock and ordered by run start,
+so an older scan committing after a newer failed one cannot restore a passing
+verdict.
 
 ### 5.2 Identity per deal
 
@@ -368,8 +372,10 @@ every won deal has an explicit observation outcome, that a successful zero and
 a failed/never-made lookup are distinct, that stored paths reconcile with the
 recorded success counts, that no path is stored twice or exists without a
 successful lookup, that coverage is proven by a recorded complete scan, and
-that every window touched by a no-company, multi-company, unobserved or stale
-deal publishes no exact customer total, that the scan is current, and — for
+that every won deal has a success at or after the recorded complete scan's
+start (a scan that did not observe a deal cannot claim it), that every window
+touched by a no-company, multi-company, unobserved or stale deal publishes no
+exact customer total, that the scan is current, and — for
 every window whose deal count is published — that the customer status, reason
 and identity distribution match what the raw evidence says (so a failed lookup
 published as "no company" is caught even though the total stays withheld). It

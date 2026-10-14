@@ -89,7 +89,25 @@ def sync_deal_company_associations(*, batch_id=None, mode: str = "incremental",
     import connectors.hubspot_pull as hubspot  # noqa: PLC0415
     import db.deal_company_association_repository as repo  # noqa: PLC0415
 
-    started_at = now_fn()
+    # The run's start orders every run-state field, so it comes from the
+    # DATABASE clock — a host running ahead must not stamp a start that later
+    # runs can never supersede. A dry run records nothing and uses its own.
+    if dry_run:
+        started_at = now_fn()
+    else:
+        clock = repo.db_now()
+        if not clock.get("available"):
+            return {"status": STATUS_FAILED, "mode": mode, "dry_run": dry_run,
+                    "full_population": deal_ids is None, "population": None,
+                    "attempted": 0, "succeeded": 0, "failed": 0, "applied": 0,
+                    "paths_written": 0, "skipped_stale": 0,
+                    "write_failures": 0, "remaining": None, "complete": False,
+                    "truncated": False, "stopped_on_failure": False,
+                    "shapes": {}, "failure_reasons": {}, "failed_deal_ids": [],
+                    "error": "database_clock_unavailable",
+                    "hubspot_writes_performed": False,
+                    "google_ads_calls_performed": False}
+        started_at = clock["now"]
     # Only a run over the FULL current won population may prove a complete scan;
     # a resume pass over the remaining deals proves only its own subset.
     full_population = deal_ids is None
@@ -242,8 +260,11 @@ def record_failed_run(error: str, *, mode: str = "incremental") -> dict:
     keep publishing over a pipeline that had stopped."""
     import db.deal_company_association_repository as repo  # noqa: PLC0415
 
+    clock = repo.db_now()
+    if not clock.get("available"):
+        return {"available": False, "error": "database_clock_unavailable"}
     return repo.record_sync_run(mode=mode, status=STATUS_FAILED,
-                                started_at=_now(), full_population=True,
+                                started_at=clock["now"], full_population=True,
                                 error=str(error)[:1000])
 
 

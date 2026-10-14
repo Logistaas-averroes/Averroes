@@ -323,12 +323,19 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
 
     The complete-scan columns move ONLY for a full-population run that
     succeeded AND observed every won deal — coverage is proven by the run that
-    covered it, never assumed from rows existing."""
+    covered it, never assumed from rows existing.
+
+    ``started_at`` must come from the DATABASE clock (:func:`db_now`): every
+    run-state field is ordered by it, so an older run that commits after a
+    newer one cannot overwrite the newer verdict."""
     if mode not in ALL_MODES:
         return _unavailable(reason="invalid_mode", error=f"unknown mode {mode!r}")
     if status not in ("success", "partial", "failed"):
         return _unavailable(reason="invalid_status",
                             error=f"unknown status {status!r}")
+    if started_at is None:
+        return _unavailable(reason="missing_started_at",
+                            error="started_at is required (database clock)")
     proves = bool(complete and status == "success" and full_population)
     params = {"full": bool(full_population),"scope": SYNC_SCOPE, "status": status, "mode": mode,
               "started": started_at, "batch_id": batch_id,
@@ -366,27 +373,70 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                             CASE WHEN %(proves)s THEN %(population)s END,
                             NOW())
                     ON CONFLICT (scope) DO UPDATE SET
-                        last_run_status         = EXCLUDED.last_run_status,
-                        last_run_mode           = EXCLUDED.last_run_mode,
-                        last_run_started_at     = EXCLUDED.last_run_started_at,
-                        last_run_finished_at    = EXCLUDED.last_run_finished_at,
-                        last_run_batch_id       = EXCLUDED.last_run_batch_id,
-                        last_run_population     = EXCLUDED.last_run_population,
-                        last_run_attempted      = EXCLUDED.last_run_attempted,
-                        last_run_succeeded      = EXCLUDED.last_run_succeeded,
-                        last_run_failed         = EXCLUDED.last_run_failed,
-                        last_run_write_failures = EXCLUDED.last_run_write_failures,
-                        last_run_complete       = EXCLUDED.last_run_complete,
-                        last_error              = EXCLUDED.last_error,
-                        last_full_run_status = CASE WHEN %(full)s
-                            THEN EXCLUDED.last_run_status
-                            ELSE {SYNC_STATE_TABLE}.last_full_run_status END,
-                        last_full_run_started_at = CASE WHEN %(full)s
+                        -- Every run-state field is ordered by RUN START (database
+                        -- clock), never by commit order: an older run committing
+                        -- after a newer one must not overwrite its verdict.
+                        last_run_status = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_status ELSE {SYNC_STATE_TABLE}.last_run_status END,
+                        last_run_mode = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_mode ELSE {SYNC_STATE_TABLE}.last_run_mode END,
+                        last_run_started_at = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_started_at ELSE {SYNC_STATE_TABLE}.last_run_started_at END,
+                        last_run_finished_at = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_finished_at ELSE {SYNC_STATE_TABLE}.last_run_finished_at END,
+                        last_run_batch_id = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_batch_id ELSE {SYNC_STATE_TABLE}.last_run_batch_id END,
+                        last_run_population = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_population ELSE {SYNC_STATE_TABLE}.last_run_population END,
+                        last_run_attempted = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_attempted ELSE {SYNC_STATE_TABLE}.last_run_attempted END,
+                        last_run_succeeded = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_succeeded ELSE {SYNC_STATE_TABLE}.last_run_succeeded END,
+                        last_run_failed = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_failed ELSE {SYNC_STATE_TABLE}.last_run_failed END,
+                        last_run_write_failures = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_write_failures ELSE {SYNC_STATE_TABLE}.last_run_write_failures END,
+                        last_run_complete = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_run_complete ELSE {SYNC_STATE_TABLE}.last_run_complete END,
+                        last_error = CASE
+                            WHEN {SYNC_STATE_TABLE}.last_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_run_started_at
+                            THEN EXCLUDED.last_error ELSE {SYNC_STATE_TABLE}.last_error END,
+                        last_full_run_status = CASE
+                            WHEN %(full)s AND ({SYNC_STATE_TABLE}.last_full_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_full_run_started_at)
+                            THEN EXCLUDED.last_run_status ELSE {SYNC_STATE_TABLE}.last_full_run_status END,
+                        last_full_run_complete = CASE
+                            WHEN %(full)s AND ({SYNC_STATE_TABLE}.last_full_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_full_run_started_at)
+                            THEN EXCLUDED.last_run_complete ELSE {SYNC_STATE_TABLE}.last_full_run_complete END,
+                        last_full_run_started_at = CASE
+                            WHEN %(full)s AND ({SYNC_STATE_TABLE}.last_full_run_started_at IS NULL
+                              OR %(started)s >= {SYNC_STATE_TABLE}.last_full_run_started_at)
                             THEN EXCLUDED.last_run_started_at
                             ELSE {SYNC_STATE_TABLE}.last_full_run_started_at END,
-                        last_full_run_complete = CASE WHEN %(full)s
-                            THEN EXCLUDED.last_run_complete
-                            ELSE {SYNC_STATE_TABLE}.last_full_run_complete END,
                         -- A complete scan is never un-proven by a later partial
                         -- run, and never moved backwards by an older one.
                         last_complete_scan_started_at = CASE

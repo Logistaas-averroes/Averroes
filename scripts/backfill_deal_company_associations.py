@@ -48,7 +48,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -58,10 +57,6 @@ EXIT_STOPPED = 1
 EXIT_UNAVAILABLE = 2
 
 DEFAULT_MAX_LOOKUPS = 2000
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc)
 
 
 def _run_summary(result: dict) -> dict:
@@ -150,7 +145,15 @@ def apply(*, max_lookups: int, resume: bool, restart: bool) -> dict:
                        generation_started_at=row.get("backfill_started_at"),
                        exit_code=EXIT_STOPPED)
             return out
-        generation = _now()
+        # The anchor is compared with observation starts, which use the
+        # DATABASE clock — so the anchor must too, or a host running ahead
+        # would leave every deal pending forever.
+        clock = repo.db_now()
+        if not clock.get("available"):
+            out.update(reason="database_clock_unavailable",
+                       exit_code=EXIT_UNAVAILABLE)
+            return out
+        generation = clock["now"]
         opened = repo.start_backfill_generation(generation)
         if not opened.get("available"):
             out.update(reason=f"generation_not_recorded:{opened.get('error')}",
