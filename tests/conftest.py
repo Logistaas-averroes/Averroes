@@ -93,6 +93,7 @@ _EAGER_DB_MODULES = (
     "db.canonical_contact_outcome_repository",
     "db.crm_funnel_repository",
     "db.deal_ledger_repository",
+    "db.deal_company_association_repository",   # PR-ADS-161D2
     "db.mailchimp_repository",
     "db.schema",
 )
