@@ -183,7 +183,39 @@ def storage_checks(a: Audit, universe: dict) -> dict:
             "failed_without_any_success": failed_without_success}
 
 
-def coverage_checks(a: Audit, universe: dict, identity: dict) -> dict:
+def scan_is_current(state: dict, now, max_age_hours: float) -> tuple:
+    """``(current, reason)`` — restated here from the stored run record, not
+    taken from the service: the latest full-population run succeeded and was
+    complete, and the latest complete scan finished within the configured age."""
+    state = state or {}
+    if state.get("last_full_run_status") != "success" \
+            or state.get("last_full_run_complete") is not True:
+        return False, "latest full scan not successful and complete"
+    finished = _dt(state.get("last_complete_scan_finished_at"))
+    if finished is None:
+        return False, "no complete scan recorded"
+    if (now - finished).total_seconds() / 3600 > max_age_hours:
+        return False, f"complete scan older than {max_age_hours:g}h"
+    return True, None
+
+
+def expected_customer_verdict(members, identity, scan_current) -> tuple:
+    """``(status, reason)`` the customer metric must carry when the deal count
+    is published — restated from the identity rules, not imported."""
+    states = [identity[d]["state"] for d in members]
+    if any(st == UNAVAILABLE for st in states):
+        return "unavailable", "customer_identity_evidence_unavailable"
+    if not scan_current:
+        return "withheld", "customer_identity_scan_not_current"
+    if any(st not in RESOLVED for st in states):
+        return "withheld", "customer_identity_unresolved"
+    if any(identity[d]["stale"] for d in members):
+        return "withheld", "customer_identity_evidence_stale"
+    return "published", None
+
+
+def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
+                    max_age_hours: float) -> dict:
     """Every won deal has an outcome, and coverage is proven by a recorded
     complete scan whose start every won deal's evidence post-dates."""
     evidence = universe.get("company_associations") or {}
@@ -194,6 +226,8 @@ def coverage_checks(a: Audit, universe: dict, identity: dict) -> dict:
     scan_start = _dt(state.get("last_complete_scan_started_at"))
     a.check("coverage_proven_by_a_complete_scan", scan_start is not None,
             "no recorded scan has observed every won deal")
+    current, why = scan_is_current(state, now, max_age_hours)
+    a.check("association_scan_is_current", current, why or "")
     obs = {str(o["deal_id"]): o for o in evidence.get("observations") or []}
     behind = []
     if scan_start is not None:
@@ -205,7 +239,9 @@ def coverage_checks(a: Audit, universe: dict, identity: dict) -> dict:
     # A deal won after the last complete scan has not been covered by it. That
     # is a coverage gap (the next scheduled scan closes it), reported — and it
     # already withholds customers in its windows as unavailable or stale.
-    return {"never_observed": len(never),
+    return {"scan_current": current, "scan_not_current_reason": why,
+            "scan_max_age_hours": max_age_hours,
+            "never_observed": len(never),
             "never_observed_deal_ids": never[:50],
             "complete_scan_started_at": state.get("last_complete_scan_started_at"),
             "complete_scan_finished_at": state.get(
@@ -218,7 +254,8 @@ def coverage_checks(a: Audit, universe: dict, identity: dict) -> dict:
             "backfill_status": state.get("backfill_status")}
 
 
-def publication_checks(a: Audit, universe: dict, identity: dict, *, now) -> list:
+def publication_checks(a: Audit, universe: dict, identity: dict, *, now,
+                       scan_current: bool) -> list:
     """No window publishes an exact customer total over a deal that cannot
     support it; a fully supported window's total is the distinct companies."""
     from scripts import audit_customer_closed_won_truth as cw  # noqa: PLC0415
@@ -238,11 +275,27 @@ def publication_checks(a: Audit, universe: dict, identity: dict, *, now) -> list
                    if identity[d]["state"] not in RESOLVED or identity[d]["stale"]]
         pub = w["publication"]["customers"]
         customers = w["outcomes"]["customers"]
-        if touched:
+        if w["publication"]["closed_won_deals"]["status"] == "published":
+            # The published surface must tell a failed or never-made lookup
+            # from a successful "no company" — status, reason and distribution.
+            verdict = expected_customer_verdict(members, identity, scan_current)
+            a.check("customer_verdict_matches_the_evidence",
+                    (pub["status"], pub["reason"]) == verdict,
+                    f"{name}: customers {pub['status']}/{pub['reason']}, the "
+                    f"evidence says {verdict[0]}/{verdict[1]}")
+            dist: dict = {}
+            for d in members:
+                dist[identity[d]["state"]] = dist.get(identity[d]["state"], 0) + 1
+            a.check("identity_distribution_matches_the_evidence",
+                    w["coverage"].get("customer_identity") == dist,
+                    f"{name}: published {w['coverage'].get('customer_identity')}"
+                    f", the evidence says {dist}")
+        if touched or not scan_current:
             a.check("customers_withheld_where_identity_is_unsupported",
                     pub["status"] != "published" and customers is None,
                     f"{name}: customers={customers} ({pub['status']}) over "
-                    f"{len(touched)} unsupported deal(s)")
+                    f"{len(touched)} unsupported deal(s), scan current: "
+                    f"{scan_current}")
         elif pub["status"] == "published":
             expected = {c for d in members for c in identity[d]["companies"]}
             a.check("published_customers_are_distinct_companies",
@@ -296,11 +349,16 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
                                    f"{evidence.get('error')}"))
         return a, report
 
+    from services.canonical_customer_revenue_service import (  # noqa: PLC0415
+        association_scan_max_age_hours,
+    )
     identity = independent_identity(universe)
     report["available"] = True
     report["won_deals"] = len(identity)
     report["storage"] = storage_checks(a, universe)
-    report["coverage"] = coverage_checks(a, universe, identity)
+    report["coverage"] = coverage_checks(
+        a, universe, identity, now=now,
+        max_age_hours=association_scan_max_age_hours())
     states: dict = {}
     for i in identity.values():
         states[i["state"]] = states.get(i["state"], 0) + 1
@@ -324,7 +382,9 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
         "multiple_company_deal_ids": sorted(
             d for d, i in identity.items() if i["state"] == AMBIGUOUS)[:100],
     }
-    report["windows"] = publication_checks(a, universe, identity, now=now)
+    report["windows"] = publication_checks(
+        a, universe, identity, now=now,
+        scan_current=report["coverage"]["scan_current"])
     report["checks"] = a.checks
     report["violations"] = a.violations
     report["exit_code"] = EXIT_VIOLATION if a.violations else EXIT_OK

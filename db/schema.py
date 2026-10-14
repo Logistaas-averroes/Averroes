@@ -1906,6 +1906,13 @@ CREATE TABLE IF NOT EXISTS hubspot_deal_company_sync_state (
   last_run_write_failures         INTEGER,
   last_run_complete               BOOLEAN,
   last_error                      TEXT,
+  -- The latest run over the FULL won population (an incremental scan or a
+  -- completed backfill generation). A backfill RESUME pass covers a subset and
+  -- never moves these, so "is the evidence current?" is never answered by a
+  -- run that did not look at every deal.
+  last_full_run_status            TEXT,
+  last_full_run_started_at        TIMESTAMPTZ,
+  last_full_run_complete          BOOLEAN,
   -- Stamped ONLY by a run that observed every won deal successfully.
   last_complete_scan_started_at   TIMESTAMPTZ,
   last_complete_scan_finished_at  TIMESTAMPTZ,

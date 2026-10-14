@@ -433,13 +433,28 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
     # 5. Customers: distinct proven HubSpot company ids, never a deal count —
     # re-derived here from the raw stored association rows (PR-ADS-161D2).
     from scripts.audit_deal_company_association_coverage import (  # noqa: PLC0415
-        RESOLVED, independent_identity,
+        RESOLVED, expected_customer_verdict, independent_identity,
+        scan_is_current,
+    )
+    from services.canonical_customer_revenue_service import (  # noqa: PLC0415
+        association_scan_max_age_hours,
     )
     identity = independent_identity(universe)
     member_ids = exp["members"]
-    supported = all(identity.get(d, {}).get("state") in RESOLVED
-                    and not identity.get(d, {}).get("stale")
-                    for d in member_ids)
+    evidence = universe.get("company_associations") or {}
+    scan_current = bool(evidence.get("available")) and scan_is_current(
+        evidence.get("sync_state"), now, association_scan_max_age_hours())[0]
+    supported = scan_current and all(
+        identity.get(d, {}).get("state") in RESOLVED
+        and not identity.get(d, {}).get("stale") for d in member_ids)
+    if count_published and evidence.get("available"):
+        verdict = expected_customer_verdict(member_ids, identity, scan_current)
+        a.check("customer_verdict_matches_the_evidence",
+                (pub["customers"]["status"], pub["customers"]["reason"])
+                == verdict,
+                f"{name}: customers {pub['customers']['status']}/"
+                f"{pub['customers']['reason']}, the evidence says "
+                f"{verdict[0]}/{verdict[1]}")
     companies = {c for d in member_ids
                  for c in identity.get(d, {}).get("companies", [])}
     if pub["customers"]["status"] == PUBLISHED:
@@ -454,6 +469,8 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
                 f"{name}: customers={out['customers']} while withheld")
     lower = out.get("confirmed_customer_lower_bound")
     if lower is not None:
+        a.check("customer_lower_bound_is_confirmed_companies", scan_current,
+                f"{name}: a lower bound published with no current scan")
         confirmed = {c for d in member_ids
                      if identity.get(d, {}).get("state") in RESOLVED
                      and not identity.get(d, {}).get("stale")

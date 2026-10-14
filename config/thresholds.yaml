@@ -116,3 +116,10 @@ ui:
       weekly: 8
       monthly: 35
     consecutive_failure_warning: 2
+
+customer_identity:
+  association_scan_max_age_hours: 48
+  # PR-ADS-161D2 — an exact customer total publishes only while the latest
+  # FULL deal→company association scan succeeded, covered every won deal, and
+  # finished within this many hours. The scan runs daily; 48h tolerates one
+  # missed run. Beyond it, totals are withheld (customer_identity_scan_not_current).

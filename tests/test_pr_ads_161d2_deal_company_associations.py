@@ -449,6 +449,16 @@ def _observe(deal_id, companies, minutes=0):
         deal_id, paths, observation_started_at=_t(minutes))["applied"]
 
 
+def _record_complete_scan():
+    """A successful, complete full-population run, as the scheduled scan would
+    record it. A published total needs one (the scan-current gate)."""
+    from db import deal_company_association_repository as repo
+    assert repo.record_sync_run(
+        mode="incremental", status="success", started_at=_t(-60),
+        population=0, attempted=0, succeeded=0, complete=True,
+        full_population=True)["available"]
+
+
 @_needs_pg
 def test_20_one_company_per_deal_publishes_exact_distinct_customers(ledger):
     for d in ("1", "2", "3"):
@@ -456,6 +466,7 @@ def test_20_one_company_per_deal_publishes_exact_distinct_customers(ledger):
     _observe("1", [901])
     _observe("2", [901])          # same company, second won deal
     _observe("3", [902, _path(902, type_id="341")])   # two paths, one company
+    _record_complete_scan()
     w = _window()
     assert w["outcomes"]["closed_won_deals"] == 3
     assert w["publication"]["customers"] == {"status": cwt.PUBLISHED,
@@ -473,6 +484,7 @@ def test_21_unresolved_or_ambiguous_identity_publishes_only_a_lower_bound(
     _observe("1", [901])
     _observe("2", [901, 902])     # two distinct companies — ambiguous
     _observe("3", [])             # successful lookup, no company
+    _record_complete_scan()
     w = _window()
     assert w["outcomes"]["customers"] is None
     assert w["publication"]["customers"] == {
@@ -496,6 +508,7 @@ def test_22_a_never_observed_or_failed_deal_is_unavailable_not_no_company(
     repo.record_observation_failure("2", observation_started_at=_t(0),
                                     reason="timeout")
     # Deal 3: never looked at.
+    _record_complete_scan()
     w = _window()
     assert w["publication"]["customers"] == {
         "status": cwt.UNAVAILABLE, "reason": cwt.R_CUSTOMER_IDENTITY_UNAVAILABLE}
@@ -512,6 +525,7 @@ def test_23_stale_evidence_is_used_disclosed_and_never_a_published_total(
     _deal(ledger, "2", hubspot_lastmodified_at="2026-10-07T11:30:00+00:00")
     _observe("1", [901], minutes=0)
     _observe("2", [902], minutes=10)    # observed 11:10, deal changed 11:30
+    _record_complete_scan()
     w = _window()
     assert w["publication"]["customers"] == {
         "status": cwt.WITHHELD, "reason": cwt.R_CUSTOMER_IDENTITY_STALE}
@@ -626,6 +640,83 @@ def test_26_no_identity_is_ever_inferred_from_names_contacts_or_campaigns():
     assert out["outcomes"]["customers"] is None
 
 
+@_needs_pg
+def test_27_a_stopped_pipeline_withholds_customers_whatever_each_deal_says(
+        ledger, monkeypatch):
+    """The truth auditor's probe 1: a complete scan, then runs that fail before
+    reading any deal. No per-deal record moves, so per-deal staleness cannot
+    see it — the dataset's own run record must."""
+    from db import deal_company_association_repository as repo
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    _deal(ledger, "1")
+    _deal(ledger, "2")
+    _fake_reads(monkeypatch, {"1": [901], "2": [902]})
+    assert sync_deal_company_associations(mode="incremental")["complete"]
+    assert _window()["outcomes"]["customers"] == 2
+    monkeypatch.setattr(repo, "fetch_won_deal_population",
+                        lambda: {"available": False, "deals": [],
+                                 "error": "boom"})
+    assert sync_deal_company_associations(mode="incremental")["status"] == \
+        "failed"
+    w = _window()
+    assert w["outcomes"]["customers"] is None
+    assert w["publication"]["customers"] == {
+        "status": cwt.WITHHELD,
+        "reason": cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT}
+    assert w["outcomes"]["confirmed_customer_lower_bound"] is None
+
+
+@_needs_pg
+def test_28_an_old_complete_scan_is_not_current(ledger, monkeypatch):
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    assert sync_deal_company_associations(mode="incremental")["complete"]
+    finished = svc._parse(_q(
+        "SELECT last_complete_scan_finished_at AS f FROM "
+        "hubspot_deal_company_sync_state")[0]["f"])
+    max_age = svc.association_scan_max_age_hours()
+    fresh = svc.get_closed_won_truth(
+        [(BUSINESS, "all_time")], now=finished + timedelta(hours=max_age - 1),
+        resolver=None, resolver_detail="t")["windows"][0]
+    old = svc.get_closed_won_truth(
+        [(BUSINESS, "all_time")], now=finished + timedelta(hours=max_age + 1),
+        resolver=None, resolver_detail="t")["windows"][0]
+    assert fresh["outcomes"]["customers"] == 1
+    assert old["outcomes"]["customers"] is None
+    assert old["publication"]["customers"]["reason"] == \
+        cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT
+
+
+@_needs_pg
+def test_29_nothing_observed_is_no_lower_bound_not_zero(ledger):
+    _deal(ledger, "1")
+    _record_complete_scan()
+    w = _window()
+    assert w["outcomes"]["closed_won_deals"] == 1
+    assert w["outcomes"]["confirmed_customer_lower_bound"] is None
+
+
+@_needs_pg
+def test_29_b_observations_are_ordered_by_the_database_clock(
+        ledger, monkeypatch):
+    """A host clock running a year ahead must not stamp observations, or every
+    genuinely newer read afterwards would be rejected as stale."""
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    ahead = datetime.now(tz=timezone.utc) + timedelta(days=365)
+    sync_deal_company_associations(mode="incremental", now_fn=lambda: ahead)
+    started = _obs("1")["last_success_started_at"]
+    assert started < ahead - timedelta(days=300)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # §4 — sync service, backfill command, scheduler
 # ═════════════════════════════════════════════════════════════════════════════
@@ -736,6 +827,10 @@ def test_32_the_backfill_checkpoints_resumes_and_proves_completion(
     state = repo.fetch_sync_state()["row"]
     assert state["backfill_status"] == "complete"
     assert state["last_complete_scan_population"] == 3
+    # Only the completed generation counts as a full run; its resume passes
+    # (subsets) never did.
+    assert (state["last_full_run_status"], state["last_full_run_complete"]) == \
+        ("success", True)
 
 
 @_needs_pg
@@ -797,6 +892,28 @@ def test_36_no_durable_batch_aborts_before_any_hubspot_call(monkeypatch):
     out = sync._sync_deal_company_associations(run_id=1, errors=errors)
     assert out["status"] == "failed" and calls == []
     assert errors
+
+
+@_needs_pg
+def test_36_b_a_step_that_dies_is_recorded_as_a_failed_full_run(
+        ledger, monkeypatch):
+    import scheduler.incremental_sync as sync
+    import services.deal_company_association_sync_service as service
+    from db import deal_company_association_repository as repo
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    assert service.sync_deal_company_associations(mode="incremental")["complete"]
+
+    def boom(**_):
+        raise RuntimeError("worker killed")
+
+    monkeypatch.setattr(service, "sync_deal_company_associations", boom)
+    out = sync._sync_deal_company_associations(run_id=None, errors=[])
+    assert out["status"] == "failed"
+    state = repo.fetch_sync_state()["row"]
+    assert state["last_full_run_status"] == "failed"
+    assert _window()["publication"]["customers"]["reason"] == \
+        cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT
 
 
 def test_37_the_scheduler_runs_associations_after_the_ledger():
@@ -899,7 +1016,13 @@ def _universe(rows, observations, paths):
             "coverage_findings": [],
             "company_associations": {"available": True, "paths": paths,
                                      "observations": observations,
-                                     "sync_state": None}}
+                                     "sync_state": _CURRENT_SCAN}}
+
+
+#: A full scan that succeeded, covered every deal, and finished just before NOW.
+_CURRENT_SCAN = {"last_full_run_status": "success",
+                 "last_full_run_complete": True,
+                 "last_complete_scan_finished_at": "2026-10-07T06:00:00+00:00"}
 
 
 def _ok_obs(deal_id, companies, paths):
@@ -943,6 +1066,9 @@ def test_43_the_closed_won_audit_catches_customers_published_over_ambiguity(
 
 
 def test_44_the_closed_won_audit_catches_a_wrong_lower_bound(monkeypatch):
+    """An OUTPUT counterfactual (the dict is edited), not an implementation
+    mutation: it proves the lower-bound check can fire. test_43 and test_45
+    break the implementation itself."""
     from scripts import audit_customer_closed_won_truth as audit
     rows = [ledger_row("1", deal_close_date=Q4),
             ledger_row("2", deal_close_date=Q4)]
@@ -956,6 +1082,66 @@ def test_44_the_closed_won_audit_catches_a_wrong_lower_bound(monkeypatch):
     a = audit.Audit()
     audit.window_checks(a, w, universe, now=NOW)
     assert a.checks["customer_lower_bound_is_confirmed_companies"] is False
+
+
+def test_45_the_audits_catch_a_failed_lookup_read_as_no_company(monkeypatch):
+    """Implementation mutation (the auditor's MINOR 1): a deal whose only
+    lookup FAILED is put in the map as ``[]``. The customer total is still
+    withheld — so "not published" alone proves nothing. Both audits must see
+    that the published status and distribution contradict the evidence."""
+    from scripts import audit_customer_closed_won_truth as audit
+    from scripts import audit_deal_company_association_coverage as cov
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=Q4)]
+    failed_only = {"deal_id": "2", "last_attempt_status": "failed",
+                   "last_success_started_at": None,
+                   "success_company_count": None, "success_path_count": None,
+                   "success_zero_companies": None, "deal_lastmodified_at": None}
+    universe = _universe(rows, [_ok_obs("1", 1, 1), failed_only],
+                         [{"deal_id": "1", "company_id": "901"}])
+    real = svc.company_identity_inputs
+
+    def misreads(evidence):
+        out = real(evidence)
+        out["company_ids_by_deal"]["2"] = []      # failure read as "no company"
+        return out
+
+    monkeypatch.setattr(svc, "company_identity_inputs", misreads)
+    w = svc.get_closed_won_truth([(BUSINESS, "current_quarter")], now=NOW,
+                                 universe=universe, resolver=None,
+                                 resolver_detail="t")["windows"][0]
+    assert w["outcomes"]["customers"] is None     # withheld either way
+    a = audit.Audit()
+    audit.window_checks(a, w, universe, now=NOW)
+    assert a.checks["customer_verdict_matches_the_evidence"] is False
+    identity = cov.independent_identity(universe)
+    a = cov.Audit()
+    monkeypatch.setattr(svc, "get_closed_won_truth",
+                        lambda **k: {"windows": [w]})
+    cov.publication_checks(a, universe, identity, now=NOW, scan_current=True)
+    assert a.checks["customer_verdict_matches_the_evidence"] is False
+    assert a.checks["identity_distribution_matches_the_evidence"] is False
+
+
+@_needs_pg
+def test_46_the_coverage_audit_fails_while_the_scan_is_not_current(
+        ledger, monkeypatch):
+    """The auditor's probe 6: a once-complete scan, then a failed pipeline."""
+    from db import deal_company_association_repository as repo
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    _deal(ledger, "1")
+    _fake_reads(monkeypatch, {"1": [901]})
+    assert sync_deal_company_associations(mode="incremental")["complete"]
+    assert _coverage_audit()[0] == 0
+    monkeypatch.setattr(repo, "fetch_won_deal_population",
+                        lambda: {"available": False, "deals": [],
+                                 "error": "boom"})
+    sync_deal_company_associations(mode="incremental")
+    code, out = _coverage_audit()
+    assert code == 1
+    assert out["checks"]["association_scan_is_current"] is False
 
 
 # ═════════════════════════════════════════════════════════════════════════════

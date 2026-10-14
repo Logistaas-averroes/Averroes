@@ -123,8 +123,21 @@ def sync_deal_company_associations(*, batch_id=None, mode: str = "incremental",
             # never happened.
             result["truncated"] = True
             break
+        # Observations are ordered by the DATABASE clock (see repo.db_now);
+        # a dry run writes nothing and orders nothing, so it uses its own.
+        if dry_run:
+            observed_at = now_fn()
+        else:
+            clock = repo.db_now()
+            if not clock.get("available"):
+                result["write_failures"] += 1
+                first_error = first_error or "database_clock_unavailable"
+                if stop_on_failure:
+                    result["stopped_on_failure"] = True
+                    break
+                continue
+            observed_at = clock["now"]
         result["attempted"] += 1
-        observed_at = now_fn()
         try:
             read = hubspot.fetch_deal_company_associations(deal_id)
             companies = read.get("companies") or []
@@ -207,7 +220,7 @@ def _finish(result, repo, batch_id, started_at, dry_run, record_run) -> dict:
         attempted=result["attempted"], succeeded=result["succeeded"],
         failed=result["failed"], write_failures=result["write_failures"],
         complete=bool(result["complete"] and result["full_population"]),
-        error=result["error"])
+        full_population=result["full_population"], error=result["error"])
     if not state.get("available"):
         # Coverage that could not be recorded cannot be claimed.
         result["status"] = STATUS_FAILED
@@ -222,4 +235,17 @@ def _finish(result, repo, batch_id, started_at, dry_run, record_run) -> dict:
     return result
 
 
-__all__ = ["DEFAULT_MAX_LOOKUPS", "sync_deal_company_associations"]
+def record_failed_run(error: str, *, mode: str = "incremental") -> dict:
+    """Record a FULL-population run that failed before it could look at any
+    deal — no batch, an exception in the step. Without this, the last recorded
+    full run would still read ``success`` and an exact customer total would
+    keep publishing over a pipeline that had stopped."""
+    import db.deal_company_association_repository as repo  # noqa: PLC0415
+
+    return repo.record_sync_run(mode=mode, status=STATUS_FAILED,
+                                started_at=_now(), full_population=True,
+                                error=str(error)[:1000])
+
+
+__all__ = ["DEFAULT_MAX_LOOKUPS", "sync_deal_company_associations",
+           "record_failed_run"]

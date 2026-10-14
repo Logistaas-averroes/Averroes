@@ -151,10 +151,12 @@ the last successful set and its counts untouched, in the bridge and on the
 observation row. A successful refresh replaces the set (paths HubSpot no longer
 reports are removed) and records itself in ONE transaction.
 
-**Monotonic.** Every write carries the instant its HubSpot read STARTED. A
-success applies only if it started at or after the stored latest success; an
-attempt outcome only if at or after the stored latest attempt. A slow
-historical pass cannot overwrite a newer observation, whatever the commit order.
+**Monotonic.** Every write carries the instant its HubSpot read STARTED, taken
+from the **database clock** (`clock_timestamp()`), so two hosts with different
+clocks cannot misorder each other. A success applies only if it started at or
+after the stored latest success; an attempt outcome only if at or after the
+stored latest attempt. A slow historical pass cannot overwrite a newer
+observation, whatever the commit order.
 
 ### 5.2 Identity per deal
 
@@ -168,7 +170,19 @@ historical pass cannot overwrite a newer observation, whatever the commit order.
 
 Evidence is **stale** when the latest attempt failed (the stored set is older
 than our latest look) or when the deal changed in HubSpot
-(`hubspot_lastmodified_at`) after the evidence was observed. Stale evidence is
+(`hubspot_lastmodified_at`) after the evidence was observed. The second rule
+compares HubSpot's clock with ours, and associating a company is not guaranteed
+to move `hs_lastmodifieddate` — so per-deal staleness is a disclosure, not the
+currency guarantee. That is the scan gate below.
+
+**The scan gate.** A pipeline that stops — the population unreadable, no batch,
+the step killed — moves no per-deal row, so every deal's evidence would still
+look untouched. Customers therefore also require the dataset's own record: the
+latest FULL-population run succeeded and covered every won deal, and the latest
+complete scan finished within `customer_identity.association_scan_max_age_hours`
+(config/thresholds.yaml, 48h — one missed daily run tolerated). A backfill
+resume pass covers a subset and never counts; a completed backfill generation
+does. Stale evidence is
 kept and disclosed (`stale_customer_identity`), counts toward nothing exact,
 and withholds the total.
 
@@ -179,6 +193,7 @@ and withholds the total.
 | deal count not published | follows the deal count |
 | company evidence unreadable | `unavailable` (`company_associations_unreadable`) |
 | any member `association_unavailable` | `unavailable` (`customer_identity_evidence_unavailable`) |
+| scan not current (see above) | `withheld` (`customer_identity_scan_not_current`) — and no lower bound |
 | any member no-company or multi-company | `withheld` (`customer_identity_unresolved`) |
 | any member stale | `withheld` (`customer_identity_evidence_stale`) |
 | every member resolved and current | **published**: distinct company ids |
@@ -186,8 +201,10 @@ and withholds the total.
 Whenever the total is not published and the deal count is,
 `confirmed_customer_lower_bound` (distinct companies of resolved, current
 members), `unresolved_customer_identity`, `stale_customer_identity` and the
-`customer_identity` distribution are published. The won-deal count never
-stands in for customers.
+`customer_identity` distribution are published. The lower bound is NULL — not
+0 — when the scan is not current or when no member was ever successfully
+observed: "0 confirmed" would be a finding nobody made. The won-deal count
+never stands in for customers.
 
 Unreadable company evidence is isolated under a SAVEPOINT inside the universe's
 one READ ONLY snapshot: customers become unavailable, deals and revenue stay
@@ -352,8 +369,14 @@ a failed/never-made lookup are distinct, that stored paths reconcile with the
 recorded success counts, that no path is stored twice or exists without a
 successful lookup, that coverage is proven by a recorded complete scan, and
 that every window touched by a no-company, multi-company, unobserved or stale
-deal publishes no exact customer total. It lists no-company and multi-company
-deals as **CRM findings** — data quality, not contract failures.
+deal publishes no exact customer total, that the scan is current, and — for
+every window whose deal count is published — that the customer status, reason
+and identity distribution match what the raw evidence says (so a failed lookup
+published as "no company" is caught even though the total stays withheld). It
+lists no-company and multi-company deals as **CRM findings** — data quality,
+not contract failures. Deleted or merged HubSpot deals are not handled by the
+ledger: a won deal that now 404s fails every scan and keeps its windows
+withheld — closed, but noisy.
 
 Exit **0** storage and coverage contracts hold · **1** a contract is violated
 or coverage is not proven (expected before the first backfill) · **2**

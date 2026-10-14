@@ -1288,6 +1288,18 @@ PG storage (atomicity, preservation, ordering, rollback), identity through the
 real service, sync/backfill/scheduler, audits and implementation mutations; in
 CI's PostgreSQL step and did-run list.
 
+**Truth audit (no blocker after fixes).** Its blocker — the all-success
+fixture in `test_daily_incremental_sync.py` did not stub the new step — and its
+MAJOR — customers kept publishing on weeks-old evidence after the pipeline
+stopped, because a run that fails before reading a deal moves no per-deal row —
+are fixed: a scan gate (latest full run successful and complete, last complete
+scan within `customer_identity.association_scan_max_age_hours`) withholds
+customers otherwise, a step that dies records a failed full run, and the
+coverage audit fails on the same condition. Also fixed: both audits now
+reconcile the customer status and identity distribution against the raw
+evidence; the lower bound is NULL when nothing was observed; observations are
+ordered by the database clock.
+
 **Production.** Completeness depends on the backfill's evidence. Expected after
 it: deal and revenue totals unchanged; customer totals published only in windows
 whose won deals all resolve to one current company; the coverage audit lists the

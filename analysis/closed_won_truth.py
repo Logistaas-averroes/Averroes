@@ -151,6 +151,7 @@ R_CUSTOMER_IDENTITY_NOT_INGESTED = "company_associations_not_ingested"
 R_CUSTOMER_IDENTITY_UNAVAILABLE = "customer_identity_evidence_unavailable"
 R_CUSTOMER_IDENTITY_STALE = "customer_identity_evidence_stale"
 R_COMPANY_ASSOCIATIONS_UNREADABLE = "company_associations_unreadable"
+R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT = "customer_identity_scan_not_current"
 R_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
 R_DEALS_WITHHELD = "closed_won_deal_count_withheld"
 R_REVENUE_WITHHELD = "closed_won_revenue_withheld"
@@ -411,7 +412,8 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                     is_all_time: bool, now: datetime, coverage_findings,
                     resolve_label=None, company_ids_by_deal=None,
                     unknown_won_rows=None, stale_company_evidence=None,
-                    company_source_reason=None) -> dict:
+                    company_source_reason=None,
+                    company_scan_current: bool = True) -> dict:
     """The closed-won truth for one window. Pure.
 
     ``won_rows``           every ``hs_is_closed_won IS TRUE`` deal, all time.
@@ -429,6 +431,10 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                            latest attempt failed, or the deal changed after it
                            was observed). Used, disclosed, and never published
                            as a total.
+    ``company_scan_current`` False when the latest FULL association scan did
+                           not succeed over every won deal recently enough:
+                           no stored evidence is current, so no exact total and
+                           no lower bound.
     ``company_source_reason`` why ``company_ids_by_deal`` is None. Unset keeps
                            the PR-ADS-161D meaning (never ingested → withheld);
                            set, customers are ``unavailable`` for that reason.
@@ -577,6 +583,10 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
              for r in members):
         # A member we never observed: the count cannot be computed at all.
         cust_status, cust_reason = UNAVAILABLE, R_CUSTOMER_IDENTITY_UNAVAILABLE
+    elif not company_scan_current:
+        # The pipeline has not proven a current, complete look at every won
+        # deal; per-deal evidence may be weeks old and nothing says so.
+        cust_status, cust_reason = WITHHELD, R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT
     elif unresolved_identity:
         # Observed, and genuinely no company or several — a CRM finding.
         cust_status, cust_reason = WITHHELD, R_CUSTOMER_IDENTITY
@@ -647,8 +657,15 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                 [r for r in members if close_date_state(r, now) == CLOSE_EXACT]),
             # A count of PROVEN identities. NULL when no identity source exists
             # at all — "we could not look" is not "zero customers".
-            "confirmed_customer_lower_bound": (len(resolved_customers)
-                                               if company_source else None),
+            # NULL also when nothing about the members is current or was ever
+            # seen: "0 confirmed" would read as a finding nobody made.
+            "confirmed_customer_lower_bound": (
+                len(resolved_customers)
+                if company_source and company_scan_current
+                and (not members or any(
+                    identity[str(r.get("deal_id"))]
+                    != CUSTOMER_ASSOCIATION_UNAVAILABLE for r in members))
+                else None),
             "unresolved_customer_identity": len(unresolved_identity),
             "stale_customer_identity": len(stale_identity),
             "deals_without_proven_usd": len(unpriced),

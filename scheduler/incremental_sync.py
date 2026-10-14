@@ -1022,6 +1022,16 @@ def _sync_deal_company_associations(*, run_id, errors: list) -> dict:
         errors.append(f"{LABEL_DEAL_COMPANY_ASSOCIATIONS}: {exc}")
         db_writers.finish_sync_batch(batch_id=batch_id, status="failed",
                                      error_message=str(exc))
+        # The dataset's own coverage state must say this run failed too, or
+        # the last full scan would still read as current.
+        try:
+            from services.deal_company_association_sync_service import (  # noqa: PLC0415
+                record_failed_run,
+            )
+            record_failed_run(str(exc))
+        except Exception as state_exc:  # noqa: BLE001
+            log.error("[incremental] could not record the failed association "
+                      "run: %s", state_exc)
         return {"status": "failed", "error": str(exc)[:500], "rows": 0}
 
     status = result.get("status")

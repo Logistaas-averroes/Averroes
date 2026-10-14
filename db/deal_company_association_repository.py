@@ -65,6 +65,7 @@ _STATE_COLUMNS = (
     "last_run_finished_at", "last_run_batch_id", "last_run_population",
     "last_run_attempted", "last_run_succeeded", "last_run_failed",
     "last_run_write_failures", "last_run_complete", "last_error",
+    "last_full_run_status", "last_full_run_started_at", "last_full_run_complete",
     "last_complete_scan_started_at", "last_complete_scan_finished_at",
     "last_complete_scan_population", "backfill_status", "backfill_started_at",
     "backfill_completed_at", "updated_at",
@@ -311,17 +312,25 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                     population: int = 0, attempted: int = 0,
                     succeeded: int = 0, failed: int = 0,
                     write_failures: int = 0, complete: bool = False,
+                    full_population: bool = False,
                     error: str | None = None) -> dict:
-    """Record a run's outcome. The complete-scan columns move ONLY for a run
-    that succeeded AND observed every won deal — coverage is proven by the run
-    that covered it, never assumed from rows existing."""
+    """Record a run's outcome.
+
+    ``full_population``: the run looked at the WHOLE won population (or failed
+    before it could). Only such a run moves the ``last_full_run_*`` columns —
+    the ones that answer "is the evidence current?" — so a backfill resume pass
+    over a subset can neither prove nor disprove currency.
+
+    The complete-scan columns move ONLY for a full-population run that
+    succeeded AND observed every won deal — coverage is proven by the run that
+    covered it, never assumed from rows existing."""
     if mode not in ALL_MODES:
         return _unavailable(reason="invalid_mode", error=f"unknown mode {mode!r}")
     if status not in ("success", "partial", "failed"):
         return _unavailable(reason="invalid_status",
                             error=f"unknown status {status!r}")
-    proves = bool(complete and status == "success")
-    params = {"scope": SYNC_SCOPE, "status": status, "mode": mode,
+    proves = bool(complete and status == "success" and full_population)
+    params = {"full": bool(full_population),"scope": SYNC_SCOPE, "status": status, "mode": mode,
               "started": started_at, "batch_id": batch_id,
               "population": int(population), "attempted": int(attempted),
               "succeeded": int(succeeded), "failed": int(failed),
@@ -340,6 +349,8 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                         last_run_batch_id, last_run_population,
                         last_run_attempted, last_run_succeeded, last_run_failed,
                         last_run_write_failures, last_run_complete, last_error,
+                        last_full_run_status, last_full_run_started_at,
+                        last_full_run_complete,
                         last_complete_scan_started_at,
                         last_complete_scan_finished_at,
                         last_complete_scan_population, updated_at)
@@ -347,6 +358,9 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                             clock_timestamp(), %(batch_id)s, %(population)s,
                             %(attempted)s, %(succeeded)s, %(failed)s,
                             %(write_failures)s, %(complete)s, %(error)s,
+                            CASE WHEN %(full)s THEN %(status)s END,
+                            CASE WHEN %(full)s THEN %(started)s END,
+                            CASE WHEN %(full)s THEN %(complete)s END,
                             CASE WHEN %(proves)s THEN %(started)s END,
                             CASE WHEN %(proves)s THEN clock_timestamp() END,
                             CASE WHEN %(proves)s THEN %(population)s END,
@@ -364,6 +378,15 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                         last_run_write_failures = EXCLUDED.last_run_write_failures,
                         last_run_complete       = EXCLUDED.last_run_complete,
                         last_error              = EXCLUDED.last_error,
+                        last_full_run_status = CASE WHEN %(full)s
+                            THEN EXCLUDED.last_run_status
+                            ELSE {SYNC_STATE_TABLE}.last_full_run_status END,
+                        last_full_run_started_at = CASE WHEN %(full)s
+                            THEN EXCLUDED.last_run_started_at
+                            ELSE {SYNC_STATE_TABLE}.last_full_run_started_at END,
+                        last_full_run_complete = CASE WHEN %(full)s
+                            THEN EXCLUDED.last_run_complete
+                            ELSE {SYNC_STATE_TABLE}.last_full_run_complete END,
                         -- A complete scan is never un-proven by a later partial
                         -- run, and never moved backwards by an older one.
                         last_complete_scan_started_at = CASE
@@ -440,6 +463,18 @@ def complete_backfill_generation(generation_started_at, *,
                     UPDATE {SYNC_STATE_TABLE}
                        SET backfill_status = %(complete)s,
                            backfill_completed_at = clock_timestamp(),
+                           -- A completed generation observed every won deal:
+                           -- it is a full, successful, complete run.
+                           last_full_run_status = CASE
+                               WHEN last_full_run_started_at IS NULL
+                                 OR %(gen)s >= last_full_run_started_at
+                               THEN 'success' ELSE last_full_run_status END,
+                           last_full_run_complete = CASE
+                               WHEN last_full_run_started_at IS NULL
+                                 OR %(gen)s >= last_full_run_started_at
+                               THEN TRUE ELSE last_full_run_complete END,
+                           last_full_run_started_at = GREATEST(
+                               last_full_run_started_at, %(gen)s::timestamptz),
                            last_complete_scan_started_at = CASE
                                WHEN last_complete_scan_started_at IS NULL
                                  OR %(gen)s >= last_complete_scan_started_at
@@ -468,6 +503,22 @@ def complete_backfill_generation(generation_started_at, *,
     except Exception as exc:  # noqa: BLE001
         log.error("complete_backfill_generation failed: %s", exc)
         return _unavailable(completed=False, error=type(exc).__name__)
+
+
+def db_now() -> dict:
+    """``{available, now}`` — the DATABASE clock, the one instant every
+    observation is ordered by. Using the caller's clock would let a host whose
+    clock runs ahead make genuinely newer reads look stale."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(now=None)
+            with conn.cursor() as cur:
+                cur.execute("SELECT clock_timestamp()")
+                return {"available": True, "now": cur.fetchone()[0]}
+    except Exception as exc:  # noqa: BLE001
+        log.error("db_now failed: %s", exc)
+        return _unavailable(now=None, error=type(exc).__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -594,7 +645,7 @@ __all__ = [
     "BACKFILL_COMPLETE", "READ_ONLY_TRANSACTION",
     "record_observation_success", "record_observation_failure",
     "record_sync_run", "start_backfill_generation",
-    "complete_backfill_generation", "fetch_won_deal_population",
+    "complete_backfill_generation", "db_now", "fetch_won_deal_population",
     "fetch_sync_state", "fetch_backfill_progress", "read_sync_state",
     "read_won_deal_company_evidence",
 ]
