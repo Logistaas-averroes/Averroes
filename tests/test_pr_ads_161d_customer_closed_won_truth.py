@@ -97,12 +97,14 @@ def test_01_a_won_deal_is_counted_once_and_is_never_a_customer():
     w = _one([ledger_row("1", deal_close_date=Q4)])
     assert w["outcomes"]["closed_won_deals"] == 1
     assert _status(w, "closed_won_deals") == cwt.PUBLISHED
-    # No company identity exists in the repository: customers are withheld,
-    # and the lower bound is unknown — not "zero customers".
+    # This snapshot carries no company evidence (PR-ADS-161D2 reads it from
+    # hubspot_deal_company_association): a deal is never a customer, so
+    # customers are unavailable and the lower bound unknown — not "zero".
     assert w["outcomes"]["customers"] is None
     assert w["outcomes"]["confirmed_customer_lower_bound"] is None
     assert w["publication"]["customers"] == {
-        "status": cwt.WITHHELD, "reason": cwt.R_CUSTOMER_IDENTITY_NOT_INGESTED}
+        "status": cwt.UNAVAILABLE,
+        "reason": cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE}
 
 
 def test_02_the_won_flag_disagreeing_with_the_won_stage_withholds_the_count():

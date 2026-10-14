@@ -55,6 +55,7 @@ from scheduler.sync_utils import max_source_date, persistence_succeeded
 from services.dataset_keys import (
     CANONICAL_GEO_DATASET, CANONICAL_GEO_SOURCE,
     CANONICAL_SPEND_DATASET, CANONICAL_SPEND_SOURCE,
+    DEAL_COMPANY_ASSOCIATION_DATASET, DEAL_COMPANY_ASSOCIATION_SOURCE,
     DEAL_LEDGER_DATASET, DEAL_LEDGER_SOURCE,
     FX_DAILY_RATES_DATASET, FX_SOURCE,
     GCLID_MATCHES_DATASET, GCLID_SOURCE,
@@ -212,6 +213,8 @@ LABEL_CANONICAL_GEO = f"{CANONICAL_GEO_SOURCE}/{CANONICAL_GEO_DATASET}"
 LABEL_GEO_RECONCILIATION = f"{CANONICAL_GEO_SOURCE}/geo_reconciliation"
 LABEL_FX = f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}"
 LABEL_DEAL_LEDGER = f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"
+LABEL_DEAL_COMPANY_ASSOCIATIONS = (
+    f"{DEAL_COMPANY_ASSOCIATION_SOURCE}/{DEAL_COMPANY_ASSOCIATION_DATASET}")
 LABEL_SOURCE_CLASSIFICATION = (
     f"{SOURCE_CLASSIFICATION_SOURCE}/{SOURCE_CLASSIFICATION_DATASET}")
 LABEL_GCLID_MATCHES = f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"
@@ -235,6 +238,7 @@ ACTIVE_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
     ("hubspot", "deals"),
     (GCLID_SOURCE, GCLID_MATCHES_DATASET),
     (DEAL_LEDGER_SOURCE, DEAL_LEDGER_DATASET),
+    (DEAL_COMPANY_ASSOCIATION_SOURCE, DEAL_COMPANY_ASSOCIATION_DATASET),
     (SOURCE_CLASSIFICATION_SOURCE, SOURCE_CLASSIFICATION_DATASET),
     (CANONICAL_SPEND_SOURCE, CANONICAL_SPEND_DATASET),
     (FX_SOURCE, FX_DAILY_RATES_DATASET),
@@ -401,6 +405,8 @@ def run_daily_incremental_sync(
       - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
       - hubspot/deal_ledger, hubspot/source_classification
+      - hubspot/deal_company_associations — every won deal's companies,
+                               refreshed after the ledger (PR-ADS-161D2)
       - google_ads_api/canonical_spend — the ROAS denominator
       - fx/daily_rates      — required before any USD figure is safe
       - google_ads_api/canonical_geo — CANONICAL per-country spend (PR-ADS-153F),
@@ -536,6 +542,15 @@ def run_daily_incremental_sync(
     # currency, association and attribution decision lives in the service and
     # its pure rule modules, never here.
     datasets[LABEL_DEAL_LEDGER] = _sync_deal_ledger(
+        run_id=run_id, errors=errors,
+    )
+
+    # ── hubspot/deal_company_associations — PR-ADS-161D2. Customer identity
+    # evidence for every canonical won deal. Runs AFTER the ledger so a deal won
+    # today exists locally before its companies are looked up. It reads the
+    # ledger and writes only its own three tables: a failure here withholds
+    # customer counts and can never touch deal or revenue evidence.
+    datasets[LABEL_DEAL_COMPANY_ASSOCIATIONS] = _sync_deal_company_associations(
         run_id=run_id, errors=errors,
     )
 
@@ -977,6 +992,64 @@ def _sync_deal_ledger(*, run_id, errors: list) -> dict:
         "skipped_stale": result.get("skipped_stale", 0),
         "association_failures": result.get("association_failures", 0),
         "complete": result.get("complete", False),
+        "error": result.get("error"),
+    }
+
+
+def _sync_deal_company_associations(*, run_id, errors: list) -> dict:
+    """Orchestrate the PR-ADS-161D2 deal→company association refresh.
+
+    No customer, identity or company logic here — it opens a batch, calls the
+    service, and records exactly what happened. A run with no durable batch
+    fails BEFORE any HubSpot call. Lookup or persistence failures are partial
+    or failed, never success.
+    """
+    batch_id = db_writers.start_sync_batch(
+        source=DEAL_COMPANY_ASSOCIATION_SOURCE,
+        dataset=DEAL_COMPANY_ASSOCIATION_DATASET, sync_type="daily",
+        run_id=run_id)
+    try:
+        batch_id = _require_batch(batch_id, LABEL_DEAL_COMPANY_ASSOCIATIONS)
+        from services.deal_company_association_sync_service import (  # noqa: PLC0415
+            sync_deal_company_associations,
+        )
+
+        result = sync_deal_company_associations(batch_id=batch_id,
+                                                mode="incremental")
+    except Exception as exc:  # noqa: BLE001
+        log.error("[incremental] deal→company association sync failed: %s",
+                  exc, exc_info=True)
+        errors.append(f"{LABEL_DEAL_COMPANY_ASSOCIATIONS}: {exc}")
+        db_writers.finish_sync_batch(batch_id=batch_id, status="failed",
+                                     error_message=str(exc))
+        return {"status": "failed", "error": str(exc)[:500], "rows": 0}
+
+    status = result.get("status")
+    if status not in ("success", "partial", "failed"):
+        status = "failed"   # an unrecognised outcome is not a success
+    if status != "success":
+        errors.append(
+            f"{LABEL_DEAL_COMPANY_ASSOCIATIONS}: {status} "
+            f"({result.get('error') or 'incomplete'}; "
+            f"{result.get('failed', 0)} lookup failure(s), "
+            f"{result.get('write_failures', 0)} write failure(s))")
+    db_writers.finish_sync_batch(
+        batch_id=batch_id, status=status, row_count=result.get("applied", 0),
+        error_message=(result.get("error")
+                       or (None if status == "success" else status)))
+    return {
+        "status": status,
+        "rows": result.get("applied", 0),
+        "population": result.get("population"),
+        "attempted": result.get("attempted", 0),
+        "succeeded": result.get("succeeded", 0),
+        "failed": result.get("failed", 0),
+        "applied": result.get("applied", 0),
+        "paths_written": result.get("paths_written", 0),
+        "skipped_stale": result.get("skipped_stale", 0),
+        "write_failures": result.get("write_failures", 0),
+        "complete": result.get("complete", False),
+        "failure_reasons": result.get("failure_reasons") or {},
         "error": result.get("error"),
     }
 

@@ -244,12 +244,18 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   is: `scripts/audit_post_boundary_sql_incidents.py`; see `docs/45_*`.
 
 - **A won deal is not a customer.** A customer is a distinct HubSpot company
-  id; the repository ingests no deal→company association, so
-  `services/canonical_customer_revenue_service` withholds customer counts
-  (`company_associations_not_ingested`, lower bound NULL). Many existing readers
-  still call won deals "customers" — PR-ADS-161E migrates them. The won
-  predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a cross-check
-  whose disagreement withholds, never a filter. See `docs/46_*`.
+  id from `hubspot_deal_company_association` (PR-ADS-161D2), never a deal,
+  contact, email domain, name or campaign. The per-deal
+  `hubspot_deal_company_observation` row decides what the bridge means: no
+  bridge rows with `success_zero_companies = true` is a CRM finding ("no
+  company"); no successful observation is `association_unavailable` — never
+  read the absence of rows as either. A failed lookup must never delete or
+  replace the last successful set, and writes are ordered by observation START,
+  not commit order. Customers publish only when every member deal is resolved
+  AND current; otherwise the lower bound and unresolved counts publish instead.
+  Many existing readers still call won deals "customers" — PR-ADS-161E migrates
+  them. The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
+  cross-check whose disagreement withholds, never a filter. See `docs/46_*` §5.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

@@ -147,6 +147,10 @@ R_UNDATED_WON_DEALS = "won_deals_without_close_date"
 R_REVENUE_UNPROVEN = "closed_won_deals_missing_proven_usd_amount"
 R_CUSTOMER_IDENTITY = "customer_identity_unresolved"
 R_CUSTOMER_IDENTITY_NOT_INGESTED = "company_associations_not_ingested"
+# PR-ADS-161D2 — the association store exists; these say what it holds.
+R_CUSTOMER_IDENTITY_UNAVAILABLE = "customer_identity_evidence_unavailable"
+R_CUSTOMER_IDENTITY_STALE = "customer_identity_evidence_stale"
+R_COMPANY_ASSOCIATIONS_UNREADABLE = "company_associations_unreadable"
 R_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
 R_DEALS_WITHHELD = "closed_won_deal_count_withheld"
 R_REVENUE_WITHHELD = "closed_won_revenue_withheld"
@@ -406,7 +410,8 @@ def _redact(value):
 def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
                     is_all_time: bool, now: datetime, coverage_findings,
                     resolve_label=None, company_ids_by_deal=None,
-                    unknown_won_rows=None) -> dict:
+                    unknown_won_rows=None, stale_company_evidence=None,
+                    company_source_reason=None) -> dict:
     """The closed-won truth for one window. Pure.
 
     ``won_rows``           every ``hs_is_closed_won IS TRUE`` deal, all time.
@@ -414,8 +419,19 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
     ``contacts_by_deal``   deal_id → associated contacts with creation times.
     ``coverage_findings``  the ledger coverage gate's findings (``[]`` proven).
     ``resolve_label``      the campaign resolver, or None when unavailable.
-    ``company_ids_by_deal`` deal_id → company ids, or None when the repository
-                           holds no company associations at all.
+    ``company_ids_by_deal`` deal_id → company ids (one per association path)
+                           for every deal with a SUCCESSFUL lookup; ``[]`` is a
+                           successful lookup that found no company. A deal
+                           ABSENT from the map was never observed — that is
+                           ``association_unavailable``, never "no company".
+                           None when no company evidence could be read at all.
+    ``stale_company_evidence`` deal ids whose evidence is not current (the
+                           latest attempt failed, or the deal changed after it
+                           was observed). Used, disclosed, and never published
+                           as a total.
+    ``company_source_reason`` why ``company_ids_by_deal`` is None. Unset keeps
+                           the PR-ADS-161D meaning (never ingested → withheld);
+                           set, customers are ``unavailable`` for that reason.
     ``unknown_won_rows``   deals whose ``hs_is_closed_won`` IS NULL — neither
                            won nor lost; disclosed beside the count (docs/35 §3).
     """
@@ -470,12 +486,17 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
     identity = {}
     for r in members:
         cid = str(r.get("deal_id"))
+        # Observed means PRESENT in the map: absent is "never looked".
         identity[cid] = customer_identity_state(
-            (company_ids_by_deal or {}).get(cid), source_available=company_source)
+            (company_ids_by_deal or {}).get(cid),
+            source_available=company_source and cid in company_ids_by_deal)
+    stale = {str(d) for d in (stale_company_evidence or ())}
+    stale_identity = [r for r in members if str(r.get("deal_id")) in stale]
     resolved_customers = set()
     for r in members:
         cid = str(r.get("deal_id"))
-        if identity[cid] in CUSTOMER_RESOLVED_STATES:
+        # The lower bound counts only CURRENT, resolved evidence.
+        if identity[cid] in CUSTOMER_RESOLVED_STATES and cid not in stale:
             companies = {str(c).strip() for c in
                          (company_ids_by_deal or {}).get(cid) or []
                          if str(c or "").strip()}
@@ -547,9 +568,20 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
         cust_reason = deal_reason if deal_status == UNAVAILABLE \
             else R_DEALS_WITHHELD
     elif not company_source:
-        cust_status, cust_reason = WITHHELD, R_CUSTOMER_IDENTITY_NOT_INGESTED
+        if company_source_reason:
+            cust_status, cust_reason = UNAVAILABLE, company_source_reason
+        else:
+            cust_status, cust_reason = (WITHHELD,
+                                        R_CUSTOMER_IDENTITY_NOT_INGESTED)
+    elif any(identity[str(r.get("deal_id"))] == CUSTOMER_ASSOCIATION_UNAVAILABLE
+             for r in members):
+        # A member we never observed: the count cannot be computed at all.
+        cust_status, cust_reason = UNAVAILABLE, R_CUSTOMER_IDENTITY_UNAVAILABLE
     elif unresolved_identity:
+        # Observed, and genuinely no company or several — a CRM finding.
         cust_status, cust_reason = WITHHELD, R_CUSTOMER_IDENTITY
+    elif stale_identity:
+        cust_status, cust_reason = WITHHELD, R_CUSTOMER_IDENTITY_STALE
     else:
         cust_status, cust_reason = PUBLISHED, None
 
@@ -618,6 +650,7 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
             "confirmed_customer_lower_bound": (len(resolved_customers)
                                                if company_source else None),
             "unresolved_customer_identity": len(unresolved_identity),
+            "stale_customer_identity": len(stale_identity),
             "deals_without_proven_usd": len(unpriced),
         },
         "attribution": {
@@ -633,6 +666,7 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
             "close_date_of_members": _count(close_date_state(r, now)
                                             for r in members),
             "customer_identity": _count(identity.values()),
+            "customer_identity_evidence_stale": len(stale_identity),
             "amount": _count(amount_state(r) for r in members),
             "currency": _count(currency_state(r) for r in members),
             "contact_association": _count(

@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161D — canonical closed-won deals, customers and revenue truth (October 2026)
+**Last updated:** PR-ADS-161D2 — deal→company association ingestion and customer identity certification (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1239,3 +1239,58 @@ the audit), PG end-to-end cases including the audit CLI and a no-writes
 fingerprint; in CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/46_CANONICAL_CUSTOMER_CLOSED_WON_TRUTH.md`.
+
+---
+
+## PR-ADS-161D2 — Deal→company association ingestion and customer identity certification (October 2026)
+
+**Why.** PR-ADS-161D defined customers as distinct HubSpot company ids and
+withheld every customer total, because no deal→company association was stored
+anywhere. This PR stores that evidence, keeps it current, and lets the truth
+service publish an exact customer total where — and only where — it supports
+one.
+
+**Built.**
+* `connectors/hubspot_pull.fetch_deal_company_associations` — v4 GET, every
+  page, every association path, Retry-After honoured; raises
+  `DealCompanyAssociationLookupError` on any failure, malformed row or repeated
+  cursor. An empty list only after a complete successful read.
+* Schema (additive, idempotent): `hubspot_deal_company_association` (one row per
+  deal/company/path), `hubspot_deal_company_observation` (latest attempt and
+  latest success per deal; `success_zero_companies` recorded, with an
+  all-or-nothing CHECK on the success columns),
+  `hubspot_deal_company_sync_state` (last run, last complete scan, backfill
+  generation).
+* `db/deal_company_association_repository.py` — a success replaces the set and
+  records itself in one transaction; a failure records the attempt and
+  preserves the last proven set; both ordered by observation START, so an older
+  pass cannot overwrite a newer one.
+* `services/deal_company_association_sync_service.py` — scans the WHOLE won
+  population (never the GCLID subset); bounded; success / partial / failed.
+* `scripts/backfill_deal_company_associations.py` — dry run by default (no
+  writes), `--apply`, `--resume --apply`, deliberate `--restart`; stops at the
+  first failure; completion proven from stored observations.
+* Scheduler: `hubspot/deal_company_associations` registered and run right after
+  `hubspot/deal_ledger`; no batch → abort before HubSpot.
+* Truth service: `company_ids_by_deal` and stale evidence built from the same
+  READ ONLY snapshot (under a SAVEPOINT, so unreadable company evidence
+  withholds customers only). A deal absent from the map is now
+  `association_unavailable`, never "no company".
+* `scripts/audit_deal_company_association_coverage.py` — read-only coverage and
+  storage certification; `audit_customer_closed_won_truth` now re-derives
+  customers from the raw rows.
+
+**Not changed.** Every production page and route; deal, revenue, attribution
+and cohort contracts; the won predicate. No HubSpot write, no Google Ads call.
+
+**Suite.** `tests/test_pr_ads_161d2_deal_company_associations.py` — connector,
+PG storage (atomicity, preservation, ordering, rollback), identity through the
+real service, sync/backfill/scheduler, audits and implementation mutations; in
+CI's PostgreSQL step and did-run list.
+
+**Production.** Completeness depends on the backfill's evidence. Expected after
+it: deal and revenue totals unchanged; customer totals published only in windows
+whose won deals all resolve to one current company; the coverage audit lists the
+CRM remediation queue (no-company and multi-company won deals).
+
+Full doctrine: `docs/46_CANONICAL_CUSTOMER_CLOSED_WON_TRUTH.md` §5, §9.1.

@@ -60,14 +60,22 @@ DEFINITIONS = {
     "window_interval": "half-open [start, end), UTC instants",
 }
 
-#: The repository has no store of deal→company associations (the ledger holds
-#: none, and no table does). Customer identity is therefore unavailable for
-#: every deal — stated as data so the audit and the docs say the same thing.
-COMPANY_ASSOCIATION_SOURCE = None
+#: PR-ADS-161D2 — THE customer-identity source: HubSpot deal→company
+#: associations, stored per association path, with a per-deal observation state
+#: that tells a successful zero-company lookup from one that never succeeded.
+COMPANY_ASSOCIATION_SOURCE = {
+    "table": "hubspot_deal_company_association",
+    "observation_table": "hubspot_deal_company_observation",
+    "sync_state_table": "hubspot_deal_company_sync_state",
+    "dataset": "hubspot/deal_company_associations",
+}
+#: What is still true even with the source in place. Coverage is per deal, and
+#: proven only by the stored observations — never by the table existing.
 COMPANY_ASSOCIATION_GAP = (
-    "the canonical deal ledger stores no HubSpot company association, and no "
-    "other local table does; a customer count cannot be computed from local "
-    "data until company associations are ingested")
+    "a customer total is published only when every won deal in the window has "
+    "a successful, current deal→company observation resolving to exactly one "
+    "HubSpot company; any deal never observed, with no company, with several "
+    "companies, or with stale evidence withholds it")
 
 
 def _utcnow() -> datetime:
@@ -168,6 +176,91 @@ def _as_dt(value):
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def company_identity_inputs(evidence) -> dict:
+    """``company_ids_by_deal`` and the stale set, from the stored evidence.
+
+    * A deal is in ``company_ids_by_deal`` only when it has a SUCCESSFUL
+      observation; its list holds one company id per stored association path
+      (duplicates kept — two paths to one company is one company, resolved).
+      ``[]`` is a successful lookup that found no company.
+    * A deal with no successful observation is left OUT: never looked, which
+      the truth layer reads as ``association_unavailable``.
+    * Evidence is STALE when the latest attempt failed (the stored set is older
+      than our latest look), or when the deal changed in HubSpot after the
+      evidence was observed.
+
+    ``evidence`` unreadable → ``company_ids_by_deal`` None, with the reason.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("available"):
+        return {"company_ids_by_deal": None, "stale": set(),
+                "reason": cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE,
+                "observed_deals": 0, "error": (evidence or {}).get("error")
+                if isinstance(evidence, dict) else "no_company_evidence"}
+    observed = {}
+    stale = set()
+    for o in evidence.get("observations") or []:
+        deal_id = str(o.get("deal_id"))
+        if not o.get("last_success_started_at"):
+            continue
+        observed[deal_id] = []
+        if o.get("last_attempt_status") != "success":
+            stale.add(deal_id)
+        modified = _parse(o.get("deal_lastmodified_at"))
+        seen = _parse(o.get("last_success_started_at"))
+        if modified and seen and seen < modified:
+            stale.add(deal_id)
+    for p in evidence.get("paths") or []:
+        deal_id = str(p.get("deal_id"))
+        if deal_id in observed:
+            observed[deal_id].append(str(p.get("company_id")))
+    return {"company_ids_by_deal": observed, "stale": stale, "reason": None,
+            "observed_deals": len(observed), "error": None}
+
+
+def _parse(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def company_association_freshness(evidence, now: datetime) -> dict:
+    """The association dataset's coverage, from its own recorded runs.
+
+    Reported, not judged against a threshold (none is configured). Coverage is
+    "proven" only by a recorded run that observed every won deal successfully.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("available"):
+        return {"signal": "hubspot_deal_company_sync_state",
+                "available": False, "complete_scan_proven": None,
+                "last_complete_scan_finished_at": None, "age_hours": None,
+                "last_run_status": None, "staleness_assessed": False}
+    state = evidence.get("sync_state") or {}
+    finished = _parse(state.get("last_complete_scan_finished_at"))
+    return {
+        "signal": "hubspot_deal_company_sync_state",
+        "available": True,
+        "complete_scan_proven": finished is not None,
+        "last_complete_scan_finished_at": state.get(
+            "last_complete_scan_finished_at"),
+        "last_complete_scan_population": state.get(
+            "last_complete_scan_population"),
+        "age_hours": (round((now - finished).total_seconds() / 3600, 2)
+                      if finished else None),
+        "last_run_status": state.get("last_run_status"),
+        "last_run_mode": state.get("last_run_mode"),
+        "last_run_complete": state.get("last_run_complete"),
+        "backfill_status": state.get("backfill_status"),
+        "staleness_threshold_hours": None,
+        "staleness_assessed": False,
+    }
 
 
 def freshness_block(sync_state, findings, now: datetime) -> dict:
@@ -305,6 +398,9 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
                      "message": "the ledger coverage gate returned no verdict"}]
     freshness = freshness_block(universe.get("sync_state"), findings, now)
     contacts = _contacts_by_deal(universe.get("acquisition_contacts"))
+    company = company_identity_inputs(universe.get("company_associations"))
+    company_freshness = company_association_freshness(
+        universe.get("company_associations"), now)
     out = []
     for wtype, wkey in windows:
         bounds = window_bounds(wtype, wkey, now)
@@ -314,13 +410,17 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
             contacts_by_deal=contacts, start=bounds["start"],
             end=bounds["end"], is_all_time=bounds["is_all_time"], now=now,
             coverage_findings=findings, resolve_label=resolver,
-            company_ids_by_deal=None,
+            company_ids_by_deal=company["company_ids_by_deal"],
+            stale_company_evidence=company["stale"],
+            company_source_reason=company["reason"],
             unknown_won_rows=universe.get("unknown_won_rows"))
         result["coverage"]["source_freshness"] = freshness
+        result["coverage"]["company_association_freshness"] = company_freshness
         out.append({"available": True,
                     "window": _window_meta(wtype, wkey, bounds),
                     "definitions": DEFINITIONS, **result})
-    return {**base, "available": True, "windows": out, "freshness": freshness}
+    return {**base, "available": True, "windows": out, "freshness": freshness,
+            "company_association_freshness": company_freshness}
 
 
 def get_window_outcome(window_type: str, window_key: str, *,
