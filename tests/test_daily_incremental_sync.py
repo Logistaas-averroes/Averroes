@@ -143,6 +143,8 @@ class TestSummaryShape:
             # wrote, so a newly qualified contact with no exact SQL timestamp
             # becomes a visible incident instead of joining the historical gap.
             "hubspot/sql_coverage_gaps",
+            # PR-ADS-161D2: every won deal's companies, right after the ledger.
+            "hubspot/deal_company_associations",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -793,6 +795,19 @@ def _patch_all_datasets_success(
                 "pages": 0, "complete": True, "watermark": None, "error": None}
     monkeypatch.setattr(
         "services.hubspot_deal_sync_service.sync_deals", _deal_ledger_stub)
+
+    # PR-ADS-161D2: deal→company associations, patched at the service seam for
+    # the same reasons, mirroring the source_pull failure mode.
+    def _deal_company_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"status": "success", "population": 0, "attempted": 0,
+                "succeeded": 0, "failed": 0, "applied": 0, "paths_written": 0,
+                "skipped_stale": 0, "write_failures": 0, "complete": True,
+                "failure_reasons": {}, "error": None}
+    monkeypatch.setattr(
+        "services.deal_company_association_sync_service."
+        "sync_deal_company_associations", _deal_company_stub)
     monkeypatch.setattr(
         "services.hubspot_contact_funnel_sync_service.get_bootstrap_mode",
         lambda: "incremental")

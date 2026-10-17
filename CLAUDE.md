@@ -15,7 +15,7 @@ authoritative documents. It does not restate the product or the architecture.
 
 | Document | What it is | Trust its status claims? |
 | --- | --- | --- |
-| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-161A-1; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
+| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-161D2; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
 | `docs/DOCTRINE.md` | the governing advisory rules | Yes |
 | `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
 | `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |
@@ -25,7 +25,7 @@ authoritative documents. It does not restate the product or the architecture.
 | `CLAUDE_CODE_BRIEFING.md` | original strategy→build handoff | **No — stale.** Its "what needs to be built" list is years out of date (it lists `api/server.py` and the dashboard as unbuilt; both exist) |
 | `docs/07_AGENT_BRIEFING.md` | architecture + layer rules | Architecture yes; its status narrative is explicitly marked stale |
 
-The repo is at **PR-ADS-161A-1**. Any doc describing "Phase 1" as current is
+The repo is at **PR-ADS-161D2**. Any doc describing "Phase 1" as current is
 historical.
 
 ---
@@ -244,12 +244,29 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   is: `scripts/audit_post_boundary_sql_incidents.py`; see `docs/45_*`.
 
 - **A won deal is not a customer.** A customer is a distinct HubSpot company
-  id; the repository ingests no deal→company association, so
-  `services/canonical_customer_revenue_service` withholds customer counts
-  (`company_associations_not_ingested`, lower bound NULL). Many existing readers
-  still call won deals "customers" — PR-ADS-161E migrates them. The won
-  predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a cross-check
-  whose disagreement withholds, never a filter. See `docs/46_*`.
+  id from `hubspot_deal_company_association` (PR-ADS-161D2), never a deal,
+  contact, email domain, name or campaign. The per-deal
+  `hubspot_deal_company_observation` row decides what the bridge means: no
+  bridge rows with `success_zero_companies = true` is a CRM finding ("no
+  company"); no successful observation is `association_unavailable` — never
+  read the absence of rows as either. A failed lookup must never delete or
+  replace the last successful set, and writes are ordered by observation START,
+  not commit order. Customers publish only when every member deal is resolved
+  AND current AND the latest FULL association scan succeeded and STARTED within
+  `customer_identity.association_scan_max_age_hours` (a stopped pipeline moves
+  no per-deal row, so per-deal staleness alone cannot see it); otherwise the
+  lower bound and unresolved counts publish instead. A complete scan is
+  proven set-for-set: it stores the deal ids it certified, and backfill
+  completion re-derives that set inside its own transaction with the deal
+  ledger SHARE-locked — never from a caller's count or an earlier progress
+  read (PR-ADS-161D2-F1). The publication gate requires that certified set to
+  EQUAL the current won set (and the recorded population to match it); a deal
+  won since the last full scan withholds customers even when a subset pass has
+  observed it. The audit and the gate share this rule — never let one judge
+  coverage the other does not (PR-ADS-161D2-F3).
+  Many existing readers still call won deals "customers" — PR-ADS-161E migrates
+  them. The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
+  cross-check whose disagreement withholds, never a filter. See `docs/46_*` §5.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

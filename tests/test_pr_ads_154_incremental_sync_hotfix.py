@@ -382,6 +382,10 @@ def test_5b_the_scheduler_pairs_match_what_it_actually_stamps():
         "FX_DAILY_RATES_DATASET": dataset_keys.FX_DAILY_RATES_DATASET,
         "DEAL_LEDGER_SOURCE": dataset_keys.DEAL_LEDGER_SOURCE,
         "DEAL_LEDGER_DATASET": dataset_keys.DEAL_LEDGER_DATASET,
+        "DEAL_COMPANY_ASSOCIATION_SOURCE":
+            dataset_keys.DEAL_COMPANY_ASSOCIATION_SOURCE,
+        "DEAL_COMPANY_ASSOCIATION_DATASET":
+            dataset_keys.DEAL_COMPANY_ASSOCIATION_DATASET,
         "SOURCE_CLASSIFICATION_SOURCE": dataset_keys.SOURCE_CLASSIFICATION_SOURCE,
         "SOURCE_CLASSIFICATION_DATASET": dataset_keys.SOURCE_CLASSIFICATION_DATASET,
         "GCLID_SOURCE": dataset_keys.GCLID_SOURCE,
@@ -724,7 +728,9 @@ def test_10b_the_report_keys_are_the_labels(monkeypatch):
                  # too, so a healthy-path fixture has to describe them.
                  "_sync_keyword_facts", "_sync_search_terms",
                  # PR-ADS-160: post-boundary SQL gap detection runs here too.
-                 "_detect_sql_coverage_gaps"):
+                 "_detect_sql_coverage_gaps",
+                 # PR-ADS-161D2: deal→company associations run here too.
+                 "_sync_deal_company_associations"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     keys = set(sync.run_daily_incremental_sync(run_reason="test")["datasets"])
@@ -854,7 +860,9 @@ def test_a4_a_successful_run_record_proceeds_and_emits_the_canonical_type(monkey
                  # too, so a healthy-path fixture has to describe them.
                  "_sync_keyword_facts", "_sync_search_terms",
                  # PR-ADS-160: post-boundary SQL gap detection runs here too.
-                 "_detect_sql_coverage_gaps"):
+                 "_detect_sql_coverage_gaps",
+                 # PR-ADS-161D2: deal→company associations run here too.
+                 "_sync_deal_company_associations"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     out = sync.run_daily_incremental_sync(run_reason="test")

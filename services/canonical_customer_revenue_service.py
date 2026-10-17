@@ -60,14 +60,22 @@ DEFINITIONS = {
     "window_interval": "half-open [start, end), UTC instants",
 }
 
-#: The repository has no store of deal→company associations (the ledger holds
-#: none, and no table does). Customer identity is therefore unavailable for
-#: every deal — stated as data so the audit and the docs say the same thing.
-COMPANY_ASSOCIATION_SOURCE = None
+#: PR-ADS-161D2 — THE customer-identity source: HubSpot deal→company
+#: associations, stored per association path, with a per-deal observation state
+#: that tells a successful zero-company lookup from one that never succeeded.
+COMPANY_ASSOCIATION_SOURCE = {
+    "table": "hubspot_deal_company_association",
+    "observation_table": "hubspot_deal_company_observation",
+    "sync_state_table": "hubspot_deal_company_sync_state",
+    "dataset": "hubspot/deal_company_associations",
+}
+#: What is still true even with the source in place. Coverage is per deal, and
+#: proven only by the stored observations — never by the table existing.
 COMPANY_ASSOCIATION_GAP = (
-    "the canonical deal ledger stores no HubSpot company association, and no "
-    "other local table does; a customer count cannot be computed from local "
-    "data until company associations are ingested")
+    "a customer total is published only when every won deal in the window has "
+    "a successful, current deal→company observation resolving to exactly one "
+    "HubSpot company; any deal never observed, with no company, with several "
+    "companies, or with stale evidence withholds it")
 
 
 def _utcnow() -> datetime:
@@ -168,6 +176,189 @@ def _as_dt(value):
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+#: Fallback when config/thresholds.yaml cannot be read. The same number as the
+#: config, so a missing file does not loosen the gate.
+_DEFAULT_ASSOCIATION_SCAN_MAX_AGE_HOURS = 48
+
+
+def association_scan_max_age_hours() -> float:
+    """``customer_identity.association_scan_max_age_hours`` from
+    config/thresholds.yaml."""
+    try:
+        import yaml  # noqa: PLC0415
+
+        with open("config/thresholds.yaml", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        return float(cfg["customer_identity"]["association_scan_max_age_hours"])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("association scan threshold unavailable, using %s: %s",
+                  _DEFAULT_ASSOCIATION_SCAN_MAX_AGE_HOURS, exc)
+        return float(_DEFAULT_ASSOCIATION_SCAN_MAX_AGE_HOURS)
+
+
+def association_scan_current(sync_state, now: datetime,
+                             max_age_hours: float | None = None, *,
+                             won_deal_ids) -> dict:
+    """Is the stored evidence CURRENT as a whole? ``{current, reason}``.
+
+    ``won_deal_ids`` is the CURRENT won population, from the same snapshot as
+    the evidence. It is required: a scan proves coverage of the exact set it
+    certified, so currency cannot be judged without the set it must equal.
+
+    Current means: the latest FULL-population run succeeded and covered every
+    won deal, and the latest complete scan STARTED within the configured age.
+    Per-deal staleness cannot see a pipeline that stopped — a run that fails
+    before reading a deal leaves every deal's evidence looking untouched — so
+    this is judged on the dataset's own recorded runs.
+
+    The age runs from the scan's START, never its finish (PR-ADS-161D2-F2): a
+    backfill generation resumed over days finishes "now" while its earliest
+    observations are as old as its anchor, and its finish would let days-old
+    evidence read as fresh. The start bounds the oldest observation the scan
+    certified.
+    """
+    max_age = (association_scan_max_age_hours() if max_age_hours is None
+               else float(max_age_hours))
+    state = sync_state or {}
+    if state.get("last_full_run_status") != "success" \
+            or state.get("last_full_run_complete") is not True:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "latest_full_scan_not_successful_and_complete"}
+    started = _parse(state.get("last_complete_scan_started_at"))
+    if started is None:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "no_complete_scan_recorded"}
+    age = (now - started).total_seconds() / 3600
+    if age > max_age:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": f"complete_scan_older_than_{max_age:g}h"}
+    # PR-ADS-161D2-F3. The scan certified an exact deal set; it is current only
+    # while that set IS the won population. A deal that won since — even one a
+    # subset pass has observed — or a certified deal no longer won means no
+    # full scan has covered the population as it stands. The same rule as the
+    # coverage audit's, so the surface and the audit cannot disagree.
+    if won_deal_ids is None:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "current_won_population_not_supplied"}
+    raw = state.get("last_complete_scan_deal_ids")
+    if raw is None:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "complete_scan_certified_no_deal_set"}
+    certified = {str(d) for d in raw}
+    won = {str(d) for d in won_deal_ids}
+    population = {"certified_population": len(certified),
+                  "current_won_population": len(won),
+                  "recorded_population": state.get(
+                      "last_complete_scan_population"),
+                  "won_not_certified": len(won - certified),
+                  "certified_no_longer_won": len(certified - won)}
+    if certified != won:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "certified_set_differs_from_current_won_population",
+                **population}
+    if population["recorded_population"] != len(certified):
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "recorded_scan_population_inconsistent",
+                **population}
+    return {"current": True, "max_age_hours": max_age, "reason": None,
+            **population}
+
+
+def company_identity_inputs(evidence) -> dict:
+    """``company_ids_by_deal`` and the stale set, from the stored evidence.
+
+    * A deal is in ``company_ids_by_deal`` only when it has a SUCCESSFUL
+      observation; its list holds one company id per stored association path
+      (duplicates kept — two paths to one company is one company, resolved).
+      ``[]`` is a successful lookup that found no company.
+    * A deal with no successful observation is left OUT: never looked, which
+      the truth layer reads as ``association_unavailable``.
+    * Evidence is STALE when the latest attempt failed (the stored set is older
+      than our latest look), or when the deal changed in HubSpot after the
+      evidence was observed.
+
+    ``evidence`` unreadable → ``company_ids_by_deal`` None, with the reason.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("available"):
+        return {"company_ids_by_deal": None, "stale": set(),
+                "reason": cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE,
+                "observed_deals": 0, "error": (evidence or {}).get("error")
+                if isinstance(evidence, dict) else "no_company_evidence"}
+    observed = {}
+    stale = set()
+    for o in evidence.get("observations") or []:
+        deal_id = str(o.get("deal_id"))
+        if not o.get("last_success_started_at"):
+            continue
+        observed[deal_id] = []
+        if o.get("last_attempt_status") != "success":
+            stale.add(deal_id)
+        modified = _parse(o.get("deal_lastmodified_at"))
+        seen = _parse(o.get("last_success_started_at"))
+        if modified and seen and seen < modified:
+            stale.add(deal_id)
+    for p in evidence.get("paths") or []:
+        deal_id = str(p.get("deal_id"))
+        if deal_id in observed:
+            observed[deal_id].append(str(p.get("company_id")))
+    return {"company_ids_by_deal": observed, "stale": stale, "reason": None,
+            "observed_deals": len(observed), "error": None}
+
+
+def _parse(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def company_association_freshness(evidence, now: datetime, *,
+                                  won_deal_ids) -> dict:
+    """The association dataset's coverage, from its own recorded runs.
+
+    Judged against ``customer_identity.association_scan_max_age_hours``
+    (config/thresholds.yaml). Coverage is "proven" only by a recorded run that
+    observed every won deal successfully.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("available"):
+        return {"signal": "hubspot_deal_company_sync_state",
+                "available": False, "complete_scan_proven": None,
+                "last_complete_scan_started_at": None,
+                "last_complete_scan_finished_at": None, "age_hours": None,
+                "last_run_status": None, "staleness_assessed": False}
+    state = evidence.get("sync_state") or {}
+    started = _parse(state.get("last_complete_scan_started_at"))
+    return {
+        "signal": "hubspot_deal_company_sync_state",
+        "available": True,
+        "complete_scan_proven": started is not None,
+        "last_complete_scan_started_at": state.get(
+            "last_complete_scan_started_at"),
+        "last_complete_scan_finished_at": state.get(
+            "last_complete_scan_finished_at"),
+        "last_complete_scan_population": state.get(
+            "last_complete_scan_population"),
+        # Aged from the scan's START — the oldest evidence it certified.
+        "age_hours": (round((now - started).total_seconds() / 3600, 2)
+                      if started else None),
+        "last_run_status": state.get("last_run_status"),
+        "last_run_mode": state.get("last_run_mode"),
+        "last_run_complete": state.get("last_run_complete"),
+        "backfill_status": state.get("backfill_status"),
+        "last_full_run_status": state.get("last_full_run_status"),
+        "last_full_run_complete": state.get("last_full_run_complete"),
+        "scan_current": association_scan_current(
+            state, now, won_deal_ids=won_deal_ids),
+        "staleness_threshold_hours": association_scan_max_age_hours(),
+        "staleness_assessed": True,
+    }
 
 
 def freshness_block(sync_state, findings, now: datetime) -> dict:
@@ -305,6 +496,13 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
                      "message": "the ledger coverage gate returned no verdict"}]
     freshness = freshness_block(universe.get("sync_state"), findings, now)
     contacts = _contacts_by_deal(universe.get("acquisition_contacts"))
+    company = company_identity_inputs(universe.get("company_associations"))
+    company_freshness = company_association_freshness(
+        universe.get("company_associations"), now,
+        # The current won population, from the SAME snapshot as the evidence.
+        won_deal_ids=[str(r["deal_id"])
+                      for r in universe.get("won_rows") or []])
+    scan = (company_freshness.get("scan_current") or {}).get("current") is True
     out = []
     for wtype, wkey in windows:
         bounds = window_bounds(wtype, wkey, now)
@@ -314,13 +512,18 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
             contacts_by_deal=contacts, start=bounds["start"],
             end=bounds["end"], is_all_time=bounds["is_all_time"], now=now,
             coverage_findings=findings, resolve_label=resolver,
-            company_ids_by_deal=None,
+            company_ids_by_deal=company["company_ids_by_deal"],
+            stale_company_evidence=company["stale"],
+            company_source_reason=company["reason"],
+            company_scan_current=scan,
             unknown_won_rows=universe.get("unknown_won_rows"))
         result["coverage"]["source_freshness"] = freshness
+        result["coverage"]["company_association_freshness"] = company_freshness
         out.append({"available": True,
                     "window": _window_meta(wtype, wkey, bounds),
                     "definitions": DEFINITIONS, **result})
-    return {**base, "available": True, "windows": out, "freshness": freshness}
+    return {**base, "available": True, "windows": out, "freshness": freshness,
+            "company_association_freshness": company_freshness}
 
 
 def get_window_outcome(window_type: str, window_key: str, *,

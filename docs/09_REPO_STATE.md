@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161D — canonical closed-won deals, customers and revenue truth (October 2026)
+**Last updated:** PR-ADS-161D2-F3 — the publication gate requires the certified set, on PR-ADS-161D2-F2 (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1239,3 +1239,152 @@ the audit), PG end-to-end cases including the audit CLI and a no-writes
 fingerprint; in CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/46_CANONICAL_CUSTOMER_CLOSED_WON_TRUTH.md`.
+
+---
+
+## PR-ADS-161D2 — Deal→company association ingestion and customer identity certification (October 2026)
+
+**Why.** PR-ADS-161D defined customers as distinct HubSpot company ids and
+withheld every customer total, because no deal→company association was stored
+anywhere. This PR stores that evidence, keeps it current, and lets the truth
+service publish an exact customer total where — and only where — it supports
+one.
+
+**Built.**
+* `connectors/hubspot_pull.fetch_deal_company_associations` — v4 GET, every
+  page, every association path, Retry-After honoured; raises
+  `DealCompanyAssociationLookupError` on any failure, malformed row or repeated
+  cursor. An empty list only after a complete successful read.
+* Schema (additive, idempotent): `hubspot_deal_company_association` (one row per
+  deal/company/path), `hubspot_deal_company_observation` (latest attempt and
+  latest success per deal; `success_zero_companies` recorded, with an
+  all-or-nothing CHECK on the success columns),
+  `hubspot_deal_company_sync_state` (last run, last complete scan, backfill
+  generation).
+* `db/deal_company_association_repository.py` — a success replaces the set and
+  records itself in one transaction; a failure records the attempt and
+  preserves the last proven set; both ordered by observation START, so an older
+  pass cannot overwrite a newer one.
+* `services/deal_company_association_sync_service.py` — scans the WHOLE won
+  population (never the GCLID subset); bounded; success / partial / failed.
+* `scripts/backfill_deal_company_associations.py` — dry run by default (no
+  writes), `--apply`, `--resume --apply`, deliberate `--restart`; stops at the
+  first failure; completion proven from stored observations.
+* Scheduler: `hubspot/deal_company_associations` registered and run right after
+  `hubspot/deal_ledger`; no batch → abort before HubSpot.
+* Truth service: `company_ids_by_deal` and stale evidence built from the same
+  READ ONLY snapshot (under a SAVEPOINT, so unreadable company evidence
+  withholds customers only). A deal absent from the map is now
+  `association_unavailable`, never "no company".
+* `scripts/audit_deal_company_association_coverage.py` — read-only coverage and
+  storage certification; `audit_customer_closed_won_truth` now re-derives
+  customers from the raw rows.
+
+**Not changed.** Every production page and route; deal, revenue, attribution
+and cohort contracts; the won predicate. No HubSpot write, no Google Ads call.
+
+**Suite.** `tests/test_pr_ads_161d2_deal_company_associations.py` — connector,
+PG storage (atomicity, preservation, ordering, rollback), identity through the
+real service, sync/backfill/scheduler, audits and implementation mutations; in
+CI's PostgreSQL step and did-run list.
+
+**Truth audit (no blocker after fixes).** Its blocker — the all-success
+fixture in `test_daily_incremental_sync.py` did not stub the new step — and its
+MAJOR — customers kept publishing on weeks-old evidence after the pipeline
+stopped, because a run that fails before reading a deal moves no per-deal row —
+are fixed: a scan gate (latest full run successful and complete, last complete
+scan within `customer_identity.association_scan_max_age_hours`) withholds
+customers otherwise, a step that dies records a failed full run, and the
+coverage audit fails on the same condition. Also fixed: both audits now
+reconcile the customer status and identity distribution against the raw
+evidence; the lower bound is NULL when nothing was observed; observations are
+ordered by the database clock.
+
+**Production.** Completeness depends on the backfill's evidence. Expected after
+it: deal and revenue totals unchanged; customer totals published only in windows
+whose won deals all resolve to one current company; the coverage audit lists the
+CRM remediation queue (no-company and multi-company won deals).
+
+Full doctrine: `docs/46_CANONICAL_CUSTOMER_CLOSED_WON_TRUTH.md` §5, §9.1.
+
+### PR-ADS-161D2-F1 — Monotonic and atomic customer certification (October 2026, same PR)
+
+**Why.** Review of PR-ADS-161D2 found four ways the system could claim current,
+complete customer evidence it had not proven.
+
+**Fixed.**
+* **Run state is monotonic by run start.** Every `last_run_*` and
+  `last_full_run_*` field applies only when its run started at or after the
+  stored run (this landed with the Copilot review fixes). F1 adds tests for
+  both directions and every commit order of three runs.
+* **A complete scan names what it certified.** `last_complete_scan_deal_ids`
+  stores the exact set; the population is its size. A completeness claim that
+  names no deals proves nothing.
+* **The coverage audit checks the CURRENT population, set for set.** The new
+  blocking check `complete_scan_covers_current_won_population` requires every
+  current won deal to have a success at or after the scan's start, the
+  certified set to equal the current won set, and the recorded population to
+  equal the set's size. A deal that won or stopped being won since the scan
+  fails it until a later full scan succeeds and covers every won deal (a
+  failed, truncated or 404-ing scan keeps it red).
+* **Backfill completion is atomic.** `complete_backfill_generation` no longer
+  takes a population. Inside its transaction it takes a SHARE lock on
+  `hubspot_deal_ledger`, re-reads the won population, proves every deal was
+  observed in the generation, and derives the certified set. Otherwise it
+  refuses with the remaining count.
+* **Counts are separate from samples.** CRM findings report
+  `no_company_count` / `multiple_company_count` beside
+  `*_deal_ids_sample` (≤ 100).
+* **Runbook.** `--resume --apply` runs only after an `--apply` that stopped at a
+  resumable checkpoint.
+
+**Suite.** `tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py`, in
+CI's PostgreSQL step and did-run list. It includes a real concurrent ledger
+writer that completion must wait out.
+
+### PR-ADS-161D2-F2 — Scan age from its start; reconciled population (October 2026, same PR)
+
+From the truth audit of F1 and the PR re-review.
+
+* **The scan is aged from its START** (the truth auditor's MAJOR, inherited
+  from 161D2). A backfill generation resumed over days used to stamp
+  `last_complete_scan_finished_at = now`, and age was measured from that, so
+  nine-day-old evidence read as fresh for 48h. The service gate and both audits
+  now age from `last_complete_scan_started_at`, which bounds the oldest
+  observation the scan certified.
+* **`complete_scan_population_reconciles`** is a separate blocking check: the
+  recorded population must equal the certified set's size and the current won
+  population. Recorded, certified and current counts are disclosed.
+* **Migration:** `ALTER TABLE … ADD COLUMN IF NOT EXISTS
+  last_complete_scan_deal_ids`, for a database that created the table first.
+* **Bounded lock:** completion waits at most
+  `COMPLETION_LOCK_TIMEOUT_MS` (30s) for the ledger lock. On timeout it writes
+  nothing and reports unavailable; `--resume --apply` retries.
+* **Tests:** completion is refused, then succeeds with the DB-derived
+  population; an older complete scan committing late keeps the newer set; a
+  held ledger lock times out without writing; the migration is exercised on a
+  real table.
+
+### PR-ADS-161D2-F3 — The publication gate requires the certified set (October 2026, same PR)
+
+**Why.** After F2 the coverage audit required the scan's certified deal set to
+equal the current won population, but the customer publication gate did not.
+A deal that won after the scan and was then observed by a subset pass left
+every member with usable evidence: the audit said "coverage contract broken"
+while the service published. One system gave two answers.
+
+**Fixed.** `association_scan_current` takes the current won-deal ids (from the
+same snapshot as the evidence) as a required argument. It is current only when
+`last_complete_scan_deal_ids` equals that set and
+`last_complete_scan_population` equals both; otherwise customers are withheld
+with `customer_identity_scan_not_current`, and the freshness block discloses
+`won_not_certified` / `certified_no_longer_won`. Both audits' `scan_is_current`
+restate the same rule independently, so their expected verdicts match the
+service.
+
+**Suite.** `test_50`–`test_53` in
+`tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py`: a deal won
+after the scan (observed by a subset pass) withholds until a full scan
+certifies it; a deal leaving the won population withholds until rescanned; a
+corrupted recorded population is rejected by the gate and the audit; the gate
+cannot be called without the won set. All four fail on 03159b5.

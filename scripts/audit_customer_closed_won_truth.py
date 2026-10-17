@@ -52,6 +52,11 @@ ANALYSIS_FILE = "analysis/closed_won_truth.py"
 AUDIT_FILE = "scripts/audit_customer_closed_won_truth.py"
 #: Production surfaces that must not consume the new service in PR-ADS-161D.
 PRODUCTION_SURFACES = ("api/server.py", "static/app.js")
+#: Read-only certification scripts that may read the service. Named one by
+#: one: an audit is not a production page, but "any script" would be.
+CERTIFICATION_CONSUMERS = (
+    "scripts/audit_deal_company_association_coverage.py",   # PR-ADS-161D2
+)
 #: Python packages scanned for any consumer of the service.
 PRODUCTION_PACKAGES = ("api", "services", "scheduler", "scripts", "connectors",
                        "db", "analysis")
@@ -112,7 +117,7 @@ def structural_checks(a: Audit) -> dict:
                  (_ROOT / rel).read_text(encoding="utf-8")]
     # Every Python production path: routes, schedulers, services, scripts —
     # all but the service itself and this audit.
-    exempt = {SERVICE_FILE, AUDIT_FILE}
+    exempt = {SERVICE_FILE, AUDIT_FILE, *CERTIFICATION_CONSUMERS}
     consumers += sorted(
         str(p.relative_to(_ROOT)) for d in PRODUCTION_PACKAGES
         for p in (_ROOT / d).rglob("*.py")
@@ -425,14 +430,62 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
                       if p.endswith(".revenue_usd")]
             a.check("withheld_is_never_a_number", not leaked,
                     f"{name}: revenue withheld but present at {leaked[:5]}")
-    # 5. Customers: only distinct proven identities, never a deal count.
+    # 5. Customers: distinct proven HubSpot company ids, never a deal count —
+    # re-derived here from the raw stored association rows (PR-ADS-161D2).
+    from scripts.audit_deal_company_association_coverage import (  # noqa: PLC0415
+        RESOLVED, expected_customer_verdict, independent_identity,
+        scan_is_current,
+    )
+    from services.canonical_customer_revenue_service import (  # noqa: PLC0415
+        association_scan_max_age_hours,
+    )
+    identity = independent_identity(universe)
+    member_ids = exp["members"]
+    evidence = universe.get("company_associations") or {}
+    scan_current = bool(evidence.get("available")) and scan_is_current(
+        evidence.get("sync_state"), now, association_scan_max_age_hours(),
+        set(identity))[0]
+    supported = scan_current and all(
+        identity.get(d, {}).get("state") in RESOLVED
+        and not identity.get(d, {}).get("stale") for d in member_ids)
+    if count_published and evidence.get("available"):
+        verdict = expected_customer_verdict(member_ids, identity, scan_current)
+        a.check("customer_verdict_matches_the_evidence",
+                (pub["customers"]["status"], pub["customers"]["reason"])
+                == verdict,
+                f"{name}: customers {pub['customers']['status']}/"
+                f"{pub['customers']['reason']}, the evidence says "
+                f"{verdict[0]}/{verdict[1]}")
+    companies = {c for d in member_ids
+                 for c in identity.get(d, {}).get("companies", [])}
     if pub["customers"]["status"] == PUBLISHED:
         a.check("customer_count_is_distinct_identities",
-                count_published and out["unresolved_customer_identity"] == 0,
-                name)
+                count_published and supported
+                and out["customers"] == len(companies),
+                f"{name}: published {out['customers']} customers; re-derived "
+                f"{len(companies)} distinct companies, every member "
+                f"resolved and current: {supported}")
     else:
         a.check("withheld_is_never_a_number", out["customers"] is None,
                 f"{name}: customers={out['customers']} while withheld")
+    # The lower bound is checked UNCONDITIONALLY against what the evidence
+    # allows — a wrong 0 is as false as a wrong 7.
+    lower = out.get("confirmed_customer_lower_bound")
+    confirmed = {c for d in member_ids
+                 if identity.get(d, {}).get("state") in RESOLVED
+                 and not identity.get(d, {}).get("stale")
+                 for c in identity[d]["companies"]}
+    anything_observed = not member_ids or any(
+        identity.get(d, {}).get("state") != "association_unavailable"
+        for d in member_ids)
+    if not (count_published and evidence.get("available") and scan_current
+            and anything_observed):
+        expected_lower = None
+    else:
+        expected_lower = len(confirmed)
+    a.check("customer_lower_bound_is_confirmed_companies",
+            lower == expected_lower,
+            f"{name}: lower bound {lower}, the evidence allows {expected_lower}")
     # Campaign revenue: only over published revenue with every Google Ads
     # deal placed — otherwise each campaign figure is a lower bound.
     if pub["campaign_revenue"]["status"] == PUBLISHED:
@@ -516,8 +569,17 @@ def source_diagnostics(universe: dict, now) -> dict:
 
     exp = _expected(universe, None, datetime.max.replace(tzinfo=timezone.utc),
                     True, now)
+    from scripts.audit_deal_company_association_coverage import (  # noqa: PLC0415
+        independent_identity,
+    )
+    evidence = universe.get("company_associations") or {}
+    identity_states = None
+    if evidence.get("available"):
+        identity_states = tally(i["state"] for i in
+                                independent_identity(universe).values())
     return {
         "label": "source diagnostics — not a published figure",
+        "customer_identity_states": identity_states,
         "won_flag_rows": len(won),
         "missing_close_date": exp["undated"],
         "future_close_date": sum(1 for r in won if _dt(r.get("deal_close_date"))
@@ -623,6 +685,7 @@ def _render(report: dict) -> None:
                        ("unknown_won_state", "won state unknown (NULL flag)"),
                        ("won_flag_stage_conflicts", "won flag / stage conflicts"),
                        ("without_proven_usd", "without proven USD"),
+                       ("customer_identity_states", "customer identity"),
                        ("currency_status", "currency status"),
                        ("association_status", "contact association")):
         if key in diag:
@@ -631,8 +694,16 @@ def _render(report: dict) -> None:
           f"{fresh.get('coverage_proven')} last_ok_incremental="
           f"{fresh.get('latest_successful_incremental_at')} age_h="
           f"{fresh.get('age_hours')} (threshold not configured)")
+    src = truth.get("customer_identity_source") or {}
+    cfresh = truth.get("company_association_freshness") or {}
     print(f"    customer identity source      "
-          f"{truth.get('customer_identity_source')} — "
+          f"{src.get('dataset') if isinstance(src, dict) else src}")
+    print(f"    association coverage          complete_scan_proven="
+          f"{cfresh.get('complete_scan_proven')} last_run="
+          f"{cfresh.get('last_run_status')} age_h={cfresh.get('age_hours')} "
+          f"(threshold {cfresh.get('staleness_threshold_hours')}h; current="
+          f"{(cfresh.get('scan_current') or {}).get('current')})")
+    print(f"    customer publication rule     "
           f"{truth.get('customer_identity_gap')}")
     if report.get("violations"):
         print("\n  CONTRACT VIOLATIONS")

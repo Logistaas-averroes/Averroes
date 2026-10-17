@@ -1815,6 +1815,123 @@ CREATE TABLE IF NOT EXISTS hubspot_deal_sync_state (
 ALTER TABLE hubspot_deal_sync_state
   ADD COLUMN IF NOT EXISTS last_sync_mode TEXT;
 
+-- PR-ADS-161D2 — deal→company associations: the evidence a CUSTOMER rests on.
+-- A customer is one distinct HubSpot company id. One row per association PATH:
+-- HubSpot can relate the same company to a deal by more than one association
+-- type, and each is kept — two paths to one company are still one company, and
+-- collapsing them would lose the evidence the identity audit reconciles.
+--
+-- The set for a deal is replaced ONLY by a successful, complete observation
+-- (inside the same transaction that records it). A failed lookup never touches
+-- these rows: the last proven set stands, and the failure is recorded on the
+-- observation row below instead.
+CREATE TABLE IF NOT EXISTS hubspot_deal_company_association (
+  id                       SERIAL PRIMARY KEY,
+  deal_id                  TEXT NOT NULL,
+  company_id               TEXT NOT NULL,
+  association_category     TEXT NOT NULL,
+  association_type_id      TEXT NOT NULL,
+  association_label        TEXT,
+  -- category:type_id — HubSpot's identity of the path, never a name.
+  association_path_key     TEXT NOT NULL,
+  last_observed_batch_id   INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  last_observed_at         TIMESTAMPTZ NOT NULL,
+  created_at               TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT uq_deal_company_association_path
+    UNIQUE (deal_id, company_id, association_path_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_company_assoc_deal
+  ON hubspot_deal_company_association(deal_id);
+CREATE INDEX IF NOT EXISTS idx_deal_company_assoc_company
+  ON hubspot_deal_company_association(company_id);
+CREATE INDEX IF NOT EXISTS idx_deal_company_assoc_deal_company
+  ON hubspot_deal_company_association(deal_id, company_id);
+
+-- One row per deal: what the LATEST attempt found, and what the latest
+-- SUCCESSFUL attempt found. "A successful lookup returned zero companies" is a
+-- recorded fact here (success_zero_companies), never inferred from the bridge
+-- having no rows — no rows is also what "never looked" looks like.
+--
+-- Ordering is by OBSERVATION START, not commit order: a slow historical pass
+-- that started before a later successful observation must not overwrite it.
+CREATE TABLE IF NOT EXISTS hubspot_deal_company_observation (
+  deal_id                   TEXT PRIMARY KEY,
+  last_attempt_status       TEXT NOT NULL
+    CHECK (last_attempt_status IN ('success', 'failed')),
+  last_attempt_started_at   TIMESTAMPTZ NOT NULL,
+  last_attempt_finished_at  TIMESTAMPTZ,
+  last_attempt_batch_id     INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  -- Sanitized machine code (timeout, http_404, malformed_payload, ...).
+  last_failure_reason       TEXT,
+  last_success_started_at   TIMESTAMPTZ,
+  last_success_at           TIMESTAMPTZ,
+  last_success_batch_id     INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  success_company_count     INTEGER,
+  success_path_count        INTEGER,
+  success_zero_companies    BOOLEAN,
+  created_at                TIMESTAMPTZ DEFAULT NOW(),
+  updated_at                TIMESTAMPTZ DEFAULT NOW(),
+  -- A success is all-or-nothing: either every success column is set or none.
+  CONSTRAINT ck_deal_company_observation_success_complete CHECK (
+    (last_success_started_at IS NULL AND last_success_at IS NULL
+     AND success_company_count IS NULL AND success_path_count IS NULL
+     AND success_zero_companies IS NULL)
+    OR
+    (last_success_started_at IS NOT NULL AND last_success_at IS NOT NULL
+     AND success_company_count IS NOT NULL AND success_path_count IS NOT NULL
+     AND success_zero_companies IS NOT NULL
+     AND success_zero_companies = (success_company_count = 0)
+     AND success_path_count >= success_company_count))
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_company_observation_status
+  ON hubspot_deal_company_observation(last_attempt_status);
+
+-- Run-level coverage for the association dataset: the last run, the last scan
+-- that PROVED it covered the whole won population, and the historical backfill
+-- generation. Completeness is recorded, never inferred from "some rows exist".
+CREATE TABLE IF NOT EXISTS hubspot_deal_company_sync_state (
+  scope                           TEXT PRIMARY KEY,   -- 'deal_company_associations'
+  last_run_status                 TEXT,               -- success|partial|failed
+  last_run_mode                   TEXT,               -- incremental|backfill
+  last_run_started_at             TIMESTAMPTZ,
+  last_run_finished_at            TIMESTAMPTZ,
+  last_run_batch_id               INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  last_run_population             INTEGER,
+  last_run_attempted              INTEGER,
+  last_run_succeeded              INTEGER,
+  last_run_failed                 INTEGER,
+  last_run_write_failures         INTEGER,
+  last_run_complete               BOOLEAN,
+  last_error                      TEXT,
+  -- The latest run over the FULL won population (an incremental scan or a
+  -- completed backfill generation). A backfill RESUME pass covers a subset and
+  -- never moves these, so "is the evidence current?" is never answered by a
+  -- run that did not look at every deal.
+  last_full_run_status            TEXT,
+  last_full_run_started_at        TIMESTAMPTZ,
+  last_full_run_complete          BOOLEAN,
+  -- Stamped ONLY by a run that observed every won deal successfully.
+  last_complete_scan_started_at   TIMESTAMPTZ,
+  last_complete_scan_finished_at  TIMESTAMPTZ,
+  last_complete_scan_population   INTEGER,
+  -- PR-ADS-161D2-F1: the exact deal ids that scan certified, so coverage of
+  -- the CURRENT won population is proven set-for-set, never by a count.
+  last_complete_scan_deal_ids     TEXT[],
+  -- Historical backfill generation: started_at is the resume anchor; a deal is
+  -- done when it has a success observed at or after it.
+  backfill_status                 TEXT,               -- in_progress|complete
+  backfill_started_at             TIMESTAMPTZ,
+  backfill_completed_at           TIMESTAMPTZ,
+  updated_at                      TIMESTAMPTZ DEFAULT NOW()
+);
+-- PR-ADS-161D2-F1: a database that created the table before the column
+-- existed gets it here; without it the state read and the run record fail.
+ALTER TABLE hubspot_deal_company_sync_state
+  ADD COLUMN IF NOT EXISTS last_complete_scan_deal_ids TEXT[];
+
 -- PR-ADS-153F: per-chunk fetch ledger for canonical Google Ads GEO spend, the
 -- exact counterpart of google_ads_spend_coverage. Before this table the geo sync
 -- had no durable evidence at all: a range that was never fetched and a range
