@@ -405,3 +405,21 @@ Recurring patterns (durable):
   move): 4 failed, 5029 passed, 1 skipped, 2 baseline deselects.
 - Lesson again: when a PR adds a scheduler step, grep EVERY test that stubs the
   step list (test_154 was updated, test_daily_incremental_sync was not).
+
+## PR-ADS-161D2-F1 review (reviewed as a working-tree diff on 23c536d; committed as 17ce6fe mid-review, same content)
+- Run-start ordering of last_run_*/last_full_run_* landed in 23c536d, NOT F1;
+  F1's test_01-03 are regression tests for 23c536d (pass there).
+- F1: `last_complete_scan_deal_ids TEXT[]` (added only in CREATE TABLE, no
+  ALTER ADD COLUMN IF NOT EXISTS). record_sync_run proves only with named ids.
+  complete_backfill_generation: LOCK ledger IN SHARE MODE, then state row FOR
+  UPDATE, then re-read won set (READ COMMITTED; the statement snapshot is taken
+  after the lock, so it is sound). Ledger writer upsert_deal = one txn per deal,
+  touches no association table, so no deadlock cycle. No lock_timeout.
+- Service gate `association_scan_current` does NOT use the certified set; it ages
+  the scan from `last_complete_scan_finished_at`. Backfill completion stamps
+  finished=clock_timestamp() and last_full_run_status=success for a generation
+  that may span days, so a multi-day bootstrap reads as a fresh full scan (open,
+  pre-existing in 161D2; the audit's scan_is_current restates the same rule).
+- Audit's new set-equality check goes red on won->not-won transitions while the
+  service legitimately publishes (audit stricter, fail-closed).
+- Not run: the PG tests (a parallel full run was going). Ran only test_30/test_40 (pass).
