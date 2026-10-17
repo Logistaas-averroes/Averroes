@@ -259,7 +259,11 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   proven set-for-set: it stores the deal ids it certified, and backfill
   completion re-derives that set inside its own transaction with the deal
   ledger SHARE-locked — never from a caller's count or an earlier progress
-  read (PR-ADS-161D2-F1).
+  read (PR-ADS-161D2-F1). The publication gate requires that certified set to
+  EQUAL the current won set (and the recorded population to match it); a deal
+  won since the last full scan withholds customers even when a subset pass has
+  observed it. The audit and the gate share this rule — never let one judge
+  coverage the other does not (PR-ADS-161D2-F3).
   Many existing readers still call won deals "customers" — PR-ADS-161E migrates
   them. The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
   cross-check whose disagreement withholds, never a filter. See `docs/46_*` §5.

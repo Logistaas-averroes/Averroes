@@ -188,7 +188,8 @@ def storage_checks(a: Audit, universe: dict) -> dict:
             "failed_without_any_success": failed_without_success}
 
 
-def scan_is_current(state: dict, now, max_age_hours: float) -> tuple:
+def scan_is_current(state: dict, now, max_age_hours: float,
+                    won_deal_ids) -> tuple:
     """``(current, reason)`` — restated here from the stored run record, not
     taken from the service: the latest full-population run succeeded and was
     complete, and the latest complete scan STARTED within the configured age —
@@ -203,6 +204,16 @@ def scan_is_current(state: dict, now, max_age_hours: float) -> tuple:
         return False, "no complete scan recorded"
     if (now - started).total_seconds() / 3600 > max_age_hours:
         return False, f"complete scan started more than {max_age_hours:g}h ago"
+    # PR-ADS-161D2-F3: current only while the certified set IS the current
+    # won population, and the recorded population agrees with it.
+    raw = state.get("last_complete_scan_deal_ids")
+    if raw is None:
+        return False, "complete scan certified no deal set"
+    certified = {str(d) for d in raw}
+    if certified != {str(d) for d in won_deal_ids}:
+        return False, "certified set differs from the current won population"
+    if state.get("last_complete_scan_population") != len(certified):
+        return False, "recorded scan population disagrees with its set"
     return True, None
 
 
@@ -233,7 +244,7 @@ def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
     scan_start = _dt(state.get("last_complete_scan_started_at"))
     a.check("coverage_proven_by_a_complete_scan", scan_start is not None,
             "no recorded scan has observed every won deal")
-    current, why = scan_is_current(state, now, max_age_hours)
+    current, why = scan_is_current(state, now, max_age_hours, set(identity))
     a.check("association_scan_is_current", current, why or "")
 
     # PR-ADS-161D2-F1. The complete scan must cover the population as it is

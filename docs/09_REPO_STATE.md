@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161D2-F2 — scan aged from its start, reconciled population, on PR-ADS-161D2-F1 (October 2026)
+**Last updated:** PR-ADS-161D2-F3 — the publication gate requires the certified set, on PR-ADS-161D2-F2 (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1364,3 +1364,27 @@ From the truth audit of F1 and the PR re-review.
   population; an older complete scan committing late keeps the newer set; a
   held ledger lock times out without writing; the migration is exercised on a
   real table.
+
+### PR-ADS-161D2-F3 — The publication gate requires the certified set (October 2026, same PR)
+
+**Why.** After F2 the coverage audit required the scan's certified deal set to
+equal the current won population, but the customer publication gate did not.
+A deal that won after the scan and was then observed by a subset pass left
+every member with usable evidence: the audit said "coverage contract broken"
+while the service published. One system gave two answers.
+
+**Fixed.** `association_scan_current` takes the current won-deal ids (from the
+same snapshot as the evidence) as a required argument. It is current only when
+`last_complete_scan_deal_ids` equals that set and
+`last_complete_scan_population` equals both; otherwise customers are withheld
+with `customer_identity_scan_not_current`, and the freshness block discloses
+`won_not_certified` / `certified_no_longer_won`. Both audits' `scan_is_current`
+restate the same rule independently, so their expected verdicts match the
+service.
+
+**Suite.** `test_50`–`test_53` in
+`tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py`: a deal won
+after the scan (observed by a subset pass) withholds until a full scan
+certifies it; a deal leaving the won population withholds until rescanned; a
+corrupted recorded population is rejected by the gate and the audit; the gate
+cannot be called without the won set. All four fail on 03159b5.

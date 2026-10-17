@@ -443,7 +443,8 @@ def window_checks(a: Audit, w: dict, universe: dict, *, now) -> None:
     member_ids = exp["members"]
     evidence = universe.get("company_associations") or {}
     scan_current = bool(evidence.get("available")) and scan_is_current(
-        evidence.get("sync_state"), now, association_scan_max_age_hours())[0]
+        evidence.get("sync_state"), now, association_scan_max_age_hours(),
+        set(identity))[0]
     supported = scan_current and all(
         identity.get(d, {}).get("state") in RESOLVED
         and not identity.get(d, {}).get("stale") for d in member_ids)

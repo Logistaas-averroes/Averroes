@@ -73,7 +73,8 @@ def test_01_an_older_success_finishing_late_cannot_hide_a_newer_failure(ledger):
     assert svc._parse(s["last_full_run_started_at"]) == _t(10)
     assert s["last_error"] == "newer scan failed"
     # So the customer gate stays shut.
-    assert svc.association_scan_current(s, _t(11), 48)["current"] is False
+    assert svc.association_scan_current(s, _t(11), 48,
+                                        won_deal_ids=[])["current"] is False
 
 
 @_needs_pg
@@ -456,14 +457,16 @@ def test_26_a_backfill_finished_today_is_aged_from_its_start(ledger):
     later = gen + timedelta(days=9)
     s["last_complete_scan_finished_at"] = (later - timedelta(minutes=5)
                                            ).isoformat()
-    verdict = svc.association_scan_current(s, later, max_age)
+    verdict = svc.association_scan_current(s, later, max_age,
+                                           won_deal_ids=["1"])
     assert verdict["current"] is False
     assert finished >= gen
     from scripts import audit_deal_company_association_coverage as audit
-    assert audit.scan_is_current(s, later, max_age)[0] is False
+    assert audit.scan_is_current(s, later, max_age, {"1"})[0] is False
     # Within the threshold of the START it is current.
     assert svc.association_scan_current(
-        s, gen + timedelta(hours=max_age - 1), max_age)["current"] is True
+        s, gen + timedelta(hours=max_age - 1), max_age,
+        won_deal_ids=["1"])["current"] is True
 
 
 @_needs_pg
@@ -512,6 +515,118 @@ def test_30_crm_finding_counts_are_exact_beyond_the_sample_cap(monkeypatch):
     assert crm["sample_limit"] == 100
     assert not any(k.endswith("_deal_ids") for k in crm), \
         "an id list must be named a sample"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §4b — PR-ADS-161D2-F3: the publication gate requires the certified set
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _customers():
+    """Customer publication for all time, through the real truth service, at
+    the database's 'now' (the scans in these tests are stamped on it)."""
+    import analysis.closed_won_truth as cwt  # noqa: F401
+    from db import deal_company_association_repository as repo
+    w = svc.get_closed_won_truth(
+        [(svc.WINDOW_BUSINESS, "all_time")], now=repo.db_now()["now"],
+        resolver=None, resolver_detail="t")["windows"][0]
+    scan = w["coverage"]["company_association_freshness"]["scan_current"]
+    return w["publication"]["customers"], w["outcomes"]["customers"], scan
+
+
+@_needs_pg
+def test_50_a_deal_won_after_the_scan_withholds_customers_until_rescanned(
+        ledger, monkeypatch):
+    import analysis.closed_won_truth as cwt
+    from services.deal_company_association_sync_service import (
+        sync_deal_company_associations,
+    )
+    for d in ("1", "2"):
+        _deal(ledger, d)
+    _scan(monkeypatch, {"1": [901], "2": [902]})
+    pub, customers, _ = _customers()
+    assert (pub["status"], customers) == (cwt.PUBLISHED, 2)
+
+    _deal(ledger, "3")                           # wins after the full scan
+    _fake_reads(monkeypatch, {"3": [903]})
+    subset = sync_deal_company_associations(mode="backfill", deal_ids=["3"])
+    assert subset["complete"] and not subset["full_population"]
+    # Every deal individually has usable, current, single-company evidence...
+    from scripts import audit_deal_company_association_coverage as audit
+    from services import canonical_revenue_service as crs
+    import analysis.closed_won_truth as cw
+    identity = audit.independent_identity(
+        crs.load_closed_won_universe(cw.CONFIRMED_WON_STAGE_ID))
+    assert {d: (i["state"], i["stale"]) for d, i in identity.items()} == {
+        d: ("resolved_single_customer", False) for d in ("1", "2", "3")}
+    # ...but no full scan has certified the population as it stands.
+    assert _coverage_audit()[0] == 1
+    pub, customers, scan = _customers()
+    assert (pub["status"], pub["reason"], customers) == (
+        cwt.WITHHELD, cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT, None)
+    assert scan["reason"] == \
+        "certified_set_differs_from_current_won_population"
+    assert scan["won_not_certified"] == 1
+
+    _scan(monkeypatch, {"1": [901], "2": [902], "3": [903]})
+    assert sorted(_state()["last_complete_scan_deal_ids"]) == ["1", "2", "3"]
+    pub, customers, _ = _customers()
+    assert (pub["status"], customers) == (cwt.PUBLISHED, 3)
+    assert _coverage_audit()[0] == 0
+
+
+@_needs_pg
+def test_51_a_deal_leaving_the_won_population_withholds_until_rescanned(
+        ledger, monkeypatch):
+    import analysis.closed_won_truth as cwt
+    for d in ("1", "2"):
+        _deal(ledger, d)
+    _scan(monkeypatch, {"1": [901], "2": [902]})
+    assert _customers()[0]["status"] == cwt.PUBLISHED
+    _deal(ledger, "2", hs_is_closed_won=False, deal_stage_id="x")
+    pub, customers, scan = _customers()
+    assert (pub["status"], pub["reason"], customers) == (
+        cwt.WITHHELD, cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT, None)
+    assert scan["certified_no_longer_won"] == 1
+    _scan(monkeypatch, {"1": [901]})
+    assert _state()["last_complete_scan_deal_ids"] == ["1"]
+    pub, customers, _ = _customers()
+    assert (pub["status"], customers) == (cwt.PUBLISHED, 1)
+
+
+@_needs_pg
+def test_52_a_corrupted_recorded_population_is_rejected_by_both(
+        ledger, monkeypatch):
+    import analysis.closed_won_truth as cwt
+    from db.connection import get_conn
+    _deal(ledger, "1")
+    _scan(monkeypatch, {"1": [901]})
+    assert _customers()[0]["status"] == cwt.PUBLISHED
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE hubspot_deal_company_sync_state "
+                    "SET last_complete_scan_population = 2")
+    pub, customers, scan = _customers()
+    assert (pub["status"], pub["reason"], customers) == (
+        cwt.WITHHELD, cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT, None)
+    assert scan["reason"] == "recorded_scan_population_inconsistent"
+    code, out = _coverage_audit()
+    assert code == 1
+    assert out["checks"]["complete_scan_population_reconciles"] is False
+    assert out["checks"]["association_scan_is_current"] is False
+
+
+def test_53_the_gate_cannot_be_judged_without_the_won_population():
+    state = {"last_full_run_status": "success", "last_full_run_complete": True,
+             "last_complete_scan_started_at": NOW.isoformat(),
+             "last_complete_scan_deal_ids": ["1"],
+             "last_complete_scan_population": 1}
+    assert svc.association_scan_current(
+        state, NOW, 48, won_deal_ids=None)["current"] is False
+    assert svc.association_scan_current(
+        state, NOW, 48, won_deal_ids=["1"])["current"] is True
+    import inspect
+    p = inspect.signature(svc.association_scan_current).parameters
+    assert p["won_deal_ids"].default is inspect.Parameter.empty, \
+        "the won population must be passed, never defaulted"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

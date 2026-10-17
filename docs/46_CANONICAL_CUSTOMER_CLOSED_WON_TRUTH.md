@@ -198,6 +198,20 @@ and withholds the total. The age runs from the scan's START,
 never its finish (PR-ADS-161D2-F2): a backfill generation resumed over nine
 days finishes "now", but its earliest observations are nine days old.
 
+**The certified set must be the won population** (PR-ADS-161D2-F3). The
+scan is current only while `last_complete_scan_deal_ids` equals the current
+won-deal set from the same snapshot, exactly, and
+`last_complete_scan_population` equals both. A deal that won after the scan —
+even one a subset or backfill pass has since observed, so every member
+individually has usable evidence — or a certified deal that is no longer won
+makes the scan not current: customers are withheld
+(`customer_identity_scan_not_current`) until a full scan certifies the
+population as it stands. A subset pass never expands the certified set.
+`association_scan_current` requires the won set as an argument; it cannot be
+judged without it. In normal operation the association scan runs right after
+the deal-ledger sync, so the window between a population change and its
+re-certification is minutes; it is longer only when that scan fails.
+
 ### 5.3 Publication
 
 | Members of the window | `customers` |
@@ -400,10 +414,9 @@ recorded population equals both the certified set's size and the current won
 population (recorded, certified and current counts are all disclosed). A deal
 that won or stopped being won since the scan fails these until a later full
 scan succeeds and covers every won deal; a failed, truncated or 404-ing scan
-keeps them red. That is deliberately stricter than the customer surface: a
-certified deal that stops being won leaves the surface publishing correctly
-(it is simply no longer a member), while the audit refuses to certify coverage
-it no longer matches — a false alarm in the safe direction, not a hidden error.
+keeps them red. The customer publication gate applies the same rule (§5.2,
+PR-ADS-161D2-F3), so the audit and the surface give one answer: whenever the
+audit says the certified population does not match, customers are withheld.
 Then, that every window
 touched by a no-company, multi-company, unobserved or stale deal publishes no
 exact customer total, that the scan is current, and — for

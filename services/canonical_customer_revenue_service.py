@@ -199,8 +199,13 @@ def association_scan_max_age_hours() -> float:
 
 
 def association_scan_current(sync_state, now: datetime,
-                             max_age_hours: float | None = None) -> dict:
+                             max_age_hours: float | None = None, *,
+                             won_deal_ids) -> dict:
     """Is the stored evidence CURRENT as a whole? ``{current, reason}``.
+
+    ``won_deal_ids`` is the CURRENT won population, from the same snapshot as
+    the evidence. It is required: a scan proves coverage of the exact set it
+    certified, so currency cannot be judged without the set it must equal.
 
     Current means: the latest FULL-population run succeeded and covered every
     won deal, and the latest complete scan STARTED within the configured age.
@@ -229,7 +234,36 @@ def association_scan_current(sync_state, now: datetime,
     if age > max_age:
         return {"current": False, "max_age_hours": max_age,
                 "reason": f"complete_scan_older_than_{max_age:g}h"}
-    return {"current": True, "max_age_hours": max_age, "reason": None}
+    # PR-ADS-161D2-F3. The scan certified an exact deal set; it is current only
+    # while that set IS the won population. A deal that won since — even one a
+    # subset pass has observed — or a certified deal no longer won means no
+    # full scan has covered the population as it stands. The same rule as the
+    # coverage audit's, so the surface and the audit cannot disagree.
+    if won_deal_ids is None:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "current_won_population_not_supplied"}
+    raw = state.get("last_complete_scan_deal_ids")
+    if raw is None:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "complete_scan_certified_no_deal_set"}
+    certified = {str(d) for d in raw}
+    won = {str(d) for d in won_deal_ids}
+    population = {"certified_population": len(certified),
+                  "current_won_population": len(won),
+                  "recorded_population": state.get(
+                      "last_complete_scan_population"),
+                  "won_not_certified": len(won - certified),
+                  "certified_no_longer_won": len(certified - won)}
+    if certified != won:
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "certified_set_differs_from_current_won_population",
+                **population}
+    if population["recorded_population"] != len(certified):
+        return {"current": False, "max_age_hours": max_age,
+                "reason": "recorded_scan_population_inconsistent",
+                **population}
+    return {"current": True, "max_age_hours": max_age, "reason": None,
+            **population}
 
 
 def company_identity_inputs(evidence) -> dict:
@@ -285,7 +319,8 @@ def _parse(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def company_association_freshness(evidence, now: datetime) -> dict:
+def company_association_freshness(evidence, now: datetime, *,
+                                  won_deal_ids) -> dict:
     """The association dataset's coverage, from its own recorded runs.
 
     Judged against ``customer_identity.association_scan_max_age_hours``
@@ -319,7 +354,8 @@ def company_association_freshness(evidence, now: datetime) -> dict:
         "backfill_status": state.get("backfill_status"),
         "last_full_run_status": state.get("last_full_run_status"),
         "last_full_run_complete": state.get("last_full_run_complete"),
-        "scan_current": association_scan_current(state, now),
+        "scan_current": association_scan_current(
+            state, now, won_deal_ids=won_deal_ids),
         "staleness_threshold_hours": association_scan_max_age_hours(),
         "staleness_assessed": True,
     }
@@ -462,7 +498,10 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
     contacts = _contacts_by_deal(universe.get("acquisition_contacts"))
     company = company_identity_inputs(universe.get("company_associations"))
     company_freshness = company_association_freshness(
-        universe.get("company_associations"), now)
+        universe.get("company_associations"), now,
+        # The current won population, from the SAME snapshot as the evidence.
+        won_deal_ids=[str(r["deal_id"])
+                      for r in universe.get("won_rows") or []])
     scan = (company_freshness.get("scan_current") or {}).get("current") is True
     out = []
     for wtype, wkey in windows:

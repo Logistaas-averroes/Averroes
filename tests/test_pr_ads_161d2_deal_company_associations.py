@@ -1109,7 +1109,15 @@ def _universe(rows, observations, paths):
             "coverage_findings": [],
             "company_associations": {"available": True, "paths": paths,
                                      "observations": observations,
-                                     "sync_state": _CURRENT_SCAN}}
+                                     "sync_state": _current_scan(rows)}}
+
+
+def _current_scan(rows):
+    """``_CURRENT_SCAN`` certifying exactly these won rows (PR-ADS-161D2-F3:
+    a scan is current only while its certified set IS the won population)."""
+    ids = sorted(str(r["deal_id"]) for r in rows)
+    return {**_CURRENT_SCAN, "last_complete_scan_deal_ids": ids,
+            "last_complete_scan_population": len(ids)}
 
 
 #: A full scan that succeeded, covered every deal, and ran just before NOW.
