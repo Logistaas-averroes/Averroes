@@ -19,7 +19,9 @@ and proves, for every canonical won deal:
     whose lookup never succeeded;
   * stale evidence (latest attempt failed, or the deal changed after it was
     observed) is identified;
-  * coverage is proven by a recorded complete scan, not by rows existing;
+  * coverage is proven by a recorded complete scan, not by rows existing —
+    the scan's certified deal set must equal the CURRENT won set, and every
+    current won deal must have a success at or after the scan's start;
   * every window touched by a no-company, multi-company, unobserved or stale
     deal publishes NO exact customer total.
 
@@ -65,6 +67,9 @@ NO_COMPANY = "unresolved_no_company"
 AMBIGUOUS = "ambiguous_multiple_companies"
 UNAVAILABLE = "association_unavailable"
 RESOLVED = (RESOLVED_SINGLE, RESOLVED_MULTI_PATH)
+
+#: CRM finding id lists are samples of at most this many; counts are exact.
+CRM_SAMPLE_LIMIT = 100
 
 
 class Audit:
@@ -216,8 +221,8 @@ def expected_customer_verdict(members, identity, scan_current) -> tuple:
 
 def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
                     max_age_hours: float) -> dict:
-    """Every won deal has an outcome, and coverage is proven by a recorded
-    complete scan whose start every won deal's evidence post-dates."""
+    """Every won deal has an outcome, and coverage of the CURRENT won
+    population is proven by the recorded complete scan, set for set."""
     evidence = universe.get("company_associations") or {}
     state = evidence.get("sync_state") or {}
     never = sorted(d for d, i in identity.items() if not i["observed"])
@@ -228,29 +233,64 @@ def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
             "no recorded scan has observed every won deal")
     current, why = scan_is_current(state, now, max_age_hours)
     a.check("association_scan_is_current", current, why or "")
+
+    # PR-ADS-161D2-F1. The complete scan must cover the population as it is
+    # NOW. Every current won deal needs a successful observation started at or
+    # after the scan's start (none missing, none behind), and the set the scan
+    # certified must be exactly the current won set — a count can match while
+    # the members differ.
     obs = {str(o["deal_id"]): o for o in evidence.get("observations") or []}
-    behind = []
-    if scan_start is not None:
-        for deal_id in identity:
-            o = obs.get(deal_id) or {}
-            seen = _dt(o.get("last_success_started_at"))
-            if seen is None or seen < scan_start:
-                behind.append(deal_id)
-    # A complete scan must have covered every won deal: a deal whose latest
-    # success predates the scan's start was NOT observed by it, so the scan's
-    # claim of completeness is false for that deal.
-    a.check("complete_scan_covers_every_won_deal", not behind,
-            f"{len(behind)} won deal(s) lack a successful observation since "
-            f"the recorded complete scan started")
+    won = set(identity)
+    missing, behind = [], []
+    for deal_id in sorted(won):
+        seen = _dt((obs.get(deal_id) or {}).get("last_success_started_at"))
+        if seen is None:
+            missing.append(deal_id)
+        elif scan_start is not None and seen < scan_start:
+            behind.append(deal_id)
+    raw = state.get("last_complete_scan_deal_ids")
+    certified = None if raw is None else {str(d) for d in raw}
+    not_certified = sorted(won - certified) if certified is not None else []
+    no_longer_won = sorted(certified - won) if certified is not None else []
+    recorded = state.get("last_complete_scan_population")
+    problems = []
+    if scan_start is None:
+        problems.append("no complete scan is recorded")
+    elif certified is None:
+        problems.append("the complete scan recorded no certified deal set")
+    else:
+        if not_certified or no_longer_won:
+            problems.append(
+                f"certified set differs from the current won set "
+                f"({len(not_certified)} won but not certified, "
+                f"{len(no_longer_won)} certified but no longer won)")
+        if recorded != len(certified):
+            problems.append(f"recorded population {recorded} != "
+                            f"{len(certified)} certified deal(s)")
+    if missing:
+        problems.append(f"{len(missing)} won deal(s) have no successful "
+                        f"observation")
+    if behind:
+        problems.append(f"{len(behind)} won deal(s) were last observed before "
+                        f"the complete scan started")
+    a.check("complete_scan_covers_current_won_population", not problems,
+            "; ".join(problems))
     return {"scan_current": current, "scan_not_current_reason": why,
             "scan_max_age_hours": max_age_hours,
             "never_observed": len(never),
-            "never_observed_deal_ids": never[:50],
+            "never_observed_deal_ids_sample": never[:50],
             "complete_scan_started_at": state.get("last_complete_scan_started_at"),
             "complete_scan_finished_at": state.get(
                 "last_complete_scan_finished_at"),
-            "complete_scan_population": state.get("last_complete_scan_population"),
-            "won_deals_without_evidence_since_last_complete_scan": len(behind),
+            "complete_scan_population": recorded,
+            "complete_scan_certified_deals": (
+                None if certified is None else len(certified)),
+            "won_deals_without_successful_observation": len(missing),
+            "won_deals_behind_complete_scan": len(behind),
+            "won_deals_not_certified_by_complete_scan": len(not_certified),
+            "certified_deals_no_longer_won": len(no_longer_won),
+            "coverage_gap_deal_ids_sample": sorted(
+                set(missing) | set(behind) | set(not_certified))[:50],
             "last_run_status": state.get("last_run_status"),
             "last_run_mode": state.get("last_run_mode"),
             "last_run_complete": state.get("last_run_complete"),
@@ -379,11 +419,17 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
             and o.get("last_success_started_at")),
     }
     report["latest_failure_reasons"] = dict(sorted(reasons.items()))
+    # Counts are over the full population; the id lists are samples (<= 100)
+    # and are named as such, so a sample is never read as the total.
+    no_company = sorted(d for d, i in identity.items()
+                        if i["state"] == NO_COMPANY)
+    several = sorted(d for d, i in identity.items() if i["state"] == AMBIGUOUS)
     report["crm_findings"] = {
-        "no_company_deal_ids": sorted(
-            d for d, i in identity.items() if i["state"] == NO_COMPANY)[:100],
-        "multiple_company_deal_ids": sorted(
-            d for d, i in identity.items() if i["state"] == AMBIGUOUS)[:100],
+        "no_company_count": len(no_company),
+        "no_company_deal_ids_sample": no_company[:CRM_SAMPLE_LIMIT],
+        "multiple_company_count": len(several),
+        "multiple_company_deal_ids_sample": several[:CRM_SAMPLE_LIMIT],
+        "sample_limit": CRM_SAMPLE_LIMIT,
     }
     report["windows"] = publication_checks(
         a, universe, identity, now=now,
@@ -412,12 +458,12 @@ def _render(report: dict) -> None:
     for k, v in report["storage"].items():
         print(f"  {k:<29}{v}")
     for k, v in report["coverage"].items():
-        if k != "never_observed_deal_ids":
+        if not k.endswith("_sample"):
             print(f"  {k:<29}{v}")
-    print(f"  CRM findings (no company)    "
-          f"{len(report['crm_findings']['no_company_deal_ids'])} deal(s)")
-    print(f"  CRM findings (several)       "
-          f"{len(report['crm_findings']['multiple_company_deal_ids'])} deal(s)")
+    crm = report["crm_findings"]
+    print(f"  CRM findings (no company)    {crm['no_company_count']} deal(s)")
+    print(f"  CRM findings (several)       {crm['multiple_company_count']} "
+          f"deal(s)")
     print()
     print(f"  {'window':<24}{'members':>8}{'unsupported':>13}{'customers':>11}"
           f"{'lower bd':>10}  status / reason")

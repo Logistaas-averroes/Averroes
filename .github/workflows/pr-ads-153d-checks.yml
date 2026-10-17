@@ -98,6 +98,7 @@ jobs:
             tests/test_pr_ads_161c_post_boundary_sql_evidence.py \
             tests/test_pr_ads_161d_customer_closed_won_truth.py \
             tests/test_pr_ads_161d2_deal_company_associations.py \
+            tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -171,6 +172,11 @@ jobs:
                            # checkpoint/resume, and the coverage audit's
                            # no-writes fingerprint against the real schema.
                            "tests.test_pr_ads_161d2_deal_company_associations",
+                           # PR-ADS-161D2-F1. Its PG cases prove run-start
+                           # ordering, exact-set scan coverage and a backfill
+                           # completion that waits out a real concurrent
+                           # ledger writer.
+                           "tests.test_pr_ads_161d2_f1_monotonic_atomic_certification",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

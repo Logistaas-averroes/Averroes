@@ -208,14 +208,26 @@ def apply(*, max_lookups: int, resume: bool, restart: bool) -> dict:
                    exit_code=EXIT_STOPPED)
         return out
 
-    # Every won deal has a success at or after the anchor: PROVEN complete.
-    done = repo.complete_backfill_generation(generation,
-                                             population=after["population"])
-    if not (done.get("available") and done.get("completed")):
-        out.update(reason=("every deal is observed but the generation could "
-                           "not be marked complete (restarted elsewhere, or "
-                           "the state write failed)"),
-                   exit_code=EXIT_STOPPED)
+    # The progress read above can be overtaken (a deal may win after it), so
+    # completion re-proves coverage of the CURRENT won population inside its
+    # own transaction, with the ledger locked against writes.
+    done = repo.complete_backfill_generation(generation)
+    out["completion"] = {k: done.get(k) for k in (
+        "completed", "reason", "population", "remaining", "error")}
+    if not done.get("available"):
+        out.update(reason=f"completion_not_recorded:{done.get('error')}",
+                   exit_code=EXIT_UNAVAILABLE)
+        return out
+    if not done.get("completed"):
+        if done.get("remaining"):
+            reason = (f"completion refused: {done['remaining']} won deal(s) "
+                      f"lack a successful observation in this generation "
+                      f"(the won population changed) — rerun with --resume "
+                      f"--apply")
+        else:
+            reason = ("completion refused: the generation is no longer in "
+                      "progress (restarted elsewhere)")
+        out.update(reason=reason, exit_code=EXIT_STOPPED)
         return out
     out.update(ok=True, reason="backfill_generation_complete",
                exit_code=EXIT_OK)

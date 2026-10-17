@@ -160,7 +160,13 @@ observation, whatever the commit order. The same holds one level up: every
 run-state field (last run, last full run, complete scan) and the backfill
 generation anchor are stamped on the database clock and ordered by run start,
 so an older scan committing after a newer failed one cannot restore a passing
-verdict.
+verdict — and an older failure committing after a newer success cannot replace
+it (PR-ADS-161D2-F1 proves every commit order).
+
+**A complete scan names what it certified** (PR-ADS-161D2-F1). It stores the
+exact deal-id set it observed (`last_complete_scan_deal_ids`), and its
+population is that set's size. A run that claims completeness without naming
+its deals proves nothing.
 
 ### 5.2 Identity per deal
 
@@ -231,7 +237,18 @@ publishable.
   `--resume --apply` continues it; a plain `--apply` refuses to restart over an
   in-progress generation. Stops at the first failure with that deal as the
   checkpoint. Completion is proven when every won deal has a success at or
-  after the generation's start.
+  after the generation's start — and that proof is made **inside the
+  completing transaction** (PR-ADS-161D2-F1): it takes a SHARE lock on the deal
+  ledger (no ledger write can commit until it ends), re-reads the current won
+  population, and derives the certified set from that read. A progress read
+  taken earlier is never trusted: a deal that wins in between refuses
+  completion, and the command says to `--resume --apply`.
+
+  **Operator sequence.** Run `--apply` once. Run `--resume --apply` ONLY when
+  `--apply` exited 1 at a resumable checkpoint (`checkpoint:`,
+  `stopped_on_failure:` or `completion refused:` with deals remaining). After
+  an `--apply` that exited 0 the generation is complete; a `--resume` would
+  only report `no_backfill_in_progress_to_resume`.
 
 **Installing this does not make customer totals complete.** Completeness is a
 property of production evidence after the backfill: genuinely unassociated or
@@ -372,15 +389,22 @@ every won deal has an explicit observation outcome, that a successful zero and
 a failed/never-made lookup are distinct, that stored paths reconcile with the
 recorded success counts, that no path is stored twice or exists without a
 successful lookup, that coverage is proven by a recorded complete scan, and
-that every won deal has a success at or after the recorded complete scan's
-start (a scan that did not observe a deal cannot claim it), that every window
+— `complete_scan_covers_current_won_population` (PR-ADS-161D2-F1) — that the
+scan covers the population as it is NOW: every current won deal has a success
+at or after the scan's start (none missing, none behind), the scan's certified
+deal set equals the current won set exactly (a matching count is not enough),
+and the recorded population equals the certified set's size. A deal that won
+or stopped being won since the scan fails it until the next full scan
+re-certifies. Then, that every window
 touched by a no-company, multi-company, unobserved or stale deal publishes no
 exact customer total, that the scan is current, and — for
 every window whose deal count is published — that the customer status, reason
 and identity distribution match what the raw evidence says (so a failed lookup
 published as "no company" is caught even though the total stays withheld). It
 lists no-company and multi-company deals as **CRM findings** — data quality,
-not contract failures. Deleted or merged HubSpot deals are not handled by the
+not contract failures — as exact counts (`no_company_count`,
+`multiple_company_count`) beside id samples capped at 100
+(`*_deal_ids_sample`); a sample is never presented as the total. Deleted or merged HubSpot deals are not handled by the
 ledger: a won deal that now 404s fails every scan and keeps its windows
 withheld — closed, but noisy.
 

@@ -1917,6 +1917,9 @@ CREATE TABLE IF NOT EXISTS hubspot_deal_company_sync_state (
   last_complete_scan_started_at   TIMESTAMPTZ,
   last_complete_scan_finished_at  TIMESTAMPTZ,
   last_complete_scan_population   INTEGER,
+  -- PR-ADS-161D2-F1: the exact deal ids that scan certified, so coverage of
+  -- the CURRENT won population is proven set-for-set, never by a count.
+  last_complete_scan_deal_ids     TEXT[],
   -- Historical backfill generation: started_at is the resume anchor; a deal is
   -- done when it has a success observed at or after it.
   backfill_status                 TEXT,               -- in_progress|complete

@@ -255,7 +255,11 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   AND current AND the latest FULL association scan succeeded within
   `customer_identity.association_scan_max_age_hours` (a stopped pipeline moves
   no per-deal row, so per-deal staleness alone cannot see it); otherwise the
-  lower bound and unresolved counts publish instead.
+  lower bound and unresolved counts publish instead. A complete scan is
+  proven set-for-set: it stores the deal ids it certified, and backfill
+  completion re-derives that set inside its own transaction with the deal
+  ledger SHARE-locked — never from a caller's count or an earlier progress
+  read (PR-ADS-161D2-F1).
   Many existing readers still call won deals "customers" — PR-ADS-161E migrates
   them. The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
   cross-check whose disagreement withholds, never a filter. See `docs/46_*` §5.

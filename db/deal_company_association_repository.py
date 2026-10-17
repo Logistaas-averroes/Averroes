@@ -67,7 +67,8 @@ _STATE_COLUMNS = (
     "last_run_write_failures", "last_run_complete", "last_error",
     "last_full_run_status", "last_full_run_started_at", "last_full_run_complete",
     "last_complete_scan_started_at", "last_complete_scan_finished_at",
-    "last_complete_scan_population", "backfill_status", "backfill_started_at",
+    "last_complete_scan_population", "last_complete_scan_deal_ids",
+    "backfill_status", "backfill_started_at",
     "backfill_completed_at", "updated_at",
 )
 
@@ -313,6 +314,7 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                     succeeded: int = 0, failed: int = 0,
                     write_failures: int = 0, complete: bool = False,
                     full_population: bool = False,
+                    scanned_deal_ids=None,
                     error: str | None = None) -> dict:
     """Record a run's outcome.
 
@@ -323,7 +325,10 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
 
     The complete-scan columns move ONLY for a full-population run that
     succeeded AND observed every won deal — coverage is proven by the run that
-    covered it, never assumed from rows existing.
+    covered it, never assumed from rows existing. Such a run must name the
+    deals it observed (``scanned_deal_ids``): the scan certifies that exact
+    set, and its population is the set's size, never a caller's count. A run
+    that claims completeness without naming its deals proves nothing.
 
     ``started_at`` must come from the DATABASE clock (:func:`db_now`): every
     run-state field is ordered by it, so an older run that commits after a
@@ -336,8 +341,14 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
     if started_at is None:
         return _unavailable(reason="missing_started_at",
                             error="started_at is required (database clock)")
-    proves = bool(complete and status == "success" and full_population)
-    params = {"full": bool(full_population),"scope": SYNC_SCOPE, "status": status, "mode": mode,
+    certified = (sorted({str(d) for d in scanned_deal_ids})
+                 if scanned_deal_ids is not None else None)
+    proves = bool(complete and status == "success" and full_population
+                  and certified is not None)
+    params = {"full": bool(full_population), "scope": SYNC_SCOPE,
+              "status": status, "mode": mode,
+              "certified": certified if proves else None,
+              "certified_population": len(certified) if proves else None,
               "started": started_at, "batch_id": batch_id,
               "population": int(population), "attempted": int(attempted),
               "succeeded": int(succeeded), "failed": int(failed),
@@ -360,7 +371,8 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                         last_full_run_complete,
                         last_complete_scan_started_at,
                         last_complete_scan_finished_at,
-                        last_complete_scan_population, updated_at)
+                        last_complete_scan_population,
+                        last_complete_scan_deal_ids, updated_at)
                     VALUES (%(scope)s, %(status)s, %(mode)s, %(started)s,
                             clock_timestamp(), %(batch_id)s, %(population)s,
                             %(attempted)s, %(succeeded)s, %(failed)s,
@@ -370,7 +382,8 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                             CASE WHEN %(full)s THEN %(complete)s END,
                             CASE WHEN %(proves)s THEN %(started)s END,
                             CASE WHEN %(proves)s THEN clock_timestamp() END,
-                            CASE WHEN %(proves)s THEN %(population)s END,
+                            %(certified_population)s,
+                            %(certified)s::text[],
                             NOW())
                     ON CONFLICT (scope) DO UPDATE SET
                         -- Every run-state field is ordered by RUN START (database
@@ -458,8 +471,15 @@ def record_sync_run(*, mode: str, status: str, started_at, batch_id=None,
                                 {SYNC_STATE_TABLE}.last_complete_scan_started_at IS NULL
                                 OR %(started)s
                                    >= {SYNC_STATE_TABLE}.last_complete_scan_started_at)
-                            THEN %(population)s
+                            THEN %(certified_population)s
                             ELSE {SYNC_STATE_TABLE}.last_complete_scan_population END,
+                        last_complete_scan_deal_ids = CASE
+                            WHEN %(proves)s AND (
+                                {SYNC_STATE_TABLE}.last_complete_scan_started_at IS NULL
+                                OR %(started)s
+                                   >= {SYNC_STATE_TABLE}.last_complete_scan_started_at)
+                            THEN %(certified)s::text[]
+                            ELSE {SYNC_STATE_TABLE}.last_complete_scan_deal_ids END,
                         updated_at = NOW()
                     """, params)
         return {"available": True, "error": None}
@@ -493,21 +513,66 @@ def start_backfill_generation(started_at) -> dict:
         return _unavailable(error=type(exc).__name__)
 
 
-def complete_backfill_generation(generation_started_at, *,
-                                 population: int) -> dict:
-    """Mark the generation complete — ONLY the generation it was proven for.
+def complete_backfill_generation(generation_started_at) -> dict:
+    """Mark the generation complete — ONLY when the database proves it, and
+    ONLY the generation it was proven for.
 
-    Matching on the generation's own start instant means a stale process can
-    never complete a generation an operator has since restarted. A completed
-    generation proves every won deal was observed successfully at or after its
-    start, so it also stands as a complete scan (moved forward only).
-    Returns ``{available, completed}``.
+    The proof is made inside the completing transaction, never trusted from
+    the caller: a progress read taken before this call can be overtaken by a
+    deal that wins in between. So this transaction
+
+      1. takes a SHARE lock on the deal ledger, which no ledger write can hold
+         alongside — no deal can enter or leave the won population until it
+         commits, and every write that committed before the lock is visible;
+      2. locks the generation's state row (a stale process can never complete
+         a generation an operator has since restarted);
+      3. re-reads the CURRENT won population and requires every deal in it to
+         have a successful observation started at or after the anchor;
+      4. derives the certified set and its size from that read, and stamps the
+         generation complete — which also stands as a complete scan, moved
+         forward only.
+
+    Returns ``{available, completed, reason, population, remaining,
+    remaining_deal_ids}``; ``remaining_deal_ids`` is a sample of at most 50,
+    ``remaining`` is the full count.
     """
     try:
         with get_conn() as conn:
             if conn is None:
                 return _unavailable(completed=False, error="database_unavailable")
             with conn.cursor() as cur:
+                # SHARE conflicts with the ROW EXCLUSIVE every INSERT/UPDATE/
+                # DELETE takes, so ledger writers wait for this transaction.
+                cur.execute(f"LOCK TABLE {LEDGER_TABLE} IN SHARE MODE")
+                cur.execute(
+                    f"SELECT scope FROM {SYNC_STATE_TABLE} "
+                    f"WHERE scope = %s AND backfill_started_at = %s "
+                    f"AND backfill_status = %s FOR UPDATE",
+                    (SYNC_SCOPE, generation_started_at, BACKFILL_IN_PROGRESS))
+                if cur.fetchone() is None:
+                    return {"available": True, "completed": False,
+                            "reason": "generation_not_in_progress",
+                            "population": None, "remaining": None,
+                            "remaining_deal_ids": [], "error": None}
+                cur.execute(
+                    f"""
+                    SELECT l.deal_id,
+                           (o.last_success_started_at IS NOT NULL
+                            AND o.last_success_started_at >= %s) AS done
+                      FROM {LEDGER_TABLE} l
+                      LEFT JOIN {OBSERVATION_TABLE} o ON o.deal_id = l.deal_id
+                     WHERE l.hs_is_closed_won IS TRUE
+                     ORDER BY l.deal_id
+                    """, (generation_started_at,))
+                rows = _rows(cur)
+                certified = [str(r["deal_id"]) for r in rows]
+                remaining = [str(r["deal_id"]) for r in rows if not r["done"]]
+                if remaining:
+                    return {"available": True, "completed": False,
+                            "reason": "won_deals_lack_observation_in_generation",
+                            "population": len(certified),
+                            "remaining": len(remaining),
+                            "remaining_deal_ids": remaining[:50], "error": None}
                 cur.execute(
                     f"""
                     UPDATE {SYNC_STATE_TABLE}
@@ -540,16 +605,25 @@ def complete_backfill_generation(generation_started_at, *,
                                  OR %(gen)s >= last_complete_scan_started_at
                                THEN %(population)s
                                ELSE last_complete_scan_population END,
+                           last_complete_scan_deal_ids = CASE
+                               WHEN last_complete_scan_started_at IS NULL
+                                 OR %(gen)s >= last_complete_scan_started_at
+                               THEN %(certified)s::text[]
+                               ELSE last_complete_scan_deal_ids END,
                            updated_at = NOW()
                      WHERE scope = %(scope)s AND backfill_started_at = %(gen)s
                        AND backfill_status = %(in_progress)s
                      RETURNING scope
                     """, {"complete": BACKFILL_COMPLETE, "scope": SYNC_SCOPE,
                           "gen": generation_started_at,
-                          "population": int(population),
+                          "population": len(certified),
+                          "certified": certified,
                           "in_progress": BACKFILL_IN_PROGRESS})
                 completed = cur.fetchone() is not None
-        return {"available": True, "completed": completed, "error": None}
+        return {"available": True, "completed": completed,
+                "reason": None if completed else "generation_not_in_progress",
+                "population": len(certified), "remaining": 0,
+                "remaining_deal_ids": [], "error": None}
     except Exception as exc:  # noqa: BLE001
         log.error("complete_backfill_generation failed: %s", exc)
         return _unavailable(completed=False, error=type(exc).__name__)

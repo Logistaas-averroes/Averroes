@@ -226,10 +226,12 @@ def sync_deal_company_associations(*, batch_id=None, mode: str = "incremental",
         first_error,
         "lookup_cap_reached" if result["truncated"] else None) if e]
     result["error"] = "; ".join(errors) if errors else None
-    return _finish(result, repo, batch_id, started_at, dry_run, record_run)
+    return _finish(result, repo, batch_id, started_at, dry_run, record_run,
+                   scanned_deal_ids=deal_ids)
 
 
-def _finish(result, repo, batch_id, started_at, dry_run, record_run) -> dict:
+def _finish(result, repo, batch_id, started_at, dry_run, record_run, *,
+            scanned_deal_ids=None) -> dict:
     if dry_run or not record_run:
         return result
     state = repo.record_sync_run(
@@ -238,7 +240,10 @@ def _finish(result, repo, batch_id, started_at, dry_run, record_run) -> dict:
         attempted=result["attempted"], succeeded=result["succeeded"],
         failed=result["failed"], write_failures=result["write_failures"],
         complete=bool(result["complete"] and result["full_population"]),
-        full_population=result["full_population"], error=result["error"])
+        full_population=result["full_population"],
+        # The exact set this run observed — what a complete scan certifies.
+        scanned_deal_ids=scanned_deal_ids if result["complete"] else None,
+        error=result["error"])
     if not state.get("available"):
         # Coverage that could not be recorded cannot be claimed.
         result["status"] = STATUS_FAILED

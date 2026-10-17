@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161D2 — deal→company association ingestion and customer identity certification (October 2026)
+**Last updated:** PR-ADS-161D2-F1 — monotonic and atomic customer certification, on PR-ADS-161D2 (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1306,3 +1306,37 @@ whose won deals all resolve to one current company; the coverage audit lists the
 CRM remediation queue (no-company and multi-company won deals).
 
 Full doctrine: `docs/46_CANONICAL_CUSTOMER_CLOSED_WON_TRUTH.md` §5, §9.1.
+
+### PR-ADS-161D2-F1 — Monotonic and atomic customer certification (October 2026, same PR)
+
+**Why.** Review of PR-ADS-161D2 found four ways the system could claim current,
+complete customer evidence it had not proven.
+
+**Fixed.**
+* **Run state is monotonic by run start.** Every `last_run_*` and
+  `last_full_run_*` field applies only when its run started at or after the
+  stored run (this landed with the Copilot review fixes). F1 adds tests for
+  both directions and every commit order of three runs.
+* **A complete scan names what it certified.** `last_complete_scan_deal_ids`
+  stores the exact set; the population is its size. A completeness claim that
+  names no deals proves nothing.
+* **The coverage audit checks the CURRENT population, set for set.** The new
+  blocking check `complete_scan_covers_current_won_population` requires every
+  current won deal to have a success at or after the scan's start, the
+  certified set to equal the current won set, and the recorded population to
+  equal the set's size. A deal that won or stopped being won since the scan
+  fails it until the next full scan re-certifies (≤ one daily run).
+* **Backfill completion is atomic.** `complete_backfill_generation` no longer
+  takes a population. Inside its transaction it takes a SHARE lock on
+  `hubspot_deal_ledger`, re-reads the won population, proves every deal was
+  observed in the generation, and derives the certified set. Otherwise it
+  refuses with the remaining count.
+* **Counts are separate from samples.** CRM findings report
+  `no_company_count` / `multiple_company_count` beside
+  `*_deal_ids_sample` (≤ 100).
+* **Runbook.** `--resume --apply` runs only after an `--apply` that stopped at a
+  resumable checkpoint.
+
+**Suite.** `tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py`, in
+CI's PostgreSQL step and did-run list. It includes a real concurrent ledger
+writer that completion must wait out.

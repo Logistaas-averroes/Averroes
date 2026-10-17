@@ -449,14 +449,23 @@ def _observe(deal_id, companies, minutes=0):
         deal_id, paths, observation_started_at=_t(minutes))["applied"]
 
 
+def _won_ids():
+    return [r["deal_id"] for r in _q(
+        "SELECT deal_id FROM hubspot_deal_ledger "
+        "WHERE hs_is_closed_won IS TRUE ORDER BY deal_id")]
+
+
 def _record_complete_scan():
     """A successful, complete full-population run, as the scheduled scan would
-    record it. A published total needs one (the scan-current gate)."""
+    record it — naming the won deals it certified. A published total needs one
+    (the scan-current gate)."""
     from db import deal_company_association_repository as repo
+    won = _won_ids()
     assert repo.record_sync_run(
         mode="incremental", status="success", started_at=_t(-60),
-        population=0, attempted=0, succeeded=0, complete=True,
-        full_population=True)["available"]
+        population=len(won), attempted=len(won), succeeded=len(won),
+        complete=True, full_population=True,
+        scanned_deal_ids=won)["available"]
 
 
 @_needs_pg
@@ -1016,8 +1025,12 @@ def test_40_the_coverage_audit_certifies_a_complete_scan_and_writes_nothing(
     assert out["identity_states"] == {
         "ambiguous_multiple_companies": 1, "resolved_single_customer": 1,
         "unresolved_no_company": 1}
-    assert out["crm_findings"]["multiple_company_deal_ids"] == ["2"]
-    assert out["crm_findings"]["no_company_deal_ids"] == ["3"]
+    assert out["crm_findings"]["multiple_company_count"] == 1
+    assert out["crm_findings"]["multiple_company_deal_ids_sample"] == ["2"]
+    assert out["crm_findings"]["no_company_count"] == 1
+    assert out["crm_findings"]["no_company_deal_ids_sample"] == ["3"]
+    assert out["coverage"]["complete_scan_certified_deals"] == 3
+    assert out["checks"]["complete_scan_covers_current_won_population"] is True
     assert out["storage"]["successful_zero_company_lookups"] == 1
     assert out["hubspot_calls_performed"] is False
     # Every window those deals touch withholds the exact total.
@@ -1067,11 +1080,14 @@ def test_41_b_a_complete_scan_that_did_not_cover_a_deal_fails_the_audit(
     assert sync_deal_company_associations(mode="incremental")["complete"]
     assert _coverage_audit()[0] == 0
     later = repo.db_now()["now"] + timedelta(minutes=5)
-    repo.record_sync_run(mode="incremental", status="success",
-                         started_at=later, complete=True, full_population=True)
+    assert repo.record_sync_run(mode="incremental", status="success",
+                                started_at=later, complete=True,
+                                full_population=True,
+                                scanned_deal_ids=["1"])["available"]
     code, out = _coverage_audit()
     assert code == 1
-    assert out["checks"]["complete_scan_covers_every_won_deal"] is False
+    assert out["checks"]["complete_scan_covers_current_won_population"] is False
+    assert out["coverage"]["won_deals_behind_complete_scan"] == 1
 
 
 def test_42_the_coverage_audit_has_no_external_or_write_path():
