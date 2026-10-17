@@ -1927,6 +1927,10 @@ CREATE TABLE IF NOT EXISTS hubspot_deal_company_sync_state (
   backfill_completed_at           TIMESTAMPTZ,
   updated_at                      TIMESTAMPTZ DEFAULT NOW()
 );
+-- PR-ADS-161D2-F1: a database that created the table before the column
+-- existed gets it here; without it the state read and the run record fail.
+ALTER TABLE hubspot_deal_company_sync_state
+  ADD COLUMN IF NOT EXISTS last_complete_scan_deal_ids TEXT[];
 
 -- PR-ADS-153F: per-chunk fetch ledger for canonical Google Ads GEO spend, the
 -- exact counterpart of google_ads_spend_coverage. Before this table the geo sync

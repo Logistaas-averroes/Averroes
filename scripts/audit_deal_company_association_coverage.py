@@ -191,16 +191,18 @@ def storage_checks(a: Audit, universe: dict) -> dict:
 def scan_is_current(state: dict, now, max_age_hours: float) -> tuple:
     """``(current, reason)`` — restated here from the stored run record, not
     taken from the service: the latest full-population run succeeded and was
-    complete, and the latest complete scan finished within the configured age."""
+    complete, and the latest complete scan STARTED within the configured age —
+    the start bounds its oldest observation; a multi-day backfill's finish
+    does not (PR-ADS-161D2-F2)."""
     state = state or {}
     if state.get("last_full_run_status") != "success" \
             or state.get("last_full_run_complete") is not True:
         return False, "latest full scan not successful and complete"
-    finished = _dt(state.get("last_complete_scan_finished_at"))
-    if finished is None:
+    started = _dt(state.get("last_complete_scan_started_at"))
+    if started is None:
         return False, "no complete scan recorded"
-    if (now - finished).total_seconds() / 3600 > max_age_hours:
-        return False, f"complete scan older than {max_age_hours:g}h"
+    if (now - started).total_seconds() / 3600 > max_age_hours:
+        return False, f"complete scan started more than {max_age_hours:g}h ago"
     return True, None
 
 
@@ -264,9 +266,6 @@ def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
                 f"certified set differs from the current won set "
                 f"({len(not_certified)} won but not certified, "
                 f"{len(no_longer_won)} certified but no longer won)")
-        if recorded != len(certified):
-            problems.append(f"recorded population {recorded} != "
-                            f"{len(certified)} certified deal(s)")
     if missing:
         problems.append(f"{len(missing)} won deal(s) have no successful "
                         f"observation")
@@ -275,6 +274,16 @@ def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
                         f"the complete scan started")
     a.check("complete_scan_covers_current_won_population", not problems,
             "; ".join(problems))
+    # The recorded population is a claim too: it must equal the set the scan
+    # certified AND the current won population. A mismatch is a violation,
+    # never informational.
+    reconciles = (scan_start is not None and certified is not None
+                  and recorded == len(certified) == len(won)
+                  and not not_certified and not no_longer_won)
+    a.check("complete_scan_population_reconciles", reconciles,
+            f"recorded complete-scan population {recorded}, certified set "
+            f"{None if certified is None else len(certified)}, current won "
+            f"population {len(won)}")
     return {"scan_current": current, "scan_not_current_reason": why,
             "scan_max_age_hours": max_age_hours,
             "never_observed": len(never),
@@ -285,6 +294,8 @@ def coverage_checks(a: Audit, universe: dict, identity: dict, *, now,
             "complete_scan_population": recorded,
             "complete_scan_certified_deals": (
                 None if certified is None else len(certified)),
+            "current_won_population": len(won),
+            "complete_scan_population_reconciles": reconciles,
             "won_deals_without_successful_observation": len(missing),
             "won_deals_behind_complete_scan": len(behind),
             "won_deals_not_certified_by_complete_scan": len(not_certified),

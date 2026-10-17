@@ -121,5 +121,7 @@ customer_identity:
   association_scan_max_age_hours: 48
   # PR-ADS-161D2 — an exact customer total publishes only while the latest
   # FULL deal→company association scan succeeded, covered every won deal, and
-  # finished within this many hours. The scan runs daily; 48h tolerates one
+  # STARTED within this many hours (its start bounds its oldest observation; a
+  # multi-day backfill's finish does not — PR-ADS-161D2-F2). The scan runs
+  # daily; 48h tolerates one
   # missed run. Beyond it, totals are withheld (customer_identity_scan_not_current).

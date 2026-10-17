@@ -189,12 +189,14 @@ currency guarantee. That is the scan gate below.
 the step killed — moves no per-deal row, so every deal's evidence would still
 look untouched. Customers therefore also require the dataset's own record: the
 latest FULL-population run succeeded and covered every won deal, and the latest
-complete scan finished within `customer_identity.association_scan_max_age_hours`
+complete scan **started** within `customer_identity.association_scan_max_age_hours`
 (config/thresholds.yaml, 48h — one missed daily run tolerated). A backfill
 resume pass covers a subset and never counts; a completed backfill generation
 does. Stale evidence is
 kept and disclosed (`stale_customer_identity`), counts toward nothing exact,
-and withholds the total.
+and withholds the total. The age runs from the scan's START,
+never its finish (PR-ADS-161D2-F2): a backfill generation resumed over nine
+days finishes "now", but its earliest observations are nine days old.
 
 ### 5.3 Publication
 
@@ -393,9 +395,16 @@ successful lookup, that coverage is proven by a recorded complete scan, and
 scan covers the population as it is NOW: every current won deal has a success
 at or after the scan's start (none missing, none behind), the scan's certified
 deal set equals the current won set exactly (a matching count is not enough),
-and the recorded population equals the certified set's size. A deal that won
-or stopped being won since the scan fails it until the next full scan
-re-certifies. Then, that every window
+and — `complete_scan_population_reconciles`, a separate blocking check — the
+recorded population equals both the certified set's size and the current won
+population (recorded, certified and current counts are all disclosed). A deal
+that won or stopped being won since the scan fails these until a later full
+scan succeeds and covers every won deal; a failed, truncated or 404-ing scan
+keeps them red. That is deliberately stricter than the customer surface: a
+certified deal that stops being won leaves the surface publishing correctly
+(it is simply no longer a member), while the audit refuses to certify coverage
+it no longer matches — a false alarm in the safe direction, not a hidden error.
+Then, that every window
 touched by a no-company, multi-company, unobserved or stale deal publishes no
 exact customer total, that the scan is current, and — for
 every window whose deal count is published — that the customer status, reason

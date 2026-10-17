@@ -685,15 +685,16 @@ def test_28_an_old_complete_scan_is_not_current(ledger, monkeypatch):
     _deal(ledger, "1")
     _fake_reads(monkeypatch, {"1": [901]})
     assert sync_deal_company_associations(mode="incremental")["complete"]
-    finished = svc._parse(_q(
-        "SELECT last_complete_scan_finished_at AS f FROM "
+    # Aged from the scan's START (PR-ADS-161D2-F2).
+    started = svc._parse(_q(
+        "SELECT last_complete_scan_started_at AS f FROM "
         "hubspot_deal_company_sync_state")[0]["f"])
     max_age = svc.association_scan_max_age_hours()
     fresh = svc.get_closed_won_truth(
-        [(BUSINESS, "all_time")], now=finished + timedelta(hours=max_age - 1),
+        [(BUSINESS, "all_time")], now=started + timedelta(hours=max_age - 1),
         resolver=None, resolver_detail="t")["windows"][0]
     old = svc.get_closed_won_truth(
-        [(BUSINESS, "all_time")], now=finished + timedelta(hours=max_age + 1),
+        [(BUSINESS, "all_time")], now=started + timedelta(hours=max_age + 1),
         resolver=None, resolver_detail="t")["windows"][0]
     assert fresh["outcomes"]["customers"] == 1
     assert old["outcomes"]["customers"] is None
@@ -1111,9 +1112,10 @@ def _universe(rows, observations, paths):
                                      "sync_state": _CURRENT_SCAN}}
 
 
-#: A full scan that succeeded, covered every deal, and finished just before NOW.
+#: A full scan that succeeded, covered every deal, and ran just before NOW.
 _CURRENT_SCAN = {"last_full_run_status": "success",
                  "last_full_run_complete": True,
+                 "last_complete_scan_started_at": "2026-10-07T05:55:00+00:00",
                  "last_complete_scan_finished_at": "2026-10-07T06:00:00+00:00"}
 
 

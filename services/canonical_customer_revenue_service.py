@@ -203,10 +203,16 @@ def association_scan_current(sync_state, now: datetime,
     """Is the stored evidence CURRENT as a whole? ``{current, reason}``.
 
     Current means: the latest FULL-population run succeeded and covered every
-    won deal, and the latest complete scan finished within the configured age.
+    won deal, and the latest complete scan STARTED within the configured age.
     Per-deal staleness cannot see a pipeline that stopped — a run that fails
     before reading a deal leaves every deal's evidence looking untouched — so
     this is judged on the dataset's own recorded runs.
+
+    The age runs from the scan's START, never its finish (PR-ADS-161D2-F2): a
+    backfill generation resumed over days finishes "now" while its earliest
+    observations are as old as its anchor, and its finish would let days-old
+    evidence read as fresh. The start bounds the oldest observation the scan
+    certified.
     """
     max_age = (association_scan_max_age_hours() if max_age_hours is None
                else float(max_age_hours))
@@ -215,11 +221,11 @@ def association_scan_current(sync_state, now: datetime,
             or state.get("last_full_run_complete") is not True:
         return {"current": False, "max_age_hours": max_age,
                 "reason": "latest_full_scan_not_successful_and_complete"}
-    finished = _parse(state.get("last_complete_scan_finished_at"))
-    if finished is None:
+    started = _parse(state.get("last_complete_scan_started_at"))
+    if started is None:
         return {"current": False, "max_age_hours": max_age,
                 "reason": "no_complete_scan_recorded"}
-    age = (now - finished).total_seconds() / 3600
+    age = (now - started).total_seconds() / 3600
     if age > max_age:
         return {"current": False, "max_age_hours": max_age,
                 "reason": f"complete_scan_older_than_{max_age:g}h"}
@@ -289,20 +295,24 @@ def company_association_freshness(evidence, now: datetime) -> dict:
     if not isinstance(evidence, dict) or not evidence.get("available"):
         return {"signal": "hubspot_deal_company_sync_state",
                 "available": False, "complete_scan_proven": None,
+                "last_complete_scan_started_at": None,
                 "last_complete_scan_finished_at": None, "age_hours": None,
                 "last_run_status": None, "staleness_assessed": False}
     state = evidence.get("sync_state") or {}
-    finished = _parse(state.get("last_complete_scan_finished_at"))
+    started = _parse(state.get("last_complete_scan_started_at"))
     return {
         "signal": "hubspot_deal_company_sync_state",
         "available": True,
-        "complete_scan_proven": finished is not None,
+        "complete_scan_proven": started is not None,
+        "last_complete_scan_started_at": state.get(
+            "last_complete_scan_started_at"),
         "last_complete_scan_finished_at": state.get(
             "last_complete_scan_finished_at"),
         "last_complete_scan_population": state.get(
             "last_complete_scan_population"),
-        "age_hours": (round((now - finished).total_seconds() / 3600, 2)
-                      if finished else None),
+        # Aged from the scan's START — the oldest evidence it certified.
+        "age_hours": (round((now - started).total_seconds() / 3600, 2)
+                      if started else None),
         "last_run_status": state.get("last_run_status"),
         "last_run_mode": state.get("last_run_mode"),
         "last_run_complete": state.get("last_run_complete"),

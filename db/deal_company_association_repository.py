@@ -57,6 +57,9 @@ ALL_MODES = (MODE_INCREMENTAL, MODE_BACKFILL)
 BACKFILL_IN_PROGRESS = "in_progress"
 BACKFILL_COMPLETE = "complete"
 
+#: How long backfill completion waits for the ledger lock before giving up.
+COMPLETION_LOCK_TIMEOUT_MS = 30000
+
 #: Read-only, one snapshot — for the operator reads below.
 READ_ONLY_TRANSACTION = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 
@@ -543,6 +546,12 @@ def complete_backfill_generation(generation_started_at) -> dict:
             with conn.cursor() as cur:
                 # SHARE conflicts with the ROW EXCLUSIVE every INSERT/UPDATE/
                 # DELETE takes, so ledger writers wait for this transaction.
+                # Bounded: a long ledger transaction must not stall completion
+                # (and the writers queued behind it) indefinitely. On timeout
+                # nothing is written and the backfill reports it as
+                # unavailable; --resume --apply retries.
+                cur.execute("SET LOCAL lock_timeout = %s",
+                            (f"{COMPLETION_LOCK_TIMEOUT_MS}ms",))
                 cur.execute(f"LOCK TABLE {LEDGER_TABLE} IN SHARE MODE")
                 cur.execute(
                     f"SELECT scope FROM {SYNC_STATE_TABLE} "

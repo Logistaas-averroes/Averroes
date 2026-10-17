@@ -136,6 +136,11 @@ def test_10_a_complete_scan_records_the_exact_set_it_certified(
     code, out = _coverage_audit()
     assert code == 0, out["violations"]
     assert out["checks"]["complete_scan_covers_current_won_population"] is True
+    assert out["checks"]["complete_scan_population_reconciles"] is True
+    assert (out["coverage"]["complete_scan_population"],
+            out["coverage"]["current_won_population"],
+            out["coverage"]["complete_scan_population_reconciles"]) == \
+        (2, 2, True)
 
 
 @_needs_pg
@@ -237,7 +242,19 @@ def test_15_a_recorded_population_that_disagrees_with_its_set_fails(
                     "SET last_complete_scan_population = 5")
     code, out = _coverage_audit()
     assert code == 1
-    assert out["checks"]["complete_scan_covers_current_won_population"] is False
+    # PR-ADS-161D2-F2: a wrong recorded population is its own violation. Every
+    # deal IS covered, so the coverage check holds; the population claim does
+    # not, and the audit fails on it.
+    assert out["checks"]["complete_scan_covers_current_won_population"] is True
+    assert out["checks"]["complete_scan_population_reconciles"] is False
+    cov = out["coverage"]
+    assert (cov["complete_scan_population"], cov["current_won_population"],
+            cov["complete_scan_certified_deals"],
+            cov["won_deals_behind_complete_scan"],
+            cov["won_deals_without_successful_observation"],
+            cov["complete_scan_population_reconciles"]) == (5, 1, 1, 0, 0, False)
+    assert any(v.startswith("complete_scan_population_reconciles:")
+               for v in out["violations"])
 
 
 @_needs_pg
@@ -273,11 +290,17 @@ def _generation_with_every_deal_observed(deals):
 
 @_needs_pg
 def test_20_completion_rereads_the_population_instead_of_trusting_progress(
-        ledger):
-    """A deal wins between the progress read and completion."""
+        ledger, monkeypatch):
+    """Progress says zero remaining; a deal wins; completion must refuse,
+    leave the generation in progress and the complete scan where it was —
+    then succeed, with the database-derived population, once that deal is
+    observed. Fails against 23c536d, which trusted the caller."""
     from db import deal_company_association_repository as repo
     _deal(ledger, "1")
     _deal(ledger, "9", hs_is_closed_won=False, deal_stage_id="x")
+    _scan(monkeypatch, {"1": [901]})                 # an earlier complete scan
+    before = {k: v for k, v in _state().items()
+              if k.startswith("last_complete_scan_")}
     gen = _generation_with_every_deal_observed(["1"])
     _deal(ledger, "9")                                   # now won, unobserved
     done = repo.complete_backfill_generation(gen)
@@ -286,7 +309,19 @@ def test_20_completion_rereads_the_population_instead_of_trusting_progress(
         ("won_deals_lack_observation_in_generation", 2, 1)
     s = _state()
     assert s["backfill_status"] == "in_progress"
-    assert s["last_complete_scan_started_at"] is None
+    assert {k: v for k, v in s.items()
+            if k.startswith("last_complete_scan_")} == before, \
+        "a refused completion moved the complete scan"
+    # Observe the new deal: completion now succeeds, population from the DB.
+    assert repo.record_observation_success(
+        "9", [], observation_started_at=repo.db_now()["now"])["applied"]
+    done = repo.complete_backfill_generation(gen)
+    assert (done["completed"], done["population"], done["remaining"]) == \
+        (True, 2, 0)
+    s = _state()
+    assert s["backfill_status"] == "complete"
+    assert sorted(s["last_complete_scan_deal_ids"]) == ["1", "9"]
+    assert s["last_complete_scan_population"] == 2
 
 
 @_needs_pg
@@ -362,6 +397,92 @@ def test_23_the_backfill_command_reports_a_refused_completion(
     code, out = _backfill(["--resume", "--apply"])
     assert code == 0 and out["reason"] == "backfill_generation_complete"
     assert sorted(_state()["last_complete_scan_deal_ids"]) == ["1", "9"]
+
+
+@_needs_pg
+def test_24_completion_gives_up_on_a_held_ledger_lock_and_writes_nothing(
+        ledger, pg, monkeypatch):
+    from db import deal_company_association_repository as repo
+    _deal(ledger, "1")
+    gen = _generation_with_every_deal_observed(["1"])
+    monkeypatch.setattr(repo, "COMPLETION_LOCK_TIMEOUT_MS", 300)
+    writer = psycopg2.connect(pg.url)
+    try:
+        with writer.cursor() as cur:
+            cur.execute("UPDATE hubspot_deal_ledger SET deal_name = deal_name "
+                        "WHERE deal_id = '1'")          # holds ROW EXCLUSIVE
+        done = repo.complete_backfill_generation(gen)
+    finally:
+        writer.rollback()
+        writer.close()
+    assert done["available"] is False and done["completed"] is False
+    assert _state()["backfill_status"] == "in_progress"
+    assert repo.complete_backfill_generation(gen)["completed"] is True
+
+
+@_needs_pg
+def test_25_an_older_complete_scan_committing_late_keeps_the_newer_set(
+        ledger):
+    from db import deal_company_association_repository as repo
+    for d in ("1", "2"):
+        _deal(ledger, d)
+    assert repo.record_sync_run(
+        mode="incremental", status="success", started_at=_t(10),
+        complete=True, full_population=True,
+        scanned_deal_ids=["1", "2"])["available"]
+    assert repo.record_sync_run(
+        mode="incremental", status="success", started_at=_t(5),
+        complete=True, full_population=True,
+        scanned_deal_ids=["1"])["available"]          # older, commits second
+    s = _state()
+    assert sorted(s["last_complete_scan_deal_ids"]) == ["1", "2"]
+    assert s["last_complete_scan_population"] == 2
+    assert svc._parse(s["last_complete_scan_started_at"]) == _t(10)
+
+
+@_needs_pg
+def test_26_a_backfill_finished_today_is_aged_from_its_start(ledger):
+    """The auditor's MAJOR: a generation anchored days ago finishes 'now'. Its
+    oldest observation is as old as its anchor, so the scan is aged from the
+    START — customers withhold once that exceeds the threshold."""
+    from db import deal_company_association_repository as repo
+    _deal(ledger, "1")
+    gen = _generation_with_every_deal_observed(["1"])
+    assert repo.complete_backfill_generation(gen)["completed"]
+    s = _state()
+    max_age = svc.association_scan_max_age_hours()
+    finished = svc._parse(s["last_complete_scan_finished_at"])
+    # Nine days after the anchor, minutes after the finish.
+    later = gen + timedelta(days=9)
+    s["last_complete_scan_finished_at"] = (later - timedelta(minutes=5)
+                                           ).isoformat()
+    verdict = svc.association_scan_current(s, later, max_age)
+    assert verdict["current"] is False
+    assert finished >= gen
+    from scripts import audit_deal_company_association_coverage as audit
+    assert audit.scan_is_current(s, later, max_age)[0] is False
+    # Within the threshold of the START it is current.
+    assert svc.association_scan_current(
+        s, gen + timedelta(hours=max_age - 1), max_age)["current"] is True
+
+
+@_needs_pg
+def test_27_the_schema_migrates_a_table_created_before_the_column(ledger):
+    """A database that already ran PR-ADS-161D2 has the table without the
+    column; init_db must add it, or the state read and run record fail."""
+    from db import deal_company_association_repository as repo
+    from db import schema
+    from db.connection import get_conn
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("ALTER TABLE hubspot_deal_company_sync_state "
+                    "DROP COLUMN last_complete_scan_deal_ids")
+    assert repo.fetch_sync_state()["available"] is False
+    schema.init_db()
+    assert repo.fetch_sync_state()["available"] is True
+    assert repo.record_sync_run(
+        mode="incremental", status="success", started_at=_t(0),
+        complete=True, full_population=True,
+        scanned_deal_ids=[])["available"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════

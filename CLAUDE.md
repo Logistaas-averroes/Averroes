@@ -252,7 +252,7 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   read the absence of rows as either. A failed lookup must never delete or
   replace the last successful set, and writes are ordered by observation START,
   not commit order. Customers publish only when every member deal is resolved
-  AND current AND the latest FULL association scan succeeded within
+  AND current AND the latest FULL association scan succeeded and STARTED within
   `customer_identity.association_scan_max_age_hours` (a stopped pipeline moves
   no per-deal row, so per-deal staleness alone cannot see it); otherwise the
   lower bound and unresolved counts publish instead. A complete scan is

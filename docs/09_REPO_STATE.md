@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161D2-F1 — monotonic and atomic customer certification, on PR-ADS-161D2 (October 2026)
+**Last updated:** PR-ADS-161D2-F2 — scan aged from its start, reconciled population, on PR-ADS-161D2-F1 (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1325,7 +1325,8 @@ complete customer evidence it had not proven.
   current won deal to have a success at or after the scan's start, the
   certified set to equal the current won set, and the recorded population to
   equal the set's size. A deal that won or stopped being won since the scan
-  fails it until the next full scan re-certifies (≤ one daily run).
+  fails it until a later full scan succeeds and covers every won deal (a
+  failed, truncated or 404-ing scan keeps it red).
 * **Backfill completion is atomic.** `complete_backfill_generation` no longer
   takes a population. Inside its transaction it takes a SHARE lock on
   `hubspot_deal_ledger`, re-reads the won population, proves every deal was
@@ -1340,3 +1341,26 @@ complete customer evidence it had not proven.
 **Suite.** `tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py`, in
 CI's PostgreSQL step and did-run list. It includes a real concurrent ledger
 writer that completion must wait out.
+
+### PR-ADS-161D2-F2 — Scan age from its start; reconciled population (October 2026, same PR)
+
+From the truth audit of F1 and the PR re-review.
+
+* **The scan is aged from its START** (the truth auditor's MAJOR, inherited
+  from 161D2). A backfill generation resumed over days used to stamp
+  `last_complete_scan_finished_at = now`, and age was measured from that, so
+  nine-day-old evidence read as fresh for 48h. The service gate and both audits
+  now age from `last_complete_scan_started_at`, which bounds the oldest
+  observation the scan certified.
+* **`complete_scan_population_reconciles`** is a separate blocking check: the
+  recorded population must equal the certified set's size and the current won
+  population. Recorded, certified and current counts are disclosed.
+* **Migration:** `ALTER TABLE … ADD COLUMN IF NOT EXISTS
+  last_complete_scan_deal_ids`, for a database that created the table first.
+* **Bounded lock:** completion waits at most
+  `COMPLETION_LOCK_TIMEOUT_MS` (30s) for the ledger lock. On timeout it writes
+  nothing and reports unavailable; `--resume --apply` retries.
+* **Tests:** completion is refused, then succeeds with the DB-derived
+  population; an older complete scan committing late keeps the newer set; a
+  held ledger lock times out without writing; the migration is exercised on a
+  real table.
