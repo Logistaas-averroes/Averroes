@@ -1,6 +1,6 @@
 # 46 — Canonical Closed-Won Deals, Customers and Revenue
 
-**PR-ADS-161D.** One read-only definition of closed-won deals, customers and
+**PR-ADS-161D**, customer identity added by **PR-ADS-161D2**. One read-only definition of closed-won deals, customers and
 closed-won revenue, per evidence and business window, with attribution,
 coverage, freshness and a publication verdict for every metric. Truth service
 and audit only: **no production page reads it yet** — that is PR-ADS-161E.
@@ -12,6 +12,11 @@ and audit only: **no production page reads it yet** — that is PR-ADS-161E.
 | `services/canonical_revenue_service.load_closed_won_universe` | the ONE ledger read it uses |
 | `db/deal_ledger_repository.fetch_closed_won_universe` | REPEATABLE READ, READ ONLY |
 | `scripts/audit_customer_closed_won_truth.py` | read-only certification, `--json`, exit 0/1/2 |
+| `connectors/hubspot_pull.fetch_deal_company_associations` | 161D2: read-only deal→company read, every page and path, fails closed |
+| `db/deal_company_association_repository.py` | 161D2: atomic, failure-preserving, monotonic association storage |
+| `services/deal_company_association_sync_service.py` | 161D2: scan of the whole won population |
+| `scripts/backfill_deal_company_associations.py` | 161D2: dry-run / apply / resume historical backfill |
+| `scripts/audit_deal_company_association_coverage.py` | 161D2: read-only association coverage certification |
 
 ---
 
@@ -118,36 +123,153 @@ reads as the total.
 
 ---
 
-## 5. Customers — withheld, and why
+## 5. Customers — deal→company identity (PR-ADS-161D2)
 
-**The repository holds no HubSpot company association for any deal.** The
-canonical ledger has no company column, no deal→company table exists, and
-docs/35 §19 already records that the legacy "company" field was a contact's
-employer, not a company record. Every won deal's customer identity is therefore
-`association_unavailable`, the customer count is **withheld**
-(`company_associations_not_ingested`), and `confirmed_customer_lower_bound` is
-**NULL** — "we could not look" is not "zero customers".
+A customer is ONE distinct HubSpot **company id**, read from HubSpot's own
+deal→company associations. Never a deal count, a contact, a lifecycle stage, an
+email domain, a company or deal name, a GCLID, a campaign or a source.
 
-The resolver and its publication rule are built and tested so ingestion can
-light them up without a second definition:
+### 5.1 The evidence
 
-| State | Meaning |
+| Table | One row per | Holds |
+| --- | --- | --- |
+| `hubspot_deal_company_association` | (deal, company, association **path**) | the set from the deal's latest **successful** lookup |
+| `hubspot_deal_company_observation` | deal | latest attempt (success/failed, when, why) and latest success (when, companies, paths, `success_zero_companies`) |
+| `hubspot_deal_company_sync_state` | dataset | last run, last **complete scan**, historical backfill generation |
+
+A path is HubSpot's association category and type id (`HUBSPOT_DEFINED:5`,
+`USER_DEFINED:17`). Two paths to one company are kept as two rows and are still
+one company.
+
+**Successful zero vs never looked.** A lookup that succeeded and found no
+company writes `success_zero_companies = true`. A lookup that failed — or was
+never made — leaves no success at all. "No bridge rows" is never read as "no
+company": the observation row decides.
+
+**Failure preserves.** A failed refresh records the failed attempt and leaves
+the last successful set and its counts untouched, in the bridge and on the
+observation row. A successful refresh replaces the set (paths HubSpot no longer
+reports are removed) and records itself in ONE transaction.
+
+**Monotonic.** Every write carries the instant its HubSpot read STARTED, taken
+from the **database clock** (`clock_timestamp()`), so two hosts with different
+clocks cannot misorder each other. A success applies only if it started at or
+after the stored latest success; an attempt outcome only if at or after the
+stored latest attempt. A slow historical pass cannot overwrite a newer
+observation, whatever the commit order. The same holds one level up: every
+run-state field (last run, last full run, complete scan) and the backfill
+generation anchor are stamped on the database clock and ordered by run start,
+so an older scan committing after a newer failed one cannot restore a passing
+verdict — and an older failure committing after a newer success cannot replace
+it (PR-ADS-161D2-F1 proves every commit order).
+
+**A complete scan names what it certified** (PR-ADS-161D2-F1). It stores the
+exact deal-id set it observed (`last_complete_scan_deal_ids`), and its
+population is that set's size. A run that claims completeness without naming
+its deals proves nothing.
+
+### 5.2 Identity per deal
+
+| State | When |
 | --- | --- |
-| `resolved_single_customer` | exactly one company |
-| `resolved_same_customer_multiple_paths` | one company, reached more than once |
-| `unresolved_no_company` | association read, no company |
-| `ambiguous_multiple_companies` | more than one company |
-| `association_unavailable` | no association evidence at all |
+| `resolved_single_customer` | successful lookup, exactly one company, one path |
+| `resolved_same_customer_multiple_paths` | one company, more than one path |
+| `unresolved_no_company` | successful lookup, no company |
+| `ambiguous_multiple_companies` | more than one distinct company — never counted as several customers |
+| `association_unavailable` | no successful lookup (never looked, or every look failed) |
 
-A count is published only when every deal in the window is resolved. Only a
-company id counts: never a contact, an email domain, a company name or a
-campaign.
+Evidence is **stale** when the latest attempt failed (the stored set is older
+than our latest look) or when the deal changed in HubSpot
+(`hubspot_lastmodified_at`) after the evidence was observed. The second rule
+compares HubSpot's clock with ours, and associating a company is not guaranteed
+to move `hs_lastmodifieddate` — so per-deal staleness is a disclosure, not the
+currency guarantee. That is the scan gate below.
 
-**To publish customers**, company associations must be ingested by the deal
-sync (read-only from HubSpot) and the historical ledger re-synced. That is a
-sync change and a backfill, outside this PR's read-only truth-service scope.
+**The scan gate.** A pipeline that stops — the population unreadable, no batch,
+the step killed — moves no per-deal row, so every deal's evidence would still
+look untouched. Customers therefore also require the dataset's own record: the
+latest FULL-population run succeeded and covered every won deal, and the latest
+complete scan **started** within `customer_identity.association_scan_max_age_hours`
+(config/thresholds.yaml, 48h — one missed daily run tolerated). A backfill
+resume pass covers a subset and never counts; a completed backfill generation
+does. Stale evidence is
+kept and disclosed (`stale_customer_identity`), counts toward nothing exact,
+and withholds the total. The age runs from the scan's START,
+never its finish (PR-ADS-161D2-F2): a backfill generation resumed over nine
+days finishes "now", but its earliest observations are nine days old.
 
----
+**The certified set must be the won population** (PR-ADS-161D2-F3). The
+scan is current only while `last_complete_scan_deal_ids` equals the current
+won-deal set from the same snapshot, exactly, and
+`last_complete_scan_population` equals both. A deal that won after the scan —
+even one a subset or backfill pass has since observed, so every member
+individually has usable evidence — or a certified deal that is no longer won
+makes the scan not current: customers are withheld
+(`customer_identity_scan_not_current`) until a full scan certifies the
+population as it stands. A subset pass never expands the certified set.
+`association_scan_current` requires the won set as an argument; it cannot be
+judged without it. In normal operation the association scan runs right after
+the deal-ledger sync, so the window between a population change and its
+re-certification is minutes; it is longer only when that scan fails.
+
+### 5.3 Publication
+
+| Members of the window | `customers` |
+| --- | --- |
+| deal count not published | follows the deal count |
+| company evidence unreadable | `unavailable` (`company_associations_unreadable`) |
+| any member `association_unavailable` | `unavailable` (`customer_identity_evidence_unavailable`) |
+| scan not current (see above) | `withheld` (`customer_identity_scan_not_current`) — and no lower bound |
+| any member no-company or multi-company | `withheld` (`customer_identity_unresolved`) |
+| any member stale | `withheld` (`customer_identity_evidence_stale`) |
+| every member resolved and current | **published**: distinct company ids |
+
+Whenever the total is not published and the deal count is,
+`confirmed_customer_lower_bound` (distinct companies of resolved, current
+members), `unresolved_customer_identity`, `stale_customer_identity` and the
+`customer_identity` distribution are published. The lower bound is NULL — not
+0 — when the scan is not current or when no member was ever successfully
+observed: "0 confirmed" would be a finding nobody made. The won-deal count
+never stands in for customers.
+
+Unreadable company evidence is isolated under a SAVEPOINT inside the universe's
+one READ ONLY snapshot: customers become unavailable, deals and revenue stay
+publishable.
+
+### 5.4 Keeping it current
+
+* **Population:** every deal the canonical ledger holds as won. Never the
+  legacy GCLID deal subset.
+* **Incremental:** `hubspot/deal_company_associations` runs in the daily
+  incremental sync right after `hubspot/deal_ledger`, and reads the WHOLE won
+  population every run — associating a company to a deal is not guaranteed to
+  move `hs_lastmodifieddate`, so a watermark scan could miss exactly this
+  change. Clean complete run → `success` (and a recorded complete scan);
+  lookup or write failures → `partial`/`failed`; cap reached → `partial`; no
+  durable batch → aborts before any HubSpot call. Its failure withholds
+  customers and never touches deal or revenue evidence.
+* **Historical backfill:** `python -m scripts.backfill_deal_company_associations`
+  — dry run by default (no writes of any kind); `--apply` opens a generation;
+  `--resume --apply` continues it; a plain `--apply` refuses to restart over an
+  in-progress generation. Stops at the first failure with that deal as the
+  checkpoint. Completion is proven when every won deal has a success at or
+  after the generation's start — and that proof is made **inside the
+  completing transaction** (PR-ADS-161D2-F1): it takes a SHARE lock on the deal
+  ledger (no ledger write can commit until it ends), re-reads the current won
+  population, and derives the certified set from that read. A progress read
+  taken earlier is never trusted: a deal that wins in between refuses
+  completion, and the command says to `--resume --apply`.
+
+  **Operator sequence.** Run `--apply` once. Run `--resume --apply` ONLY when
+  `--apply` exited 1 at a resumable checkpoint (`checkpoint:`,
+  `stopped_on_failure:` or `completion refused:` with deals remaining). After
+  an `--apply` that exited 0 the generation is complete; a `--resume` would
+  only report `no_backfill_in_progress_to_resume`.
+
+**Installing this does not make customer totals complete.** Completeness is a
+property of production evidence after the backfill: genuinely unassociated or
+multi-company won deals stay withheld, and are a CRM remediation queue (listed
+by the coverage audit), not something the application may resolve by guessing.
 
 ## 6. Attribution — a partition that always adds up
 
@@ -209,7 +331,7 @@ unproven coverage gate makes every metric `unavailable`.
 | --- | --- |
 | `closed_won_deals` | coverage proven; no won flag/stage conflict touching the window; no undated won deal (finite windows) |
 | `revenue_usd` | deals published and every deal has proven USD |
-| `customers` | deals published, company identity ingested, every deal resolved |
+| `customers` | deals published, every member's company identity observed, resolved and current (§5.3) |
 | `campaign_revenue` | revenue published and the campaign resolver available |
 | `campaign_revenue` (above) | … and no Google Ads deal in the window left unplaced |
 | `acquisition_cohort` | coverage proven; no won flag/stage conflict dated up to now (or undated) — acquisition membership ignores the close date, so any such conflict touches it; no unresolved or ambiguous membership |
@@ -262,6 +384,55 @@ page consuming the service.
 Exit **0** every contract holds (metrics may still be withheld) · **1** a
 contract is broken · **2** unavailable — the ledger could not be read, or a
 cross-check could not run (an unmeasured comparison is not a violation).
+
+**Customers (PR-ADS-161D2).** The audit re-derives each member's identity from
+the raw association rows and observation states — shared with the coverage
+audit's `independent_identity`, not the truth module's resolver — and requires a
+published total to equal the distinct company ids of members that are all
+resolved and current, and a published lower bound to equal the distinct
+companies of the resolved, current members. `test_43` breaks the resolver
+itself and shows the audit refuses.
+
+### 9.1 Association coverage audit
+
+```bash
+python -m scripts.audit_deal_company_association_coverage
+python -m scripts.audit_deal_company_association_coverage --json
+```
+
+One READ ONLY snapshot; no HubSpot, Google Ads or database write. Proves that
+every won deal has an explicit observation outcome, that a successful zero and
+a failed/never-made lookup are distinct, that stored paths reconcile with the
+recorded success counts, that no path is stored twice or exists without a
+successful lookup, that coverage is proven by a recorded complete scan, and
+— `complete_scan_covers_current_won_population` (PR-ADS-161D2-F1) — that the
+scan covers the population as it is NOW: every current won deal has a success
+at or after the scan's start (none missing, none behind), the scan's certified
+deal set equals the current won set exactly (a matching count is not enough),
+and — `complete_scan_population_reconciles`, a separate blocking check — the
+recorded population equals both the certified set's size and the current won
+population (recorded, certified and current counts are all disclosed). A deal
+that won or stopped being won since the scan fails these until a later full
+scan succeeds and covers every won deal; a failed, truncated or 404-ing scan
+keeps them red. The customer publication gate applies the same rule (§5.2,
+PR-ADS-161D2-F3), so the audit and the surface give one answer: whenever the
+audit says the certified population does not match, customers are withheld.
+Then, that every window
+touched by a no-company, multi-company, unobserved or stale deal publishes no
+exact customer total, that the scan is current, and — for
+every window whose deal count is published — that the customer status, reason
+and identity distribution match what the raw evidence says (so a failed lookup
+published as "no company" is caught even though the total stays withheld). It
+lists no-company and multi-company deals as **CRM findings** — data quality,
+not contract failures — as exact counts (`no_company_count`,
+`multiple_company_count`) beside id samples capped at 100
+(`*_deal_ids_sample`); a sample is never presented as the total. Deleted or merged HubSpot deals are not handled by the
+ledger: a won deal that now 404s fails every scan and keeps its windows
+withheld — closed, but noisy.
+
+Exit **0** storage and coverage contracts hold · **1** a contract is violated
+or coverage is not proven (expected before the first backfill) · **2**
+unavailable.
 
 ---
 

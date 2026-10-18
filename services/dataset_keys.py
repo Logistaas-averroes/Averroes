@@ -74,6 +74,8 @@ VALID_SYNC_DATASETS: frozenset[str] = frozenset({
     # CRM
     "contacts", "deals", "matches", "contact_funnel", "lifecycle_events",
     "deal_ledger", "source_classification",
+    # PR-ADS-161D2 — deal→company associations (customer identity evidence)
+    "deal_company_associations",
     # Currency
     "daily_rates",
     # Mailchimp (PR-ADS-151)
@@ -177,6 +179,13 @@ FX_DAILY_RATES_DATASET = "daily_rates"
 DEAL_LEDGER_SOURCE = "hubspot"
 DEAL_LEDGER_DATASET = "deal_ledger"
 
+# PR-ADS-161D2 — deal→company associations for every canonical won deal: the
+# evidence a customer (one distinct HubSpot company id) rests on. Refreshed
+# after the deal ledger, so a newly won deal exists locally before its
+# companies are looked up.
+DEAL_COMPANY_ASSOCIATION_SOURCE = "hubspot"
+DEAL_COMPANY_ASSOCIATION_DATASET = "deal_company_associations"
+
 # Acquisition-source classification / deal attribution.
 SOURCE_CLASSIFICATION_SOURCE = "hubspot"
 SOURCE_CLASSIFICATION_DATASET = "source_classification"
@@ -203,6 +212,7 @@ __all__ = [
     "LEGACY_KEYWORD_SNAPSHOT_SOURCE", "LEGACY_KEYWORD_SNAPSHOT_DATASET",
     "FX_SOURCE", "FX_DAILY_RATES_DATASET",
     "DEAL_LEDGER_SOURCE", "DEAL_LEDGER_DATASET",
+    "DEAL_COMPANY_ASSOCIATION_SOURCE", "DEAL_COMPANY_ASSOCIATION_DATASET",
     "SOURCE_CLASSIFICATION_SOURCE", "SOURCE_CLASSIFICATION_DATASET",
     "GCLID_SOURCE", "GCLID_MATCHES_DATASET", "GCLID_COVERAGE_SNAPSHOTS_DATASET",
 ]

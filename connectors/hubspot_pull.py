@@ -1933,6 +1933,188 @@ def fetch_deal_associations(deal_id) -> dict:
         f"association lookup failed for deal {deal_id}: {last_exc}")
 
 
+# ---------------------------------------------------------------------------
+# PR-ADS-161D2 — deal→company associations (customer identity evidence)
+# ---------------------------------------------------------------------------
+
+#: Associations per page. HubSpot's v4 association read accepts up to 500.
+COMPANY_ASSOCIATION_PAGE_SIZE = 500
+#: Hard bound on pages for ONE deal. A deal with more than 100,000 associated
+#: companies is not a real deal; a cursor that never ends is a broken read.
+COMPANY_ASSOCIATION_MAX_PAGES = 200
+#: Ceiling on a server-requested Retry-After wait, so one header cannot park
+#: the scheduler.
+COMPANY_ASSOCIATION_MAX_RETRY_AFTER_SECONDS = 60
+
+
+class DealCompanyAssociationLookupError(RuntimeError):
+    """A deal→company association lookup did not complete.
+
+    Raised — never returned as an empty list — so a caller can tell "HubSpot
+    says this deal has no company" from "we could not find out". Collapsing the
+    two would turn every timeout into proof that a won deal has no customer.
+
+    ``reason`` is a short machine code with no URL, token or record content in
+    it, safe to persist and to print in operator logs.
+    """
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+
+
+def company_association_path_key(category, type_id) -> str:
+    """The stable identity of one association PATH: HubSpot's own association
+    category and type id. Never a company name or a label, both of which an
+    admin can rename."""
+    return f"{str(category).strip().upper()}:{str(type_id).strip()}"
+
+
+def _retry_after_seconds(resp, attempt: int) -> float:
+    raw = (getattr(resp, "headers", None) or {}).get("Retry-After")
+    try:
+        wait = float(raw)
+        if wait >= 0:
+            return min(wait, COMPANY_ASSOCIATION_MAX_RETRY_AFTER_SECONDS)
+    except (TypeError, ValueError):
+        pass
+    return INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+
+
+def _company_association_page(url, params, *, sleep):
+    """One page, with retries. Returns the decoded payload or raises."""
+    headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+    last_reason, last_detail = "lookup_failed", ""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+        except requests.exceptions.Timeout as exc:
+            last_reason, last_detail = "timeout", type(exc).__name__
+            resp = None
+        except requests.exceptions.RequestException as exc:
+            last_reason, last_detail = "connection_error", type(exc).__name__
+            resp = None
+        if resp is not None:
+            status = resp.status_code
+            if status == 429 or status >= 500:
+                last_reason = "rate_limited" if status == 429 else f"http_{status}"
+                last_detail = ""
+                if attempt < MAX_RETRIES:
+                    sleep(_retry_after_seconds(resp, attempt))
+                    continue
+                break
+            if status != 200:
+                # A 4xx other than 429 will not change on retry (a deleted deal,
+                # a missing scope). It is a failed lookup, never "no company".
+                raise DealCompanyAssociationLookupError(f"http_{status}")
+            try:
+                payload = resp.json()
+            except ValueError:
+                last_reason, last_detail = "malformed_payload", "not JSON"
+                if attempt < MAX_RETRIES:
+                    sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                    continue
+                break
+            if not isinstance(payload, dict):
+                raise DealCompanyAssociationLookupError(
+                    "malformed_payload", "payload is not an object")
+            return payload
+        if attempt < MAX_RETRIES:
+            sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+    raise DealCompanyAssociationLookupError(
+        f"{last_reason}_after_{MAX_RETRIES}_attempts", last_detail)
+
+
+def fetch_deal_company_associations(deal_id, *, sleep=time.sleep) -> dict:
+    """Every company associated with a deal, by EVERY association path.
+
+    Returns::
+
+        {"deal_id": "...", "complete": True, "pages": n,
+         "companies": [{"company_id", "association_category",
+                        "association_type_id", "association_label",
+                        "association_path_key"}, ...]}
+
+    One entry per (company, path). A company reached by two association types
+    appears twice, with two path keys — two paths to one company is still one
+    company, and dropping the second path would lose evidence the identity
+    audit reconciles against.
+
+    Reads every page. Raises :class:`DealCompanyAssociationLookupError` on any
+    failure — a non-200 response, retries exhausted, a malformed row, a cursor
+    that repeats or never ends. An empty ``companies`` list is returned ONLY
+    after a complete, successful read, so it always means "HubSpot reports no
+    company for this deal".
+
+    Read-only: one GET per page against the v4 associations API. NEVER writes
+    to HubSpot.
+    """
+    if deal_id in (None, ""):
+        raise DealCompanyAssociationLookupError("missing_deal_id")
+    if not HUBSPOT_API_KEY:
+        raise DealCompanyAssociationLookupError("hubspot_api_key_missing")
+
+    url = (f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/deals/{deal_id}"
+           f"/associations/companies")
+    companies: list = []
+    seen: set = set()
+    seen_cursors: set = set()
+    after = None
+    pages = 0
+    while True:
+        if pages >= COMPANY_ASSOCIATION_MAX_PAGES:
+            raise DealCompanyAssociationLookupError(
+                "pagination_page_limit", f"{pages} pages")
+        params = {"limit": COMPANY_ASSOCIATION_PAGE_SIZE}
+        if after:
+            params["after"] = after
+        payload = _company_association_page(url, params, sleep=sleep)
+        pages += 1
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise DealCompanyAssociationLookupError(
+                "malformed_payload", "results is not a list")
+        for row in results:
+            company_id = row.get("toObjectId") if isinstance(row, dict) else None
+            if company_id in (None, ""):
+                raise DealCompanyAssociationLookupError(
+                    "malformed_payload", "association without toObjectId")
+            types = row.get("associationTypes")
+            if not isinstance(types, list) or not types:
+                # A company with no association type is not a path we can
+                # identify; reading it as "associated somehow" would invent one.
+                raise DealCompanyAssociationLookupError(
+                    "malformed_payload", "association without a type")
+            for t in types:
+                category = (t or {}).get("category")
+                type_id = (t or {}).get("typeId")
+                if category in (None, "") or type_id in (None, ""):
+                    raise DealCompanyAssociationLookupError(
+                        "malformed_payload", "association type without id")
+                key = company_association_path_key(category, type_id)
+                if (str(company_id), key) in seen:
+                    continue
+                seen.add((str(company_id), key))
+                companies.append({
+                    "company_id": str(company_id),
+                    "association_category": str(category).strip().upper(),
+                    "association_type_id": str(type_id).strip(),
+                    "association_label": (t or {}).get("label"),
+                    "association_path_key": key,
+                })
+        nxt = (payload.get("paging") or {}).get("next") or {}
+        after = nxt.get("after") if isinstance(nxt, dict) else None
+        if not after:
+            break
+        if after in seen_cursors:
+            raise DealCompanyAssociationLookupError(
+                "pagination_cursor_repeated")
+        seen_cursors.add(after)
+
+    return {"deal_id": str(deal_id), "companies": companies,
+            "complete": True, "pages": pages}
+
+
 def pull_deals_for_ledger(
     *,
     modified_since_ms: int | None = None,

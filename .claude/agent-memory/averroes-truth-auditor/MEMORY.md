@@ -361,3 +361,65 @@ Recurring patterns (durable):
   pass at 0f68beb.
 - Full suite at 0f68beb (HEAD stable across the run): 4973 passed, 1 skipped,
   2 baseline deselects. The 161D file's PG cases ran.
+
+## PR-ADS-161D2 first review (HEAD 747c385, 2026-10-14)
+- Customer identity store: `hubspot_deal_company_association` (deal, company,
+  path=CATEGORY:typeId), `hubspot_deal_company_observation` (latest attempt +
+  latest success per deal, `success_zero_companies`), `hubspot_deal_company_sync_state`
+  (scope `deal_company_associations`; last run, last complete scan, backfill
+  generation). Dataset pair `hubspot/deal_company_associations`, scheduled in the
+  daily incremental right after `hubspot/deal_ledger`. NOT registered in
+  DATASET_FRESHNESS_CONFIG (neither is deal_ledger).
+- Truth rules (verified by reading + execution): absent from map → association_unavailable
+  → customers UNAVAILABLE (precedence over unresolved); failed-only deal is absent;
+  stale = latest attempt failed OR last_success_started_at (app clock) <
+  ledger hubspot_lastmodified_at (HubSpot clock). Stale excluded from lower bound.
+  Company evidence read under SAVEPOINT in fetch_closed_won_universe; failure →
+  customers unavailable, deals/revenue unaffected (test_25).
+- Writes ordered by observation START on the CALLER's clock (Python now), not DB
+  clock. Equal start instants: last writer wins (benign). Backfill resume passes
+  the anchor as an ISO string; round-trips to timestamptz fine (verified on PG).
+- DEFECT (MAJOR, open at 747c385): no age / run-status gate on association
+  evidence. `company_association_freshness` is report-only
+  (`staleness_assessed: False`). A run-level failure (population unreadable,
+  batch not opened, exception) or cap truncation writes NO per-deal record, so
+  customers keep PUBLISHING on old evidence (probe: last_run failed, 1273 h old,
+  published). The per-deal staleness leg cannot see association changes (the PR
+  itself says they don't move hs_lastmodifieddate). docs/46 §5.4 "Its failure
+  withholds customers" is overclaimed. Coverage audit exits 0 in the same state
+  (it checks only that a complete scan EVER happened; `behind` is reported, not checked).
+- Audit gap: neither audit reconciles published `coverage.customer_identity` or
+  the unavailable-vs-withheld status against the independent derivation. A
+  mutation reading a failed lookup as no-company passes both audits (executed);
+  only test_22 catches it. test_44 mutates the output dict, not the implementation.
+- Empty store (pre-backfill) → `confirmed_customer_lower_bound` 0, not None.
+- Ledger never processes deleted/merged deals; a 404 on a won deal would make
+  every daily run partial and withhold customers in its windows (unverified concern).
+- 161D2 + 161D + 154 test files: 161 passed, PG cases ran (python3.11).
+- Branch moved mid-review to 8d72c33 (conftest eager import; fixes 157 test_66,
+  which failed at 747c385). At 8d72c33, 3 tests in tests/test_daily_incremental_sync.py
+  FAIL (pass on parent 85aa4ab, run from a git-archive copy): its
+  `_patch_all_datasets_success` helper does not stub `_sync_deal_company_associations`,
+  so the real step runs, fails without a batch, and the run goes partial; the
+  expected dataset-key set also lacks the new label. Full suite (straddling the
+  move): 4 failed, 5029 passed, 1 skipped, 2 baseline deselects.
+- Lesson again: when a PR adds a scheduler step, grep EVERY test that stubs the
+  step list (test_154 was updated, test_daily_incremental_sync was not).
+
+## PR-ADS-161D2-F1 review (reviewed as a working-tree diff on 23c536d; committed as 17ce6fe mid-review, same content)
+- Run-start ordering of last_run_*/last_full_run_* landed in 23c536d, NOT F1;
+  F1's test_01-03 are regression tests for 23c536d (pass there).
+- F1: `last_complete_scan_deal_ids TEXT[]` (added only in CREATE TABLE, no
+  ALTER ADD COLUMN IF NOT EXISTS). record_sync_run proves only with named ids.
+  complete_backfill_generation: LOCK ledger IN SHARE MODE, then state row FOR
+  UPDATE, then re-read won set (READ COMMITTED; the statement snapshot is taken
+  after the lock, so it is sound). Ledger writer upsert_deal = one txn per deal,
+  touches no association table, so no deadlock cycle. No lock_timeout.
+- Service gate `association_scan_current` does NOT use the certified set; it ages
+  the scan from `last_complete_scan_finished_at`. Backfill completion stamps
+  finished=clock_timestamp() and last_full_run_status=success for a generation
+  that may span days, so a multi-day bootstrap reads as a fresh full scan (open,
+  pre-existing in 161D2; the audit's scan_is_current restates the same rule).
+- Audit's new set-equality check goes red on won->not-won transitions while the
+  service legitimately publishes (audit stricter, fail-closed).
+- Not run: the PG tests (a parallel full run was going). Ran only test_30/test_40 (pass).

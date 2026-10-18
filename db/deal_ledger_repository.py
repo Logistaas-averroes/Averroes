@@ -586,11 +586,31 @@ CLOSED_WON_UNIVERSE_TRANSACTION = (
     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
 
 
+def _read_company_evidence(cur) -> dict:
+    """PR-ADS-161D2 — deal→company evidence on the universe's own cursor.
+
+    A SAVEPOINT isolates it: a failure rolls back to the savepoint (the outer
+    READ ONLY snapshot is untouched) and is reported as unavailable evidence.
+    """
+    from db import deal_company_association_repository as company_repo  # noqa: PLC0415
+
+    cur.execute("SAVEPOINT company_evidence")
+    try:
+        evidence = company_repo.read_won_deal_company_evidence(cur)
+    except Exception as exc:  # noqa: BLE001
+        cur.execute("ROLLBACK TO SAVEPOINT company_evidence")
+        log.warning("company-association evidence unreadable: %s", exc)
+        return {"available": False, "paths": [], "observations": [],
+                "sync_state": None, "error": type(exc).__name__}
+    cur.execute("RELEASE SAVEPOINT company_evidence")
+    return {"available": True, **evidence, "error": None}
+
+
 def fetch_closed_won_universe(won_stage_id: str, *,
                               sql_windows: dict | None = None) -> dict:
     """Every input the closed-won truth service needs, from ONE snapshot.
 
-    PR-ADS-161D. Five reads, one REPEATABLE READ / READ ONLY transaction, so a
+    PR-ADS-161D. Every read below shares one REPEATABLE READ / READ ONLY transaction, so a
     deal sync committing mid-read cannot give the won population, the
     won-definition cross-check, the deal→contact acquisition evidence and the
     sync coverage four different instants:
@@ -605,6 +625,10 @@ def fetch_closed_won_universe(won_stage_id: str, *,
     * ``acquisition_contacts`` — for each won deal, every associated contact and
       that contact's canonical ``created_at`` (NULL when the funnel holds no row);
     * ``sync_state`` — the ledger's sync coverage row;
+    * ``company_associations`` — PR-ADS-161D2: ``{available, paths,
+      observations, sync_state, error}`` for every won deal's deal→company
+      evidence. Read under a SAVEPOINT: ``available: False`` withholds customers
+      and leaves every other input intact;
     * ``sql_windowed`` — only when ``sql_windows`` (``{key: (start, end)}``) is
       given: for each key, the deal ids production's own
       :func:`fetch_won_deals` returns, with their close dates, run on THIS
@@ -676,6 +700,11 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                     f"association_failures, last_batch_id, updated_at "
                     f"FROM {SYNC_STATE_TABLE} WHERE scope = %s", (SYNC_SCOPE,))
                 state_rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+                # PR-ADS-161D2 — company-association evidence, same snapshot.
+                # Inside a SAVEPOINT: if it cannot be read, customers become
+                # unavailable while deals and revenue stay readable — customer
+                # identity is a separate claim and must not take them down.
+                company_evidence = _read_company_evidence(cur)
                 windowed = {}
                 for key, (w_start, w_end) in (sql_windows or {}).items():
                     production = fetch_won_deals(w_start, w_end, cursor=cur)
@@ -687,7 +716,8 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                   "won_definition_rows": definition_rows,
                   "unknown_won_rows": unknown_rows,
                   "acquisition_contacts": acquisition,
-                  "sync_state": state_rows[0] if state_rows else None}
+                  "sync_state": state_rows[0] if state_rows else None,
+                  "company_associations": company_evidence}
         if sql_windows is not None:
             result["sql_windowed"] = windowed
         return result
