@@ -111,8 +111,9 @@ included. A row's `affected_windows` says what it blocks today.
   - the CSV route returns 503;
   - the UI renders "Evidence unavailable", never "0 issues".
 - **Association evidence unreadable:**
-  - the identity family's totals, `totals.rows` and
-    `totals.deals_with_any_exception` are `null`;
+  - the identity family's totals, `totals.rows`,
+    `totals.deals_with_any_exception` and every window's identity blocker
+    counts are `null`;
   - `complete_families` names the families whose rows are complete
     (revenue proof and won-deal membership);
   - an unfiltered list, or any filter that reaches the identity family, returns

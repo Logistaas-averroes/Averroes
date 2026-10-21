@@ -623,6 +623,85 @@ def test_23_f_hubspot_links_and_csv_cells_are_safe():
     assert cte._cell("Acme -") == "Acme -"
 
 
+def test_24_a_an_undated_conflict_deal_does_not_fail_a_truthful_audit():
+    """Review finding: one undated deal flagged won in another stage carries
+    both a missing-close-date row (bounded windows) and a conflict row (every
+    window, All Time included). The undated check reads only the former."""
+    rows = [ledger_row("1", deal_close_date=None, deal_stage_id="999")]
+    u = _universe(rows, [_ok_obs("1", 1, 1)],
+                  [{"deal_id": "1", "company_id": "901"}])
+    m = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    [conflict] = _rows(m, cte.FAMILY_MEMBERSHIP, cwt.WON_FLAG_OTHER_STAGE)
+    [undated] = _rows(m, cte.FAMILY_MEMBERSHIP, cwt.CLOSE_MISSING)
+    assert WINDOW in conflict["affected_windows"]
+    assert WINDOW not in undated["affected_windows"]
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.membership_checks(a, m, u, NOW)
+    assert a.violations == []
+
+
+def test_24_b_reconciliation_reads_every_page_past_the_api_limit():
+    """Review finding: a filter matching more than MAX_LIMIT rows was compared
+    against its first page only, failing a correct workbench."""
+    n = cte.MAX_LIMIT + 3
+    rows = [ledger_row(str(i), deal_close_date=Q4, **_unpriced(str(i)))
+            for i in range(1, n + 1)]
+    u = _universe(rows, [_ok_obs(str(i), 1, 1) for i in range(1, n + 1)],
+                  [{"deal_id": str(i), "company_id": str(900 + i)}
+                   for i in range(1, n + 1)])
+    m = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    assert len(_rows(m, cte.FAMILY_REVENUE)) == n
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.serialization_checks(a, m)
+    assert a.violations == []
+    assert a.checks["api_filter_matches_the_model"] is True
+
+
+def test_24_c_unreadable_identity_window_counts_are_null_not_zero():
+    """Review finding: with association evidence unreadable, a window's
+    identity blocker counts read 0 and the audit reported a broken contract
+    instead of unavailable."""
+    m = _identity_unreadable_model()
+    for w in m["windows"]:
+        b = w["blocker_deals"]
+        assert (b["customer_identity_unresolved"], b["customer_identity_stale"],
+                b["customer_identity_any"]) == (None, None, None), w["window"]
+    assert _window(m, WINDOW)["blocker_deals"]["revenue_unproven"] == 1
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.window_checks(a, m)
+    assert a.violations == []
+    assert a.checks["unreadable_identity_counts_are_null"] is True
+
+
+def test_24_d_filter_options_stay_retryable_while_evidence_is_unavailable():
+    src = (_ROOT / "static/app.js").read_text(encoding="utf-8")
+    body = src.split("function _cteFillOptions(data)")[1].split(
+        "\nfunction ")[0]
+    guard = body.split("\n")[3]
+    assert "!Array.isArray(data.windows)" in guard
+    assert "!data.reason_vocabulary" in guard
+    assert body.index("_cteOptionsLoaded = true") > body.index("forEach")
+
+
+@_needs_pg
+def test_24_e_a_won_stage_deal_not_flagged_won_carries_its_stored_name(
+        ledger, monkeypatch):
+    """Review finding: a deal in the won stage HubSpot does not flag won is
+    not in the won rows; its name must come from the same snapshot's
+    cross-check row, not show as unnamed."""
+    _deal(ledger, "1")
+    _deal(ledger, "5", hs_is_closed_won=False,
+          deal_stage_id=cwt.CONFIRMED_WON_STAGE_ID, deal_name="Acme renewal")
+    _scan(monkeypatch, {"1": [901]})
+    m = _model()
+    [row] = _rows(m, cte.FAMILY_MEMBERSHIP, cwt.WON_STAGE_FLAG_NOT_TRUE)
+    assert (row["deal_id"], row["deal_name"]) == ("5", "Acme renewal")
+    assert [r["deal_id"] for r in cte.query(m, q="acme")["rows"]] == ["5"]
+
+
 def _client(monkeypatch):
     from fastapi.testclient import TestClient
     import api.server as server

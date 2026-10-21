@@ -441,7 +441,8 @@ def build_crm_truth_exceptions(*, now: datetime | None = None,
                 cert["certified_no_longer_won"]),
         })
 
-    window_summaries = [_window_summary(w, rows, members_by_window, dataset)
+    window_summaries = [_window_summary(w, rows, members_by_window, dataset,
+                                        identity_readable)
                         for w in windows]
 
     if not identity_readable:
@@ -510,7 +511,8 @@ def _totals(rows, identity_readable) -> dict:
             "by_family": by_family}
 
 
-def _window_summary(w, rows, members_by_window, dataset) -> dict:
+def _window_summary(w, rows, members_by_window, dataset,
+                    identity_readable=True) -> dict:
     """One window: its canonical verdicts, the blockers among its members, and
     whether every withheld customer / revenue verdict is explained."""
     wid = _window_id(w["window"])
@@ -573,6 +575,7 @@ def _window_summary(w, rows, members_by_window, dataset) -> dict:
         return {"explained": need[1], "by": need[0], "reason": reason}
 
     outcomes = w.get("outcomes") or {}
+    identity_known = members is not None and identity_readable
     return {
         "window": wid,
         "window_type": w["window"]["window_type"],
@@ -583,12 +586,14 @@ def _window_summary(w, rows, members_by_window, dataset) -> dict:
             "undated_included"),
         "publication": pub,
         "blocker_deals": {
+            # Identity evidence unreadable: no identity row could be built, so
+            # these counts are unknown — None, never 0.
             "customer_identity_unresolved": (len(identity_unresolved)
-                                             if members is not None else None),
+                                             if identity_known else None),
             "customer_identity_stale": (len(stale)
-                                        if members is not None else None),
+                                        if identity_known else None),
             "customer_identity_any": (
-                len(deals(FAMILY_IDENTITY)) if members is not None else None),
+                len(deals(FAMILY_IDENTITY)) if identity_known else None),
             "revenue_unproven": (len(revenue)
                                  if members is not None else None),
             "won_deal_membership": len(membership),

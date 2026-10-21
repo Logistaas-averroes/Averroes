@@ -160,11 +160,19 @@ def window_checks(a: Audit, model: dict) -> list:
                     f"{e}")
         b, c = w["blocker_deals"], w["canonical_counts"]
         if w["membership_published"]:
-            for mine, theirs in (
-                    ("customer_identity_unresolved",
-                     "unresolved_customer_identity"),
-                    ("customer_identity_stale", "stale_customer_identity"),
-                    ("revenue_unproven", "deals_without_proven_usd")):
+            pairs = [("revenue_unproven", "deals_without_proven_usd")]
+            if model.get("identity_evidence_readable"):
+                pairs += [("customer_identity_unresolved",
+                           "unresolved_customer_identity"),
+                          ("customer_identity_stale",
+                           "stale_customer_identity")]
+            else:
+                # No identity row can exist; the counts must say unknown.
+                a.check("unreadable_identity_counts_are_null",
+                        b["customer_identity_unresolved"] is None
+                        and b["customer_identity_stale"] is None
+                        and b["customer_identity_any"] is None, w["window"])
+            for mine, theirs in pairs:
                 a.check("window_counts_reconcile_with_truth_service",
                         b[mine] == c[theirs],
                         f"{w['window']}: workbench {mine}={b[mine]}, truth "
@@ -255,12 +263,17 @@ def membership_checks(a: Audit, model: dict, universe: dict,
     for w in model["windows"]:
         wid = w["window"]
         hit = {r["deal_id"] for r in rows if wid in r["affected_windows"]}
+        # Only the missing-close-date rows: an undated deal may also carry a
+        # conflict row, which rightly reaches All Time too.
+        hit_undated = {r["deal_id"] for r in rows
+                       if r["reason_code"] == cwt.CLOSE_MISSING
+                       and wid in r["affected_windows"]}
         bounded = w.get("undated_included") is False
         # An undated won deal blocks every window that cannot include it,
         # whichever reason that window's verdict shows first.
         a.check("undated_deal_is_named_in_every_bounded_window",
-                (hit & undated) == (undated if bounded else set()),
-                f"{wid}: named {sorted(hit & undated)[:10]}, expected "
+                hit_undated == (undated if bounded else set()),
+                f"{wid}: named {sorted(hit_undated)[:10]}, expected "
                 f"{sorted(undated if bounded else set())[:10]}")
         if bounded and undated:
             a.check("undated_deal_withholds_every_bounded_window",
@@ -332,12 +345,18 @@ def serialization_checks(a: Audit, model: dict) -> dict:
                     and ("family" not in f
                          or r["exception_family"] == f["family"])
                     and ("reason" not in f or r["reason_code"] == f["reason"])]
-        api = cte.query(model, limit=cte.MAX_LIMIT, **f)
-        got = [r["row_id"] for r in api["rows"]]
+        # Every page of the filtered API read, not only the first.
+        got, off, total = [], 0, None
+        while True:
+            api = cte.query(model, limit=cte.MAX_LIMIT, offset=off, **f)
+            total = api["pagination"]["total"]
+            if not api["rows"]:
+                break
+            got.extend(r["row_id"] for r in api["rows"])
+            off += len(api["rows"])
         a.check("api_filter_matches_the_model",
-                got == expected and api["pagination"]["total"]
-                == len(expected), f"{f}: api {len(got)}, model "
-                                  f"{len(expected)}")
+                got == expected and total == len(expected),
+                f"{f}: api {len(got)}, model {len(expected)}")
         a.check("csv_filter_matches_the_api",
                 csv_ids(cte.filter_rows(model, **f)) == got, str(f))
         checked += 1

@@ -1421,6 +1421,14 @@ problem was, and the CRM team could not see it.
   - future-dated findings are disclosed through `close_date_state`;
   - the workbench's own importers are fenced;
   - numeric-only HubSpot links, and whitespace-prefixed formula cells.
+* PR review round (Copilot). Five findings, all fixed:
+  - the audit's undated check reads only missing-close-date rows, so an
+    undated conflict deal no longer fails a truthful workbench;
+  - filter reconciliation reads every API page past `MAX_LIMIT`;
+  - window identity counts are `null` while association evidence is
+    unreadable, and the audit then reports unavailable, not a violation;
+  - the won-definition snapshot rows carry `deal_name`;
+  - the UI's filter options stay retryable after an unavailable response.
 * Canonical-owner change, publication unchanged: `company_identity_inputs`
   returns `stale_reasons` (`stale` is exactly its keys), and
   `scan_certification_sets` is the one place the certified set is compared.

@@ -13415,7 +13415,9 @@ function _cteCount(value) {
 }
 
 function _cteFillOptions(data) {
-  if (_cteOptionsLoaded) return;
+  // An unavailable response carries no windows or vocabulary: stay retryable
+  // so Refresh can populate the filters once the evidence recovers.
+  if (_cteOptionsLoaded || !Array.isArray(data.windows) || !data.reason_vocabulary) return;
   const winSel = document.getElementById("cte-window");
   const famSel = document.getElementById("cte-family");
   const rsnSel = document.getElementById("cte-reason");
