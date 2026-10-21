@@ -56,10 +56,13 @@ PRODUCTION_SURFACES = ("api/server.py", "static/app.js")
 #: one: an audit is not a production page, but "any script" would be.
 CERTIFICATION_CONSUMERS = (
     "scripts/audit_deal_company_association_coverage.py",   # PR-ADS-161D2
-    # PR-ADS-191 — the CRM Truth Exceptions workbench and its audit. Read by
-    # the admin-only /api/audit/crm-truth-exceptions routes; they surface
-    # blockers, publication statuses and reasons — never a customer or
-    # revenue total (enforced by audit_crm_truth_exceptions).
+    # PR-ADS-191 — the CRM Truth Exceptions workbench and its audit. The
+    # workbench is itself a reader one hop from the service, so its OWN
+    # consumers are named too: only api/server.py's two admin-only routes
+    # and its audit may import it (audit_crm_truth_exceptions,
+    # ``workbench_consumers_are_named``). Its window summaries carry
+    # publication statuses and blocker counts, no outcomes / attribution /
+    # membership block (``window_summary_republishes_no_total``).
     "services/crm_truth_exceptions_service.py",
     "scripts/audit_crm_truth_exceptions.py",
 )

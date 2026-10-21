@@ -47,8 +47,20 @@ A deal is attributed to a window only through that window's own
 `membership.deal_ids`. The truth service publishes those ids only when the
 window's deal count is published, so where the deal count is withheld the
 workbench attributes nothing to the window either: withheld means absent here
-too. That window's blocker is then the deal-count reason (an undated won deal,
-or a won-definition conflict), which the workbench names.
+too. That window's blocker is then the deal-count reason, which the workbench
+names:
+
+- **An undated won deal** withholds the deal count of every window except
+  All Time. Its `missing_close_date` row is attached to every such window
+  (those whose `membership.undated_included` is false), whichever reason that
+  window's verdict happens to show first. A won-definition conflict takes
+  precedence in the verdict but does not lift the undated block, so both are
+  named.
+- **A won-definition conflict** is attached to exactly the windows whose
+  `membership.won_definition_conflicts` list it.
+- **A future-dated won deal** (`close_date_state = invalid_close_date`) is in
+  no window yet. Its findings are listed with `affected_windows: []`: they
+  block no total today.
 
 The only canonical-owner change in this PR: `company_identity_inputs` now also
 returns `stale_reasons`, which names why each stale deal is stale. The `stale`
@@ -89,14 +101,31 @@ names, and that any extra deal is a negative or invalid amount.
 | `scan_not_current` | The latest full scan is not successful and complete, or its certified set or recorded population does not match the current won population |
 | `evidence_unavailable` | The ledger, its coverage or the association evidence cannot be read or proven |
 
+`certified_with_findings` counts every listed finding, a future-dated one
+included. A row's `affected_windows` says what it blocks today.
+
 **Unavailable is never zero:**
 
 - **Ledger unreadable, or ledger coverage unproven:**
   - the JSON route returns `available: false`, `rows: null` and `totals: null`;
   - the CSV route returns 503;
   - the UI renders "Evidence unavailable", never "0 issues".
-- **Association evidence unreadable:** the identity totals are `null` and the
-  revenue rows are still listed.
+- **Association evidence unreadable:**
+  - the identity family's totals, `totals.rows` and
+    `totals.deals_with_any_exception` are `null`;
+  - `complete_families` names the families whose rows are complete
+    (revenue proof and won-deal membership);
+  - an unfiltered list, or any filter that reaches the identity family, returns
+    `rows: null` (JSON) or 503 (CSV). A partial list would read as the whole
+    population;
+  - filtered by `revenue_proof` or `won_deal_membership`, the rows are listed.
+
+**The won population is not the closed-won count.** `won_deal_population`
+(basis `hs_is_closed_won_true_any_close_date`) is every deal HubSpot flags won,
+at any close date. It is the population the association scan must certify,
+and the scan verdict carries the same count. It is not the All Time
+`closed_won_deals` total, which excludes future-dated deals and is withheld
+while the won flag and won stage disagree. The UI labels it as such.
 
 ## 6. API contract
 
@@ -116,7 +145,8 @@ The response carries:
 
 - `status` and `generated_at`;
 - `source_freshness` and `association_scan`;
-- `won_deal_population` and `dataset_blockers`;
+- `won_deal_population` (with its basis), `dataset_blockers` and
+  `complete_families`;
 - `totals` by family and reason;
 - `windows`: each window's publication verdict, its blocker counts, the truth
   service's own counts and whether each withheld verdict is explained;
@@ -125,8 +155,11 @@ The response carries:
 
 **CSV:** the same filters and the same read model (one snapshot), every row,
 UTF-8, stable columns (`CSV_COLUMNS`). A cell beginning with `=`, `+`, `-`, `@`,
-a tab or a carriage return is prefixed with an apostrophe, so a spreadsheet will
-not execute it.
+a tab or a carriage return, after any leading whitespace, is prefixed with an
+apostrophe, so a spreadsheet will not execute it.
+
+**HubSpot links** are built only from a numeric portal id and a numeric deal
+id; anything else yields no link.
 
 **Fields that are never invented:**
 
@@ -140,17 +173,26 @@ not execute it.
 
 - **Rows:** every row's reason belongs to its family and has an explanation.
 - **Withheld verdicts:** every withheld customer or revenue verdict, in every
-  window, is explained by a row or a dataset blocker.
+  window, is explained by a row or a dataset blocker. An undated or conflict
+  verdict is explained only when the named deals reconcile with the truth
+  service's own `undated_won_deals` count and `won_definition_conflicts` list.
 - **Published totals:** no published total has an unresolved blocker among its
   members.
 - **Window counts:** each window's blocker counts equal the truth service's
   `unresolved_customer_identity`, `stale_customer_identity` and
   `deals_without_proven_usd`.
-- **Independent readers:** identity rows equal the coverage audit's independent
-  derivation from the raw association rows, and revenue rows contain every deal
-  PR-ADS-155 names.
+- **Independent readers:**
+  - identity rows equal the coverage audit's independent derivation from the
+    raw association rows;
+  - revenue rows contain every deal PR-ADS-155 names;
+  - undated and won-definition rows equal the audit's own derivation from the
+    raw ledger rows, and every undated deal is named in every window that
+    cannot include it, not only where it is the reason the verdict shows.
+- **Consumers:** only `api/server.py` and the audit import the workbench
+  (`workbench_consumers_are_named`). The workbench reads the canonical truth
+  service, so it is fenced like that service.
 - **Serialization:** paging, every filter and the CSV export lose and duplicate
-  no row.
+  no row. When a family is unreadable, the unfiltered list is absent.
 - **Existing audits:** `audit_customer_closed_won_truth` and
   `audit_deal_company_association_coverage` hold.
 
@@ -161,9 +203,11 @@ Exit codes:
 - **1:** a contract is violated.
 - **2:** the evidence, or an embedded audit, is unavailable.
 
-## 8. Deferred
+## 8. Deferred and known limitations
 
 **"View blockers" links from withheld metrics.** No production page shows the
 canonical customer metric yet (PR-ADS-161E migrates readers). Revenue-withheld
 messages exist only on legacy readers, so linking from them would mean
 unrelated page refactors. The workbench is reachable from System Status.
+
+**Company names are not shown.** Association ingestion stores ids only.

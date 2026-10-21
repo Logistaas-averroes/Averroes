@@ -172,8 +172,8 @@ MAX_LIMIT = 1000
 #: Stable CSV column order.
 CSV_COLUMNS = (
     "row_id", "deal_id", "deal_name", "exception_family", "reason_code",
-    "explanation", "hs_is_closed_won", "deal_close_date", "amount_raw",
-    "deal_currency_code", "revenue_usd", "currency_proof_status",
+    "explanation", "hs_is_closed_won", "deal_close_date", "close_date_state",
+    "amount_raw", "deal_currency_code", "revenue_usd", "currency_proof_status",
     "resolved_company_id", "associated_company_ids", "association_identity_state",
     "affected_windows", "affected_metrics", "latest_success_started_at",
     "latest_attempt_status", "latest_attempt_started_at",
@@ -221,8 +221,10 @@ def _hubspot_url(deal_id, portal_id):
     from services.canonical_revenue_service import (  # noqa: PLC0415
         _HUBSPOT_DEAL_URL,
     )
-    return (_HUBSPOT_DEAL_URL.format(portal_id=portal_id, deal_id=deal_id)
-            if portal_id and deal_id else None)
+    # HubSpot ids are numeric; anything else is not interpolated into a link.
+    if not (str(portal_id or "").isdigit() and str(deal_id or "").isdigit()):
+        return None
+    return _HUBSPOT_DEAL_URL.format(portal_id=portal_id, deal_id=deal_id)
 
 
 def _unavailable(now, reason, detail, *, freshness=None, scan=None) -> dict:
@@ -307,9 +309,13 @@ def build_crm_truth_exceptions(*, now: datetime | None = None,
     def deal_count_windows(deal_id, reason) -> list:
         out = []
         for w in windows:
-            deal_pub = _publication(w, METRIC_DEALS)
             if reason == cwt.CLOSE_MISSING:
-                if deal_pub["reason"] == cwt.R_UNDATED_WON_DEALS:
+                # An undated won deal withholds the deal count of EVERY window
+                # that cannot include it (all but All Time), whatever reason
+                # that window happens to show first: a won-definition conflict
+                # takes precedence in the verdict but does not lift this one.
+                # ``undated_included`` is the truth service's own flag.
+                if (w.get("membership") or {}).get("undated_included") is False:
                     out.append(_window_id(w["window"]))
             else:
                 conflicts = (w.get("membership") or {}).get(
@@ -361,6 +367,12 @@ def build_crm_truth_exceptions(*, now: datetime | None = None,
             "association_identity_state": identity,
             "affected_windows": sorted(windows_hit),
             "affected_metrics": list(FAMILY_METRICS[family]),
+            # The canonical close-date state. ``invalid_close_date`` (a close
+            # after now) is a deal no window contains yet: a finding that
+            # blocks no total today. An empty ``affected_windows`` on any other
+            # row means every window that could hold it withholds its deal
+            # count — the membership blocker is listed instead.
+            "close_date_state": cwt.close_date_state(base, now),
             "latest_success_started_at": obs.get("last_success_started_at"),
             "latest_success_at": obs.get("last_success_at"),
             "latest_attempt_status": obs.get("last_attempt_status"),
@@ -450,9 +462,19 @@ def build_crm_truth_exceptions(*, now: datetime | None = None,
         "source_freshness": freshness,
         "association_scan": scan,
         "identity_evidence_readable": identity_readable,
+        # Every deal HubSpot flags won (hs_is_closed_won IS TRUE), any close
+        # date — the population the association scan must certify, and the
+        # same count the scan verdict carries. NOT the All Time closed-won
+        # count: that excludes future-dated deals, and is withheld while the
+        # won flag and won stage disagree.
         "won_deal_population": len(won_ids),
+        "won_deal_population_basis": "hs_is_closed_won_true_any_close_date",
         "dataset_blockers": dataset,
         "totals": _totals(rows, identity_readable),
+        # Families whose rows are complete. Identity evidence unreadable: the
+        # identity family is unknown, so an unfiltered list is not complete.
+        "complete_families": (list(FAMILIES) if identity_readable else
+                              [FAMILY_REVENUE, FAMILY_MEMBERSHIP]),
         "windows": window_summaries,
         "rows": rows,
         "hubspot_portal_id_configured": bool(portal_id),
@@ -481,8 +503,10 @@ def _totals(rows, identity_readable) -> dict:
                       else len({r["deal_id"] for r in fam})),
             "by_reason": dict(sorted(reasons.items())),
         }
-    return {"rows": len(rows),
-            "deals_with_any_exception": len({r["deal_id"] for r in rows}),
+    # One family unknown makes the cross-family totals unknown too.
+    return {"rows": len(rows) if identity_readable else None,
+            "deals_with_any_exception": (len({r["deal_id"] for r in rows})
+                                         if identity_readable else None),
             "by_family": by_family}
 
 
@@ -504,6 +528,11 @@ def _window_summary(w, rows, members_by_window, dataset) -> dict:
     stale = deals(FAMILY_IDENTITY, cwt.STALE_EVIDENCE_REASONS)
     revenue = deals(FAMILY_REVENUE)
     membership = deals(FAMILY_MEMBERSHIP)
+    undated = deals(FAMILY_MEMBERSHIP, (cwt.CLOSE_MISSING,))
+    conflicts = deals(FAMILY_MEMBERSHIP, (cwt.WON_FLAG_OTHER_STAGE,
+                                          cwt.WON_STAGE_FLAG_NOT_TRUE))
+    canonical_conflicts = {str(c.get("deal_id")) for c in (
+        w.get("membership") or {}).get("won_definition_conflicts") or []}
     codes = {b["code"] for b in dataset}
     pub = {m: _publication(w, m) for m in (METRIC_DEALS, METRIC_CUSTOMERS,
                                            METRIC_REVENUE)}
@@ -527,11 +556,12 @@ def _window_summary(w, rows, members_by_window, dataset) -> dict:
                 FAMILY_IDENTITY, (cwt.CUSTOMER_ASSOCIATION_UNAVAILABLE,)))),
             cwt.R_CUSTOMER_IDENTITY_STALE: ("rows", bool(stale)),
             cwt.R_REVENUE_UNPROVEN: ("rows", bool(revenue)),
-            cwt.R_UNDATED_WON_DEALS: ("rows", bool(deals(
-                FAMILY_MEMBERSHIP, (cwt.CLOSE_MISSING,)))),
-            cwt.R_WON_DEFINITION_CONFLICT: ("rows", bool(deals(
-                FAMILY_MEMBERSHIP, (cwt.WON_FLAG_OTHER_STAGE,
-                                    cwt.WON_STAGE_FLAG_NOT_TRUE)))),
+            # Membership reasons reconcile against the truth service's own
+            # count and list, not against the rows' own attachment.
+            cwt.R_UNDATED_WON_DEALS: ("rows", 0 < len(undated) == (
+                (w.get("membership") or {}).get("undated_won_deals"))),
+            cwt.R_WON_DEFINITION_CONFLICT: ("rows", bool(conflicts) and set(
+                conflicts) == canonical_conflicts),
             cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT: (
                 "dataset", DATASET_SCAN_NOT_CURRENT in codes),
             cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE: (
@@ -549,12 +579,16 @@ def _window_summary(w, rows, members_by_window, dataset) -> dict:
         "window_key": w["window"]["window_key"],
         "label": w["window"].get("label"),
         "membership_published": members is not None,
+        "undated_included": (w.get("membership") or {}).get(
+            "undated_included"),
         "publication": pub,
         "blocker_deals": {
             "customer_identity_unresolved": (len(identity_unresolved)
                                              if members is not None else None),
             "customer_identity_stale": (len(stale)
                                         if members is not None else None),
+            "customer_identity_any": (
+                len(deals(FAMILY_IDENTITY)) if members is not None else None),
             "revenue_unproven": (len(revenue)
                                  if members is not None else None),
             "won_deal_membership": len(membership),
@@ -613,6 +647,15 @@ def filter_rows(model: dict, *, window=None, family=None, reason=None,
     rows = model.get("rows")
     if rows is None:
         return None
+    complete = set(model.get("complete_families") or FAMILIES)
+    vocab = reason_vocabulary()
+    scope = ({family} if family is not None else
+             {f for f, rs in vocab.items() if reason in rs}
+             if reason is not None else set(FAMILIES))
+    if not scope <= complete:
+        # Part of the asked-for population could not be read: no list at all
+        # rather than a partial one that reads as complete.
+        return None
     needle = (q or "").strip().lower()
     out = []
     for r in rows:
@@ -658,7 +701,9 @@ def _cell(value) -> str:
     if isinstance(value, (list, tuple)):
         value = "; ".join(str(v) for v in value)
     text = str(value)
-    if text.startswith(_FORMULA_PREFIXES):
+    # Spreadsheets skip leading whitespace before evaluating a formula.
+    if text.startswith(_FORMULA_PREFIXES) or text.lstrip(
+            " \n\r\t").startswith(_FORMULA_PREFIXES):
         return "'" + text
     return text
 

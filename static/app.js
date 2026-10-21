@@ -13448,7 +13448,7 @@ function renderCrmTruthSummary(data) {
       <span style="font-size:12px;color:var(--text-muted)">Generated ${escapeHtml(data.generated_at || "")}</span>
     </div>
     <div class="freshness-summary-grid">
-      <div><span>Won-deal population</span><strong>${_cteCount(data.won_deal_population)}</strong></div>
+      <div><span>Deals flagged won in HubSpot (any close date; not the closed-won count)</span><strong>${_cteCount(data.won_deal_population)}</strong></div>
       <div><span>Association scan</span><strong>${verdict.current === true ? "Current" : escapeHtml(verdict.reason || "Not current")}</strong></div>
       <div><span>Last certified scan</span><strong>${escapeHtml(scan.last_complete_scan_started_at || "None recorded")}</strong></div>
       <div><span>Customer-identity blockers</span><strong>${famDeals("customer_identity")} deal(s)</strong></div>
@@ -13464,18 +13464,26 @@ function renderCrmTruthWindows(data) {
   const pubCell = (p) => p.status === "published"
     ? '<span class="status-pill status-pill--ok">Published</span>'
     : `<span class="status-pill status-pill--missing">${escapeHtml(p.status || "unknown")}</span> <small>${escapeHtml(p.reason || "")}</small>`;
+  const explainedCell = (w) => {
+    const bad = ["customers", "revenue_usd"].filter((m) => ((w.explanation || {})[m] || {}).explained !== true);
+    return bad.length
+      ? `<span class="status-pill status-pill--missing">Not explained</span> <small>${escapeHtml(bad.join(", "))}</small>`
+      : '<span class="status-pill status-pill--ok">Explained</span>';
+  };
   const rows = data.windows.map((w) => `
     <tr>
       <td>${escapeHtml(w.label || w.window)} <small>${escapeHtml(w.window_type)}</small></td>
       <td>${pubCell(w.publication.customers)}</td>
       <td>${pubCell(w.publication.revenue_usd)}</td>
-      <td>${_cteCount(w.blocker_deals.customer_identity_unresolved)}</td>
+      <td>${_cteCount(w.blocker_deals.customer_identity_any)}</td>
       <td>${_cteCount(w.blocker_deals.revenue_unproven)}</td>
+      <td>${_cteCount(w.blocker_deals.won_deal_membership)}</td>
+      <td>${explainedCell(w)}</td>
     </tr>`).join("");
   return `
     <div class="dataset-freshness-table-wrap" style="margin-bottom:var(--space-4)">
       <table class="data-table dataset-freshness-table">
-        <thead><tr><th>Window</th><th>Customers</th><th>Revenue (USD)</th><th>Identity blockers</th><th>Revenue blockers</th></tr></thead>
+        <thead><tr><th>Window</th><th>Customers</th><th>Revenue (USD)</th><th>Identity blockers</th><th>Revenue blockers</th><th>Membership blockers</th><th>Verdict explained</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
@@ -13483,6 +13491,10 @@ function renderCrmTruthWindows(data) {
 
 function renderCrmTruthRows(data) {
   if (data.rows === null || data.rows === undefined) {
+    if (data.available && Array.isArray(data.complete_families)) {
+      const readable = data.complete_families.map((f) => CTE_FAMILY_LABELS[f] || f).join(" or ");
+      return `<p class="empty-state">Customer-identity evidence could not be read, so this list would be incomplete. Filter by ${escapeHtml(readable)} to see those rows. This is not "0 issues".</p>`;
+    }
     return '<p class="empty-state">Evidence unavailable — the exception list cannot be produced. This is not "0 issues".</p>';
   }
   const pg = data.pagination || {};
@@ -13509,7 +13521,8 @@ function renderCrmTruthRows(data) {
         <td>${amount}</td>
         <td>${r.revenue_usd === null || r.revenue_usd === undefined ? "Not proven" : escapeHtml(String(r.revenue_usd))}</td>
         <td>${companies}</td>
-        <td>${r.affected_windows.length}</td>
+        <td>${r.affected_windows.length ? r.affected_windows.length
+          : (r.close_date_state === "invalid_close_date" ? "None yet <small>(close date after today)</small>" : "None published <small>(deal count withheld)</small>")}</td>
         <td>${link}</td>
       </tr>`;
   }).join("");

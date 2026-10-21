@@ -366,6 +366,66 @@ def test_12_d_the_ui_never_renders_unavailable_as_zero_issues():
            '"admin")' in src
 
 
+def _identity_unreadable_model():
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=Q4, **_unpriced("2"))]
+    u = _universe(rows, [], [])
+    u["company_associations"] = {"available": False, "error": "boom"}
+    return cte.build_crm_truth_exceptions(now=NOW, universe=u)
+
+
+def test_12_e_a_partial_population_is_never_listed_as_complete():
+    """Identity evidence unreadable: the revenue rows are still known, but an
+    unfiltered list (or its total) would read as the whole population."""
+    m = _identity_unreadable_model()
+    assert (m["totals"]["rows"], m["totals"]["deals_with_any_exception"]) == (
+        None, None)
+    assert m["complete_families"] == [cte.FAMILY_REVENUE, cte.FAMILY_MEMBERSHIP]
+    for kw in ({}, {"family": cte.FAMILY_IDENTITY},
+               {"reason": cwt.CUSTOMER_NO_COMPANY},
+               {"window": WINDOW}, {"q": "1"}):
+        page = cte.query(m, **kw)
+        assert page["rows"] is None and page["pagination"]["total"] is None, kw
+    page = cte.query(m, family=cte.FAMILY_REVENUE)
+    assert [r["deal_id"] for r in page["rows"]] == ["2"]
+    assert [r["deal_id"] for r in cte.query(
+        m, reason="unknown_currency")["rows"]] == ["2"]
+
+
+def test_12_f_the_csv_refuses_a_partial_population(monkeypatch):
+    m = _identity_unreadable_model()
+    monkeypatch.setattr(cte, "build_crm_truth_exceptions", lambda: m)
+    client = _client(monkeypatch)
+    path = "/api/audit/crm-truth-exceptions.csv"
+    assert client.get(path, headers=_AUTH).status_code == 503
+    assert client.get(path, params={"family": "customer_identity"},
+                      headers=_AUTH).status_code == 503
+    ok = client.get(path, params={"family": "revenue_proof"}, headers=_AUTH)
+    assert ok.status_code == 200
+    assert [r["deal_id"] for r in csv.DictReader(io.StringIO(
+        ok.content.decode("utf-8")))] == ["2"]
+    js = client.get("/api/audit/crm-truth-exceptions", headers=_AUTH).json()
+    assert (js["available"], js["rows"], js["totals"]["rows"]) == (
+        True, None, None)
+
+
+def test_12_g_the_ui_names_a_partial_population_and_withheld_counts():
+    src = (_ROOT / "static/app.js").read_text(encoding="utf-8")
+    body = src.split("function renderCrmTruthRows(data)")[1].split(
+        "\nasync function ")[0]
+    assert "data.complete_families" in body
+    assert "Customer-identity evidence could not be read" in body
+    summary = src.split("function renderCrmTruthSummary(data)")[1].split(
+        "\nfunction ")[0]
+    assert "Deals flagged won in HubSpot (any close date; not the closed-won " \
+        "count)" in summary
+    windows = src.split("function renderCrmTruthWindows(data)")[1].split(
+        "\nfunction ")[0]
+    # Identity blockers include stale evidence, not only unresolved deals, and
+    # every window says whether its withheld verdicts are explained.
+    assert "customer_identity_any" in windows and ".explained" in windows
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # §5 — windows, pagination, CSV, HTTP
 # ═════════════════════════════════════════════════════════════════════════════
@@ -418,6 +478,149 @@ def test_14_pagination_is_stable_with_no_gap_or_duplicate(ledger, monkeypatch):
     assert pages == [r["row_id"] for r in m["rows"]] and len(pages) == 12
     again = cte.query(_model(), limit=5, offset=5)
     assert [r["row_id"] for r in again["rows"]] == pages[5:10]
+
+
+def _bounded(model):
+    return [w["window"] for w in model["windows"]
+            if w["undated_included"] is False]
+
+
+def test_23_a_an_undated_deal_blocks_every_bounded_window_and_masks_none():
+    """An undated won deal withholds every window's deal count but All Time's.
+    A Q4 no-company deal is then attributed to no withheld window (withheld
+    means absent) and to All Time, where the truth service publishes the
+    membership."""
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=None)]
+    u = _universe(rows, [_ok_obs("1", 0, 0), _ok_obs("2", 1, 1)],
+                  [{"deal_id": "2", "company_id": "901"}])
+    m = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    [undated] = _rows(m, cte.FAMILY_MEMBERSHIP, cwt.CLOSE_MISSING)
+    assert undated["deal_id"] == "2"
+    assert undated["close_date_state"] == cwt.CLOSE_MISSING
+    bounded = _bounded(m)
+    assert QUARTER in bounded and WINDOW not in bounded
+    assert undated["affected_windows"] == sorted(bounded)
+    [identity] = _rows(m, cte.FAMILY_IDENTITY, deal="1")
+    assert identity["reason_code"] == cwt.CUSTOMER_NO_COMPANY
+    assert QUARTER not in identity["affected_windows"]
+    assert WINDOW in identity["affected_windows"]
+    q = _window(m, QUARTER)
+    assert q["publication"]["closed_won_deals"]["reason"] == \
+        cwt.R_UNDATED_WON_DEALS
+    assert q["explanation"]["customers"] == {
+        "explained": True, "by": "rows", "reason": cwt.R_UNDATED_WON_DEALS}
+    assert _window(m, WINDOW)["publication"]["customers"]["reason"] == \
+        cwt.R_CUSTOMER_IDENTITY
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.membership_checks(a, m, u, NOW)
+    audit.window_checks(a, m)
+    assert a.violations == []
+
+
+def test_23_b_a_conflict_does_not_mask_an_undated_blocker():
+    """The quarter's verdict shows the won-definition conflict first; the
+    undated deal still withholds it and is still named there. Fixing only the
+    conflict in HubSpot would leave the quarter withheld."""
+    rows = [ledger_row("1", deal_close_date=Q4, deal_stage_id="999"),
+            ledger_row("2", deal_close_date=None)]
+    u = _universe(rows, [_ok_obs("1", 1, 1), _ok_obs("2", 1, 1)],
+                  [{"deal_id": "1", "company_id": "901"},
+                   {"deal_id": "2", "company_id": "902"}])
+    m = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    q = _window(m, QUARTER)
+    assert q["publication"]["closed_won_deals"]["reason"] == \
+        cwt.R_WON_DEFINITION_CONFLICT
+    named = {r["deal_id"]: r["reason_code"]
+             for r in _rows(m, cte.FAMILY_MEMBERSHIP)
+             if QUARTER in r["affected_windows"]}
+    assert named == {"1": cwt.WON_FLAG_OTHER_STAGE, "2": cwt.CLOSE_MISSING}
+    assert q["explanation"]["customers"]["explained"] is True
+    # The All Time deal count is withheld for the conflict. The population
+    # is the raw won-flag count the scan certifies, and says so.
+    assert _window(m, WINDOW)["publication"]["closed_won_deals"]["status"] \
+        == cwt.WITHHELD
+    assert (m["won_deal_population"], m["won_deal_population_basis"]) == (
+        2, "hs_is_closed_won_true_any_close_date")
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.membership_checks(a, m, u, NOW)
+    audit.window_checks(a, m)
+    assert a.violations == []
+
+
+def test_23_c_the_audit_catches_an_undated_blocker_masked_by_a_conflict():
+    """Counterfactual: the pre-fix attachment (an undated row only where the
+    window's own reason is "undated") hides deal 2 from the quarter. The
+    audit's ledger derivation refuses it."""
+    rows = [ledger_row("1", deal_close_date=Q4, deal_stage_id="999"),
+            ledger_row("2", deal_close_date=None)]
+    u = _universe(rows, [_ok_obs("1", 1, 1), _ok_obs("2", 1, 1)],
+                  [{"deal_id": "1", "company_id": "901"},
+                   {"deal_id": "2", "company_id": "902"}])
+    m = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    reasons = {w["window"]: w["publication"]["closed_won_deals"]["reason"]
+               for w in m["windows"]}
+    for r in _rows(m, cte.FAMILY_MEMBERSHIP, cwt.CLOSE_MISSING):
+        r["affected_windows"] = [w for w in r["affected_windows"]
+                                 if reasons[w] == cwt.R_UNDATED_WON_DEALS]
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.membership_checks(a, m, u, NOW)
+    assert a.checks["undated_deal_is_named_in_every_bounded_window"] is False
+    # And a lost conflict row is caught from the ledger too.
+    m2 = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    m2["rows"] = [r for r in m2["rows"]
+                  if r["reason_code"] != cwt.WON_FLAG_OTHER_STAGE]
+    a2 = audit.Audit()
+    audit.membership_checks(a2, m2, u, NOW)
+    assert a2.checks["won_definition_rows_match_the_ledger"] is False
+
+
+def test_23_d_a_future_dated_finding_is_listed_and_blocks_no_window():
+    future = (NOW + timedelta(days=30)).isoformat()
+    rows = [ledger_row("1", deal_close_date=Q4),
+            ledger_row("2", deal_close_date=future)]
+    u = _universe(rows, [_ok_obs("1", 1, 1), _ok_obs("2", 0, 0)],
+                  [{"deal_id": "1", "company_id": "901"}])
+    m = cte.build_crm_truth_exceptions(now=NOW, universe=u)
+    [row] = _rows(m, deal="2")
+    assert (row["reason_code"], row["affected_windows"],
+            row["close_date_state"]) == (cwt.CUSTOMER_NO_COMPANY, [],
+                                         cwt.CLOSE_INVALID)
+    for w in m["windows"]:
+        assert w["publication"]["customers"]["status"] == cwt.PUBLISHED, \
+            w["window"]
+    # A finding, not a blocker: listed, and no window names it.
+    assert m["status"] == cte.STATUS_CERTIFIED_WITH_FINDINGS
+    assert cte.query(m, window=WINDOW)["rows"] == []
+
+
+def test_23_e_only_the_admin_routes_and_the_audit_import_the_workbench(
+        monkeypatch):
+    from scripts import audit_crm_truth_exceptions as audit
+    a = audit.Audit()
+    audit.structural_checks(a)
+    assert a.checks["workbench_consumers_are_named"] is True
+    # Counterfactual: a new production page reads the workbench.
+    real = audit._imports_of
+    monkeypatch.setattr(audit, "_imports_of", lambda rel: real(rel) | (
+        {"services.crm_truth_exceptions_service"}
+        if rel == "services/canonical_revenue_service.py" else set()))
+    b = audit.Audit()
+    audit.structural_checks(b)
+    assert b.checks["workbench_consumers_are_named"] is False
+
+
+def test_23_f_hubspot_links_and_csv_cells_are_safe():
+    assert cte._hubspot_url("123", "456") is not None
+    for deal, portal in (("12/../x", "456"), ("123", "45?x"), ("", "456"),
+                         ("123", None)):
+        assert cte._hubspot_url(deal, portal) is None
+    for text in (" =1+1", "\n=cmd", "\t+x", "  @SUM(A1)"):
+        assert cte._cell(text).startswith("'"), text
+    assert cte._cell("Acme -") == "Acme -"
 
 
 def _client(monkeypatch):
@@ -625,8 +828,26 @@ def test_20_the_workbench_republishes_no_total():
                                     [{"deal_id": "1", "company_id": "901"}]))
     for w in m["windows"]:
         assert not {"outcomes", "attribution", "membership"} & set(w)
-    flat = json.dumps({k: v for k, v in m.items() if k != "rows"})
-    assert '"customers": 1' not in flat and "revenue_usd\": 1000" not in flat
+
+    # No metric key anywhere in the model carries a number: a customer,
+    # revenue or deal-count key holds a publication verdict, never a total.
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("customers", "revenue_usd", "closed_won_deals",
+                         "confirmed_customer_lower_bound", "by_campaign"):
+                    assert not isinstance(v, (int, float)) or isinstance(
+                        v, bool), f"{path}/{k} = {v}"
+                    assert v is None or isinstance(v, dict), f"{path}/{k}"
+                walk(v, f"{path}/{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+
+    walk({k: v for k, v in m.items() if k != "rows"})
+    # The rows' revenue_usd is the per-deal proven value, never a total.
+    assert all(r["exception_family"] != cte.FAMILY_REVENUE
+               or r["revenue_usd"] is None for r in m["rows"])
 
 
 def test_21_rows_use_only_canonical_reason_codes():

@@ -22,8 +22,13 @@ ONLY) and proves:
     the raw association rows, and the revenue rows contain every deal PR-ADS-155's
     missing-amount report names (the only extra being negative / invalid
     amounts the closed-won gate refuses);
+  * the undated and won-definition rows equal this audit's own derivation from
+    the raw ledger rows, and an undated deal is named in every window that
+    cannot include it;
+  * only the admin routes and this audit import the workbench;
   * paging the API read through every page, every filter, and the CSV export
-    lose and duplicate no row;
+    lose and duplicate no row — and a population with an unreadable family is
+    never listed as complete;
   * the existing customer-truth and association-coverage audits hold.
 
 A CRM finding is a data-quality fact, not a contract failure: genuine
@@ -62,6 +67,11 @@ FORBIDDEN_IMPORTS = ("db.writers", "writers", "connectors.hubspot_pull",
                      "hubspot_pull", "connectors.google_ads_direct",
                      "google_ads_direct", "connectors.google_ads_source",
                      "connectors.hubspot_deals")
+#: The only modules that may import the workbench (it reads the canonical
+#: customer / revenue truth service, so it is fenced like that service).
+WORKBENCH_CONSUMERS = ("api/server.py", AUDIT_FILE)
+PRODUCTION_PACKAGES = ("api", "services", "scheduler", "scripts", "connectors",
+                       "db", "analysis")
 #: Keys whose presence in a window summary would republish a total.
 TOTAL_KEYS = ("outcomes", "attribution", "membership")
 
@@ -93,6 +103,14 @@ def structural_checks(a: Audit) -> None:
     for rel in (SERVICE_FILE, AUDIT_FILE):
         bad = sorted(n for n in _imports_of(rel) if n in FORBIDDEN_IMPORTS)
         a.check("no_external_or_write_path", not bad, f"{rel} imports {bad}")
+    consumers = sorted(
+        str(p.relative_to(_ROOT)) for d in PRODUCTION_PACKAGES
+        for p in (_ROOT / d).rglob("*.py")
+        if str(p.relative_to(_ROOT)) not in (SERVICE_FILE, *WORKBENCH_CONSUMERS)
+        and any("crm_truth_exceptions_service" in n
+                for n in _imports_of(str(p.relative_to(_ROOT)))))
+    a.check("workbench_consumers_are_named", not consumers,
+            f"imported by {consumers}")
 
 
 def row_checks(a: Audit, model: dict) -> None:
@@ -158,7 +176,8 @@ def window_checks(a: Audit, model: dict) -> list:
     return summary
 
 
-def independent_checks(a: Audit, model: dict, universe: dict) -> dict:
+def independent_checks(a: Audit, model: dict, universe: dict,
+                       now: datetime) -> dict:
     """The rows against readers that do NOT share the workbench's code path."""
     from analysis import closed_won_truth as cwt  # noqa: PLC0415
     from scripts import audit_deal_company_association_coverage as cov  # noqa: PLC0415
@@ -204,23 +223,90 @@ def independent_checks(a: Audit, model: dict, universe: dict) -> dict:
             f"extra deals {sorted(extra)} with {sorted(extra_reasons)}")
     out["revenue_unproven"] = len(mine)
     out["pr155_missing_amount"] = len(theirs)
+    out.update(membership_checks(a, model, universe, now))
     return out
+
+
+def membership_checks(a: Audit, model: dict, universe: dict,
+                      now: datetime) -> dict:
+    """Undated and won-definition rows, derived here from the raw ledger rows
+    — not from the windows' verdicts the workbench attached them by."""
+    from analysis import closed_won_truth as cwt  # noqa: PLC0415
+    from services import crm_truth_exceptions_service as cte  # noqa: PLC0415
+
+    rows = [r for r in model["rows"]
+            if r["exception_family"] == cte.FAMILY_MEMBERSHIP]
+    undated = {str(r.get("deal_id")) for r in universe.get("won_rows") or []
+               if cwt.close_date_state(r, now) == cwt.CLOSE_MISSING}
+    mine = {r["deal_id"] for r in rows if r["reason_code"] == cwt.CLOSE_MISSING}
+    a.check("undated_rows_match_the_ledger", mine == undated,
+            f"workbench {sorted(mine)[:10]}, ledger {sorted(undated)[:10]}")
+    conflicting = {str(d.get("deal_id")): d
+                   for d in universe.get("won_definition_rows") or []
+                   if cwt.won_definition_state(d) != cwt.WON_DEFINITIONS_AGREE}
+    conflict_codes = (cwt.WON_FLAG_OTHER_STAGE, cwt.WON_STAGE_FLAG_NOT_TRUE)
+    mine_c = {r["deal_id"] for r in rows if r["reason_code"] in conflict_codes}
+    a.check("won_definition_rows_match_the_ledger",
+            mine_c == set(conflicting),
+            f"workbench {sorted(mine_c)[:10]}, ledger "
+            f"{sorted(conflicting)[:10]}")
+    undated_conflicts = {d for d, row in conflicting.items()
+                         if cwt.close_date_state(row, now) == cwt.CLOSE_MISSING}
+    for w in model["windows"]:
+        wid = w["window"]
+        hit = {r["deal_id"] for r in rows if wid in r["affected_windows"]}
+        bounded = w.get("undated_included") is False
+        # An undated won deal blocks every window that cannot include it,
+        # whichever reason that window's verdict shows first.
+        a.check("undated_deal_is_named_in_every_bounded_window",
+                (hit & undated) == (undated if bounded else set()),
+                f"{wid}: named {sorted(hit & undated)[:10]}, expected "
+                f"{sorted(undated if bounded else set())[:10]}")
+        if bounded and undated:
+            a.check("undated_deal_withholds_every_bounded_window",
+                    w["publication"][cte.METRIC_DEALS]["status"]
+                    != cwt.PUBLISHED, wid)
+        # An undated conflict could belong to any window: it blocks them all.
+        a.check("undated_conflict_is_named_in_every_window",
+                undated_conflicts <= hit,
+                f"{wid}: missing {sorted(undated_conflicts - hit)[:10]}")
+        if w["publication"][cte.METRIC_DEALS]["status"] == cwt.PUBLISHED:
+            a.check("published_deal_count_has_no_membership_blocker",
+                    not hit, f"{wid}: {sorted(hit)[:10]}")
+    return {"undated_won_deals": len(undated),
+            "won_definition_conflicts": len(conflicting)}
 
 
 def serialization_checks(a: Audit, model: dict) -> dict:
     """The API's paging, every filter and the CSV export, against the model."""
     from services import crm_truth_exceptions_service as cte  # noqa: PLC0415
 
-    all_ids = [r["row_id"] for r in model["rows"]]
-    paged, offset = [], 0
-    while True:
-        page = cte.query(model, limit=7, offset=offset)["rows"]
-        if not page:
-            break
-        paged.extend(r["row_id"] for r in page)
-        offset += len(page)
-    a.check("paging_loses_and_duplicates_no_row", paged == all_ids,
-            f"paged {len(paged)} rows, model has {len(all_ids)}")
+    complete = set(model.get("complete_families") or ())
+    if complete != set(cte.FAMILIES):
+        # Part of the population could not be read: the unfiltered list must
+        # be absent, never a partial list that reads as complete.
+        unfiltered = cte.query(model)
+        a.check("partial_population_is_not_listed_as_complete",
+                unfiltered["rows"] is None
+                and unfiltered["pagination"]["total"] is None
+                and (model.get("totals") or {}).get("rows") is None,
+                f"unreadable families {sorted(set(cte.FAMILIES) - complete)}")
+    scopes = ([{}] if complete == set(cte.FAMILIES)
+              else [{"family": f} for f in cte.FAMILIES if f in complete])
+    offset = 0
+    for scope in scopes:
+        all_ids = [r["row_id"] for r in model["rows"]
+                   if not scope or r["exception_family"] == scope["family"]]
+        paged, off = [], 0
+        while True:
+            page = cte.query(model, limit=7, offset=off, **scope)["rows"]
+            if not page:
+                break
+            paged.extend(r["row_id"] for r in page)
+            off += len(page)
+        offset += off
+        a.check("paging_loses_and_duplicates_no_row", paged == all_ids,
+                f"{scope}: paged {len(paged)} rows, model has {len(all_ids)}")
 
     def csv_ids(rows):
         reader = csv.DictReader(io.StringIO(cte.to_csv(rows)))
@@ -229,13 +315,16 @@ def serialization_checks(a: Audit, model: dict) -> dict:
                 str(reader.fieldnames))
         return [r["row_id"] for r in reader]
 
-    a.check("csv_matches_the_model", csv_ids(model["rows"]) == all_ids,
+    readable = [r for r in model["rows"] if r["exception_family"] in complete]
+    a.check("csv_matches_the_model",
+            csv_ids(readable) == [r["row_id"] for r in readable],
             "CSV rows differ from the read model")
     checked = 0
-    filters = [{"window": w["window"]} for w in model["windows"]]
-    filters += [{"family": f} for f in cte.FAMILIES]
-    filters += [{"reason": r} for r in {r["reason_code"]
-                                        for r in model["rows"]}]
+    filters = ([{"window": w["window"]} for w in model["windows"]]
+               if complete == set(cte.FAMILIES) else [])
+    filters += [{"family": f} for f in cte.FAMILIES if f in complete]
+    filters += [{"reason": r} for r in sorted({r["reason_code"]
+                                               for r in readable})]
     for f in filters:
         expected = [r["row_id"] for r in model["rows"]
                     if ("window" not in f
@@ -304,7 +393,7 @@ def run(now: datetime | None = None, *, with_embedded: bool = True) -> tuple:
     report["totals"] = model["totals"]
     row_checks(a, model)
     report["windows"] = window_checks(a, model)
-    report["independent"] = independent_checks(a, model, universe)
+    report["independent"] = independent_checks(a, model, universe, now)
     report["serialization"] = serialization_checks(a, model)
     if with_embedded:
         report["embedded_audits"] = embedded_audits(a, now)

@@ -1409,6 +1409,18 @@ problem was, and the CRM team could not see it.
 * System Status → **CRM Truth Exceptions** panel (admin-only).
 * `scripts/audit_crm_truth_exceptions.py` — exit 0/1/2; CRM findings alone
   never fail it.
+* Truth review before push. Fixes applied:
+  - an undated won deal is named in every window that cannot include it, even
+    where a won-definition conflict is the verdict's first reason;
+  - undated and conflict verdicts reconcile with the truth service's counts;
+  - the audit re-derives undated and conflict deals from the raw ledger;
+  - an unreadable identity family makes the unfiltered list and totals
+    `null`, and makes the CSV a 503, never a partial list;
+  - the won population is labelled as the raw won-flag count the scan
+    certifies, not the closed-won total;
+  - future-dated findings are disclosed through `close_date_state`;
+  - the workbench's own importers are fenced;
+  - numeric-only HubSpot links, and whitespace-prefixed formula cells.
 * Canonical-owner change, publication unchanged: `company_identity_inputs`
   returns `stale_reasons` (`stale` is exactly its keys), and
   `scan_certification_sets` is the one place the certified set is compared.
