@@ -13372,6 +13372,183 @@ function _renderHistoricalTable(entity, data) {
 
 // ── System Health page ─────────────────────────────────────────────────────
 
+// ── CRM Truth Exceptions workbench (PR-ADS-191, admin-only, read-only) ──────
+// Lists the HubSpot won deals that stop customer / revenue totals publishing,
+// from the canonical read model. Unavailable evidence is shown as unavailable —
+// never as "0 issues". Nothing here classifies: every reason comes from the API.
+
+const CTE_STATUS = {
+  certified_no_findings:   { cls: "badge--ok",      text: "Certified · no findings" },
+  certified_with_findings: { cls: "badge--warning", text: "Certified · CRM findings" },
+  source_stale:            { cls: "badge--warning", text: "Source stale" },
+  scan_not_current:        { cls: "badge--warning", text: "Scan not current" },
+  evidence_unavailable:    { cls: "badge--error",   text: "Evidence unavailable" },
+};
+const CTE_FAMILY_LABELS = {
+  customer_identity: "Customer identity",
+  revenue_proof: "Revenue proof",
+  won_deal_membership: "Won-deal membership",
+};
+let _cteSeq = 0;
+let _cteOptionsLoaded = false;
+
+function _cteParams() {
+  const p = new URLSearchParams();
+  const win = (document.getElementById("cte-window") || {}).value || "";
+  if (win) {
+    const [type, key] = win.split("/");
+    p.set("window_type", type);
+    p.set("window_key", key);
+  }
+  const fam = (document.getElementById("cte-family") || {}).value || "";
+  if (fam) p.set("family", fam);
+  const rsn = (document.getElementById("cte-reason") || {}).value || "";
+  if (rsn) p.set("reason", rsn);
+  const q = ((document.getElementById("cte-search") || {}).value || "").trim();
+  if (q) p.set("q", q);
+  return p;
+}
+
+function _cteCount(value) {
+  // NULL is "we could not look" — never rendered as zero.
+  return value === null || value === undefined ? "Unavailable" : String(value);
+}
+
+function _cteFillOptions(data) {
+  if (_cteOptionsLoaded) return;
+  const winSel = document.getElementById("cte-window");
+  const famSel = document.getElementById("cte-family");
+  const rsnSel = document.getElementById("cte-reason");
+  (data.windows || []).forEach((w) => {
+    winSel.insertAdjacentHTML("beforeend",
+      `<option value="${escapeHtml(w.window)}">${escapeHtml(w.label || w.window)} (${escapeHtml(w.window_type)})</option>`);
+  });
+  Object.entries(data.reason_vocabulary || {}).forEach(([family, reasons]) => {
+    famSel.insertAdjacentHTML("beforeend",
+      `<option value="${escapeHtml(family)}">${escapeHtml(CTE_FAMILY_LABELS[family] || family)}</option>`);
+    reasons.forEach((r) => rsnSel.insertAdjacentHTML("beforeend",
+      `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`));
+  });
+  _cteOptionsLoaded = true;
+}
+
+function renderCrmTruthSummary(data) {
+  const st = CTE_STATUS[data.status] || { cls: "badge--error", text: data.status || "Unknown" };
+  const scan = data.association_scan || {};
+  const verdict = scan.scan_current || {};
+  const fam = (data.totals && data.totals.by_family) || {};
+  const famDeals = (f) => (data.totals ? _cteCount((fam[f] || {}).deals) : "Unavailable");
+  const blockers = (data.dataset_blockers || []).map((b) =>
+    `<li><strong>${escapeHtml(b.code)}</strong> — ${escapeHtml(b.explanation || "")}${b.detail ? ` (${escapeHtml(String(b.detail))})` : ""}</li>`).join("");
+  const affected = (data.windows || []).filter((w) =>
+    ["customers", "revenue_usd"].some((m) => (w.publication[m] || {}).status !== "published"));
+  return `
+    <div style="display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-3)">
+      <span class="badge ${st.cls}"><span class="dot"></span>${escapeHtml(st.text)}</span>
+      <span style="font-size:12px;color:var(--text-muted)">Generated ${escapeHtml(data.generated_at || "")}</span>
+    </div>
+    <div class="freshness-summary-grid">
+      <div><span>Won-deal population</span><strong>${_cteCount(data.won_deal_population)}</strong></div>
+      <div><span>Association scan</span><strong>${verdict.current === true ? "Current" : escapeHtml(verdict.reason || "Not current")}</strong></div>
+      <div><span>Last certified scan</span><strong>${escapeHtml(scan.last_complete_scan_started_at || "None recorded")}</strong></div>
+      <div><span>Customer-identity blockers</span><strong>${famDeals("customer_identity")} deal(s)</strong></div>
+      <div><span>Revenue-proof blockers</span><strong>${famDeals("revenue_proof")} deal(s)</strong></div>
+      <div><span>Won-deal membership blockers</span><strong>${famDeals("won_deal_membership")} deal(s)</strong></div>
+      <div><span>Windows with withheld customers / revenue</span><strong>${data.windows ? affected.length : "Unavailable"}</strong></div>
+    </div>
+    ${blockers ? `<ul class="freshness-help-note" style="margin-top:var(--space-3)">${blockers}</ul>` : ""}`;
+}
+
+function renderCrmTruthWindows(data) {
+  if (!data.windows) return "";
+  const pubCell = (p) => p.status === "published"
+    ? '<span class="status-pill status-pill--ok">Published</span>'
+    : `<span class="status-pill status-pill--missing">${escapeHtml(p.status || "unknown")}</span> <small>${escapeHtml(p.reason || "")}</small>`;
+  const rows = data.windows.map((w) => `
+    <tr>
+      <td>${escapeHtml(w.label || w.window)} <small>${escapeHtml(w.window_type)}</small></td>
+      <td>${pubCell(w.publication.customers)}</td>
+      <td>${pubCell(w.publication.revenue_usd)}</td>
+      <td>${_cteCount(w.blocker_deals.customer_identity_unresolved)}</td>
+      <td>${_cteCount(w.blocker_deals.revenue_unproven)}</td>
+    </tr>`).join("");
+  return `
+    <div class="dataset-freshness-table-wrap" style="margin-bottom:var(--space-4)">
+      <table class="data-table dataset-freshness-table">
+        <thead><tr><th>Window</th><th>Customers</th><th>Revenue (USD)</th><th>Identity blockers</th><th>Revenue blockers</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderCrmTruthRows(data) {
+  if (data.rows === null || data.rows === undefined) {
+    return '<p class="empty-state">Evidence unavailable — the exception list cannot be produced. This is not "0 issues".</p>';
+  }
+  const pg = data.pagination || {};
+  if (!data.rows.length) {
+    return data.status === "certified_no_findings" && !_cteParams().toString()
+      ? '<p class="empty-state">Certified: no CRM truth exceptions.</p>'
+      : '<p class="empty-state">No exceptions match these filters.</p>';
+  }
+  const body = data.rows.map((r) => {
+    const link = r.hubspot_record_url
+      ? `<a href="${escapeHtml(r.hubspot_record_url)}" target="_blank" rel="noopener noreferrer">Open in HubSpot</a>`
+      : '<span class="muted">Portal not configured</span>';
+    const companies = r.associated_company_ids === null
+      ? "Unavailable"
+      : (r.associated_company_ids.length ? r.associated_company_ids.map(escapeHtml).join(", ") : "None");
+    const amount = r.amount_raw === null || r.amount_raw === undefined
+      ? "Missing" : `${escapeHtml(String(r.amount_raw))} ${escapeHtml(r.deal_currency_code || "(no currency)")}`;
+    return `
+      <tr>
+        <td><strong>${escapeHtml(r.deal_name || "(unnamed)")}</strong><br><small>${escapeHtml(r.deal_id)}</small></td>
+        <td>${escapeHtml(CTE_FAMILY_LABELS[r.exception_family] || r.exception_family)}</td>
+        <td><code>${escapeHtml(r.reason_code)}</code><br><small>${escapeHtml(r.explanation || "")}</small></td>
+        <td>${escapeHtml(r.deal_close_date || "Missing")}</td>
+        <td>${amount}</td>
+        <td>${r.revenue_usd === null || r.revenue_usd === undefined ? "Not proven" : escapeHtml(String(r.revenue_usd))}</td>
+        <td>${companies}</td>
+        <td>${r.affected_windows.length}</td>
+        <td>${link}</td>
+      </tr>`;
+  }).join("");
+  return `
+    <p style="font-size:12px;color:var(--text-muted)">Showing ${pg.returned} of ${pg.total} exception row(s).</p>
+    <div class="dataset-freshness-table-wrap">
+      <table class="data-table dataset-freshness-table">
+        <thead><tr><th>Deal</th><th>Family</th><th>Reason</th><th>Close date</th><th>Amount</th><th>Proven USD</th><th>Companies</th><th>Windows</th><th>HubSpot</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+async function loadCrmTruthExceptions() {
+  const summary = document.getElementById("cte-summary");
+  if (!summary) return;
+  const token = ++_cteSeq;
+  const params = _cteParams();
+  const exportBtn = document.getElementById("cte-export-btn");
+  if (exportBtn) exportBtn.href = `/api/audit/crm-truth-exceptions.csv${params.toString() ? "?" + params : ""}`;
+  params.set("limit", "1000");
+  try {
+    const data = await fetchJSON(`/api/audit/crm-truth-exceptions?${params}`);
+    if (token !== _cteSeq) return;  // superseded by a newer request
+    _cteFillOptions(data);
+    document.getElementById("cte-controls").hidden = false;
+    summary.innerHTML = renderCrmTruthSummary(data);
+    document.getElementById("cte-windows").innerHTML = renderCrmTruthWindows(data);
+    document.getElementById("cte-table").innerHTML = renderCrmTruthRows(data);
+  } catch (e) {
+    if (token !== _cteSeq) return;
+    if (e.message === "HTTP 401") return;
+    // An API failure is its own state: never "0 issues".
+    summary.innerHTML = `<p class="empty-state"><span class="badge badge--error"><span class="dot"></span>Could not load</span> CRM truth exceptions are unavailable: ${escapeHtml(e.message)}</p>`;
+    document.getElementById("cte-windows").innerHTML = "";
+    document.getElementById("cte-table").innerHTML = "";
+  }
+}
+
 async function loadHealth() {
   renderRunMeta("health");
   const el = document.getElementById("health-body");
@@ -13433,6 +13610,7 @@ async function loadHealth() {
   loadGclidCoverage();
   loadSearchTermsVerdict();
   loadWarRoom();
+  loadCrmTruthExceptions();
   wireKeywordRefreshButton();
 }
 
@@ -15501,6 +15679,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up dataset freshness refresh button
   const dfRefreshBtn = document.getElementById("dataset-freshness-refresh-btn");
   if (dfRefreshBtn) dfRefreshBtn.addEventListener("click", loadDatasetFreshness);
+
+  // PR-ADS-191 — CRM Truth Exceptions: refresh and filters re-query the API.
+  const cteRefreshBtn = document.getElementById("cte-refresh-btn");
+  if (cteRefreshBtn) cteRefreshBtn.addEventListener("click", loadCrmTruthExceptions);
+  ["cte-window", "cte-family", "cte-reason"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", loadCrmTruthExceptions);
+  });
+  const cteSearch = document.getElementById("cte-search");
+  if (cteSearch) {
+    let cteTimer = null;
+    cteSearch.addEventListener("input", () => {
+      clearTimeout(cteTimer);
+      cteTimer = setTimeout(loadCrmTruthExceptions, 300);
+    });
+  }
 
   // Wire up backfill form
   const backfillForm = document.getElementById("backfill-form");

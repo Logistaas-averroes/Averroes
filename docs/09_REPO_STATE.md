@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161D2-F3 — the publication gate requires the certified set, on PR-ADS-161D2-F2 (October 2026)
+**Last updated:** PR-ADS-191 — CRM Truth Exceptions workbench (October 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1388,3 +1388,37 @@ after the scan (observed by a subset pass) withholds until a full scan
 certifies it; a deal leaving the won population withholds until rescanned; a
 corrupted recorded population is rejected by the gate and the audit; the gate
 cannot be called without the won set. All four fail on 03159b5.
+
+## PR-ADS-191 — CRM Truth Exceptions workbench (October 2026)
+
+**Why.** The canonical services correctly withheld customer and revenue totals
+but never named the HubSpot won deals responsible. The system knew where the
+problem was, and the CRM team could not see it.
+
+**Built.**
+* `services/crm_truth_exceptions_service.py` — one read-only read model over
+  the canonical universe and truth service. Rows are keyed
+  `(deal_id, family, reason)` in three families: customer identity, revenue
+  proof and won-deal membership. Dataset-level blockers cover an unreadable
+  ledger or evidence, unproven coverage, and a scan that is not current. Each
+  window gets a summary that explains every withheld verdict and reconciles
+  with the truth service's own counts.
+* `GET /api/audit/crm-truth-exceptions` and `.csv` — admin-only,
+  formula-injection-safe CSV, 400 on an unknown filter. Unavailable evidence is
+  `rows: null` (JSON) or a 503 (CSV), never an empty list.
+* System Status → **CRM Truth Exceptions** panel (admin-only).
+* `scripts/audit_crm_truth_exceptions.py` — exit 0/1/2; CRM findings alone
+  never fail it.
+* Canonical-owner change, publication unchanged: `company_identity_inputs`
+  returns `stale_reasons` (`stale` is exactly its keys), and
+  `scan_certification_sets` is the one place the certified set is compared.
+  `audit_customer_closed_won_truth` names the workbench as a certification
+  consumer.
+
+**Not changed.** No publication gate, no total, no customer or revenue
+definition, no HubSpot or Google Ads call, no write.
+
+**Suite.** `tests/test_pr_ads_191_crm_truth_exceptions.py`, in CI's PostgreSQL
+step and did-run list.
+
+Doctrine: `docs/47_CRM_TRUTH_EXCEPTIONS.md`.
