@@ -423,3 +423,23 @@ Recurring patterns (durable):
 - Audit's new set-equality check goes red on won->not-won transitions while the
   service legitimately publishes (audit stricter, fail-closed).
 - Not run: the PG tests (a parallel full run was going). Ran only test_30/test_40 (pass).
+
+## PR-ADS-191 review (CRM Truth Exceptions workbench, b9826f4 on main eb77e27)
+- Verified (read): F1's "ages from finished" note above is superseded — current
+  `association_scan_current` ages from last_complete_scan_STARTED_at and compares
+  certified set == won set (161D2-F2/F3). Correction noted, history kept.
+- Truth contract re-verified in `cwt.evaluate_window`: ANY undated won deal
+  withholds closed_won_deals in every non-all-time window (all_time includes
+  undated); `membership.deal_ids` is redacted (None) whenever deal count is not
+  published; customers precedence = deals withheld > company source >
+  association_unavailable > scan not current > unresolved > stale. Future-dated
+  won deals (close > now) are members of NO window, all_time included.
+- 191 workbench defects found (probed with a scratch script over `_universe`):
+  membership-family rows are attributed by the window's own publication reason,
+  so an undated deal is NOT listed for a window whose deal-count reason is a
+  won-definition conflict (blocker masked); its "explained" check is then
+  tautological. Identity-unreadable -> available True, rows [] , totals.rows 0,
+  CSV 200 header-only. No test exercises undated / conflict / future-dated deals.
+- CERTIFICATION_CONSUMERS now exempts a SERVICE (crm_truth_exceptions_service)
+  that api/server.py imports: the 161D guard is transitive-blind; nothing limits
+  who imports the workbench.

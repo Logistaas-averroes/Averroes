@@ -664,7 +664,7 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                             row[key] = float(row[key])
                 cur.execute(
                     f"""
-                    SELECT deal_id, deal_stage_id, deal_stage_label,
+                    SELECT deal_id, deal_name, deal_stage_id, deal_stage_label,
                            hs_is_closed_won, deal_close_date
                     FROM {LEDGER_TABLE}
                     WHERE hs_is_closed_won IS TRUE OR deal_stage_id = %s

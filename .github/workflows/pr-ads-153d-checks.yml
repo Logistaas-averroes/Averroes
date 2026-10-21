@@ -99,6 +99,7 @@ jobs:
             tests/test_pr_ads_161d_customer_closed_won_truth.py \
             tests/test_pr_ads_161d2_deal_company_associations.py \
             tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py \
+            tests/test_pr_ads_191_crm_truth_exceptions.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -177,6 +178,11 @@ jobs:
                            # completion that waits out a real concurrent
                            # ledger writer.
                            "tests.test_pr_ads_161d2_f1_monotonic_atomic_certification",
+                           # PR-ADS-191. Its PG cases build the CRM truth
+                           # exceptions workbench over the real ledger writer,
+                           # association store and sync service, and run its
+                           # audit end to end, including the no-writes check.
+                           "tests.test_pr_ads_191_crm_truth_exceptions",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

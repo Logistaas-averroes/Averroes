@@ -9059,6 +9059,103 @@ def api_audit_missing_deal_amounts(
                             detail="missing-amount report unavailable") from exc
 
 
+# ── PR-ADS-191: CRM Truth Exceptions — which won deals block which totals ─────
+def _crm_truth_exceptions(window_type, window_key, family, reason, q, limit,
+                          offset) -> tuple:
+    """Shared by the JSON and CSV routes: ONE read model (one snapshot) and one
+    filter, so the two can never describe different populations.
+    ``(model, payload, window)``; 400 on an unknown filter."""
+    from services import crm_truth_exceptions_service as cte  # noqa: PLC0415
+
+    if (window_type is None) != (window_key is None):
+        raise HTTPException(status_code=400,
+                            detail="window_type and window_key go together")
+    window = f"{window_type}/{window_key}" if window_type else None
+    model = cte.build_crm_truth_exceptions()
+    try:
+        payload = cte.query(model, window=window, family=family,
+                            reason=reason, q=q, limit=limit, offset=offset)
+    except cte.CrmTruthExceptionsQueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return model, payload, window
+
+
+@app.get("/api/audit/crm-truth-exceptions")
+def api_audit_crm_truth_exceptions(
+    request: Request,
+    window_type: Optional[str] = Query(default=None),
+    window_key: Optional[str] = Query(default=None),
+    family: Optional[str] = Query(default=None),
+    reason: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    limit: int = Query(default=100),
+    offset: int = Query(default=0),
+) -> dict[str, Any]:
+    """Admin-only CRM Truth Exceptions workbench (PR-ADS-191).
+
+    Every HubSpot won deal that stops a customer or closed-won revenue total
+    from publishing, with the canonical reason, the windows and metrics it
+    affects, and a safe HubSpot link — plus each window's publication verdict
+    and whether every withheld verdict is explained.
+
+    Read-only: no HubSpot or Google Ads call, no write. Nothing is inferred: no
+    company is picked, no currency assumed, no amount filled. Evidence that
+    cannot be read is reported as unavailable (``rows: null``), never as zero.
+    """
+    check_admin_or_token(request)
+    try:
+        _, payload, _ = _crm_truth_exceptions(window_type, window_key, family,
+                                              reason, q, limit, offset)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/crm-truth-exceptions] failed: %s", exc,
+                  exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="CRM truth exceptions unavailable") from exc
+    return payload
+
+
+@app.get("/api/audit/crm-truth-exceptions.csv")
+def api_audit_crm_truth_exceptions_csv(
+    request: Request,
+    window_type: Optional[str] = Query(default=None),
+    window_key: Optional[str] = Query(default=None),
+    family: Optional[str] = Query(default=None),
+    reason: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+):
+    """The same filtered population as the JSON route, every row (no paging),
+    as UTF-8 CSV with formula-injection protection. 503 when the evidence
+    cannot be read: an empty file would read as "no blockers"."""
+    from fastapi.responses import Response as FastAPIResponse  # noqa: PLC0415
+    from services import crm_truth_exceptions_service as cte  # noqa: PLC0415
+
+    check_admin_or_token(request)
+    try:
+        model, _, window = _crm_truth_exceptions(
+            window_type, window_key, family, reason, q, cte.MAX_LIMIT, 0)
+        # Every filtered row of the SAME model the validation ran on.
+        model_rows = cte.filter_rows(model, window=window, family=family,
+                                     reason=reason, q=q)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/crm-truth-exceptions.csv] failed: %s", exc,
+                  exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="CRM truth exceptions unavailable") from exc
+    if model_rows is None:
+        raise HTTPException(status_code=503,
+                            detail="CRM truth exceptions unavailable: "
+                                   "evidence could not be read")
+    return FastAPIResponse(
+        content=cte.to_csv(model_rows).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 'attachment; filename="crm_truth_exceptions.csv"'})
+
+
 @app.get("/api/audit/sql-truth")
 def api_audit_sql_truth(
     request: Request,

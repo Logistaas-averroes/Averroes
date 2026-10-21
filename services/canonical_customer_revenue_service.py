@@ -242,18 +242,19 @@ def association_scan_current(sync_state, now: datetime,
     if won_deal_ids is None:
         return {"current": False, "max_age_hours": max_age,
                 "reason": "current_won_population_not_supplied"}
-    raw = state.get("last_complete_scan_deal_ids")
-    if raw is None:
+    sets = scan_certification_sets(state, won_deal_ids)
+    if sets["certified"] is None:
         return {"current": False, "max_age_hours": max_age,
                 "reason": "complete_scan_certified_no_deal_set"}
-    certified = {str(d) for d in raw}
-    won = {str(d) for d in won_deal_ids}
+    certified = sets["certified"]
+    won = sets["won"]
     population = {"certified_population": len(certified),
                   "current_won_population": len(won),
                   "recorded_population": state.get(
                       "last_complete_scan_population"),
-                  "won_not_certified": len(won - certified),
-                  "certified_no_longer_won": len(certified - won)}
+                  "won_not_certified": len(sets["won_not_certified"]),
+                  "certified_no_longer_won": len(
+                      sets["certified_no_longer_won"])}
     if certified != won:
         return {"current": False, "max_age_hours": max_age,
                 "reason": "certified_set_differs_from_current_won_population",
@@ -264,6 +265,25 @@ def association_scan_current(sync_state, now: datetime,
                 **population}
     return {"current": True, "max_age_hours": max_age, "reason": None,
             **population}
+
+
+def scan_certification_sets(sync_state, won_deal_ids) -> dict:
+    """The latest complete scan's certified set against the current won set.
+
+    ``{certified, won, won_not_certified, certified_no_longer_won}`` — sets of
+    deal ids; ``certified`` is None when the scan recorded no set (it then
+    certifies nothing, and every won deal is ``won_not_certified``). The one
+    place the comparison is made: :func:`association_scan_current` judges
+    currency from it, and the CRM truth exceptions workbench (PR-ADS-191) names
+    the deals in it.
+    """
+    state = sync_state or {}
+    raw = state.get("last_complete_scan_deal_ids")
+    certified = None if raw is None else {str(d) for d in raw}
+    won = {str(d) for d in won_deal_ids or ()}
+    return {"certified": certified, "won": won,
+            "won_not_certified": won - (certified or set()),
+            "certified_no_longer_won": (certified or set()) - won}
 
 
 def company_identity_inputs(evidence) -> dict:
@@ -277,33 +297,38 @@ def company_identity_inputs(evidence) -> dict:
       the truth layer reads as ``association_unavailable``.
     * Evidence is STALE when the latest attempt failed (the stored set is older
       than our latest look), or when the deal changed in HubSpot after the
-      evidence was observed.
+      evidence was observed. ``stale_reasons`` names which, per deal
+      (``cwt.STALE_EVIDENCE_REASONS``); ``stale`` is exactly its keys.
 
     ``evidence`` unreadable → ``company_ids_by_deal`` None, with the reason.
     """
     if not isinstance(evidence, dict) or not evidence.get("available"):
         return {"company_ids_by_deal": None, "stale": set(),
+                "stale_reasons": {},
                 "reason": cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE,
                 "observed_deals": 0, "error": (evidence or {}).get("error")
                 if isinstance(evidence, dict) else "no_company_evidence"}
     observed = {}
-    stale = set()
+    stale_reasons: dict = {}
     for o in evidence.get("observations") or []:
         deal_id = str(o.get("deal_id"))
         if not o.get("last_success_started_at"):
             continue
         observed[deal_id] = []
         if o.get("last_attempt_status") != "success":
-            stale.add(deal_id)
+            stale_reasons.setdefault(deal_id, []).append(
+                cwt.STALE_LATEST_ATTEMPT_FAILED)
         modified = _parse(o.get("deal_lastmodified_at"))
         seen = _parse(o.get("last_success_started_at"))
         if modified and seen and seen < modified:
-            stale.add(deal_id)
+            stale_reasons.setdefault(deal_id, []).append(
+                cwt.STALE_DEAL_MODIFIED_AFTER_OBSERVATION)
     for p in evidence.get("paths") or []:
         deal_id = str(p.get("deal_id"))
         if deal_id in observed:
             observed[deal_id].append(str(p.get("company_id")))
-    return {"company_ids_by_deal": observed, "stale": stale, "reason": None,
+    return {"company_ids_by_deal": observed, "stale": set(stale_reasons),
+            "stale_reasons": stale_reasons, "reason": None,
             "observed_deals": len(observed), "error": None}
 
 

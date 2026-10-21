@@ -813,6 +813,32 @@
           </div>
         </div>
 
+        <!-- CRM Truth Exceptions workbench (PR-ADS-191). Admin-only, read-only:
+             the HubSpot won deals that block customer / revenue totals. -->
+        <div class="panel" id="crm-truth-exceptions-panel" style="margin-top:var(--space-6)">
+          <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)">
+            <span>CRM Truth Exceptions</span>
+            <div style="display:flex;align-items:center;gap:var(--space-2)">
+              <a id="cte-export-btn" class="btn btn--secondary btn--sm" href="/api/audit/crm-truth-exceptions.csv" download>Export CSV</a>
+              <button id="cte-refresh-btn" class="btn btn--ghost btn--sm" type="button" aria-label="Refresh CRM truth exceptions">Refresh</button>
+            </div>
+          </div>
+          <div class="panel__body">
+            <p class="freshness-help-note" style="margin-bottom:var(--space-3);font-size:12px;color:var(--text-muted)">
+              Data-quality findings in HubSpot records — not software failures. Affected totals stay withheld until the records are corrected in HubSpot and the next scan reads them back. Read-only: nothing is written to HubSpot.
+            </p>
+            <div id="cte-summary"><p class="empty-state"><span class="spinner"></span> Loading CRM truth exceptions…</p></div>
+            <div id="cte-controls" style="display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center;margin:var(--space-3) 0" hidden>
+              <select id="cte-window" class="waste-filter-select" aria-label="Window"><option value="">All windows</option></select>
+              <select id="cte-family" class="waste-filter-select" aria-label="Exception family"><option value="">All families</option></select>
+              <select id="cte-reason" class="waste-filter-select" aria-label="Reason"><option value="">All reasons</option></select>
+              <input id="cte-search" class="waste-filter-select" type="search" placeholder="Search deal ID or name" aria-label="Search deal ID or name">
+            </div>
+            <div id="cte-windows"></div>
+            <div id="cte-table"></div>
+          </div>
+        </div>
+
         <!-- Search Terms Pipeline Verdict (PR-ADS-066) -->
         <div class="panel" id="search-terms-verdict-panel" style="margin-top:var(--space-6)">
           <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between">
