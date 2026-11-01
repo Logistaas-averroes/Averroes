@@ -156,8 +156,54 @@ def from_source_rows(rows, *, default_close_date="2026-05-10T00:00:00+00:00") ->
     return out
 
 
+def fake_closed_won_universe(rows, *, available=True, reason=None,
+                             sync_state=None, sync_available=True,
+                             company_associations=None):
+    """The ``fetch_closed_won_universe`` a test ledger answers with.
+
+    PR-ADS-161E: ``load_won_deals`` reads the canonical closed-won universe, so
+    a stubbed ledger must answer that read with the SAME rows. Won rows are the
+    ``hs_is_closed_won IS TRUE`` ones; the won-definition cross-check rows are
+    every row flagged won or in the confirmed won stage. No company evidence is
+    stored unless a test supplies it, so customers stay withheld by default.
+    """
+    from analysis.closed_won_truth import CONFIRMED_WON_STAGE_ID  # noqa: PLC0415
+
+    state = READY_SYNC_STATE if sync_state is None else sync_state
+    rows = [dict(r) for r in (rows or [])]
+
+    def _universe(won_stage_id=CONFIRMED_WON_STAGE_ID, *, sql_windows=None):
+        if not available or not sync_available:
+            return {"available": False, "reason": reason or "db_unavailable",
+                    "won_rows": [], "won_definition_rows": [],
+                    "unknown_won_rows": [], "acquisition_contacts": [],
+                    "sync_state": None}
+        return {
+            "available": True,
+            "won_rows": [dict(r) for r in rows
+                         if r.get("hs_is_closed_won") is True],
+            "won_definition_rows": [
+                {"deal_id": r["deal_id"], "deal_name": r.get("deal_name"),
+                 "deal_stage_id": r.get("deal_stage_id"),
+                 "deal_stage_label": r.get("deal_stage_label"),
+                 "hs_is_closed_won": r.get("hs_is_closed_won"),
+                 "deal_close_date": r.get("deal_close_date")}
+                for r in rows if r.get("hs_is_closed_won") is True
+                or str(r.get("deal_stage_id") or "") == won_stage_id],
+            "unknown_won_rows": [
+                {"deal_id": r["deal_id"],
+                 "deal_close_date": r.get("deal_close_date")}
+                for r in rows if r.get("hs_is_closed_won") is None],
+            "acquisition_contacts": [],
+            "sync_state": dict(state) if state else None,
+            "company_associations": company_associations,
+        }
+    return _universe
+
+
 def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
-                           sync_state=None, sync_available=True):
+                           sync_state=None, sync_available=True,
+                           company_associations=None):
     """Stub the canonical deal ledger for a test.
 
     ``rows`` are canonical ledger rows (see :func:`ledger_row`). ``available``
@@ -187,6 +233,12 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
              "counts": {"unknown_won": 0, "not_won": 0, "deals_in_window": len(rows)}}
             if available else
             {"available": False, "counts": {}, "reason": "db_unavailable"}))
+    monkeypatch.setattr(
+        ledger_repo, "fetch_closed_won_universe",
+        fake_closed_won_universe(rows, available=available, reason=reason,
+                                 sync_state=sync_state,
+                                 sync_available=sync_available,
+                                 company_associations=company_associations))
     return rows
 
 
@@ -224,8 +276,13 @@ def canonical_ledger_patch(rows=(), *, available=True, reason=None,
     return patch.multiple("db.deal_ledger_repository",
                           fetch_sync_state=_sync,
                           fetch_won_deals=_deals,
-                          fetch_won_state_counts=_counts)
+                          fetch_won_state_counts=_counts,
+                          fetch_closed_won_universe=fake_closed_won_universe(
+                              rows, available=available, reason=reason,
+                              sync_state=sync_state,
+                              sync_available=sync_available))
 
 
 __all__ = ["READY_SYNC_STATE", "DEFAULT_CLOSE_DATE", "ledger_row", "from_legacy_deal_rows",
-           "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch"]
+           "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch",
+           "fake_closed_won_universe"]
