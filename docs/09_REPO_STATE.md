@@ -1488,9 +1488,11 @@ admitted closes later today.
     workbench with the window and family preselected;
   * channel, campaign and country charts count won deals; customers are never
     summed across rows.
-* Placement gate: per-campaign deals, revenue, customers, ROAS and CAC are
-  withheld while any Google Ads won deal in the window has no campaign
-  (`google_ads_deals_not_placed_on_a_campaign`).
+* Per-campaign placement republishes the canonical partition: the window is
+  evaluated with Campaign Evidence's resolver. Per-campaign deals, revenue,
+  customers, ROAS and CAC are withheld while a Google Ads won deal resolves to
+  no campaign (`google_ads_deals_not_placed_on_a_campaign`). The
+  campaign-attributable scope total is not gated.
 * Country residual: the Google Ads-source canonical total minus the country
   rows. It used to subtract from the all-source total, which put non-Google
   deals in the "no country" bucket.
@@ -1501,9 +1503,38 @@ admitted closes later today.
 * `scripts/audit_customer_revenue_reader_cutover.py` — 17 checks, exit 0/1/2;
   CRM findings alone never fail it. `INVENTORY` is the reader matrix.
 
+* **Truth review before push** (`averroes-truth-auditor`). It found 1 blocker
+  and 5 major findings, all reproduced by executed probes, and all fixed:
+  - **Blocker:** a withheld per-campaign deal count read as 0 became "waste"
+    verdicts and "no won deals" cards. Rows with a withheld count are now
+    `outcome_withheld` / "Closed-won outcome withheld" and are never judged.
+  - The placement gate re-derived "unplaced". It now republishes the canonical
+    partition, and the scope total is ungated.
+  - Recoverable withheld values:
+    - a proof-deal list stayed beside a withheld count;
+    - `summarize_deals` netted negative amounts;
+    - the GCLID readiness sibling counts re-added to the withheld total.
+  - ROAS/CAC were published at `all_source` scope.
+  - The audit's leak walk covered the Mart only, and it missed the Mailchimp
+    audit reader.
+  - Headline revenue said "Unavailable" with no reason.
+  - Minors fixed:
+    - wrong-reason cards ("unknown deal amount", "ledger could not be
+      read", "integration disconnected");
+    - an HTML sub-line rendered as escaped text;
+    - deal-count links carried no window;
+    - `reconciles: true` was reported without a money comparison.
+  - Regressions: tests 28–33.
+
 **Not changed.** The won predicate, customer identity, revenue proof, window
-definitions and every publication gate are unchanged. No HubSpot or Google
-Ads call, no write. Marketing SQLs stay on the acquisition cohort.
+definitions and the canonical verdicts are unchanged. **Changed on purpose,
+for your sign-off:**
+* ROAS and CAC are now published as **period** ratios.
+  docs/46's 161D line ("neither") is superseded and recorded there.
+* Per-campaign figures follow the canonical placement verdict.
+
+No HubSpot or Google Ads call, no write. Marketing SQLs stay on the
+acquisition cohort.
 
 **Deferred** (docs/48 §7): `/api/attribution/confidence-summary` (tier counts
 only), `/api/audit/revenue-truth` (admin shadow diagnostic), and the daily

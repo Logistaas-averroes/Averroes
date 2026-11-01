@@ -208,9 +208,36 @@ def fake_closed_won_universe(rows, *, available=True, reason=None,
     return _universe
 
 
+def label_resolver(unmapped=(), not_google_ads=()):
+    """A stand-in for Campaign Evidence's campaign resolver (PR-ADS-161E).
+
+    Production builds it from all-time canonical spend and the approved
+    identity mappings (``ccr.campaign_resolver``), which a stubbed ledger test
+    does not have. This one places every labelled deal on the campaign its
+    label names — the placement those suites always assumed — except labels
+    listed as ``unmapped`` (no spend campaign) or ``not_google_ads`` (approved
+    as not Google Ads), so a test can exercise either path explicitly.
+    """
+    unmapped = {str(x).strip().lower() for x in unmapped}
+    excluded = {str(x).strip().lower() for x in not_google_ads}
+
+    def resolve(label):
+        key = str(label or "").strip().lower()
+        if not key or key in unmapped:
+            return "unmapped", None
+        if key in excluded:
+            return "not_google_ads", None
+        return "google_ads", key
+    return resolve
+
+
+def _resolver_stub(resolver):
+    return lambda now=None: (resolver, "test label resolver")
+
+
 def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
                            sync_state=None, sync_available=True,
-                           company_associations=None):
+                           company_associations=None, resolver=None):
     """Stub the canonical deal ledger for a test.
 
     ``rows`` are canonical ledger rows (see :func:`ledger_row`). ``available``
@@ -246,6 +273,9 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
                                  sync_state=sync_state,
                                  sync_available=sync_available,
                                  company_associations=company_associations))
+    import services.canonical_customer_revenue_service as ccr
+    monkeypatch.setattr(ccr, "campaign_resolver",
+                        _resolver_stub(resolver or label_resolver()))
     return rows
 
 
@@ -378,18 +408,28 @@ def canonical_ledger_patch(rows=(), *, available=True, reason=None,
                 "counts": {"unknown_won": 0, "not_won": 0,
                            "deals_in_window": len(rows)}}
 
-    return patch.multiple("db.deal_ledger_repository",
-                          fetch_sync_state=_sync,
-                          fetch_won_deals=_deals,
-                          fetch_won_state_counts=_counts,
-                          fetch_closed_won_universe=fake_closed_won_universe(
-                              rows, available=available, reason=reason,
-                              sync_state=sync_state,
-                              sync_available=sync_available))
+    from contextlib import ExitStack, contextmanager  # noqa: PLC0415
+
+    @contextmanager
+    def _both():
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(
+                "db.deal_ledger_repository",
+                fetch_sync_state=_sync,
+                fetch_won_deals=_deals,
+                fetch_won_state_counts=_counts,
+                fetch_closed_won_universe=fake_closed_won_universe(
+                    rows, available=available, reason=reason,
+                    sync_state=sync_state, sync_available=sync_available)))
+            stack.enter_context(patch(
+                "services.canonical_customer_revenue_service.campaign_resolver",
+                _resolver_stub(label_resolver())))
+            yield
+    return _both()
 
 
 __all__ = ["READY_SYNC_STATE", "DEFAULT_CLOSE_DATE", "ledger_row", "from_legacy_deal_rows",
            "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch",
            "fake_closed_won_universe", "capture_canonical_bounds",
            "UNPROVEN_SYNC_STATE", "make_canonical_unavailable",
-           "company_evidence"]
+           "company_evidence", "label_resolver"]

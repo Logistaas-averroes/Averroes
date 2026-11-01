@@ -240,6 +240,32 @@ INVENTORY = (
                               "or ratio value",
      "window_cohort": "n/a", "ui_effect": "unchanged",
      "families": (), "canonical_via": None, "status": "deferred"},
+    {"consumer": "api/server.py",
+     "surface": "/api/mailchimp/audit (admin)",
+     "existing_source": "deal_source_attribution via fetch_durable_outcome_populations",
+     "existing_meaning": "contacts with won deals as `customers`; SUM(COALESCE(amount, 0))",
+     "canonical_replacement": "withheld: every closed-won outcome figure removed "
+                              "(legacy_deal_source_attribution_not_canonical); "
+                              "coverage figures kept",
+     "window_cohort": "n/a", "ui_effect": "none (no frontend consumer)",
+     "families": ("customers", "revenue"),
+     "canonical_via": "_withhold_legacy_closed_won_outcomes", "status": "withheld"},
+    {"consumer": "services/mailchimp_audit_service.py",
+     "surface": "Mailchimp attribution feasibility audit (served only by /api/mailchimp/audit)",
+     "existing_source": "deal_source_attribution",
+     "existing_meaning": "contact-level closed-won outcomes for Mailchimp recipients",
+     "canonical_replacement": "withheld at its only route (row above)",
+     "window_cohort": "n/a", "ui_effect": "none",
+     "families": (), "canonical_via": None, "status": "withheld"},
+    {"consumer": "services/revenue_recovery_service.py",
+     "surface": "admin revenue-recovery job run report",
+     "existing_source": "the recovery job's own processed rows",
+     "existing_meaning": "counts of what one recovery run found and wrote — an "
+                         "operational job report, not a business total",
+     "canonical_replacement": "deferred: describes a job run, publishes no "
+                              "window's deals, customers or revenue",
+     "window_cohort": "n/a", "ui_effect": "unchanged",
+     "families": (), "canonical_via": None, "status": "deferred"},
     {"consumer": "services/revenue_reconciliation_service.py",
      "surface": "/api/audit/revenue-truth (admin)",
      "existing_source": "canonical ledger vs legacy ledgers",
@@ -297,6 +323,14 @@ READER_ENTRY_POINTS = (
     "load_latest_roas_snapshot", "load_roas_snapshots",
     "run_gclid_readiness_audit", "compute_cac", "has_closed_won_deal",
     "get_revenue_snapshot", "get_scope_ladder", "canonical_deal_rows",
+    # Direct SQL over the legacy closed-won tables (gclid_attribution,
+    # deal_source_attribution): every repository function that reads them is
+    # an entry point, so a page calling one is a reader too.
+    "fetch_durable_outcome_populations", "fetch_won_revenue",
+    "fetch_campaign_deal_details", "fetch_country_deal_details",
+    "fetch_revenue_deals", "fetch_source_revenue", "fetch_source_revenue_daily",
+    "fetch_source_deal_details", "fetch_sql_lead_details",
+    "source_attribution_health_counts",
 )
 #: The legacy gate this PR removes, by name.
 LEGACY_GATE = "revenue_integration_connected"
@@ -613,7 +647,7 @@ def _metric_dicts(payload):
 
 
 def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
-                  mart: dict | None, *, now) -> dict:
+                  mart: dict | None, *, now, pages: dict | None = None) -> dict:
     from services import canonical_revenue_service as crs  # noqa: PLC0415
 
     pub = truth_w.get("publication") or {}
@@ -695,6 +729,9 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
     page = {}
     if mart is not None:
         page = mart_checks(a, key, pub, truth_w, mart)
+        page_leak_checks(a, key, "revenue_decision_mart", pub, mart)
+    for name, payload in (pages or {}).items():
+        page_leak_checks(a, key, name, pub, payload)
     return {"window": key, "publication": {m: pub.get(m) for m in
                                            ("closed_won_deals", "revenue_usd",
                                             "customers")},
@@ -703,6 +740,71 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
             "independent_members": len(exp["members"]),
             "undated_won_deals": exp["undated"],
             "future_dated_won_deals": exp["future"], "page": page}
+
+
+#: Keys that carry a figure of one canonical metric family, wherever they sit
+#: in a page payload. ``known_revenue_usd`` — the named subset of priced deals,
+#: labelled as such (PR-ADS-155) — is deliberately not a total key.
+_FAMILY_KEYS = {
+    "customers": ("customers", "attributed_customers", "google_ads_source_customers",
+                  "closed_won_customers", "total_customers"),
+    "closed_won_deals": ("closed_won_deals", "attributed_closed_won_deals",
+                         "google_ads_source_closed_won_deals",
+                         "total_closed_won_deals", "won_deals", "deals_won"),
+    "revenue_usd": ("won_revenue_usd", "won_revenue", "closed_won_revenue_usd",
+                    "total_revenue_usd", "attributed_won_revenue_usd",
+                    "google_ads_source_won_revenue_usd"),
+}
+#: A row metric name → the sibling field that must be absent with it.
+_SIBLING = {"closed_won_deals": ("closed_won_deals",),
+            "customers": ("customers", "closed_won_customers"),
+            "revenue_usd": ("won_revenue", "won_revenue_usd",
+                            "closed_won_revenue_usd")}
+
+
+def _is_figure(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def page_leak_checks(a: Audit, key: str, page: str, pub: dict, payload) -> None:
+    """8 / 9 over ONE page payload.
+
+    * every ``{value, status}`` metric that is not published has no value;
+    * a row whose metric is not published carries no sibling figure for it,
+      and no proof list beside a withheld deal count;
+    * no identity map anywhere;
+    * when the WINDOW withholds a family, no figure of that family appears
+      anywhere on the page — no row, subset, bucket or total.
+    """
+    for path, d in _metric_dicts(payload):
+        if d.get("status") != "published":
+            a.check("withheld_values_absent", d.get("value") is None,
+                    f"{key} {page}{path} is {d.get('status')} with value "
+                    f"{d.get('value')}")
+    leaks = []
+    withheld = {fam for fam in _FAMILY_KEYS
+                if (pub.get(fam) or {}).get("status") != "published"}
+    for path, d in _walk(payload):
+        if "company_ids_by_deal" in d:
+            leaks.append(f"{path}.company_ids_by_deal")
+        metrics = d.get("metrics") if isinstance(d.get("metrics"), dict) else {}
+        for m, siblings in _SIBLING.items():
+            mm = metrics.get(m)
+            if isinstance(mm, dict) and mm.get("status") not in (None, "published"):
+                for sib in siblings:
+                    if _is_figure(d.get(sib)):
+                        leaks.append(f"{path}.{sib}={d.get(sib)} beside a "
+                                     f"{mm.get('status')} {m}")
+                if m == "closed_won_deals" and d.get("deals"):
+                    leaks.append(f"{path}.deals (proof list) beside a withheld "
+                                 "deal count")
+        for fam in withheld:
+            for k in _FAMILY_KEYS[fam]:
+                if _is_figure(d.get(k)):
+                    leaks.append(f"{path}.{k}={d.get(k)} while the window's "
+                                 f"{fam} is {(pub.get(fam) or {}).get('status')}")
+    a.check("withheld_not_reconstructable", not leaks,
+            f"{key} {page}: {leaks[:6]}")
 
 
 def mart_checks(a: Audit, key: str, pub: dict, truth_w: dict, mart: dict) -> dict:
@@ -737,24 +839,70 @@ def mart_checks(a: Audit, key: str, pub: dict, truth_w: dict, mart: dict) -> dic
         if d.get("status") != "published":
             a.check("withheld_values_absent", d.get("value") is None,
                     f"{key}{path} is {d.get('status')} with value {d.get('value')}")
-    # 9 — nothing in the page lets a reader rebuild a withheld total: no
-    # identity map, and no non-null customer figure anywhere when the window's
-    # customers are withheld.
-    leaks = []
-    for path, d in _walk(mart):
-        if "company_ids_by_deal" in d:
-            leaks.append(f"{path}.company_ids_by_deal")
-        if (pub.get("customers") or {}).get("status") != "published":
-            for k in ("customers", "attributed_customers",
-                      "google_ads_source_customers"):
-                if d.get(k) is not None and not isinstance(d.get(k), dict):
-                    leaks.append(f"{path}.{k}={d.get(k)}")
-    a.check("withheld_not_reconstructable", not leaks,
-            f"{key}: {leaks[:6]}")
     return {"closed_won_deals": s.get("closed_won_deals"),
             "customers": s.get("customers"),
             "customers_status": s.get("customers_status"),
             "won_revenue_usd": s.get("won_revenue_usd")}
+
+
+#: The tables a closed-won read could touch; fingerprinted before and after.
+_FINGERPRINT_TABLES = ("hubspot_deal_ledger", "hubspot_deal_company_association",
+                       "hubspot_deal_company_observation",
+                       "hubspot_deal_company_sync_state", "sync_batches")
+
+
+def _write_fingerprint():
+    """``{table: (rows, md5)}`` — or None when it cannot be read."""
+    try:
+        from db.connection import get_conn  # noqa: PLC0415
+        out = {}
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            cur = conn.cursor()
+            for t in _FINGERPRINT_TABLES:
+                cur.execute(f"SELECT count(*), md5(coalesce(string_agg(x::text, '|' "
+                            f"ORDER BY x::text), '')) FROM {t} x")
+                out[t] = tuple(cur.fetchone())
+            conn.rollback()
+        return out
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _page_builders():
+    """Every production page that publishes a closed-won figure, as
+    ``(name, build(window, now))``. All read-only."""
+    def mart(w, now):
+        from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
+        return build_revenue_decision_mart(view="campaign", window=w, now=now)
+
+    def mod(module, fn, **kw):
+        def build(w, now):
+            import importlib  # noqa: PLC0415
+            return getattr(importlib.import_module(module), fn)(w, now=now, **kw)
+        return build
+    return (
+        ("revenue_decision_mart", mart),
+        ("revenue_attribution", mod("services.revenue_attribution_service",
+                                    "build_revenue_attribution")),
+        ("revenue_by_source", mod("services.source_attribution_service",
+                                  "build_revenue_by_source")),
+        ("unit_economics", mod("services.canonical_unit_economics_service",
+                               "build_unit_economics")),
+        ("dashboard_overview", mod("services.dashboard_overview_service",
+                                   "build_dashboard_overview")),
+        ("dashboard_revenue", mod("services.dashboard_revenue_service",
+                                  "build_dashboard_revenue")),
+        ("dashboard_channels", mod("services.dashboard_channels_service",
+                                   "build_dashboard_channels")),
+        ("dashboard_campaigns", mod("services.dashboard_campaigns_service",
+                                    "build_dashboard_campaigns")),
+        ("dashboard_countries", mod("services.dashboard_countries_service",
+                                    "build_dashboard_countries")),
+        ("dashboard_deals", mod("services.dashboard_deals_service",
+                                "build_dashboard_deals")),
+    )
 
 
 def pure_checks(a: Audit) -> None:
@@ -795,7 +943,7 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
               "hubspot_calls_performed": False,
               "google_ads_calls_performed": False,
               "external_writes_performed": False,
-              "database_writes_performed": False,
+              "database_writes_performed": None,      # measured below
               "inventory": [dict(r, families=list(r["families"])) for r in INVENTORY],
               "structural": structural, "windows": [],
               "pages_not_run": []}
@@ -811,22 +959,36 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
         truth = svc.get_closed_won_truth(
             [("business", k) for k in WINDOW_KEYS], now=now, universe=universe)
         by_key = {w["window"]["window_key"]: w for w in truth["windows"]}
+        before = _write_fingerprint()
         for key in WINDOW_KEYS:
             base = crs.load_won_deals(key, now=now)
-            mart = None
+            mart, built = None, {}
             if pages:
-                try:
-                    from services.revenue_decision_mart import (  # noqa: PLC0415
-                        build_revenue_decision_mart,
-                    )
-                    mart = build_revenue_decision_mart(view="campaign",
-                                                       window=key, now=now)
-                except Exception as exc:  # noqa: BLE001
-                    report["pages_not_run"].append(
-                        {"window": key,
-                         "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                for name, build in _page_builders():
+                    try:
+                        payload = build(key, now)
+                    except Exception as exc:  # noqa: BLE001
+                        report["pages_not_run"].append(
+                            {"window": key, "page": name,
+                             "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                        continue
+                    if name == "revenue_decision_mart":
+                        mart = payload
+                    else:
+                        built[name] = payload
             report["windows"].append(window_checks(
-                a, key, universe, by_key[key], base, mart, now=now))
+                a, key, universe, by_key[key], base, mart, now=now, pages=built))
+        after = _write_fingerprint()
+    # 16 — measured, not declared: the closed-won tables are byte-identical.
+    report["database_writes_performed"] = (
+        None if before is None or after is None else before != after)
+    a.check("no_external_calls_no_writes",
+            report["database_writes_performed"] is not True,
+            "a closed-won table changed while the audit ran")
+    if before is None or after is None:
+        report["pages_not_run"].append(
+            {"window": None, "page": "write_fingerprint",
+             "detail": "the closed-won tables could not be fingerprinted"})
     report["checks"] = a.checks
     report["violations"] = a.violations
     if a.violations:
@@ -848,7 +1010,8 @@ def _render(report: dict) -> None:
     print("=" * 96)
     print("  PR-ADS-161E — CUSTOMER / REVENUE READER CUTOVER AUDIT (read-only)")
     print(f"  verdict: {report.get('verdict')}    HubSpot calls: False    "
-          "external writes: False    database writes: False")
+          f"external writes: False    database writes: "
+          f"{report.get('database_writes_performed')} (measured)")
     print("=" * 96)
     print(f"\n  {'window':<18}{'won deals':>10}{'customers':>11}{'revenue USD':>16}"
           "  deals / revenue / customers")

@@ -68,10 +68,23 @@ in `static/app.js` render these states. `rowMetricHtml` trusts the status, not
 the value: a withheld metric that wrongly carried a number still renders the
 word.
 
-**Withheld means absent.** A withheld window publishes no customer figure
-anywhere: no row, no subset, no identity map. The audit walks every page
-payload to prove it (`withheld_not_reconstructable`). The canonical
-`confirmed_customer_lower_bound` is not republished by any page.
+**Withheld means absent.** When the window withholds a family (deals,
+customers or revenue), no page publishes a figure of it anywhere: no row,
+subset, bucket, proof list or identity map. A row whose own metric is withheld
+carries no sibling figure for it, and no proof-deal list. The audit runs all
+ten page builders (the Mart, attribution, Revenue by Source, Unit Economics and
+six dashboards) for every business window and walks each payload
+(`withheld_not_reconstructable`). The canonical `confirmed_customer_lower_bound`
+is not republished by any page.
+
+The one labelled partial kept on purpose is **"Known revenue from N priced
+deals"** (PR-ADS-155). It names its own denominator and is never shown as the
+total. Negative amounts are excluded from it, because `summarize_deals` now
+uses the canonical `revenue_is_proven`.
+
+Headline revenue KPIs render through `canonicalValueHtml`. A CRM withholding
+reads "Withheld" with the reason, and gives admins a View blockers link; it is
+not a bare "Unavailable".
 
 ## 4. Derived metrics
 
@@ -86,11 +99,29 @@ The window verdict (`get_closed_won_truth`) carries no spend, so it still
 publishes neither ratio. Its reasons now say they are derived per scope by the
 reader contract.
 
-**Per-campaign placement gate.** A Google Ads won deal with no campaign could
-belong to any campaign. While one exists in the window, every per-campaign deal
-count, revenue, customer count, ROAS and CAC is withheld with
-`google_ads_deals_not_placed_on_a_campaign` (`campaign_placement_gate`). The
-account-level Google Ads figures are not affected.
+**Scope rule.** ROAS and CAC publish only for `google_ads_source` and
+`campaign_attributable`. Otherwise they are unavailable with
+`numerator_and_denominator_scopes_differ`; for example, Unit Economics at
+`all_source`.
+
+**Per-campaign placement.** The window is evaluated with Campaign Evidence's
+own resolver (`ccr.campaign_resolver`, built once per snapshot). The page then
+republishes that canonical partition. A Google Ads won deal that resolves to no
+campaign (no label, an unmapped label, or no resolver) is in
+`google_ads_unplaced`. While one exists:
+
+* every **per-campaign** deal count, revenue, customer count, ROAS and CAC is
+  withheld with `google_ads_deals_not_placed_on_a_campaign`
+  (`campaign_placement_gate`);
+* the `campaign_attributable` **scope total** is still published, because it is
+  exact for its own scope;
+* the account-level Google Ads figures are not affected.
+
+**A withheld count is never judged.** A row whose deal count is withheld gets
+the verdict `outcome_withheld` (ROAS pages) or the status "Closed-won outcome
+withheld" (dashboards), never `waste`, "spend without proof" or "no won
+deals". Decision cards say that the outcome is withheld. Charts leave the row
+off instead of plotting it at 0.
 
 ## 5. "View blockers"
 
@@ -140,7 +171,11 @@ description.
 * **Withheld legacy routes:**
   * `/api/reports/roas/campaigns|countries` and `/api/reports/roas/snapshots*`
     publish no figure (`legacy_local_revenue_not_canonical`).
-  * `/api/attribution/gclid-readiness` withholds its local-file won-deal count.
+  * `/api/attribution/gclid-readiness` withholds every local-file deal count.
+    Direct plus without-GCLID would otherwise re-add to the won-deal count.
+  * `/api/mailchimp/audit` (admin) withholds every closed-won outcome figure
+    (`legacy_deal_source_attribution_not_canonical`). Its coverage figures
+    stay.
 
 ## 7. Deferred readers
 
@@ -149,11 +184,22 @@ description.
 | `/api/attribution/confidence-summary` | Publishes attribution tier counts only, with no deal, customer, revenue or ratio value. |
 | `/api/audit/revenue-truth` | An admin shadow-reconciliation diagnostic that compares the ledger to the legacy ledgers. It is not a page publishing a total. |
 | Daily ROAS snapshot job (`scheduler/daily.py`) | Still writes a local snapshot file (no external write). Every route that serves it withholds the figures. |
+| Admin revenue-recovery job report (`revenue_recovery_service`) | Counts what one recovery run processed. It is a job report, not a window's business total. |
+| `source_attribution_health_counts` | Classification-health counts (ambiguous or unclassified deals) on Revenue by Source. They are a data-quality signal, not an outcome. |
+
+**Known limitations.**
+
+* An All Time trend cannot place an undated won deal in a bucket. The All Time
+  total holds it, so the trend buckets can sum to less than the total.
+* A Google Ads-source deal whose label is approved as `not_google_ads` is in no
+  country row. It therefore falls in the "no country" residual.
 
 ## 8. Audit
 
-`python -m scripts.audit_customer_revenue_reader_cutover [--json]`. It runs 17
-checks:
+`python -m scripts.audit_customer_revenue_reader_cutover [--json]`. It reads
+the snapshot, runs the ten page builders for every business window, and
+fingerprints the closed-won tables before and after. "No database writes" is
+measured, not declared. It runs 17 checks:
 
 * the inventory is complete; customer and revenue readers are canonical;
 * no won-deal-as-customer label; no legacy table gate;

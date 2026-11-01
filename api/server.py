@@ -8522,6 +8522,42 @@ _LEGACY_SNAPSHOT_METADATA = ("id", "snapshot_id", "snapshot_date", "window",
                              "generated_at", "created_at")
 
 
+#: Key fragments of a closed-won OUTCOME figure (a customer, won-deal or
+#: revenue count / sum / subset proof) in a legacy payload.
+_LEGACY_OUTCOME_KEY_PARTS = ("customer", "closed_won", "revenue")
+
+
+def _withhold_legacy_closed_won_outcomes(payload):
+    """PR-ADS-161E. A legacy payload with every closed-won outcome figure
+    removed, recursively: the Mailchimp attribution audit counts contacts with
+    won deals as "customers" and sums ``COALESCE(deal_amount_usd, 0)`` from the
+    legacy ``deal_source_attribution`` table — neither is the canonical
+    customer or revenue. Text (definitions, notes) is kept; numbers, booleans
+    and lists under an outcome key become None, and the payload says why.
+    """
+    def walk(value):
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                outcome = any(part in str(k).lower()
+                              for part in _LEGACY_OUTCOME_KEY_PARTS)
+                if outcome and not isinstance(v, (str, dict)):
+                    out[k] = None
+                else:
+                    out[k] = walk(v)
+            return out
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        return value
+    if not isinstance(payload, dict):
+        return payload
+    return {**walk(payload),
+            "closed_won_outcomes_status": {
+                "status": "withheld",
+                "reason": "legacy_deal_source_attribution_not_canonical",
+                "canonical_replacement": "/api/revenue-attribution"}}
+
+
 def _withhold_legacy_roas_snapshot(snapshot):
     """A persisted ROAS snapshot with every outcome figure removed.
 
@@ -8715,8 +8751,13 @@ async def get_gclid_readiness(
     # PR-ADS-161E: the audit counts won deals in a local JSON file — not the
     # canonical closed-won population — so that count is not published. The
     # GCLID coverage figures stay: they measure joinability, not outcomes.
+    # Every deal count it reports is a slice of that same local population —
+    # direct + without GCLID re-adds to the won-deal count — so all of them are
+    # withheld together (withheld means absent, not recoverable).
     summary = dict(result.get("summary") or {})
-    summary["won_deals"] = None
+    for key in ("won_deals", "deals_with_direct_gclid", "deals_with_contact_gclid",
+                "deals_without_gclid"):
+        summary[key] = None
     summary["won_deals_status"] = {
         "status": "withheld", "reason": LEGACY_REVENUE_WITHHELD_REASON,
         "canonical_replacement": "/api/revenue-attribution"}
@@ -8905,8 +8946,9 @@ def api_mailchimp_audit(request: Request, max_campaigns: int = 10,
     hubspot_window_days = max(1, min(1825, int(hubspot_window_days)))
     try:
         from services.mailchimp_audit_service import run_audit  # noqa: PLC0415
-        return run_audit(max_campaigns=max_campaigns,
-                         hubspot_window_days=hubspot_window_days)
+        return _withhold_legacy_closed_won_outcomes(
+            run_audit(max_campaigns=max_campaigns,
+                      hubspot_window_days=hubspot_window_days))
     except Exception as exc:  # noqa: BLE001
         log.error("[api/mailchimp/audit] failed: %s", exc)
         return {"status": "failed", "detail": "attribution audit failed"}

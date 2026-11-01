@@ -656,6 +656,15 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                          "because it is not a connected spend source."),
                 "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
             })
+        elif any(c.get("closed_won_deals") is None for c in channel_rows):
+            # PR-ADS-161E: a withheld deal count is unknown, not zero.
+            cards.append({
+                "type": "scale", "title": "Scale",
+                "headline": "Channel closed-won outcomes are withheld",
+                "body": ("Closed-won deals are withheld for this window, so no "
+                         "channel is claimed to have produced none."),
+                "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            })
         else:
             cards.append({
                 "type": "scale", "title": "Scale",
@@ -672,10 +681,12 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": f"{top['channel_label']} has SQLs but no connected spend",
-            "body": (f"It produced {top['sqls']} SQL{'s' if top['sqls'] != 1 else ''} and "
-                     f"{top.get('closed_won_deals') or 0} won deal"
-                     f"{'s' if (top.get('closed_won_deals') or 0) != 1 else ''}, but ROAS is "
-                     "unavailable until a real spend source is connected."),
+            "body": (f"It produced {top['sqls']} SQL{'s' if top['sqls'] != 1 else ''}"
+                     + (" (its closed-won deals are withheld this window)"
+                        if top.get("closed_won_deals") is None else
+                        f" and {top['closed_won_deals']} won deal"
+                        f"{'s' if top['closed_won_deals'] != 1 else ''}")
+                     + ", but ROAS is unavailable until a real spend source is connected."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
     else:

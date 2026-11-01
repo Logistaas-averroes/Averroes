@@ -546,13 +546,15 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
             r for r in campaign_rows or []
             if (r.get("spend") or 0) > 0
             and (r.get("sqls") or 0) == 0
-            and (r.get("closed_won_deals") or 0) == 0
+            # PR-ADS-161E: a withheld deal count is unknown, not zero — such a
+            # campaign is never called spend without proof.
+            and r.get("closed_won_deals") == 0
         ]
         if waste_rows:
             waste_total = sum(float(r.get("spend") or 0.0) for r in waste_rows)
             top_waste = max(waste_rows, key=lambda r: float(r.get("spend") or 0.0))
             biggest_waste_signal = {
-                "label": "Spend with no SQL or customer proof",
+                "label": "Spend with no SQL or won-deal proof",
                 "value": _round2(waste_total),
                 "currency": ("USD" if spend_truth.get("fx_status") == "verified"
                              else (spend_truth.get("native_currency") or "GBP")),
@@ -642,6 +644,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
 
     revenue_connected = bool(readiness.get("canonical_revenue_available"))
     producing = [r for r in campaign_rows or [] if (r.get("closed_won_deals") or 0) > 0]
+    # PR-ADS-161E: campaigns whose deal count is withheld support no claim.
+    withheld = [r for r in campaign_rows or [] if r.get("closed_won_deals") is None]
     best = signals.get("best_campaign")
     if not revenue_connected:
         # Customer production is UNKNOWN, not zero — say so instead of
@@ -668,6 +672,17 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "target_page": "roas-campaigns",
             "target_label": "Open ROAS by Campaign",
         })
+    elif withheld:
+        cards.append({
+            "type": "scale",
+            "title": "Scale",
+            "headline": "Campaign closed-won outcomes are withheld",
+            "body": (f"Closed-won deals are withheld for {len(withheld)} "
+                     f"campaign{'s' if len(withheld) != 1 else ''} in this window, "
+                     "so won-deal production is not claimed either way."),
+            "target_page": "roas-campaigns",
+            "target_label": "Open ROAS by Campaign",
+        })
     else:
         cards.append({
             "type": "scale",
@@ -681,7 +696,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
     if sqls_available:
         watch_rows = [
             r for r in campaign_rows or []
-            if (r.get("sqls") or 0) > 0 and (r.get("closed_won_deals") or 0) == 0
+            if (r.get("sqls") or 0) > 0 and r.get("closed_won_deals") == 0
         ]
         if watch_rows:
             top_watch = max(watch_rows, key=lambda r: r.get("sqls") or 0)
@@ -695,6 +710,16 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                     f"{'s' if (top_watch.get('sqls') or 0) != 1 else ''} without "
                     "closed-won proof — promising, not yet verified."
                 ),
+                "target_page": "roas-campaigns",
+                "target_label": "Open ROAS by Campaign",
+            })
+        elif any((r.get("sqls") or 0) > 0 for r in withheld):
+            cards.append({
+                "type": "watch",
+                "title": "Watch",
+                "headline": "SQL pipelines cannot be judged",
+                "body": ("Closed-won deals are withheld for campaigns with SQLs in "
+                         "this window, so unproven pipelines are not claimed."),
                 "target_page": "roas-campaigns",
                 "target_label": "Open ROAS by Campaign",
             })
@@ -730,7 +755,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "body": (
                 f"{value_copy} across {waste['campaign_count']} campaign"
                 f"{'s' if waste['campaign_count'] != 1 else ''} has no SQL or "
-                "customer evidence in this window."
+                "won-deal evidence in this window."
             ),
             "target_page": "action-queue",
             "target_label": "Open Action Queue",
@@ -744,12 +769,23 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "target_page": "revenue-health",
             "target_label": "Open Revenue Health",
         })
+    elif any((r.get("spend") or 0) > 0 and (r.get("sqls") or 0) == 0
+             for r in withheld):
+        cards.append({
+            "type": "investigate",
+            "title": "Investigate",
+            "headline": "Paid spend cannot be fully judged",
+            "body": ("Closed-won deals are withheld for campaigns with spend and no "
+                     "SQLs, so unexplained spend is neither claimed nor ruled out."),
+            "target_page": "roas-campaigns",
+            "target_label": "Open ROAS by Campaign",
+        })
     else:
         cards.append({
             "type": "investigate",
             "title": "Investigate",
             "headline": "No unexplained paid spend",
-            "body": "Every campaign with spend has SQL or customer evidence in this window.",
+            "body": "Every campaign with spend has SQL or won-deal evidence in this window.",
             "target_page": "action-queue",
             "target_label": "Open Action Queue",
         })
@@ -1253,8 +1289,13 @@ def _commercial_outcomes(mart: dict, revenue_connected: bool) -> dict:
             "connected_to_lifecycle_funnel": False,
             "source": canonical_revenue.CANONICAL_SOURCE,
             "scope": revenue_scope.SCOPE_ALL_SOURCE,
+            # PR-ADS-161E: the canonical verdicts, so the page says WHY.
+            "customers_status": summary.get("customers_status"),
+            "customers_reason": summary.get("customers_reason"),
+            "metrics": summary.get("metrics"),
         }
     return {
+        "metrics": summary.get("metrics"),
         "available": bool(disclosure.get("available")),
         "reason": None if disclosure.get("available") else disclosure.get("unavailable_reason"),
         # PR-ADS-161E: customers are distinct proven HubSpot companies, with the

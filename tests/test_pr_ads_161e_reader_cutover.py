@@ -688,3 +688,248 @@ def test_27_ci_runs_this_suite_with_postgres_and_asserts_it_ran():
     assert "tests/test_pr_ads_161e_reader_cutover.py" in pg_step
     did_run = wf[wf.index("- name: Assert the PostgreSQL tests actually ran"):]
     assert '"tests.test_pr_ads_161e_reader_cutover"' in did_run
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §7 — independent truth review: each case was executed against the first
+#      cut of this PR and reproduced a defect; each passes here.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_UNPLACED_GOOGLE_DEAL = {
+    "deal_id": "d9", "company": "Beta", "country": "Germany",
+    "campaign_name": None, "acquisition_group": "google_ads",
+    "attribution_status": "attributed", "deal_close_date": "2026-05-02",
+    "deal_amount_usd": 1000.0, "match_source": "gclid"}
+
+
+def _gated_campaigns(monkeypatch, **kw):
+    """The Campaigns tab fixture plus one Google Ads won deal on no campaign —
+    the canonical placement verdict withholds every per-campaign figure."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    deals = [dict(d) for d in t137.DEAL_ROWS] + [dict(_UNPLACED_GOOGLE_DEAL)]
+    t137._patch_durable(monkeypatch, deals=deals, **kw)
+    return t137, deals
+
+
+#: Claims that are false while a count or total is withheld, and the wrong
+#: reasons the first cut gave for a withholding.
+_FALSE_CLAIMS = ("won no deals", "no campaign has a closed-won deal",
+                 "spend without won-deal proof", "spend without sql / customer proof",
+                 "produced at least one", "maps to a campaign this window",
+                 "maps to a country this window", "could not be read",
+                 "unknown deal amount", "integration is disconnected")
+
+
+def _card_text(payload):
+    return " ".join(f"{c.get('headline')} {c.get('body')}"
+                    for c in payload.get("decision_cards") or []).lower()
+
+
+def test_28_a_a_withheld_campaign_deal_count_is_never_waste_or_no_won_deals(
+        monkeypatch):
+    t137, _ = _gated_campaigns(monkeypatch)
+    from services.revenue_attribution_service import (
+        VERDICT_OUTCOME_WITHHELD, build_revenue_attribution,
+    )
+    from services.dashboard_campaigns_service import (
+        STATUS_OUTCOME_WITHHELD, build_dashboard_campaigns,
+    )
+    ra = build_revenue_attribution("ytd", now=t137.NOW)
+    assert ra["closed_won_truth"]["campaign_placement_gate"]["reason"] == \
+        cwt.R_CAMPAIGN_UNPLACED
+    for c in ra["campaigns"]:
+        assert c["closed_won_deals"] is None and c["won_revenue"] is None
+        assert c["verdict"] in (VERDICT_OUTCOME_WITHHELD, "mapping_required"), c
+    # The campaign-attributable SCOPE total is exact for its scope: not gated.
+    assert ra["summary"]["closed_won_deals"] == 2
+    out = build_dashboard_campaigns("ytd", now=t137.NOW)
+    for c in out["campaigns"]:
+        if c["campaign_name"] == "Unattributed / Needs Review":
+            continue
+        assert c["status"] == STATUS_OUTCOME_WITHHELD
+        assert c["deals"] is None                  # no proof list beside it
+    text = _card_text(out)
+    assert not any(p in text for p in _FALSE_CLAIMS), text
+
+
+def test_28_b_the_overview_never_claims_no_producers_over_withheld_counts(
+        monkeypatch):
+    from tests import test_pr_ads_134_dashboard_overview as t134
+    rows = [t134.WON_ROW_MAPPED | {"deal_close_date": "2026-05-01"},
+            dict(_UNPLACED_GOOGLE_DEAL)]
+    leads = [dict(r, status_category="lead") for r in t134.LEAD_ROWS]
+    t134._patch_durable(monkeypatch, won_rows=rows, lead_rows=leads)
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    ledger_rows = from_legacy_deal_rows(rows)
+    patch_canonical_ledger(monkeypatch, ledger_rows,
+                           company_associations=company_evidence(ledger_rows))
+    from services.dashboard_overview_service import build_dashboard_overview
+    ov = build_dashboard_overview("ytd", now=t134.NOW)
+    text = _card_text(ov)
+    assert "no campaign has a closed-won deal" not in text
+    assert "withheld" in text
+    waste = (ov.get("top_signals") or {}).get("biggest_waste")
+    assert waste is None, waste
+
+
+def test_28_c_an_undated_won_deal_never_reads_as_no_deals_or_an_outage(
+        monkeypatch):
+    from tests import test_pr_ads_138_dashboard_countries as t138
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    deals = [dict(d) for d in t138.DEAL_ROWS] + [
+        {"deal_id": "d99", "company": "Undated", "country": "Germany",
+         "campaign_name": None, "deal_close_date": None, "deal_amount_usd": 10.0}]
+    t138._patch_durable(monkeypatch, deals=deals)
+    rows = from_legacy_deal_rows(deals)
+    rows[-1]["deal_close_date"] = None
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services.dashboard_countries_service import build_dashboard_countries
+    out = build_dashboard_countries("ytd", now=t138.NOW)
+    assert out["kpis"]["countries_with_closed_won_deals"] is None
+    assert out["kpis"]["deals_metric"]["reason"] == cwt.R_UNDATED_WON_DEALS
+    text = _card_text(out) + " " + " ".join(
+        u.get("reason") or "" for u in out.get("unavailable") or []).lower()
+    assert not any(p in text for p in _FALSE_CLAIMS), text
+
+
+def test_29_per_campaign_placement_is_the_canonical_verdict(monkeypatch):
+    """An unmapped campaign label: the canonical resolver places the deal on no
+    campaign, so the canonical ``campaign_revenue`` is withheld — and the page
+    republishes exactly that, instead of a label-presence approximation."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows, label_resolver
+    deals = [dict(d) for d in t137.DEAL_ROWS[:2]] + [
+        {"deal_id": "d5", "company": "Renamed", "country": "United States",
+         "campaign_name": "Global Competitors (old name)",
+         "deal_close_date": "2026-06-10", "deal_amount_usd": 7000.0,
+         "match_status": "matched", "match_source": "gclid"}]
+    t137._patch_durable(monkeypatch, deals=deals)
+    rows = from_legacy_deal_rows(deals)
+    patch_canonical_ledger(
+        monkeypatch, rows, company_associations=company_evidence(rows),
+        resolver=label_resolver(unmapped=["Global Competitors (old name)"]))
+    canon = svc.get_closed_won_truth([("business", "ytd")],
+                                     now=t137.NOW)["windows"][0]
+    assert canon["publication"]["campaign_revenue"]["reason"] == cwt.R_CAMPAIGN_UNPLACED
+    from services.revenue_attribution_service import build_revenue_attribution
+    ra = build_revenue_attribution("ytd", now=t137.NOW)
+    assert ra["closed_won_truth"]["campaign_placement_gate"]["reason"] == \
+        cwt.R_CAMPAIGN_UNPLACED
+    gc = next(c for c in ra["campaigns"] if c["campaign_name"] == "Global Competitors")
+    assert gc["won_revenue"] is None and gc["roas"] is None
+    assert gc["verdict"] != "winner"
+    # Control: the same label mapped → placed → published.
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    ra = build_revenue_attribution("ytd", now=t137.NOW)
+    assert ra["closed_won_truth"]["campaign_placement_gate"] is None
+
+
+def test_30_a_negative_amount_is_never_netted_into_any_total(monkeypatch):
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    deals = [dict(d) for d in t137.DEAL_ROWS]
+    t137._patch_durable(monkeypatch, deals=deals)
+    rows = from_legacy_deal_rows(deals)
+    rows[2] = dict(rows[2], amount_raw=-500.0, revenue_usd=-500.0)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    netted = 18000.0 + 11000.0 - 500.0
+    from services.revenue_decision_mart import build_revenue_decision_mart
+    from services.revenue_attribution_service import build_revenue_attribution
+    from services.canonical_unit_economics_service import build_unit_economics
+    from services.source_attribution_service import build_revenue_by_source
+    pages = {"mart": build_revenue_decision_mart(view="campaign", window="ytd",
+                                                 now=t137.NOW),
+             "attribution": build_revenue_attribution("ytd", now=t137.NOW),
+             "unit_economics": build_unit_economics("ytd", now=t137.NOW),
+             "by_source": build_revenue_by_source("ytd", now=t137.NOW)}
+    assert pages["mart"]["summary"]["metrics"]["revenue_usd"]["status"] == cwt.WITHHELD
+    for name, payload in pages.items():
+        hits = [p for p, d in audit._walk(payload) for k, v in d.items()
+                if isinstance(v, float) and abs(v - netted) < 0.01]
+        assert not hits, (name, hits[:5])
+    # The invalid deal is counted as unproven, never as a priced deal.
+    assert crs.summarize_deals(rows, "all_source")["currency_unavailable_deals"] == 1
+
+
+def test_31_roas_and_cac_need_a_scope_google_ads_spend_can_have_produced(
+        monkeypatch):
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    t137._patch_durable(monkeypatch)
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services.canonical_unit_economics_service import build_unit_economics
+    allsrc = build_unit_economics("ytd", scope="all_source", now=t137.NOW)["advertising"]
+    for m in ("roas", "cac"):
+        assert allsrc[m] is None
+        assert allsrc["metrics"][m]["reason"] == cwt.R_SCOPE_INCOMPATIBLE
+    camp = build_unit_economics("ytd", scope="campaign_attributable",
+                                now=t137.NOW)["advertising"]
+    assert camp["metrics"]["roas"]["status"] == cwt.PUBLISHED
+    assert camp["metrics"]["roas"]["cohort_basis"] == cwt.PERIOD_COHORT_BASIS
+
+
+def test_32_legacy_outcome_payloads_withhold_every_recoverable_figure():
+    import api.server as server
+    mailchimp = {"recipients_inspected": 40, "customer_contacts": 3,
+                 "contacts_with_closed_won_revenue": 2,
+                 "reconciliation": {"attributed_customers": 3,
+                                    "attributed_closed_won_revenue_usd": 900.0,
+                                    "durable_customer_population": 7,
+                                    "customers_is_subset_of_durable": True,
+                                    "definitions": {"customer": "text kept"}}}
+    out = server._withhold_legacy_closed_won_outcomes(mailchimp)
+    assert out["recipients_inspected"] == 40                 # coverage kept
+    for k in ("customer_contacts", "contacts_with_closed_won_revenue"):
+        assert out[k] is None
+    rec = out["reconciliation"]
+    assert all(rec[k] is None for k in ("attributed_customers",
+                                        "attributed_closed_won_revenue_usd",
+                                        "durable_customer_population",
+                                        "customers_is_subset_of_durable"))
+    assert rec["definitions"]["customer"] == "text kept"
+    assert out["closed_won_outcomes_status"]["status"] == "withheld"
+    src = (_ROOT / "api" / "server.py").read_text(encoding="utf-8")
+    i = src.index("async def get_gclid_readiness(")
+    region = src[i:src.index("@app.", i + 1)]
+    for key in ("won_deals", "deals_with_direct_gclid", "deals_with_contact_gclid",
+                "deals_without_gclid"):
+        assert f'"{key}"' in region
+
+
+@_needs_pg
+def test_33_the_audit_goes_red_when_a_page_keeps_proof_beside_a_withheld_count(
+        ledger, monkeypatch):
+    """Counterfactual for the page-wide leak walk: the Campaigns tab putting
+    its proof-deal list back beside a withheld count (the first cut's
+    behaviour) is caught, on any page, not only the Mart."""
+    now = _now()
+    _deal(ledger, "1", deal_close_date=_this_year(now), acquisition_group="google_ads",
+          attribution_status="attributed", gclid="g1")
+    _scan(monkeypatch, {"1": [901]})
+    _, clean = audit.run(now=now)
+    assert clean["exit_code"] == audit.EXIT_OK, clean["violations"]
+
+    from services import dashboard_campaigns_service as camp
+    real = camp._build_campaign_rows
+
+    def leaky(*a, **k):
+        rows = real(*a, **k)
+        for r in rows:
+            r["closed_won_deals"] = None
+            r["metrics"] = {"closed_won_deals": cwt.metric(
+                None, cwt.WITHHELD, cwt.R_CAMPAIGN_UNPLACED)}
+            r["deals"] = [{"deal_id": "1", "amount_usd": 1000.0}]
+        return rows or [{"campaign_name": "x", "closed_won_deals": None,
+                         "metrics": {"closed_won_deals": cwt.metric(
+                             None, cwt.WITHHELD, cwt.R_CAMPAIGN_UNPLACED)},
+                         "deals": [{"deal_id": "1"}]}]
+    monkeypatch.setattr(camp, "_build_campaign_rows", leaky)
+    _, report = audit.run(now=now)
+    assert report["exit_code"] == audit.EXIT_VIOLATION
+    assert report["checks"]["withheld_not_reconstructable"] is False
+    assert any("dashboard_campaigns" in v for v in report["violations"])

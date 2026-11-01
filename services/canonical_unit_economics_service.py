@@ -181,11 +181,16 @@ def build_unit_economics(window: str = "current_quarter",
 
     spend_reason = (None if spend_usd is not None else
                     f"google_ads_usd_spend_{spend_truth.get('state') or 'unavailable'}")
+    # PR-ADS-161E: Google Ads spend can only have produced Google Ads deals.
+    # A ratio of all-source (or any non-Google) revenue or customers over Google
+    # Ads spend credits advertising with outcomes it did not produce, so ROAS
+    # and CAC are unavailable for those scopes (``numerator_and_denominator_
+    # scopes_differ``). The scope total itself is exact and is not gated.
     advertising_canon = canonical_revenue.reader_row(
         base, canonical_revenue.filter_deals(base.get("deals"), scope),
         spend_usd=spend_usd, spend_reason=spend_reason,
-        gate=(canonical_revenue.campaign_placement_gate(base)
-              if scope == revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE else None))
+        roas_scope_ok=scope in (revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+                                revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE))
     advertising = {
         **{k: scoped[k] for k in _SCOPE_FIELDS},
         "closed_won_deals": advertising_canon["closed_won_deals"],

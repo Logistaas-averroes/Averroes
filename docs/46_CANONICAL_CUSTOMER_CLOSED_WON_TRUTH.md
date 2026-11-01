@@ -85,8 +85,23 @@ Its population is the same won population minus deals whose close lies after
 "now" (they have not closed); an undated won deal stays, because contact
 creation, not a close date, proves its membership.
 
-The two are reported side by side and never combined. Nothing here computes
-ROAS or CAC: a spend window divided by close-date deals is neither.
+The two are reported side by side and never combined. This service computes
+no ROAS or CAC: a window verdict carries no spend.
+
+**PR-ADS-161E doctrine change.** The reader contract derives a **period**
+ROAS and CAC (`cwt.derive_roas` / `derive_cac`): close-date revenue, or
+distinct companies, over the same window's Google Ads USD spend. They are
+labelled `cohort_basis: close_date_outcomes_over_same_window_spend`, and the
+UI shows that basis. They are not acquisition-cohort ratios.
+
+* Period CAC counts every company whose won deal closed in the window,
+  including repeat and expansion customers. It is "spend per customer won this
+  period", not "cost to acquire a new customer".
+* Both ratios publish only when every input is published.
+* Both are unavailable when the numerator scope is not one Google Ads spend
+  can have produced. Only `google_ads_source` and `campaign_attributable`
+  qualify.
+* See `docs/48_*` §4.
 
 ### Dates
 

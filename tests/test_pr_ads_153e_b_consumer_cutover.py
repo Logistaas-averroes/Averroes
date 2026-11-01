@@ -405,7 +405,10 @@ def test_10_revenue_by_source_reconciles_or_exposes_the_uncovered_bucket(monkeyp
     # $0 gap); the deal partition still reconciles exactly.
     assert recon["revenue_comparable"] is False
     assert recon["uncovered_revenue_usd"] is None
-    assert recon["reconciles"] is True
+    assert recon["deals_reconcile"] is True
+    # Reconciliation needs both halves: with the money side not compared the
+    # overall claim is unknown, never "reconciles".
+    assert recon["reconciles"] is None
     # The deal whose currency could not be proven is reported, not discarded.
     assert recon["revenue_unavailable_deals"] == 1
     # Unclassified/ambiguous revenue keeps its own bucket rather than being

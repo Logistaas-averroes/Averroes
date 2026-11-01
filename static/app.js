@@ -2387,6 +2387,10 @@ const CANONICAL_REASON_LABELS = {
     "leads and won deals are different populations and cohorts",
 };
 
+const CANONICAL_BASIS_LABELS = {
+  close_date_outcomes_over_same_window_spend: "period ratio: deals closed in this window ÷ this window's spend",
+};
+
 function canonicalReasonLabel(reason) {
   if (!reason) return "";
   return CANONICAL_REASON_LABELS[reason] || String(reason).replace(/_/g, " ");
@@ -2432,7 +2436,14 @@ function canonicalBlockingReason(metric) {
 function canonicalMetricHtml(metric, formatter, opts) {
   const m = metric || {};
   if (m.status === "published" && m.value !== null && m.value !== undefined) {
-    return escapeHtml(formatter ? formatter(m.value) : String(m.value));
+    const text = escapeHtml(formatter ? formatter(m.value) : String(m.value));
+    // A derived ratio states its basis (PR-ADS-161E): period ROAS / CAC are
+    // close-date outcomes over the same window's spend, not an acquisition
+    // cohort.
+    return m.cohort_basis
+      ? `<span title="${escapeHtml(CANONICAL_BASIS_LABELS[m.cohort_basis] || m.cohort_basis)}">${text}</span>`
+        + ` <small class="metric-reason">${escapeHtml(CANONICAL_BASIS_LABELS[m.cohort_basis] || m.cohort_basis)}</small>`
+      : text;
   }
   const word = m.status === "withheld" ? "Withheld" : "Unavailable";
   const reason = canonicalBlockingReason(m);
@@ -2453,6 +2464,28 @@ function rowMetricHtml(row, key, formatter, opts) {
   const m = (r.metrics || {})[ROW_METRIC_KEYS[key] || key];
   if (m && m.status) return canonicalMetricHtml(m, formatter, opts);
   return dashValue(r[key], formatter);
+}
+
+// PR-ADS-161E: a page total that is a number when published and, when not,
+// says WHY with the canonical metric — never a bare "Unavailable" for a CRM
+// withholding. Falls back to dashValue when the API sent no verdict.
+function canonicalValueHtml(value, metric, formatter, opts) {
+  if (value !== null && value !== undefined) {
+    return escapeHtml(formatter ? formatter(value) : String(value));
+  }
+  const m = metric || {};
+  if (m.status && m.status !== "published") return canonicalMetricHtml(m, formatter, opts);
+  return dashValue(null);
+}
+
+// Plain-text deal-count sub-line (escaped by the KPI template): the count, or
+// the canonical word and reason.
+function closedWonDealsSubText(value, metric) {
+  if (value !== null && value !== undefined) return `${fmtCount(value)} closed-won deals`;
+  const m = metric || {};
+  const word = m.status === "withheld" ? "withheld" : "unavailable";
+  const why = canonicalReasonLabel(canonicalBlockingReason(m));
+  return `Closed-won deals ${word}${why ? ` — ${why}` : ""}`;
 }
 
 // Admin-gated routes never render as live links for viewers — navigate() would
@@ -2573,7 +2606,7 @@ function renderDashKpiRow(d) {
     {
       key: "revenue",
       label: "Closed-Won Revenue",
-      value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+      value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }),
       sub: "USD · HubSpot truth",
       delta: dashDeltaChip("revenue_usd", pc),
       spark: revenueSpark,
@@ -2592,9 +2625,7 @@ function renderDashKpiRow(d) {
       // Closed-won DEALS beside it — a separate metric. Never "n% of leads":
       // leads are contacts, and a deal is not a lifecycle stage a contact
       // converts into (PR-ADS-155-F2 §2).
-      sub: (k.closed_won_deals === null || k.closed_won_deals === undefined)
-        ? "Closed-won deals unavailable"
-        : `${escapeHtml(fmtCount(k.closed_won_deals))} closed-won deals`,
+      sub: closedWonDealsSubText(k.closed_won_deals, (k.metrics || {}).closed_won_deals),
       delta: dashDeltaChip("customers", pc),
       spark: "",
       source: "HubSpot companies behind closed-won deals",
@@ -2718,7 +2749,7 @@ function renderDashTrendPanel(d) {
     ${notes.map((n) => `<p class="dash-series-note">${escapeHtml(n)}</p>`).join("")}
     ${dashComboChartSVG(trend)}
     <p class="dash-chart-caption">
-      Window totals — Revenue: ${dashValue(k.closed_won_revenue_usd, fmtMoney)} ·
+      Window totals — Revenue: ${canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney)} ·
       Spend: ${dashValue(k.google_ads_spend_usd, fmtMoney)}
     </p>`;
 }
@@ -3301,7 +3332,7 @@ function renderDashCommercialOutcomes(d) {
         </div>
         <div class="dash-outcomes__cell">
           <div class="dash-outcomes__label">Total Closed-Won Revenue</div>
-          <div class="dash-outcomes__value">${dashValue(o.total_revenue_usd, fmtMoney)}</div>
+          <div class="dash-outcomes__value">${canonicalValueHtml(o.total_revenue_usd, (o.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key })}</div>
           <div class="dash-outcomes__sub">USD · all sources</div>
         </div>
         <div class="dash-outcomes__cell">
@@ -3664,7 +3695,7 @@ function renderRevKpiRow(d) {
     {
       key: "revenue",
       label: "Closed-Won Revenue",
-      value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+      value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }),
       sub: "USD · HubSpot closed-won",
       delta: dashDeltaChip("closed_won_revenue_usd", pc),
       source: "HubSpot Closed-Won",
@@ -3678,9 +3709,7 @@ function renderRevKpiRow(d) {
       value: canonicalMetricHtml(
         { value: k.customers, status: k.customers_status, reason: k.customers_reason },
         fmtCount, { windowType: "business", windowKey: (d.window || {}).key }),
-      sub: (k.closed_won_deals === null || k.closed_won_deals === undefined)
-        ? "Closed-won deals unavailable"
-        : `${escapeHtml(fmtCount(k.closed_won_deals))} closed-won deals`,
+      sub: closedWonDealsSubText(k.closed_won_deals, (k.metrics || {}).closed_won_deals),
       delta: dashDeltaChip("customers", pc),
       source: "HubSpot companies behind closed-won deals",
       ok: k.customers_status === "published",
@@ -3761,7 +3790,7 @@ function renderRevMomentumPanel(d) {
     ${note}
     ${revMomentumChartSVG(trend)}
     <p class="dash-chart-caption">
-      Window total revenue: ${dashValue(k.closed_won_revenue_usd, fmtMoney)} across
+      Window total revenue: ${canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney)} across
       ${dashValue(k.closed_won_deals, fmtCount)} closed-won deals · Avg ${dashValue(k.average_deal_value_usd, fmtMoney)}
     </p>`;
 }
@@ -3901,7 +3930,7 @@ function renderRevConversionStrip(d) {
   const stages = [
     { label: "SQLs", value: dashValue(k.sqls, fmtCount), sub: "Qualified leads" },
     { label: "Closed-Won Deals", value: dashValue(k.closed_won_deals, fmtCount), sub: "By close date" },
-    { label: "Closed-Won Revenue", value: dashValue(k.closed_won_revenue_usd, fmtMoney), sub: "USD · HubSpot" },
+    { label: "Closed-Won Revenue", value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }), sub: "USD · HubSpot" },
     { label: "Avg Deal Value", value: dashValue(k.average_deal_value_usd, fmtMoney), sub: "Per won deal" },
   ];
   const conns = [
@@ -4276,7 +4305,7 @@ function renderChanKpiRow(d) {
   const cards = [
     {
       key: "revenue", label: "Closed-Won Revenue",
-      value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+      value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }),
       sub: "USD · HubSpot closed-won",
       delta: dashDeltaChip("closed_won_revenue_usd", pc),
       source: "HubSpot Closed-Won",
@@ -4542,6 +4571,10 @@ function renderChanMixPanel(d) {
 }
 
 function chanMixDonutSVG(rows) {
+  // PR-ADS-161E: a withheld channel count makes every share unknown.
+  if ((rows || []).some((r) => r.closed_won_deals === null || r.closed_won_deals === undefined)) {
+    return '<div class="dash-chart-empty">Closed-won deals are withheld for this window — no share is drawn.</div>';
+  }
   const data = (rows || [])
     .map((r) => ({ label: r.channel_label, channel: r.channel, value: r.closed_won_deals || 0 }))
     .filter((r) => r.value > 0);
@@ -4576,7 +4609,7 @@ function renderChanQualityPanel(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Quality vs Revenue</h3>
-        <p class="dash-panel__sub">SQLs (demand) × Customers (conversion) · bubble size = closed-won revenue</p>
+        <p class="dash-panel__sub">SQLs (demand) × Closed-won deals · bubble size = closed-won revenue</p>
       </div>
     </div>
     ${chanQualityBubbleSVG(pts)}`;
@@ -4887,6 +4920,8 @@ const CAMP_STATUS_META = {
   "Revenue attribution missing": { color: "#7c5cff", dot: "camp-dot--attr" },
   "FX unavailable": { color: "#8896a6", dot: "camp-dot--muted" },
   "Mapping needs review": { color: "#b6bfca", dot: "camp-dot--muted" },
+  // PR-ADS-161E: the campaign's closed-won deals are withheld — not judged.
+  "Closed-won outcome withheld": { color: "#8896a6", dot: "camp-dot--muted" },
 };
 function campStatusColor(status) {
   return (CAMP_STATUS_META[status] || { color: "#b6bfca" }).color;
@@ -5046,14 +5081,14 @@ function renderCampKpiRow(d) {
       value: canonicalMetricHtml(
         k.customers_metric || { value: k.customers, status: k.customers === null || k.customers === undefined ? "unavailable" : "published" },
         fmtCount, campBlockerOpts(d)),
-      sub: `${dashValue(k.closed_won_deals, fmtCount)} closed-won deals · campaign-attributed`,
+      sub: `${closedWonDealsSubText(k.closed_won_deals, k.deals_metric)} · campaign-attributed`,
       delta: dashDeltaChip("customers", pc),
       source: "HubSpot companies on closed-won deals",
       ok: (k.customers_metric || {}).status === "published",
     },
     {
       key: "revenue", label: "Won Revenue",
-      value: dashValue(k.won_revenue_usd, fmtMoney), sub: "USD · HubSpot closed-won",
+      value: canonicalValueHtml(k.won_revenue_usd, k.revenue_metric, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }), sub: "USD · HubSpot closed-won",
       delta: dashDeltaChip("won_revenue_usd", pc),
       source: "HubSpot Closed-Won",
       ok: k.won_revenue_usd !== null && k.won_revenue_usd !== undefined,
@@ -5090,19 +5125,30 @@ function renderCampKpiRow(d) {
 }
 
 // Campaign performance bubble map: x = native spend (GBP), y = customers, size = SQLs.
+// PR-ADS-161E: a campaign whose closed-won deals are withheld has no y value —
+// plotting it at 0 would draw "spend, no deals". It is left off the map and
+// counted beside it instead.
+function campMapRows(d) {
+  return (d.campaigns || []).filter((r) =>
+    r.spend_native !== null && r.spend_native !== undefined && r.spend_native > 0
+    && r.closed_won_deals !== null && r.closed_won_deals !== undefined);
+}
+
 function renderCampPerformanceMap(d) {
-  const rows = (d.campaigns || []).filter((r) =>
-    r.spend_native !== null && r.spend_native !== undefined && r.spend_native > 0);
+  const rows = campMapRows(d);
+  const withheldN = (d.campaigns || []).filter((r) => (r.spend_native || 0) > 0
+    && (r.closed_won_deals === null || r.closed_won_deals === undefined)).length;
   const legend = Object.keys(CAMP_STATUS_META).map((s) =>
     `<span class="dash-legend__item"><span class="dash-legend__swatch" style="background:${CAMP_STATUS_META[s].color}"></span>${escapeHtml(s)}</span>`).join("");
   return `
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Campaign Performance Map</h3>
-        <p class="dash-panel__sub">Spend (native GBP) × Customers · bubble size = SQLs · colour = status</p>
+        <p class="dash-panel__sub">Spend (native GBP) × Closed-won deals · bubble size = SQLs · colour = status</p>
       </div>
     </div>
     ${campBubbleSVG(rows)}
+    ${withheldN ? `<p class="dash-compare-note dash-compare-note--muted">${escapeHtml(fmtCount(withheldN))} campaign${withheldN === 1 ? "" : "s"} not plotted — closed-won deals withheld</p>` : ""}
     <div class="dash-legend camp-legend">${legend}</div>`;
 }
 
@@ -5179,8 +5225,7 @@ function wireCampBubbleHover(root, d) {
   const wrap = root.querySelector(".camp-bubble-wrap");
   if (!wrap) return;
   const tooltip = wrap.querySelector(".dash-chart-tooltip");
-  const rows = (d.campaigns || []).filter((r) =>
-    r.spend_native !== null && r.spend_native !== undefined && r.spend_native > 0);
+  const rows = campMapRows(d);
 
   function hide() {
     if (tooltip) tooltip.hidden = true;
@@ -5237,6 +5282,7 @@ const CAMP_NEXT_ACTION = {
   "Revenue attribution missing": "Open Revenue Health",
   "FX unavailable": "FX incomplete — USD/ROAS withheld",
   "Mapping needs review": "Map campaign spend",
+  "Closed-won outcome withheld": "Not judged — closed-won deals withheld",
 };
 
 function renderCampLeaderboard(d) {
@@ -5257,7 +5303,7 @@ function renderCampLeaderboard(d) {
       </td>
       <td class="camp-num">${campSpendCell(r)}</td>
       <td class="camp-num">${dashValue(r.sqls, fmtCount)}</td>
-      <td class="camp-num">${rowMetricHtml(r, "closed_won_deals", fmtCount)}</td>
+      <td class="camp-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
       <td class="camp-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="camp-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td>${campRoasCell(r)}</td>
@@ -5399,7 +5445,7 @@ function wireCampDrawers(root, d) {
       <dl class="camp-drawer__summary">
         <div><dt>Spend (native)</dt><dd>${campSpendCell(r)}</dd></div>
         <div><dt>SQLs</dt><dd>${dashValue(r.sqls, fmtCount)}</dd></div>
-        <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount)}</dd></div>
+        <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
         <div><dt>ROAS / status</dt><dd>${campRoasCell(r)}</dd></div>
@@ -5479,6 +5525,7 @@ const CTRY_STATUS_META = {
   "FX unavailable": { color: "#8896a6", dot: "ctry-dot--muted" },
   "Geo attribution needs review": { color: "#7c5cff", dot: "ctry-dot--attr" },
   "No spend in window": { color: "#b6bfca", dot: "ctry-dot--muted" },
+  "Closed-won outcome withheld": { color: "#8896a6", dot: "ctry-dot--muted" },
 };
 function ctryStatusColor(status) {
   return (CTRY_STATUS_META[status] || { color: "#b6bfca" }).color;
@@ -5492,6 +5539,7 @@ const CTRY_NEXT_ACTION = {
   "FX unavailable": "FX incomplete — USD/ROAS withheld",
   "Geo attribution needs review": "Open Revenue Health",
   "No spend in window": "No spend to judge",
+  "Closed-won outcome withheld": "Not judged — closed-won deals withheld",
 };
 
 async function loadDashboardCountries() {
@@ -5652,7 +5700,7 @@ function renderCtryKpiRow(d) {
     },
     {
       key: "revenue", label: "Won Revenue",
-      value: dashValue(k.won_revenue_usd, fmtMoney), sub: "USD · HubSpot closed-won",
+      value: canonicalValueHtml(k.won_revenue_usd, k.revenue_metric, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }), sub: "USD · HubSpot closed-won",
       delta: dashDeltaChip("won_revenue_usd", pc),
       source: "HubSpot Closed-Won",
       ok: k.won_revenue_usd !== null && k.won_revenue_usd !== undefined,
@@ -5700,8 +5748,10 @@ function renderCtryKpiRow(d) {
 // map is never uniformly flat); colour = business status. The residual is NEVER
 // mapped — it is not a country.
 function ctryMapSizeMetric(rows) {
-  // Prefer won deals; if no country has any, fall back to native spend.
-  const anyDeals = rows.some((r) => (r.closed_won_deals || 0) > 0);
+  // Prefer won deals; if no country has any — or any market's count is
+  // withheld (PR-ADS-161E: never sized as if it were 0) — use native spend.
+  const anyWithheld = rows.some((r) => r.closed_won_deals === null || r.closed_won_deals === undefined);
+  const anyDeals = !anyWithheld && rows.some((r) => (r.closed_won_deals || 0) > 0);
   const metric = anyDeals
     ? (r) => r.closed_won_deals || 0
     : (r) => r.spend_native || 0;
@@ -5864,7 +5914,7 @@ function renderCtryLeaderboard(d) {
       <td class="ctry-td--region">${escapeHtml(r.region || "—")}</td>
       <td class="ctry-num">${ctrySpendCell(r)}</td>
       <td class="ctry-num">${dashValue(r.sqls, fmtCount)}</td>
-      <td class="ctry-num">${rowMetricHtml(r, "closed_won_deals", fmtCount)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
       <td class="ctry-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="ctry-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td>${ctryRoasCell(r)}</td>
@@ -6029,7 +6079,7 @@ function wireCtryDrawers(root, d) {
       <dl class="ctry-drawer__summary">
         <div><dt>Spend (native)</dt><dd>${ctrySpendCell(r)}</dd></div>
         <div><dt>SQLs</dt><dd>${dashValue(r.sqls, fmtCount)}</dd></div>
-        <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount)}</dd></div>
+        <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
         <div><dt>Geo ROAS / status</dt><dd>${ctryRoasCell(r)}</dd></div>
@@ -6111,6 +6161,7 @@ const DEAL_STATUS_META = {
   "Attribution needs review": { color: "#7c5cff", dot: "deal-dot--attr" },
   "Stage unavailable": { color: "#b6bfca", dot: "deal-dot--muted" },
   "No activity in window": { color: "#b6bfca", dot: "deal-dot--muted" },
+  "Closed-won outcome withheld": { color: "#8896a6", dot: "deal-dot--muted" },
 };
 function dealStatusColor(status) {
   return (DEAL_STATUS_META[status] || { color: "#b6bfca" }).color;
@@ -6242,7 +6293,7 @@ function renderDealKpiRow(d) {
       value: '<span class="dash-unavailable">Unavailable</span>',
       sub: "Open deals only — not revenue", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
       source: "HubSpot deal ledger", ok: false },
-    { key: "revenue", label: "Closed-Won Revenue", value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+    { key: "revenue", label: "Closed-Won Revenue", value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }),
       sub: "HubSpot closed-won USD", delta: dashDeltaChip("closed_won_revenue_usd", pc),
       source: "HubSpot Closed-Won", ok: k.closed_won_revenue_usd !== null && k.closed_won_revenue_usd !== undefined },
     // PR-ADS-161E: closed-won DEALS and customers (distinct proven HubSpot
@@ -6371,7 +6422,7 @@ function renderDealSourcePipeline(d) {
       <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${escapeHtml(r.source_detail || "—")}</td>
       <td class="deal-num">${dashValue(r.sqls, fmtCount)}</td>
       <td class="deal-num">${dealPipelineCell(r)}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount)}</td>
+      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
       <td class="deal-num">${rowMetricHtml(r, "closed_won_customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="deal-num">${rowMetricHtml(r, "closed_won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td class="deal-num">${dealRateCell(r)}</td>
@@ -6406,7 +6457,7 @@ function renderDealCampaignPipeline(d) {
       <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${escapeHtml(r.campaign_name || "—")}</td>
       <td class="deal-num">${dashValue(r.sqls, fmtCount)}</td>
       <td class="deal-num">${dealPipelineCell(r)}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount)}</td>
+      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
       <td class="deal-num">${rowMetricHtml(r, "closed_won_customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="deal-num">${rowMetricHtml(r, "closed_won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td class="deal-num">${dealRateCell(r)}</td>
@@ -9027,7 +9078,7 @@ function renderSourcePlatformRow(group, ch, pf, idx) {
       <td>${fmtCount(pf.leads)}</td>
       <td>${fmtCount(pf.sqls)}</td>
       <td>${fmtSourceRate(pf.sqls, pf.leads)}</td>
-      <td>${rowMetricHtml(pf, "closed_won_deals", fmtCount)}</td>
+      <td>${rowMetricHtml(pf, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(pf, "customers", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(pf, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
       <td>${spendCell}</td>
@@ -9050,7 +9101,7 @@ function renderSourceChannelRows(group, ch, gi, ci) {
       <td>${fmtCount(ch.leads)}</td>
       <td>${fmtCount(ch.sqls)}</td>
       <td>${fmtSourceRate(ch.sqls, ch.leads)}</td>
-      <td>${rowMetricHtml(ch, "closed_won_deals", fmtCount)}</td>
+      <td>${rowMetricHtml(ch, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(ch, "customers", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(ch, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
       <td>${spendCell}</td>
@@ -9119,7 +9170,7 @@ function renderSourceGroupSection(group, gi, spendTruth) {
       <div class="revenue-summary-strip revenue-summary-strip--four source-group-kpis">
         <div><span>Leads</span><strong>${fmtCount(group.leads)}</strong></div>
         ${sourceGaSqlsChip(group)}
-        <div><span>Customers</span><strong>${rowMetricHtml(group, "customers", fmtCount, businessBlockerOpts())}</strong><small>${rowMetricHtml(group, "closed_won_deals", fmtCount)} closed-won deals</small></div>
+        <div><span>Customers</span><strong>${rowMetricHtml(group, "customers", fmtCount, businessBlockerOpts())}</strong><small>${rowMetricHtml(group, "closed_won_deals", fmtCount, businessBlockerOpts())} closed-won deals</small></div>
         <div><span>Won Revenue</span><strong>${rowMetricHtml(group, "won_revenue", fmtMoney, businessBlockerOpts())}</strong></div>
         ${spendChip}
       </div>
@@ -9756,7 +9807,7 @@ function renderCampaignMappingCard(row, nativeCur, customerId, options) {
       <span>Revenue <strong>${rowMetricHtml(row, "revenue_usd", fmtUSD, businessBlockerOpts())}</strong></span>
       <span>Leads <strong>${leadsTxt}</strong></span>
       <span>SQLs <strong>${sqlsTxt}</strong></span>
-      <span>Won deals <strong>${rowMetricHtml(row, "closed_won_deals", fmtCount)}</strong></span>
+      <span>Won deals <strong>${rowMetricHtml(row, "closed_won_deals", fmtCount, businessBlockerOpts())}</strong></span>
       <span>Customers <strong>${rowMetricHtml(row, "customers", fmtCount, businessBlockerOpts())}</strong></span>
     </div>`;
 
@@ -16102,7 +16153,9 @@ async function loadGclidReadiness() {
         </div>
         <div class="readiness-card">
           <div class="readiness-card__label">Deals with GCLID</div>
-          <div class="readiness-card__value">${(summary.deals_with_direct_gclid || 0) + (summary.deals_with_contact_gclid || 0)}</div>
+          <div class="readiness-card__value">${summary.won_deals_status
+            ? canonicalMetricHtml({ value: null, ...summary.won_deals_status })
+            : escapeHtml(String((summary.deals_with_direct_gclid || 0) + (summary.deals_with_contact_gclid || 0)))}</div>
         </div>
         <div class="readiness-card">
           <div class="readiness-card__label">Windsor GCLID Coverage</div>
@@ -16381,6 +16434,8 @@ function getBusinessVerdictBadge(verdict) {
     case "learning": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Low spend or insufficient data">Learning</span>';
     // PR-ADS-120: an unmapped campaign cannot be judged on incomplete spend.
     case "mapping_required": return '<span class="roas-verdict-badge roas-verdict-badge--mapping" title="Spend mapping required before this campaign can be judged">Mapping required</span>';
+    // PR-ADS-161E: the row's closed-won outcome is withheld — it is not judged.
+    case "outcome_withheld": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Closed-won deals for this row are withheld, so it is not judged">Outcome withheld</span>';
     default:         return '<span class="roas-verdict-badge">' + escapeHtml(verdict || "—") + '</span>';
   }
 }
@@ -16762,7 +16817,7 @@ function renderRoasCampaignSummary(summary, spendIncomplete) {
       <div><span>Spend</span><strong>${spendCell}</strong></div>
       <div><span>Leads</span><strong>${fmtCount(s.leads)}</strong></div>
       <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
-      <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount)}</strong></div>
+      <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount, businessBlockerOpts())}</strong></div>
       <div><span>Customers</span><strong>${rowMetricHtml(s, "customers", fmtCount, businessBlockerOpts())}</strong></div>
       <div><span>Won Revenue</span><strong>${rowMetricHtml(s, "won_revenue", fmtMoney, businessBlockerOpts())}</strong></div>
       <div><span>ROAS</span><strong>${spendIncomplete ? roasCell : rowMetricHtml(s, "roas", fmtRoasMultiple, businessBlockerOpts())}</strong></div>
@@ -17059,7 +17114,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
       <td>${spendCell}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
-      <td>${rowMetricHtml(r, "closed_won_deals", fmtCount)}</td>
+      <td>${rowMetricHtml(r, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "customers", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
       <td>${roasCell}</td>
@@ -17864,7 +17919,7 @@ function renderRoasCountryTable(rows) {
       <td>${fmtMoney(r.spend)}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
-      <td>${rowMetricHtml(r, "closed_won_deals", fmtCount)}</td>
+      <td>${rowMetricHtml(r, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "customers", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "roas", fmtRoasMultiple, businessBlockerOpts())}</td>
@@ -18108,7 +18163,7 @@ function renderUnitEconomicsPage() {
   if (kpiGrid) {
     const dash = (v, fmtFn) => (v === null || v === undefined ? "Unavailable" : fmtFn(v));
     kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">Closed-won deals (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "closed_won_deals", fmt)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Closed-won deals (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "closed_won_deals", fmt, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Customers (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "customers", fmt, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Closed-won revenue (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "revenue_usd", fmtMoney, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Avg deal value</div><div class="kpi-card__value">${dash(business.avg_deal_value_usd, fmtMoney)}</div></div>
@@ -18150,7 +18205,7 @@ function renderUnitEconomicsPage() {
     const rows = campaigns.map((r) => `<tr>
       <td>${escapeHtml(r.campaign || "")}</td>
       <td>${r.spend === null || r.spend === undefined ? "Unavailable" : fmtMoney(r.spend)}</td>
-      <td>${rowMetricHtml(r, "closed_won_deals", fmt)}</td>
+      <td>${rowMetricHtml(r, "closed_won_deals", fmt, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "customers", fmt, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, businessBlockerOpts())}</td>
       <td>${r.avg_deal_value_usd === null || r.avg_deal_value_usd === undefined ? "Unavailable" : fmtMoney(r.avg_deal_value_usd)}</td>

@@ -259,6 +259,22 @@ def one_snapshot():
         _SNAPSHOT.reset(token)
 
 
+def snapshot_campaign_resolver(now=None) -> tuple:
+    """Campaign Evidence's resolver (``ccr.campaign_resolver``), built once per
+    snapshot and account day: it reads all-time canonical spend and the
+    approved identity mappings, which do not change inside one page."""
+    from services import canonical_customer_revenue_service as ccr
+
+    cache = _SNAPSHOT.get()
+    key = ("campaign_resolver", (now or datetime.now(timezone.utc)).date())
+    if cache is not None and key in cache:
+        return cache[key]
+    built = ccr.campaign_resolver(now)
+    if cache is not None:
+        cache[key] = built
+    return built
+
+
 def single_snapshot(fn):
     """Decorate a page builder so all of its closed-won reads share ONE
     snapshot (:func:`one_snapshot`)."""
@@ -438,7 +454,38 @@ def _canonical_block(truth, status, reason) -> dict:
         },
         "canonical_window": (truth or {}).get("window"),
         "cohort": "closed_won_close_date",
+        "campaign_placement": _campaign_placement(truth),
     }
+
+
+def _campaign_placement(truth) -> dict | None:
+    """The canonical placement verdict for per-campaign figures.
+
+    Read from the window's own partition (``cwt.attribution_bucket`` under
+    Campaign Evidence's resolver): a Google Ads won deal that resolves to no
+    campaign — no label, an unmapped label, or no resolver at all — is in
+    ``google_ads_unplaced``. Nothing here classifies a deal.
+    """
+    from analysis import closed_won_truth as cwt
+
+    if not truth or not truth.get("available", True):
+        return None
+    part = ((truth.get("attribution") or {}).get("partition") or {}).get(
+        cwt.BUCKET_GOOGLE_ADS_UNPLACED) or {}
+    unplaced = part.get("deals")
+    if truth.get("campaign_resolver_available") is False:
+        return {"status": cwt.WITHHELD,
+                "reason": cwt.R_CAMPAIGN_IDENTITY_UNAVAILABLE,
+                "unplaced_google_ads_deals": unplaced}
+    if unplaced is None:
+        # Redacted with a withheld deal count: no per-campaign figure exists.
+        return {"status": cwt.WITHHELD, "reason": cwt.R_DEALS_WITHHELD,
+                "unplaced_google_ads_deals": None}
+    if unplaced > 0:
+        return {"status": cwt.WITHHELD, "reason": cwt.R_CAMPAIGN_UNPLACED,
+                "unplaced_google_ads_deals": unplaced}
+    return {"status": cwt.PUBLISHED, "reason": None,
+            "unplaced_google_ads_deals": 0}
 
 
 def subset_metrics(base: dict, rows) -> dict:
@@ -481,25 +528,26 @@ def is_ledger_outage(reason) -> bool:
 def campaign_placement_gate(base: dict) -> dict | None:
     """Why per-campaign closed-won figures are withheld in this window, or None.
 
-    A Google Ads deal with no campaign label (in ``google_ads_source`` but not
-    ``campaign_attributable``) could belong to ANY campaign, so every
-    per-campaign deal count, revenue, customer count and ROAS would be a lower
-    bound published as a total — the canonical ``campaign_revenue`` rule
-    (``cwt.R_CAMPAIGN_UNPLACED``). The account-wide Google Ads figure is not
-    affected: it uses the whole ``google_ads_source`` scope.
+    Republishes the canonical placement verdict (:func:`_campaign_placement`):
+    a Google Ads won deal that Campaign Evidence's resolver places on no
+    campaign could belong to ANY campaign, so every per-campaign deal count,
+    revenue, customer count, ROAS and CAC would be a lower bound published as a
+    total (``cwt.R_CAMPAIGN_UNPLACED``). Applies to per-campaign rows only: the
+    campaign-attributable SCOPE total, and the account-wide Google Ads figures,
+    are exact for their own scopes. Fails closed when the verdict is missing.
     """
     from analysis import closed_won_truth as cwt
-    from analysis.revenue_scope import SCOPE_CAMPAIGN_ATTRIBUTABLE, SCOPE_GOOGLE_ADS_SOURCE
 
     if not base.get("available"):
         return None
-    deals = base.get("deals") or []
-    unplaced = (len(filter_deals(deals, SCOPE_GOOGLE_ADS_SOURCE))
-                - len(filter_deals(deals, SCOPE_CAMPAIGN_ATTRIBUTABLE)))
-    if unplaced <= 0:
+    placement = base.get("campaign_placement")
+    if not placement or placement.get("status") not in cwt.PUBLICATION_STATUSES:
+        return {"status": cwt.WITHHELD,
+                "reason": cwt.R_CAMPAIGN_IDENTITY_UNAVAILABLE,
+                "unplaced_google_ads_deals": None}
+    if placement["status"] == cwt.PUBLISHED:
         return None
-    return {"status": cwt.WITHHELD, "reason": cwt.R_CAMPAIGN_UNPLACED,
-            "unplaced_google_ads_deals": unplaced}
+    return dict(placement)
 
 
 def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
@@ -604,10 +652,14 @@ def summarize_deals(deals, scope=DEFAULT_SCOPE) -> dict:
     currency_unavailable = 0
     ambiguous = 0
     failed = 0
+    from analysis.closed_won_truth import revenue_is_proven
+
     for row in rows:
-        status = row.get("currency_status")
         value = row.get("revenue_usd")
-        if is_summable(status) and value is not None:
+        # PR-ADS-161E: the canonical rule — proven USD AND a valid amount. A
+        # negative amount is invalid evidence, not a refund to net off the
+        # total; it is counted as unproven exactly as the truth service does.
+        if revenue_is_proven(row):
             revenue += float(value)
             revenue_deals += 1
         else:
@@ -880,8 +932,12 @@ def canonical_deal_rows(base, scope=DEFAULT_SCOPE) -> list:
 
 
 def summable_revenue(row):
-    """This row's contribution to a USD total, or ``None`` when it has none."""
-    if is_summable(row.get("currency_status")) and row.get("revenue_usd") is not None:
+    """This row's contribution to a USD total, or ``None`` when it has none
+    (PR-ADS-161E: the canonical ``revenue_is_proven`` — a negative amount has
+    none)."""
+    from analysis.closed_won_truth import revenue_is_proven
+
+    if revenue_is_proven(row):
         return float(row["revenue_usd"])
     return None
 
@@ -1266,7 +1322,7 @@ def missing_amount_deals(base: dict, scope=DEFAULT_SCOPE) -> dict:
     deals = []
     for row in filter_deals(base.get("deals") or [], scope):
         status = row.get("currency_status") or CURRENCY_UNAVAILABLE
-        if is_summable(status) and row.get("revenue_usd") is not None:
+        if summable_revenue(row) is not None:
             continue
         deal_id = row.get("deal_id")
         has_amount = row.get("amount_raw") is not None

@@ -307,6 +307,11 @@ def confidence_from_tiers(tiers: list) -> str:
     return get_confidence_severity(dominant)
 
 
+#: PR-ADS-161E: the verdict of a row whose closed-won outcome is withheld or
+#: unreadable — never "waste" or "watch" over an unknown deal count.
+VERDICT_OUTCOME_WITHHELD = "outcome_withheld"
+
+
 def classify_verdict(
     spend: float,
     sqls: int,
@@ -318,6 +323,9 @@ def classify_verdict(
     healthy_roas: float = HEALTHY_ROAS,
 ) -> str:
     """Classify a row into a simple business verdict.
+
+    Callers pass KNOWN outcomes only: a row whose deal count is withheld gets
+    ``VERDICT_OUTCOME_WITHHELD`` instead (PR-ADS-161E).
 
     winner   = revenue/customers exist and ROAS is healthy
     watch    = SQLs (or some revenue) exist but customers/revenue/ROAS are weak
@@ -460,6 +468,12 @@ def _finalize_row(
     if lead_metrics_withheld and not has_revenue:
         # Without trusted lead/SQL signal we cannot call a spend-only row "waste".
         verdict = "learning"
+    # PR-ADS-161E: a withheld (or unreadable) deal count is UNKNOWN, not zero.
+    # "waste" / "watch" would be a verdict on a number nobody published — a
+    # revenue-producing campaign must never read "cut" because its deals are
+    # withheld (an unplaced Google Ads deal, an undated won deal).
+    if deals is None:
+        verdict = VERDICT_OUTCOME_WITHHELD
     # PR-ADS-120: an unmapped campaign has incomplete spend truth — it is never
     # classed winner/waste/watch; the decision is "mapping_required".
     if spend_mapping_unavailable or spend_state == "unmapped":
@@ -959,8 +973,7 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
                       revenue_available: bool = True, revenue_readable: bool = True,
                       lead_metrics_withheld: bool = False,
                       spend_trusted: bool = True,
-                      canonical_base: dict | None = None,
-                      spend_usd=None, gate: dict | None = None) -> dict:
+                      canonical_base: dict | None = None) -> dict:
     """The campaign-attributable summary: spend, leads, SQLs, and the canonical
     closed-won fields of the deals the campaign table holds.
 
@@ -994,8 +1007,7 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
         canonical_base, revenue_rows,
         spend_usd=spend if spend_trusted else None,
         spend_reason=(None if spend_trusted
-                      else "google_ads_spend_coverage_or_fx_unverified"),
-        gate=gate)
+                      else "google_ads_spend_coverage_or_fx_unverified"))
     return {
         "spend": spend,
         "leads": leads,
@@ -1497,8 +1509,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     named_spend = [r for r in country_source_rows if r.get("country")]
     country_spend_available = bool(named_spend)
 
-    # PR-ADS-161E: per-campaign figures are withheld while any Google Ads deal
-    # in the window carries no campaign — it could belong to any campaign.
+    # PR-ADS-161E: per-campaign figures are withheld while the canonical
+    # placement verdict says a Google Ads won deal resolves to no campaign — it
+    # could belong to any of them. The campaign-attributable SCOPE total (the
+    # summary) is exact for its scope and is not gated.
     campaign_gate = canonical_revenue.campaign_placement_gate(canonical_base)
     campaigns = _build_db_rows(
         campaign_spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
@@ -1549,8 +1563,6 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=campaign_spend_trusted,
         canonical_base=canonical_base,
-        spend_usd=(spend_usd_total if use_usd else None),
-        gate=campaign_gate,
     )
 
     campaign_spend_status = "db" if spend_rows else "db_empty"

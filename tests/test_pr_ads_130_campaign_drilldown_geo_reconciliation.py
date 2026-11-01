@@ -158,7 +158,7 @@ def test_campaign_detail_db_unavailable_is_reported(monkeypatch):
 
 # Test 4 — frontend has an expandable campaign row control
 def test_frontend_has_expandable_campaign_row():
-    table = _slice("function renderRoasCampaignTable", span=3000)
+    table = _slice("function renderRoasCampaignTable", span=4800)  # PR-ADS-161E: canonical cells
     assert "data-campaign-expand-idx" in table
     assert "campaign-drilldown-row" in table
     # A click handler toggles the drawer and lazy-loads the detail.

@@ -571,9 +571,13 @@ def _evaluate(prepared, bounds, now, resolver, window_meta) -> dict:
             "definitions": DEFINITIONS, **result}
 
 
+_NO_RESOLVER_GIVEN = object()
+
+
 def window_view(window_type: str | None = None, window_key: str | None = None,
                 *, start=None, end=None, now: datetime | None = None,
-                universe: dict | None = None) -> dict:
+                universe: dict | None = None,
+                resolver=_NO_RESOLVER_GIVEN) -> dict:
     """PR-ADS-161E — ONE window's canonical truth, plus what a reader needs to
     break it down without restating a rule.
 
@@ -587,8 +591,11 @@ def window_view(window_type: str | None = None, window_key: str | None = None,
          "company_ids_by_deal": the identity map subset_outcomes needs,
          "universe": the snapshot}
 
-    The campaign resolver is not built: readers place campaigns themselves,
-    and campaign revenue is not part of this view.
+    Campaign placement is the canonical one: the window is evaluated with
+    Campaign Evidence's own resolver (:func:`campaign_resolver`, built once per
+    snapshot by ``canonical_revenue_service.snapshot_campaign_resolver``), so
+    ``publication.campaign_revenue`` and the ``google_ads_unplaced`` partition
+    are the verdicts readers republish — never re-derived (PR-ADS-161E).
     """
     from services import canonical_revenue_service as crs  # noqa: PLC0415
 
@@ -623,7 +630,12 @@ def window_view(window_type: str | None = None, window_key: str | None = None,
     prepared = _prepare(universe, findings, now)
     if bounds["end"] is None:
         bounds = {**bounds, "end": now}
-    truth = _evaluate(prepared, bounds, now, None, meta)
+    detail = None
+    if resolver is _NO_RESOLVER_GIVEN:
+        resolver, detail = crs.snapshot_campaign_resolver(now)
+    truth = _evaluate(prepared, bounds, now, resolver, meta)
+    truth["campaign_resolver_available"] = resolver is not None
+    truth["campaign_resolver"] = detail
     ids = (truth.get("membership") or {}).get("deal_ids")
     members = None
     if ids is not None:

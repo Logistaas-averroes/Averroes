@@ -511,11 +511,14 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         # (None) whenever the window's revenue is — so the money side is
         # compared only when it is published. The DEAL partition always is.
         "revenue_comparable": displayed_revenue is not None,
+        "deals_reconcile": canonical_totals["won_deals"] == displayed_deals,
+        # Unknown (None) when the money side could not be compared — a claim
+        # of reconciliation needs both halves; False when either disagrees.
         "reconciles": (
-            canonical_totals["won_deals"] == displayed_deals
-            and (displayed_revenue is None or (
-                canonical_revenue_usd is not None
-                and abs(canonical_revenue_usd - displayed_revenue) < 0.01))),
+            False if canonical_totals["won_deals"] != displayed_deals
+            else None if displayed_revenue is None
+            else (canonical_revenue_usd is not None
+                  and abs(canonical_revenue_usd - displayed_revenue) < 0.01)),
     }
 
     return {

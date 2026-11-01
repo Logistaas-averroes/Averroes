@@ -82,6 +82,8 @@ STATUS_ATTR_REVIEW = "Attribution needs review"
 STATUS_STAGE_UNAVAILABLE = "Stage unavailable"
 STATUS_SQL_PRODUCER = "SQL producer"
 STATUS_NO_ACTIVITY = "No activity in window"
+# PR-ADS-161E: the row's closed-won deal count is withheld or unreadable.
+STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
 
 # The single, precise reason every open-pipeline / lost / aging field carries.
 OPEN_PIPELINE_REASON = (
@@ -300,7 +302,11 @@ def _row_metrics(metrics, revenue_connected: bool):
 def _source_status(sqls, deals, won) -> str:
     # A closed-won deal IS revenue proof (even if that deal's exact amount is
     # unavailable), so deals>0 → proven regardless of the won total.
-    if (deals or 0) > 0:
+    if deals is None:
+        # Unknown is not zero (PR-ADS-161E): never "SQL producer" / "no
+        # activity" over a withheld deal count.
+        return STATUS_OUTCOME_WITHHELD
+    if deals > 0:
         return STATUS_REVENUE_PROVEN
     if (sqls or 0) > 0:
         return STATUS_SQL_PRODUCER
@@ -518,6 +524,15 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
                      f"{'s' if (top.get('closed_won_deals') or 0) != 1 else ''} this window."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
+    elif any(s.get("closed_won_deals") is None
+             or s.get("closed_won_revenue_usd") is None for s in source_rows):
+        cards.append({
+            "type": "scale", "title": "Scale",
+            "headline": "Source closed-won outcomes are withheld",
+            "body": ("Closed-won deals or revenue are withheld for this window, so no "
+                     "source is claimed to have produced none."),
+            "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+        })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
@@ -527,14 +542,23 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
         })
 
     # Watch — a source with SQL volume but weak customer conversion.
-    weak = [s for s in source_rows if (s.get("sqls") or 0) >= 3 and (s.get("closed_won_deals") or 0) == 0]
+    weak = [s for s in source_rows if (s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") == 0]
     if weak:
         top = max(weak, key=lambda s: s.get("sqls") or 0)
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": f"{top['source_detail']} has SQL volume but no won deals",
             "body": (f"{top['source_detail']} produced {top['sqls']} SQLs but no closed-won "
-                     "customers in this window. Review lead quality and sales follow-up."),
+                     "deals in this window. Review lead quality and sales follow-up."),
+            "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+        })
+    elif any((s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") is None
+             for s in source_rows):
+        cards.append({
+            "type": "watch", "title": "Watch",
+            "headline": "SQL conversion cannot be judged",
+            "body": ("Closed-won deals are withheld for sources with SQL volume, so "
+                     "unconverted SQL volume is not claimed."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
     else:
