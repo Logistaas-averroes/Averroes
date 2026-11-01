@@ -107,6 +107,19 @@ CUSTOMER_IDENTITY_STATES = (CUSTOMER_RESOLVED_SINGLE,
 CUSTOMER_RESOLVED_STATES = (CUSTOMER_RESOLVED_SINGLE,
                             CUSTOMER_RESOLVED_MULTI_PATH)
 
+# ── Why one won deal's association evidence is STALE · denominator: one deal ─
+# PR-ADS-191. ``stale_company_evidence`` has always held deals for one of these
+# two causes; naming them lets an operator tell "our last look failed" from
+# "HubSpot changed the deal after we looked" without re-deriving either.
+STALE_LATEST_ATTEMPT_FAILED = "latest_association_attempt_failed"
+STALE_DEAL_MODIFIED_AFTER_OBSERVATION = \
+    "deal_modified_after_association_observation"
+STALE_EVIDENCE_REASONS = (STALE_LATEST_ATTEMPT_FAILED,
+                          STALE_DEAL_MODIFIED_AFTER_OBSERVATION)
+#: A current won deal the latest complete association scan did not certify (it
+#: won after the scan, or the scan's set no longer matches the population).
+NOT_CERTIFIED_BY_COMPLETE_SCAN = "not_certified_by_latest_complete_scan"
+
 # ── Marketing attribution partition · denominator: one won deal ────────────
 # Exhaustive and mutually exclusive, so every won deal lands in exactly one and
 # the buckets always sum to the all-source total. Nothing is dropped.
