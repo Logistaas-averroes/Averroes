@@ -48,6 +48,7 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import WINDOW_KEYS
+from analysis import closed_won_truth as cwt  # PR-ADS-161E
 from services import canonical_revenue_service as canonical_revenue
 from services.canonical_contract import (
     METRIC_TRUTH_KEY,
@@ -137,6 +138,24 @@ _UNAVAILABLE_CLASSES = {
         ("population_unavailable", V_POPULATION_UNAVAILABLE,
          "the revenue integration is not connected, so no closed-won population "
          "is readable for this scope"),
+    # PR-ADS-161E: readers now republish the CANONICAL reason codes
+    # (analysis.closed_won_truth). Each is the same class of problem as its
+    # legacy twin above — one refusal, whichever vocabulary a page carries.
+    cwt.R_REVENUE_UNPROVEN:
+        ("total_unpublishable", V_TOTAL_UNPUBLISHABLE,
+         "the population IS available, but closed-won deals inside it have no "
+         "proven USD amount, so the total is unknown — resolved by pricing "
+         "those deals at source"),
+    cwt.R_UNDATED_WON_DEALS:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "a won deal has no close date, so this window's population is withheld"),
+    cwt.R_WON_DEFINITION_CONFLICT:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "HubSpot's won flag and won stage disagree for a deal in this window, "
+         "so its population is withheld"),
+    cwt.R_DEALS_WITHHELD:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "the closed-won deal count is withheld for this window"),
 }
 
 

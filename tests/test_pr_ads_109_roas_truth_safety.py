@@ -53,14 +53,15 @@ def _canonical(spend_rows):
             "coverage_start": "2000-01-01", "coverage_end": "2100-01-01"}
 
 
-def _build(spend_rows, revenue_rows, lead_rows=None, safe=True):
+def _build(spend_rows, revenue_rows, lead_rows=None, safe=True, ledger_available=True):
     spend = {"available": True, "rows": spend_rows, "coverage_start": None, "coverage_end": None, "table": "geo"}
     rev = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None, "table": "gclid_attribution"}
     coverage = {"available": True,
                 "chunks": [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified"}]}
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=_leads(lead_rows, safe)), \
-         canonical_ledger_patch(from_legacy_deal_rows(rev.get("rows") or [])), \
+         canonical_ledger_patch(from_legacy_deal_rows(rev.get("rows") or []),
+                                available=ledger_available), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=_canonical(spend_rows)), \
          patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
@@ -78,6 +79,18 @@ def _by(rows, field, value):
 
 
 def test_roas_null_when_revenue_not_wired():
+    """PR-ADS-109's guarantee, unchanged: revenue we could not READ gives a
+    null ROAS, never 0. (PR-ADS-161E: "not wired" is an unreadable canonical
+    ledger; a readable empty one is the next case — a proven $0.)"""
+    r = _build(spend_rows=[{"campaign_name": "gulf", "country": "SA", "spend": 1000.0}],
+               revenue_rows=[], ledger_available=False)
+    gulf = _by(r["campaigns"], "campaign_name", "gulf")
+    assert gulf["roas"] is None and r["summary"]["roas"] is None
+    assert gulf["won_revenue"] is None
+    assert r["summary"]["metrics"]["roas"]["status"] != "published"
+
+
+def test_roas_is_a_published_zero_when_the_readable_ledger_has_no_deal():
     r = _build(
         spend_rows=[{"campaign_name": "gulf", "country": "SA", "spend": 1000.0}],
         revenue_rows=[],  # not wired
