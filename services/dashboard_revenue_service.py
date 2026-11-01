@@ -413,6 +413,43 @@ def _breakdown_rows(grouped: list, *, name_key: str, target_page: str) -> list:
     return rows
 
 
+def _attach_verdicts(rows: list, canonical: dict, *, gate: dict | None = None) -> list:
+    """Each row's ``{value, status, reason}`` for its deal count and revenue.
+
+    A group is a subset of the window, so it inherits the window's canonical
+    verdict; ``gate`` (the per-campaign placement verdict) withholds the row's
+    figures outright. Withheld means absent: the row's own numbers go to None.
+    """
+    from analysis import closed_won_truth as cwt  # noqa: PLC0415
+
+    pub = canonical.get("publication") or {}
+    deals_pub = pub.get("closed_won_deals") or {}
+    rev_pub = pub.get("revenue_usd") or {}
+    out = []
+    for r in rows:
+        r = dict(r)
+        if gate is not None:
+            deals_m = cwt.metric(None, gate["status"], gate["reason"])
+            rev_m = cwt.metric(None, gate["status"], gate["reason"])
+        else:
+            deals_m = (cwt.metric(r.get("deals"), cwt.PUBLISHED)
+                       if deals_pub.get("status") == cwt.PUBLISHED
+                       else cwt.metric(None, deals_pub.get("status") or cwt.UNAVAILABLE,
+                                       deals_pub.get("reason") or canonical.get("reason")))
+            if rev_pub.get("status") != cwt.PUBLISHED:
+                rev_m = cwt.metric(None, rev_pub.get("status") or cwt.UNAVAILABLE,
+                                   rev_pub.get("reason") or canonical.get("reason"))
+            elif r.get("revenue_usd") is None:
+                rev_m = cwt.metric(None, cwt.WITHHELD, cwt.R_REVENUE_UNPROVEN)
+            else:
+                rev_m = cwt.metric(r.get("revenue_usd"), cwt.PUBLISHED)
+        r["deals"] = deals_m["value"]
+        r["revenue_usd"] = rev_m["value"]
+        r["metrics"] = {"closed_won_deals": deals_m, "revenue_usd": rev_m}
+        out.append(r)
+    return out
+
+
 def _build_source_breakdown(window: str, now, *, revenue_connected: bool) -> list:
     """Revenue by source group (PR-ADS-133). Never any ROAS on these rows."""
     if not revenue_connected:
@@ -422,11 +459,16 @@ def _build_source_breakdown(window: str, now, *, revenue_connected: bool) -> lis
     rows = []
     for g in groups:
         revenue = _round2(g.get("won_revenue"))
-        if not revenue:
+        # PR-ADS-161E: drop only a group that PROVABLY won nothing. A group
+        # whose revenue (or deal count) is withheld stays, with its canonical
+        # verdict — an empty list would read as "no attributed revenue".
+        if g.get("closed_won_deals") == 0:
             continue
         rows.append({
             "source_group": g.get("label") or g.get("group"),
             "revenue_usd": revenue,
+            "metrics": {k: v for k, v in (g.get("metrics") or {}).items()
+                        if k in ("closed_won_deals", "customers", "revenue_usd")},
             "closed_won_deals": g.get("closed_won_deals"),
             # Distinct companies in the group — not additive across groups.
             "customers": g.get("customers"),
@@ -579,6 +621,19 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "headline": "Revenue truth unavailable",
             "body": "The canonical closed-won population is unavailable for this window, so won-deal production cannot be verified.",
             "target_page": "revenue-health", "target_label": "Open Revenue Health",
+        })
+    elif any(r.get("deals") is None for r in by_campaign):
+        # PR-ADS-161E: per-campaign deal counts are withheld — no claim either way.
+        reason = next(((r.get("metrics") or {}).get("closed_won_deals") or {}).get("reason")
+                      for r in by_campaign if r.get("deals") is None)
+        cards.append({
+            "type": "scale", "title": "Scale",
+            "headline": "Campaign closed-won outcomes are withheld",
+            "body": ("Per-campaign closed-won deals are withheld this window"
+                     + (f" ({reason})" if reason else "")
+                     + ", so no campaign is named as a repeat producer."),
+            "reason": reason,
+            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
         })
     elif multi:
         top = multi[0]
@@ -805,6 +860,13 @@ def build_dashboard_revenue(window: str = "current_quarter",
                                   target_page="roas-campaigns")
     by_country = _breakdown_rows(grouped_country, name_key="country",
                                  target_page="roas-countries")
+    # PR-ADS-161E: each breakdown row is a subset of the window and carries the
+    # canonical verdict; per-campaign rows also follow the canonical placement
+    # verdict (a Google Ads won deal on no campaign withholds them all).
+    by_campaign = _attach_verdicts(
+        by_campaign, canonical,
+        gate=canonical_revenue.campaign_placement_gate(canonical))
+    by_country = _attach_verdicts(by_country, canonical)
     by_source = _build_source_breakdown(window, now, revenue_connected=revenue_connected)
     source_attribution_ready = not any(
         (r.get("source_group") or "").lower().startswith("unclassified") for r in by_source

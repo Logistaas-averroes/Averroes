@@ -55,6 +55,21 @@ STATUS_FX_WITHHELD = "FX unavailable — USD ROAS withheld"
 STATUS_COVERAGE_INCOMPLETE = "Canonical spend coverage incomplete"
 STATUS_GOOGLE_SPEND_UNAVAILABLE = "Google Ads spend source unavailable"
 STATUS_NO_SPEND_IN_WINDOW = "No Google Ads spend in this window"
+#: PR-ADS-161E: spend is ready but the canonical ROAS metric is not published
+#: (revenue withheld — an unpriced deal, an undated deal …).
+STATUS_ROAS_WITHHELD = "ROAS withheld — closed-won revenue is not published"
+
+
+def _roas_publication(fields: dict, spend_status: str, spend_label):
+    """``(roas_status, label, reason)`` — spend readiness is not publication.
+
+    "ROAS available" is said only when the canonical ROAS metric of THIS
+    bucket is published; otherwise its own status and reason are carried."""
+    roas = ((fields or {}).get("metrics") or {}).get("roas") or {}
+    if spend_status == "available" and roas.get("status") != "published":
+        return (roas.get("status") or "unavailable", STATUS_ROAS_WITHHELD,
+                roas.get("reason") or (roas.get("blocked_by") or {}).get("reason"))
+    return spend_status, spend_label, roas.get("reason")
 
 # state -> (roas_status code, human status label) for the Google Ads group.
 _GOOGLE_STATE_STATUS = {
@@ -257,7 +272,11 @@ def _finalize_channels(group: str, channels: dict, group_spend,
                 "spend": group_spend if canonical_platform else None,
                 # Bucket-level ROAS = this bucket's won revenue / spend.
                 "roas": pf_fields["roas"] if canonical_platform else None,
-                "status": ((google_status_label or STATUS_ROAS_AVAILABLE)
+                "status": ((_roas_publication(
+                                pf_fields,
+                                "available" if google_status_label == STATUS_ROAS_AVAILABLE
+                                else "unavailable",
+                                google_status_label or STATUS_ROAS_AVAILABLE)[1])
                            if canonical_platform and google_status_label is not None
                            else _platform_status(group, is_canonical=canonical_platform)),
             })
@@ -395,8 +414,8 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             # (non-null) spend and a published revenue total — never a $0
             # denominator, never a fabricated 0.00x, never a partial numerator.
             fields = _canonical_fields(canonical, b, group_spend)
-            roas_status = google_roas_status
-            status_label = google_status_label
+            roas_status, status_label, roas_reason = _roas_publication(
+                fields, google_roas_status, google_status_label)
             channels = _finalize_channels(g, nested[g], group_spend,
                                           google_status_label=google_status_label,
                                           canonical=canonical)
@@ -408,6 +427,7 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             fields["roas"] = None
             roas_status = "unavailable_no_spend_source"
             status_label = None
+            roas_reason = None
             channels = _finalize_channels(g, nested[g], None, canonical=canonical)
         groups.append({
             "group": g,
@@ -424,6 +444,7 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             "revenue_unavailable_deals": b["revenue_unavailable_deals"],
             "revenue_complete": b["revenue_unavailable_deals"] == 0,
             "roas_status": roas_status,
+            "roas_reason": roas_reason,
             # PR-ADS-140: honest Google Ads spend-truth label (ROAS available / FX
             # withheld / coverage incomplete / source unavailable). None for
             # non-Google groups, which keep their revenue-only status.

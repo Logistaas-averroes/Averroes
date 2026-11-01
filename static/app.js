@@ -2458,7 +2458,8 @@ function canonicalMetricHtml(metric, formatter, opts) {
 // API sent the row's canonical {value, status, reason}, render that — a
 // withheld subset reads "Withheld" and why, never a dash — else the plain value.
 const ROW_METRIC_KEYS = { won_revenue_usd: "revenue_usd", won_revenue: "revenue_usd",
-  closed_won_revenue_usd: "revenue_usd", closed_won_customers: "customers" };
+  closed_won_revenue_usd: "revenue_usd", closed_won_customers: "customers",
+  deals: "closed_won_deals" };
 function rowMetricHtml(row, key, formatter, opts) {
   const r = row || {};
   const m = (r.metrics || {})[ROW_METRIC_KEYS[key] || key];
@@ -3964,8 +3965,14 @@ function renderRevConversionStrip(d) {
 
 function renderRevBreakdownPanel(title, sub, rows, nameKey, targetPage, opts) {
   opts = opts || {};
+  // PR-ADS-161E: "no attributed revenue" is a claim about a PUBLISHED window;
+  // a withheld or unavailable one says so, with the canonical reason.
+  const windowDeals = opts.windowDeals || {};
+  const emptyHtml = (windowDeals.status && windowDeals.status !== "published")
+    ? `<p class="rev-breakdown-empty">Closed-won deals: ${canonicalMetricHtml(windowDeals, fmtCount, opts.blockerOpts)}</p>`
+    : '<p class="rev-breakdown-empty">No attributed revenue in this window.</p>';
   const body = !rows || !rows.length
-    ? '<p class="rev-breakdown-empty">No attributed revenue in this window.</p>'
+    ? emptyHtml
     : `<ul class="rev-breakdown-list">${rows.map((r) => {
         const extra = opts.spendConnected
           ? `<span class="rev-breakdown-row__status">${escapeHtml(r.status || "")}</span>`
@@ -3973,12 +3980,12 @@ function renderRevBreakdownPanel(title, sub, rows, nameKey, targetPage, opts) {
         // PR-ADS-161E: deals, never "customers" — a group's customer count
         // (distinct companies) is not additive and is not shown per row here.
         const custDeals = opts.spendConnected
-          ? `${dashValue(r.closed_won_deals, fmtCount)} won`
-          : `${dashValue(r.deals, fmtCount)} deals`;
+          ? `${rowMetricHtml(r, "closed_won_deals", fmtCount, opts.blockerOpts)} won`
+          : `${rowMetricHtml(r, "deals", fmtCount, opts.blockerOpts)} deals`;
         return `
         <li class="rev-breakdown-row">
           <span class="rev-breakdown-row__name" title="${escapeHtml(r[nameKey] || "")}">${escapeHtml(r[nameKey] || "—")}</span>
-          <span class="rev-breakdown-row__value">${dashValue(r.revenue_usd, fmtMoney)}</span>
+          <span class="rev-breakdown-row__value">${rowMetricHtml(r, "revenue_usd", fmtMoney, opts.blockerOpts)}</span>
           <span class="rev-breakdown-row__meta">${custDeals}</span>
           ${extra}
         </li>`;
@@ -4001,14 +4008,18 @@ function renderRevBreakdownPanel(title, sub, rows, nameKey, targetPage, opts) {
 
 function renderRevBreakdowns(d) {
   const b = d.breakdowns || {};
+  const common = {
+    windowDeals: (((d.kpis || {}).metrics) || {}).closed_won_deals,
+    blockerOpts: { windowType: "business", windowKey: (d.window || {}).key },
+  };
   return `
     <div class="rev-breakdown-grid">
       ${renderRevBreakdownPanel("Revenue by Campaign", "Top 5 by closed-won revenue",
-        b.by_campaign, "campaign", "roas-campaigns", {})}
+        b.by_campaign, "campaign", "roas-campaigns", common)}
       ${renderRevBreakdownPanel("Revenue by Source", "Top 5 · Google Ads spend-connected only",
-        b.by_source, "source_group", "revenue-by-source", { spendConnected: true })}
+        b.by_source, "source_group", "revenue-by-source", { ...common, spendConnected: true })}
       ${renderRevBreakdownPanel("Revenue by Country", "Top 5 by closed-won revenue",
-        b.by_country, "country", "roas-countries", {})}
+        b.by_country, "country", "roas-countries", common)}
     </div>`;
 }
 
@@ -9049,7 +9060,9 @@ function sourceStatusLabel(group) {
     // PR-ADS-140: when canonical Google Ads spend/ROAS is withheld, show the exact
     // honest reason (FX withheld / coverage incomplete / source unavailable) —
     // never a bare "Unavailable" and never "no connected spend source".
-    return group.spend_status_label || "Unavailable";
+    // PR-ADS-161E: a withheld canonical ROAS names its reason.
+    const why = canonicalReasonLabel(group.roas_reason);
+    return (group.spend_status_label || "Unavailable") + (why ? ` (${why})` : "");
   }
   if (group.group === "offline") return "Imported CRM records — no reliable source attribution";
   if (group.group === "unclassified") return "Needs review — source missing or unsafe";
@@ -16174,15 +16187,21 @@ async function loadGclidReadiness() {
         </div>
         <div class="readiness-card">
           <div class="readiness-card__label">Exact Matches Possible</div>
-          <div class="readiness-card__value">${summary.tier_1_possible_matches || 0}</div>
+          <div class="readiness-card__value">${summary.won_deals_status
+            ? canonicalMetricHtml({ value: null, ...summary.won_deals_status })
+            : escapeHtml(String(summary.tier_1_possible_matches || 0))}</div>
         </div>
         <div class="readiness-card">
           <div class="readiness-card__label">Source Tag Matches</div>
-          <div class="readiness-card__value">${summary.tier_2_source_tag_matches || 0}</div>
+          <div class="readiness-card__value">${summary.won_deals_status
+            ? canonicalMetricHtml({ value: null, ...summary.won_deals_status })
+            : escapeHtml(String(summary.tier_2_source_tag_matches || 0))}</div>
         </div>
         <div class="readiness-card">
           <div class="readiness-card__label">Estimated Rows</div>
-          <div class="readiness-card__value">${summary.tier_3_estimated_required || 0}</div>
+          <div class="readiness-card__value">${summary.won_deals_status
+            ? canonicalMetricHtml({ value: null, ...summary.won_deals_status })
+            : escapeHtml(String(summary.tier_3_estimated_required || 0))}</div>
         </div>
       </div>
       <p class="readiness-note">${status === "READY" ? "GCLID bridge is ready for exact attribution." : "GCLID bridge is not fully wired yet. Current ROAS remains partly directional."}</p>

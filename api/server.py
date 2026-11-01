@@ -8752,11 +8752,14 @@ async def get_gclid_readiness(
     # canonical closed-won population — so that count is not published. The
     # GCLID coverage figures stay: they measure joinability, not outcomes.
     # Every deal count it reports is a slice of that same local population —
-    # direct + without GCLID re-adds to the won-deal count — so all of them are
-    # withheld together (withheld means absent, not recoverable).
+    # direct + without GCLID re-adds to the won-deal count, and the three
+    # joinability tiers partition it — so all of them are withheld together
+    # (withheld means absent, not recoverable). Windsor-row coverage is an
+    # independent population and stays.
     summary = dict(result.get("summary") or {})
     for key in ("won_deals", "deals_with_direct_gclid", "deals_with_contact_gclid",
-                "deals_without_gclid"):
+                "deals_without_gclid", "tier_1_possible_matches",
+                "tier_2_source_tag_matches", "tier_3_estimated_required"):
         summary[key] = None
     summary["won_deals_status"] = {
         "status": "withheld", "reason": LEGACY_REVENUE_WITHHELD_REASON,

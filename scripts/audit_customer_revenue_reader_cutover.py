@@ -727,11 +727,12 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
                 f"{key}: customers {cust['value']} != distinct companies {len(ids)}")
 
     page = {}
+    placement = base.get("campaign_placement")
     if mart is not None:
         page = mart_checks(a, key, pub, truth_w, mart)
-        page_leak_checks(a, key, "revenue_decision_mart", pub, mart)
+        page_leak_checks(a, key, "revenue_decision_mart", pub, mart, placement)
     for name, payload in (pages or {}).items():
-        page_leak_checks(a, key, name, pub, payload)
+        page_leak_checks(a, key, name, pub, payload, placement)
     return {"window": key, "publication": {m: pub.get(m) for m in
                                            ("closed_won_deals", "revenue_usd",
                                             "customers")},
@@ -766,7 +767,21 @@ def _is_figure(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def page_leak_checks(a: Audit, key: str, page: str, pub: dict, payload) -> None:
+#: Row keys that name a campaign; rows that name the NOT-placed bucket are
+#: not per-campaign figures.
+_CAMPAIGN_KEYS = ("campaign_name", "campaign_id", "campaign")
+_NOT_A_CAMPAIGN = ("unattributed", "unclassified", "needs review", "no campaign")
+
+
+def _per_campaign_row(d: dict) -> bool:
+    name = next((d.get(k) for k in _CAMPAIGN_KEYS if d.get(k) is not None), None)
+    if name is None:
+        return False
+    return not any(p in str(name).lower() for p in _NOT_A_CAMPAIGN)
+
+
+def page_leak_checks(a: Audit, key: str, page: str, pub: dict, payload,
+                     placement: dict | None = None) -> None:
     """8 / 9 over ONE page payload.
 
     * every ``{value, status}`` metric that is not published has no value;
@@ -803,6 +818,16 @@ def page_leak_checks(a: Audit, key: str, page: str, pub: dict, payload) -> None:
                 if _is_figure(d.get(k)):
                     leaks.append(f"{path}.{k}={d.get(k)} while the window's "
                                  f"{fam} is {(pub.get(fam) or {}).get('status')}")
+        # The canonical placement verdict withholds every PER-CAMPAIGN figure
+        # (a Google Ads won deal resolves to no campaign); scope totals and the
+        # not-placed bucket are not per-campaign.
+        if (placement or {}).get("status") not in (None, "published") \
+                and _per_campaign_row(d):
+            for k in (*_FAMILY_KEYS["closed_won_deals"], *_FAMILY_KEYS["revenue_usd"],
+                      *_FAMILY_KEYS["customers"], "deals"):
+                if _is_figure(d.get(k)):
+                    leaks.append(f"{path}.{k}={d.get(k)} on a campaign row while "
+                                 f"per-campaign placement is {placement.get('status')}")
     a.check("withheld_not_reconstructable", not leaks,
             f"{key} {page}: {leaks[:6]}")
 

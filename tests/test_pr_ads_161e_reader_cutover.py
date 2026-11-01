@@ -897,8 +897,16 @@ def test_32_legacy_outcome_payloads_withhold_every_recoverable_figure():
     i = src.index("async def get_gclid_readiness(")
     region = src[i:src.index("@app.", i + 1)]
     for key in ("won_deals", "deals_with_direct_gclid", "deals_with_contact_gclid",
-                "deals_without_gclid"):
+                "deals_without_gclid",
+                # The three joinability tiers partition the same local won
+                # deals, so their sum would rebuild the withheld count.
+                "tier_1_possible_matches", "tier_2_source_tag_matches",
+                "tier_3_estimated_required"):
         assert f'"{key}"' in region
+    js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    for key in ("tier_1_possible_matches", "tier_2_source_tag_matches",
+                "tier_3_estimated_required"):
+        assert f"summary.{key} || 0}}" not in js, key
 
 
 @_needs_pg
@@ -933,3 +941,107 @@ def test_33_the_audit_goes_red_when_a_page_keeps_proof_beside_a_withheld_count(
     assert report["exit_code"] == audit.EXIT_VIOLATION
     assert report["checks"]["withheld_not_reconstructable"] is False
     assert any("dashboard_campaigns" in v for v in report["violations"])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §8 — PR review (Copilot, round 1): each case reproduced the finding first
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _revenue_tab(monkeypatch, deals):
+    from tests import test_pr_ads_135_dashboard_revenue as t135
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    t135._patch_durable(monkeypatch, deal_rows=deals)
+    rows = from_legacy_deal_rows(deals)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services.dashboard_revenue_service import build_dashboard_revenue
+    return build_dashboard_revenue("ytd", now=t135.NOW)
+
+
+def test_34_revenue_tab_campaign_breakdown_follows_the_placement_verdict(
+        monkeypatch):
+    from tests import test_pr_ads_135_dashboard_revenue as t135
+    deals = [dict(d) for d in t135.DEAL_ROWS[:2]] + [dict(_UNPLACED_GOOGLE_DEAL)]
+    out = _revenue_tab(monkeypatch, deals)
+    rows = out["breakdowns"]["by_campaign"]
+    assert rows, "rows stay, with their verdict"
+    for r in rows:
+        assert r["deals"] is None and r["revenue_usd"] is None
+        assert r["metrics"]["closed_won_deals"]["reason"] == cwt.R_CAMPAIGN_UNPLACED
+    scale = next(c for c in out["decision_cards"] if c["type"] == "scale")
+    assert "withheld" in scale["headline"].lower()
+    assert "won" not in scale["headline"].lower() or "withheld" in scale["headline"].lower()
+    # The account total is a scope figure, not per-campaign: still published.
+    assert out["kpis"]["closed_won_deals"] == 3
+
+
+def test_35_a_withheld_source_revenue_keeps_its_groups_and_says_why(monkeypatch):
+    from tests import test_pr_ads_135_dashboard_revenue as t135
+    deals = [dict(d) for d in t135.DEAL_ROWS[:3]] + [
+        dict(t135.DEAL_ROWS[0], deal_id="d8", deal_amount_usd=None)]
+    out = _revenue_tab(monkeypatch, deals)
+    src = out["breakdowns"]["by_source"]
+    assert src, "withheld groups are kept, never an empty 'no revenue' list"
+    for r in src:
+        assert r["revenue_usd"] is None
+        assert r["metrics"]["revenue_usd"]["status"] == cwt.WITHHELD
+    js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    panel = _js_extract(js, "function renderRevBreakdownPanel(")
+    assert "windowDeals.status !== \"published\"" in panel
+
+
+def test_36_roas_available_is_said_only_when_canonical_roas_publishes(
+        monkeypatch):
+    from services import source_attribution_service as sas
+    withheld = {"metrics": {"roas": cwt.metric(None, cwt.WITHHELD,
+                                               cwt.R_REVENUE_WITHHELD)}}
+    status, label, reason = sas._roas_publication(
+        withheld, "available", sas.STATUS_ROAS_AVAILABLE)
+    assert (status, label, reason) == (cwt.WITHHELD, sas.STATUS_ROAS_WITHHELD,
+                                       cwt.R_REVENUE_WITHHELD)
+    published = {"metrics": {"roas": cwt.metric(2.0, cwt.PUBLISHED)}}
+    assert sas._roas_publication(published, "available",
+                                 sas.STATUS_ROAS_AVAILABLE)[1] == sas.STATUS_ROAS_AVAILABLE
+    # Spend not ready keeps its own honest label (FX withheld, coverage …).
+    assert sas._roas_publication(withheld, "unavailable_fx",
+                                 sas.STATUS_FX_WITHHELD)[1] == sas.STATUS_FX_WITHHELD
+    # End to end: an unpriced deal anywhere withholds the window's revenue, so
+    # the Google Ads group's ROAS is withheld and never labelled available.
+    from tests import test_pr_ads_135_dashboard_revenue as t135
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    deals = [dict(d) for d in t135.DEAL_ROWS[:3]] + [
+        dict(t135.DEAL_ROWS[3], deal_amount_usd=None)]
+    t135._patch_durable(monkeypatch, deal_rows=deals)
+    rows = from_legacy_deal_rows(deals)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    out = sas.build_revenue_by_source("ytd", now=t135.NOW)
+    for g in out["groups"]:
+        if g.get("roas") is None:
+            assert g.get("spend_status_label") != sas.STATUS_ROAS_AVAILABLE, g["group"]
+        for ch in g.get("channels") or []:
+            for pf in ch.get("platforms") or []:
+                if pf.get("roas") is None:
+                    assert pf.get("status") != sas.STATUS_ROAS_AVAILABLE, pf
+
+
+@_needs_pg
+def test_37_the_audit_goes_red_on_a_per_campaign_figure_under_the_placement_gate(
+        ledger, monkeypatch):
+    """Counterfactual for the audit's placement rule: the Revenue tab's
+    campaign breakdown without the canonical verdict (the code Copilot
+    flagged) is caught."""
+    now = _now()
+    _deal(ledger, "1", deal_close_date=_this_year(now), acquisition_group="google_ads",
+          attribution_status="attributed", gclid="g1", campaign_name_raw="Brand")
+    _deal(ledger, "2", deal_close_date=_this_year(now), acquisition_group="google_ads",
+          attribution_status="attributed", gclid="g2", campaign_name_raw=None)
+    _scan(monkeypatch, {"1": [901], "2": [902]})
+    _, clean = audit.run(now=now)
+    assert clean["exit_code"] == audit.EXIT_OK, clean["violations"]
+    from services import dashboard_revenue_service as rev
+    monkeypatch.setattr(rev, "_attach_verdicts", lambda rows, canonical, gate=None: rows)
+    _, report = audit.run(now=now)
+    assert report["exit_code"] == audit.EXIT_VIOLATION
+    assert any("dashboard_revenue" in v and "per-campaign placement" in v
+               for v in report["violations"]), report["violations"]
