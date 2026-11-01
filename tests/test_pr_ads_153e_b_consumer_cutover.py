@@ -361,13 +361,10 @@ def test_9_window_bounds_are_identical_across_consumers(monkeypatch):
     from analysis.business_windows import get_window_bounds
 
     seen = []
-
-    def _capture(start=None, end=None):
-        seen.append((start, end))
-        return {"available": True, "rows": [dict(r) for r in POPULATION]}
-
     patch_canonical_ledger(monkeypatch, POPULATION)
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+    # PR-ADS-161E: membership is evaluated by the canonical truth.
+    from tests.canonical_ledger_fixtures import capture_canonical_bounds
+    capture_canonical_bounds(monkeypatch, seen)
 
     for window in ("current_quarter", "last_quarter", "ytd", "all_time"):
         seen.clear()
@@ -561,13 +558,10 @@ def test_13c_channel_trend_bounds_are_explicit_utc_datetimes(monkeypatch):
     from services import dashboard_channels_service as channels
 
     seen = []
-
-    def _capture(start=None, end=None):
-        seen.append((start, end))
-        return {"available": True, "rows": []}
-
     patch_canonical_ledger(monkeypatch, [])
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+    # PR-ADS-161E: membership is evaluated by the canonical truth.
+    from tests.canonical_ledger_fixtures import capture_canonical_bounds
+    capture_canonical_bounds(monkeypatch, seen)
 
     channels._canonical_daily_revenue(date(2026, 4, 1), date(2026, 6, 30))
     (start, end), = seen
@@ -593,13 +587,10 @@ def test_13c2_the_contract_normalizes_bounds_so_no_consumer_can_recreate_it(monk
     import db.deal_ledger_repository as ledger_repo
 
     seen = []
-
-    def _capture(start=None, end=None):
-        seen.append((start, end))
-        return {"available": True, "rows": []}
-
     patch_canonical_ledger(monkeypatch, [])
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+    # PR-ADS-161E: membership is evaluated by the canonical truth.
+    from tests.canonical_ledger_fixtures import capture_canonical_bounds
+    capture_canonical_bounds(monkeypatch, seen)
 
     # Every shape a careless caller might use.
     for start, end in ((_date(2026, 4, 1), _date(2026, 7, 1)),

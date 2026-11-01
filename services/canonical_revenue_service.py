@@ -952,12 +952,17 @@ def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE, *,
 
     if summary is None:
         summary = summarize_deals(base.get("deals") or [], scope)
+    verdict = _revenue_total_verdict(summary, scope)
+    if not verdict["publishable"]:
+        return verdict
+    # The scope's own rule publishes; the canonical window verdict may still
+    # withhold (a negative or invalid amount anywhere in the window).
     canonical = _canonical_revenue_gate(base)
     if canonical is not None:
         return {**canonical,
                 "currency_unavailable_deals": summary.get(
                     "currency_unavailable_deals")}
-    return _revenue_total_verdict(summary, scope)
+    return verdict
 
 
 def _canonical_revenue_gate(base: dict) -> dict | None:

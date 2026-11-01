@@ -154,8 +154,13 @@ def _sync_state(pg, *, bootstrap_status="complete",
 def test_unknown_won_state_is_neither_won_nor_lost(pg):
     _sync_state(pg)
     _insert(pg, "won", won=True, revenue_usd=100.0)
-    _insert(pg, "unknown", won=None, revenue_usd=999.0)
-    _insert(pg, "lost", won=False, revenue_usd=888.0)
+    # PR-ADS-161E: the unknown and lost deals sit in an OPEN stage. In the
+    # confirmed won stage a NULL/FALSE flag is a won flag/stage conflict, which
+    # withholds the window (docs/46 §2; covered by the 161D suite).
+    _insert(pg, "unknown", won=None, revenue_usd=999.0,
+            stage_id="appointmentscheduled", stage_label="Appointment Scheduled")
+    _insert(pg, "lost", won=False, revenue_usd=888.0,
+            stage_id="closedlost", stage_label="Closed Lost")
 
     snapshot = canonical_revenue.get_revenue_snapshot(
         "all_time", revenue_scope.SCOPE_ALL_SOURCE, now=NOW, include_deals=True)

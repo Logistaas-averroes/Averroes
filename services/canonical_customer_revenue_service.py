@@ -593,6 +593,8 @@ def window_view(window_type: str | None = None, window_key: str | None = None,
     from services import canonical_revenue_service as crs  # noqa: PLC0415
 
     now = now or _utcnow()
+    if now.tzinfo is None:  # a naive instant is UTC, as everywhere else here
+        now = now.replace(tzinfo=timezone.utc)
     if universe is None:
         universe = crs.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
     if window_type is not None:

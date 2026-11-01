@@ -182,15 +182,11 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
         # PR-ADS-153E-B: won revenue is read from the canonical deal ledger, so
         # the window bounds are captured there.
         patch_canonical_ledger(monkeypatch, from_source_rows(revenue_rows or []))
-        import db.deal_ledger_repository as ledger_repo
-        _canonical_rows = from_source_rows(revenue_rows or [])
-
-        def cap_canonical(start=None, end=None):
-            if seen is not None:
-                seen["revenue"] = (start, end)
-            return {"available": True, "rows": [dict(r) for r in _canonical_rows]}
-
-        monkeypatch.setattr(ledger_repo, "fetch_won_deals", cap_canonical)
+        # PR-ADS-161E: the canonical truth windows the population, so the
+        # bounds are captured where membership is evaluated.
+        if seen is not None:
+            from tests.canonical_ledger_fixtures import capture_canonical_bounds
+            capture_canonical_bounds(monkeypatch, seen, "revenue")
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", cap_spend)
         monkeypatch.setattr(
             "services.revenue_spend_truth_service.build_google_ads_spend_truth", cap_truth)

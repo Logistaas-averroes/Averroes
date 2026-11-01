@@ -50,8 +50,14 @@ EXIT_UNAVAILABLE = 2
 SERVICE_FILE = "services/canonical_customer_revenue_service.py"
 ANALYSIS_FILE = "analysis/closed_won_truth.py"
 AUDIT_FILE = "scripts/audit_customer_closed_won_truth.py"
-#: Production surfaces that must not consume the new service in PR-ADS-161D.
+#: Production surfaces that must not import the truth service directly.
 PRODUCTION_SURFACES = ("api/server.py", "static/app.js")
+#: PR-ADS-161E — THE production entry point. Every page, route and page service
+#: reads closed-won deals, customers and revenue through
+#: ``canonical_revenue_service.load_won_deals`` / ``subset_metrics``, which read
+#: the truth service; no page may import the service itself and restate what it
+#: reads. ``audit_customer_revenue_reader_cutover`` proves the readers use it.
+READER_CONTRACT = ("services/canonical_revenue_service.py",)
 #: Read-only certification scripts that may read the service. Named one by
 #: one: an audit is not a production page, but "any script" would be.
 CERTIFICATION_CONSUMERS = (
@@ -126,7 +132,8 @@ def structural_checks(a: Audit) -> dict:
                  (_ROOT / rel).read_text(encoding="utf-8")]
     # Every Python production path: routes, schedulers, services, scripts —
     # all but the service itself and this audit.
-    exempt = {SERVICE_FILE, AUDIT_FILE, *CERTIFICATION_CONSUMERS}
+    exempt = {SERVICE_FILE, AUDIT_FILE, *CERTIFICATION_CONSUMERS,
+              *READER_CONTRACT}
     consumers += sorted(
         str(p.relative_to(_ROOT)) for d in PRODUCTION_PACKAGES
         for p in (_ROOT / d).rglob("*.py")
@@ -134,8 +141,10 @@ def structural_checks(a: Audit) -> dict:
         and str(p.relative_to(_ROOT)) not in PRODUCTION_SURFACES
         and any("canonical_customer_revenue_service" in n
                 for n in _imports_of(str(p.relative_to(_ROOT)))))
-    a.check("no_production_page_changed", not consumers,
-            f"consumed by {consumers}")
+    a.check("production_reads_only_through_the_reader_contract",
+            not consumers,
+            f"imported directly by {consumers} — read it through "
+            f"{READER_CONTRACT[0]}")
     return {"production_consumers": consumers}
 
 

@@ -214,11 +214,13 @@ _READY_SYNC_SQL = """
 
 _DEAL_SQL = """
     INSERT INTO hubspot_deal_ledger
-        (deal_id, deal_name, deal_stage_label, hs_is_closed, hs_is_closed_won,
-         deal_close_date, amount_raw, deal_currency_code, revenue_usd,
-         currency_status, currency_reason, acquisition_group, attribution_status,
-         association_status)
-    VALUES (%s, %s, 'Deal Won / Payment Received', TRUE, TRUE,
+        (deal_id, deal_name, deal_stage_id, deal_stage_label, hs_is_closed,
+         hs_is_closed_won, deal_close_date, amount_raw, deal_currency_code,
+         revenue_usd, currency_status, currency_reason, acquisition_group,
+         attribution_status, association_status)
+    -- PR-ADS-161E: the stage id now matches the stage label. It was NULL, which
+    -- the canonical won-flag/stage cross-check correctly reads as a conflict.
+    VALUES (%s, %s, '326093516', 'Deal Won / Payment Received', TRUE, TRUE,
             '2026-06-14T00:00:00+00', %s, %s, %s, %s, %s,
             'unclassified', 'unclassified', 'resolved')
 """

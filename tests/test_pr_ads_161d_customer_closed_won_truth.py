@@ -930,7 +930,7 @@ def test_64_the_structural_check_catches_a_production_consumer(monkeypatch):
     monkeypatch.setattr(Path, "read_text", fake)
     a = audit.Audit()
     audit.structural_checks(a)
-    assert a.checks["no_production_page_changed"] is False
+    assert a.checks["production_reads_only_through_the_reader_contract"] is False
 
 
 def test_64_b_a_function_level_import_in_a_scheduler_is_a_consumer(monkeypatch):

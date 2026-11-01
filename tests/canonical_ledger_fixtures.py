@@ -242,6 +242,30 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
     return rows
 
 
+def capture_canonical_bounds(monkeypatch, sink, key=None):
+    """Record the ``(start, end)`` each canonical window is evaluated with.
+
+    PR-ADS-161E: the won population is windowed by THE closed-won truth
+    (``analysis.closed_won_truth.evaluate_window``), not by a windowed ledger
+    query, so that is where a test proves which window a consumer asked for.
+    ``sink`` is a list (appended) or a dict (``sink[key]`` overwritten).
+    """
+    import analysis.closed_won_truth as cwt  # noqa: PLC0415
+
+    real = cwt.evaluate_window
+
+    def _spy(**kw):
+        bounds = (kw.get("start"), kw.get("end"))
+        if isinstance(sink, dict):
+            sink[key] = bounds
+        else:
+            sink.append(bounds)
+        return real(**kw)
+
+    monkeypatch.setattr(cwt, "evaluate_window", _spy)
+    return sink
+
+
 def canonical_ledger_patch(rows=(), *, available=True, reason=None,
                            sync_state=None, sync_available=True):
     """The same stub as :func:`patch_canonical_ledger`, as ONE context manager.
@@ -285,4 +309,4 @@ def canonical_ledger_patch(rows=(), *, available=True, reason=None,
 
 __all__ = ["READY_SYNC_STATE", "DEFAULT_CLOSE_DATE", "ledger_row", "from_legacy_deal_rows",
            "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch",
-           "fake_closed_won_universe"]
+           "fake_closed_won_universe", "capture_canonical_bounds"]
