@@ -447,7 +447,9 @@ def test_deal_ledger_unavailable_does_not_claim_no_deals(monkeypatch):
     assert out["kpis"]["customers"] is None
     # No deals to display, but the row must NOT be rendered as "no deals" — the
     # contract exposes deal_proof_available for the drawer to say Unavailable.
-    assert g["deals"] == []
+    # PR-ADS-161E: the proof list is absent (None, unknown), not an empty list
+    # that reads as "this campaign has no deals".
+    assert g["deals"] is None
 
 
 def test_drawer_handles_deal_proof_unavailable():

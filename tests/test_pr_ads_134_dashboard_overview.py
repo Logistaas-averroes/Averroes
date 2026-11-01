@@ -835,7 +835,11 @@ def test_funnel_conversion_never_fakes_zero():
         assert cell in outcomes
     assert "Closed-Won Customers" not in outcomes
     assert "canonicalMetricHtml(" in outcomes
-    assert "dashValue(o.total_revenue_usd, fmtMoney)" in outcomes
+    # PR-ADS-161E: through the canonical adapter — a null total renders the
+    # canonical Withheld / Unavailable + reason (dashValue only as fallback).
+    assert "canonicalValueHtml(o.total_revenue_usd, (o.metrics || {}).revenue_usd, fmtMoney" in outcomes
+    helper = _slice(JS, "function canonicalValueHtml", 700)
+    assert "return dashValue(null)" in helper
 
 
 def test_signals_and_cards_link_to_evidence_pages():

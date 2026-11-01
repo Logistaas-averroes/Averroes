@@ -5416,8 +5416,19 @@ function wireCampDrawers(root, d) {
     const dealHead = CAMP_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
     // When the deal ledger is unavailable we cannot prove OR disprove deals — say
     // Unavailable, never "No closed-won deals" (which would imply the campaign has none).
-    const dealBody = !dealProofAvailable
-      ? `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`
+    // PR-ADS-161E: a withheld row carries no proof list (null) — say why, never
+    // "no closed-won deals".
+    const dealsWithheld = r.deals === null;
+    const dealBody = (!dealProofAvailable || dealsWithheld)
+      ? `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="dash-unavailable">${
+          (((r.metrics || {}).closed_won_deals || {}).status === "withheld")
+            ? "Closed-won deal proof withheld" : "Closed-won deal proof unavailable"} — ${
+          escapeHtml(canonicalReasonLabel(canonicalBlockingReason((r.metrics || {}).closed_won_deals))
+            || "the deal ledger could not be read")}${(() => {
+          const href = crmBlockersHref({ ...campBlockerOpts(d),
+            reason: canonicalBlockingReason((r.metrics || {}).closed_won_deals) });
+          return href ? ` <a class="metric-blockers-link" href="${escapeHtml(href)}">View blockers</a>` : "";
+        })()}</td></tr>`
       : deals.length
         ? deals.map((deal) => `<tr>${CAMP_DEAL_COLUMNS.map(([key]) => `<td class="camp-deal-td camp-deal-td--${key}">${campDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
         : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
