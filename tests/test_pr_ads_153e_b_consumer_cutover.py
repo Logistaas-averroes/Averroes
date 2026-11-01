@@ -169,7 +169,6 @@ def _patch_business_total_stack(monkeypatch, rows=None, *, available=True):
                            POPULATION if rows is None else rows,
                            available=available)
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "UTC")
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
                         lambda s, e: {"available": True, "rows": [], "table": "geo",
                                       "coverage_start": None, "coverage_end": None})
@@ -229,7 +228,7 @@ def test_2_business_total_consumers_agree_on_won_deals_and_revenue(monkeypatch):
     # withheld while d4's amount is unproven. The proven sum is still
     # reachable through the contract's `known_revenue_usd`, asserted above.
     assert deals["summary"]["won_revenue"] is None
-    assert mart["summary"]["customers"] == ALL_SOURCE_WON_DEALS
+    assert mart["summary"]["closed_won_deals"] == ALL_SOURCE_WON_DEALS
     recon = by_source["canonical_reconciliation"]
     assert recon["canonical_won_deals"] == ALL_SOURCE_WON_DEALS
     assert recon["canonical_revenue_usd"] == ALL_SOURCE_REVENUE
@@ -398,17 +397,21 @@ def test_10_revenue_by_source_reconciles_or_exposes_the_uncovered_bucket(monkeyp
     recon = out["canonical_reconciliation"]
 
     # Every canonical deal is in exactly one displayed bucket.
-    assert recon["displayed_customers"] == recon["canonical_won_deals"]
+    assert recon["displayed_closed_won_deals"] == recon["canonical_won_deals"]
     assert recon["uncovered_deals"] == 0
-    # The money that is NOT displayed is named, to the cent.
-    assert recon["uncovered_revenue_usd"] == 0.0
+    # PR-ADS-161E: d4's amount is unproven, so the canonical verdict withholds
+    # the window's revenue and every group's with it — no group shows the
+    # priced part. The money side is therefore not comparable (None, never a
+    # $0 gap); the deal partition still reconciles exactly.
+    assert recon["revenue_comparable"] is False
+    assert recon["uncovered_revenue_usd"] is None
     assert recon["reconciles"] is True
     # The deal whose currency could not be proven is reported, not discarded.
     assert recon["revenue_unavailable_deals"] == 1
     # Unclassified/ambiguous revenue keeps its own bucket rather than being
     # dropped to make the classified rows look clean.
     groups = {g["group"]: g for g in out["groups"]}
-    assert groups["unclassified"]["customers"] >= 1
+    assert groups["unclassified"]["closed_won_deals"] >= 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

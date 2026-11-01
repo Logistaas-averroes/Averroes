@@ -139,7 +139,6 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, geo_rows=N
         # ledger, so the same fixture rows are stubbed there.
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     except (ImportError, AttributeError) as exc:
@@ -387,7 +386,10 @@ def test_revenue_unchanged_across_fx_states(monkeypatch):
 
     # Revenue truth is identical regardless of FX coverage / currency.
     assert complete["summary"]["won_revenue"] == incomplete["summary"]["won_revenue"] == 34000.0
-    assert complete["summary"]["customers"] == incomplete["summary"]["customers"] == 1
+    # PR-ADS-161E: won DEALS; customers (companies) are withheld without
+    # company evidence — identically in both FX states.
+    assert complete["summary"]["closed_won_deals"] == incomplete["summary"]["closed_won_deals"] == 1
+    assert complete["summary"]["customers"] is None and incomplete["summary"]["customers"] is None
 
 
 # ════════════ approved mappings applied in the ROAS pipeline ════════════

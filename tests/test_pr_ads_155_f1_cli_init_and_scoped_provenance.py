@@ -303,7 +303,7 @@ def test_11_country_revenue_null_cannot_publish_truth_status_ready():
     # status that produced `ready` over a withheld value.
     src = (_ROOT / "services" / "dashboard_countries_service.py").read_text()
     block = src[src.index('"metric": "country_attributed_won_revenue_usd"'):]
-    block = block[:block.index('"metric": "country_attributed_customers"')]
+    block = block[:block.index('"metric": "country_attributed_closed_won_deals"')]
     assert "_country_total_ok" in block
     assert "unavailable_reason" in block and "violation_codes" in block
 

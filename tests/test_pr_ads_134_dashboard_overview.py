@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -229,7 +230,6 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
         repo, "fetch_campaign_identity",
         lambda cid=None: {"available": True, "mappings": []},
     )
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     # PR-ADS-153E-B: one canonical row set feeds the Overview KPIs, the trend
     # and every downstream breakdown — which is the property this suite exists to
     # check. A test overriding either legacy fixture drives that one ledger.
@@ -350,7 +350,10 @@ def test_kpis_come_from_canonical_safe_sources(monkeypatch):
     assert k["closed_won_revenue_usd"] == 9000.0
     assert out["google_ads_conversion_value_used"] is False
     assert out["source_truth"] == "revenue_decision_mart"
-    assert (k["leads"], k["sqls"], k["customers"]) == (5, 2, 1)
+    # PR-ADS-161E: one closed-won DEAL. Customers are distinct proven HubSpot
+    # companies; no deal→company evidence is stored here, so they are withheld.
+    assert (k["leads"], k["sqls"], k["closed_won_deals"]) == (5, 2, 1)
+    assert k["customers"] is None and k["customers_reason"]
     # PR-ADS-155-F2 §2. This case used to assert `sql_rate == 0.4` and
     # `customer_rate == 0.2` under the heading "honest rates". Neither was one.
     # `sql_rate` divided two INDEPENDENT window totals (contacts that became
@@ -430,7 +433,9 @@ def test_disconnected_revenue_integration_never_shows_fake_zero_revenue(monkeypa
     # mart's 0.0/0 aggregates over an unwired ledger are UNKNOWN, not real.
     import db.revenue_repository as repo
     _patch_durable(monkeypatch, won_rows=[], deal_rows=[], source_rev_rows=[])
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: False)
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    make_canonical_unavailable(monkeypatch)
     from services.dashboard_overview_service import build_dashboard_overview
     out = build_dashboard_overview(WINDOW, now=NOW)
     k = out["kpis"]
@@ -549,7 +554,8 @@ def test_trend_spend_series_ready_only_when_denominator_safe(monkeypatch):
     # Bucket sums reconcile with the daily rows (2 x 6500 USD).
     assert sum(p["spend_usd"] or 0 for p in trend["points"]) == 13000.0
     assert sum(p["revenue_usd"] or 0 for p in trend["points"]) == 9000.0
-    assert sum(p["customers"] or 0 for p in trend["points"]) == 1
+    # PR-ADS-161E: the close-date series counts DEALS, under that name.
+    assert sum(p["closed_won_deals"] or 0 for p in trend["points"]) == 1
 
 
 def test_trend_spend_series_withheld_when_fx_incomplete(monkeypatch):
@@ -754,7 +760,7 @@ def test_dashboard_no_longer_uses_ad_windows():
 
 
 def test_kpi_cards_render_all_five_hero_metrics():
-    fn = _slice(JS, "function renderDashKpiRow", 4200)
+    fn = _slice(JS, "function renderDashKpiRow", 5200)
     for label in ("Google Ads Spend", "Closed-Won Revenue", "Customers",
                   "SQLs", "Google Ads ROAS"):
         assert label in fn
@@ -823,8 +829,12 @@ def test_funnel_conversion_never_fakes_zero():
     assert "dashValue(s.reached, fmtCount)" in cohort
 
     outcomes = _slice(JS, "function renderDashCommercialOutcomes", 3000)
-    for cell in ("Closed-Won Customers", "Total Closed-Won Revenue"):
+    # PR-ADS-161E: deals and customers are two cells; "Closed-Won Customers"
+    # was the won-DEAL count under a customer label.
+    for cell in ("Closed-Won Deals", "Customers", "Total Closed-Won Revenue"):
         assert cell in outcomes
+    assert "Closed-Won Customers" not in outcomes
+    assert "canonicalMetricHtml(" in outcomes
     assert "dashValue(o.total_revenue_usd, fmtMoney)" in outcomes
 
 

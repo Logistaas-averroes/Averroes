@@ -124,7 +124,8 @@ def test_residual_row_is_added(monkeypatch):
     assert row["is_residual"] is True
     assert row["country_code"] is None
     # Not a real country: no leads/revenue, decision "unattributed".
-    assert row["leads"] == 0 and row["customers"] == 0 and row["won_revenue"] == 0
+    assert row["leads"] == 0 and row["closed_won_deals"] == 0 and row["won_revenue"] == 0
+    assert row["customers"] is None  # no population, no company-level figure
     assert row["decision"] == "unattributed"
     # No revenue basis -> ROAS is null, never a fake computed 0.0.
     assert row["roas"] is None

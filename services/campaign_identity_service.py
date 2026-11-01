@@ -24,6 +24,7 @@ overwrite the raw spend-table identity.
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 import re
 from datetime import datetime
@@ -31,6 +32,7 @@ from difflib import SequenceMatcher
 
 from analysis.business_windows import resolve_window
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 
 log = logging.getLogger(__name__)
 
@@ -310,14 +312,17 @@ def _canonical_label_revenue(window, now) -> dict:
 
     base = canonical_revenue.load_won_deals(window, now=now)
     if not base.get("available"):
-        return {"available": False, "rows": [], "reason": base.get("reason")}
+        return {"available": False, "rows": [], "reason": base.get("reason"),
+                "base": base}
     return {
         "available": True,
         "rows": canonical_revenue.canonical_deal_rows(
             base, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE),
+        "base": base,
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_mapping_review(window: str, now: datetime | None = None) -> dict:
     """Admin mapping-workbench payload (PR-ADS-119 / PR-ADS-120b).
 
@@ -364,7 +369,9 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
         label = r.get("campaign_name")
         if not label:
             continue
-        entry = rev_by_label.setdefault(label, {"revenue": 0.0, "deals": set()})
+        entry = rev_by_label.setdefault(label, {"revenue": 0.0, "deals": set(),
+                                                "rows": []})
+        entry["rows"].append(r)
         # A deal whose currency was never proven contributes no money but is
         # still a customer; `or 0.0` used to bill it as $0 against the label.
         amount = r.get("deal_amount_usd")
@@ -404,8 +411,14 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
         candidate = ga_by_norm.get(norm)
         rev = rev_by_label.get(label) or {}
         ld = lead_by_label.get(label) or {}
-        revenue_usd = round(float(rev.get("revenue", 0.0)), 2)
-        customers = len(rev.get("deals", set()))
+        # PR-ADS-161E: the label's revenue is its deals' TOTAL through the
+        # canonical reader contract — None (never $0, never the priced part)
+        # when the window's revenue is withheld or the ledger is unreadable —
+        # and customers are distinct HubSpot companies, not the deal count.
+        canon = canonical_revenue.reader_row(revenue["base"], rev.get("rows") or [])
+        revenue_usd = canon["won_revenue"]
+        closed_won_deals = canon["closed_won_deals"]
+        customers = canon["customers"]
         # When lead truth is available, a label with no lead rows genuinely has 0
         # leads/SQLs (not "unknown"); only withhold (None) when no lead data exists.
         leads_n = ld.get("leads", 0) if leads_available else None
@@ -468,7 +481,9 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
             "canonical_campaign_name": cand_name,
             "leads": leads_n,
             "sqls": sqls_n,
+            "closed_won_deals": closed_won_deals,
             "customers": customers,
+            "metrics": canon["metrics"],
             "match_reason": match_reason,
             "match_score": match_score,
             "confidence": _confidence_for(status, top_score),

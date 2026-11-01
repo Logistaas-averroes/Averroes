@@ -2,8 +2,12 @@
 
 **PR-ADS-161D**, customer identity added by **PR-ADS-161D2**. One read-only definition of closed-won deals, customers and
 closed-won revenue, per evidence and business window, with attribution,
-coverage, freshness and a publication verdict for every metric. Truth service
-and audit only: **no production page reads it yet** — that is PR-ADS-161E.
+coverage, freshness and a publication verdict for every metric. Since
+**PR-ADS-161E** every production page, route and service that publishes
+closed-won deals, customers, revenue, ROAS, CAC or SQL-to-customer conversion
+reads it through the reader contract in `canonical_revenue_service`
+(`load_won_deals` / `subset_metrics` / `reader_row`) — see
+`docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.
 
 | Module | Role |
 | --- | --- |
@@ -436,21 +440,24 @@ unavailable.
 
 ---
 
-## 10. Reader inventory (not migrated here)
+## 10. Reader inventory — migrated by PR-ADS-161E
 
-See the PR description for the full table. Three findings PR-ADS-161E must
-address:
+The four findings this PR recorded for PR-ADS-161E are closed:
 
-* **Won deals are called customers** across the Mart, the revenue attribution
-  and source attribution services, unit economics (whose CAC denominator is the
-  won-deal count) and the dashboards.
-* **A legacy table gates canonical revenue.** `revenue_integration_connected()`
-  is an existence check over `gclid_attribution`; dashboards blank canonical
-  customers and revenue on it.
-* **`sql_to_customer_rate`** divides all-source won deals by
-  campaign-attributable SQLs — two populations.
-* **Production's All Time drops undated won deals.** `load_won_deals("all_time")`
-  queries `deal_close_date < tomorrow`, which excludes every NULL close date;
-  this service counts them in All Time and withholds finite windows over them.
-  Its windows also end at tomorrow's UTC midnight, so a close later today is
-  admitted. The audit reports both per window.
+* **Won deals were called customers** across the Mart, revenue and source
+  attribution, unit economics (whose CAC divided by won deals) and the
+  dashboards. Every reader now publishes `closed_won_deals` and the canonical
+  `customers` (distinct proven companies) as two metrics. CAC divides by
+  customers.
+* **A legacy table gated canonical revenue.** `revenue_integration_connected()`
+  is deleted. Readiness reads the canonical verdict (`canonical_revenue_available`).
+* **`sql_to_customer_rate` mixed two populations.** It is unavailable, with
+  `sql_to_customer_rate_needs_one_acquisition_cohort_and_scope`.
+* **All Time dropped undated won deals and admitted closes later today.**
+  `load_won_deals` is now a reader of `window_view`. All Time holds the undated
+  deals, and a close later than now is in no window.
+
+The ROAS and CAC window verdicts are still `not_published`: a window carries no
+spend. Their reasons now say each is derived per scope by the reader contract.
+The full matrix, the deferred readers and the cutover audit are in
+`docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.

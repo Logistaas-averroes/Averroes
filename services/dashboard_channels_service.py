@@ -44,6 +44,7 @@ Truth rules (unchanged, never loosened):
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import date, datetime, timezone
 
@@ -196,10 +197,10 @@ def _google_roas(google_won_revenue, usd_spend):
     return round(float(google_won_revenue) / float(usd_spend), 2)
 
 
-def _accumulate(dst: dict, leads, sqls, customers, won, *, amount_known: bool):
+def _accumulate(dst: dict, leads, sqls, deals, won, *, amount_known: bool):
     dst["leads"] += leads or 0
     dst["sqls"] += sqls or 0
-    dst["customers"] += customers or 0
+    dst["closed_won_deals"] += deals or 0
     if amount_known:
         dst["won_revenue"] += won or 0.0
     else:
@@ -207,7 +208,7 @@ def _accumulate(dst: dict, leads, sqls, customers, won, *, amount_known: bool):
 
 
 def _new_bucket():
-    return {"leads": 0, "sqls": 0, "customers": 0, "won_revenue": 0.0, "amount_unknown": False}
+    return {"leads": 0, "sqls": 0, "closed_won_deals": 0, "won_revenue": 0.0, "amount_unknown": False}
 
 
 def _unknown_amount_maps(revenue_rows: list) -> tuple[set, set]:
@@ -264,7 +265,7 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             # the raw rows were unverifiable, no total can be trusted → all unknown.
             ch_amount_known = (amounts_verifiable and ch_won is not None
                                and exec_ch not in exec_unknown)
-            _accumulate(agg, ch.get("leads"), ch.get("sqls"), ch.get("customers"),
+            _accumulate(agg, ch.get("leads"), ch.get("sqls"), ch.get("closed_won_deals"),
                         ch_won, amount_known=ch_amount_known)
 
             for pf in ch.get("platforms") or []:
@@ -289,7 +290,7 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                     "source_channel": ch.get("channel"),
                     "leads": pf.get("leads"),
                     "sqls": pf.get("sqls"),
-                    "customers": pf.get("customers"),
+                    "closed_won_deals": pf.get("closed_won_deals"),
                     "won_revenue_usd": _round2(pf_won) if pf_won is not None else None,
                     "spend_usd": google_spend["usd"] if is_google else None,
                     "native_spend": ({"amount": google_spend["native_amount"],
@@ -319,7 +320,7 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             "channel_label": EXEC_CHANNEL_LABELS[exec_ch],
             "leads": agg["leads"],
             "sqls": agg["sqls"],
-            "customers": agg["customers"],
+            "closed_won_deals": agg["closed_won_deals"],
             "won_revenue_usd": won,
             "spend_usd": google_spend["usd"] if is_google else None,
             "native_spend": ({"amount": google_spend["native_amount"],
@@ -333,7 +334,7 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
 
     # Platform matrix: Google Ads first, then by customers, then won revenue.
     platforms.sort(
-        key=lambda p: (p["channel"] == CX_GOOGLE_ADS, p.get("customers") or 0,
+        key=lambda p: (p["channel"] == CX_GOOGLE_ADS, p.get("closed_won_deals") or 0,
                        p.get("won_revenue_usd") or 0.0),
         reverse=True,
     )
@@ -361,15 +362,15 @@ def _build_kpis(channel_rows: list, *, revenue_available: bool = True,
     if not revenue_available:
         return {
             "total_sqls": total_sqls,
-            "total_customers": None,
+            "total_closed_won_deals": None,
             "closed_won_revenue_usd": None,
             "spend_connected_revenue_usd": None,
             "revenue_only_revenue_usd": None,
         }
 
-    customers_incomplete = any(c.get("customers") is None for c in channel_rows)
-    total_customers = (None if customers_incomplete
-                       else sum((c.get("customers") or 0) for c in channel_rows))
+    deals_incomplete = any(c.get("closed_won_deals") is None for c in channel_rows)
+    total_closed_won_deals = (None if deals_incomplete
+                       else sum((c.get("closed_won_deals") or 0) for c in channel_rows))
 
     # PR-ADS-154C-F3-F1 §1: the canonical verdict gates the REVENUE TOTAL and
     # nothing else. `won_deals` is complete whatever the amounts are, so the
@@ -392,7 +393,7 @@ def _build_kpis(channel_rows: list, *, revenue_available: bool = True,
 
     return {
         "total_sqls": total_sqls,
-        "total_customers": total_customers,
+        "total_closed_won_deals": total_closed_won_deals,
         "closed_won_revenue_usd": None if revenue_incomplete else _round2(total_revenue),
         "spend_connected_revenue_usd": (None if revenue_incomplete
                                         else _round2(spend_connected_revenue)),
@@ -403,11 +404,11 @@ def _build_kpis(channel_rows: list, *, revenue_available: bool = True,
 
 def _top_channel_and_platform(channel_rows: list, platforms: list) -> tuple:
     def _pick(rows, name_key):
-        scored = [r for r in rows if (r.get("customers") or 0) > 0
+        scored = [r for r in rows if (r.get("closed_won_deals") or 0) > 0
                   or (r.get("won_revenue_usd") or 0) > 0]
         if not scored:
             return None
-        best = max(scored, key=lambda r: (r.get("customers") or 0,
+        best = max(scored, key=lambda r: (r.get("closed_won_deals") or 0,
                                           r.get("won_revenue_usd") or 0.0))
         return best.get(name_key)
     return _pick(channel_rows, "channel_label"), _pick(platforms, "platform_label")
@@ -502,8 +503,8 @@ def _canonical_daily_revenue(start_key, end_key) -> dict:
     return {"available": True, "rows": rows}
 
 
-def _build_trend(window_block: dict) -> dict:
-    """Per-bucket SQLs (by created date) + customers/revenue (by close date) per
+def _build_trend(window_block: dict, *, revenue_total_published: bool = True) -> dict:
+    """Per-bucket SQLs (by created date) + won deals/revenue (by close date) per
     executive channel. Each metric uses its OWN business event date. A bucket
     whose revenue includes an unknown amount reports that channel's revenue as
     null (never a fabricated $0). Withheld entirely if the durable series are
@@ -533,7 +534,7 @@ def _build_trend(window_block: dict) -> dict:
 
     def cell(bstart, ch):
         return grid.setdefault((bstart, ch),
-                               {"sqls": 0, "customers": 0, "revenue": 0.0,
+                               {"sqls": 0, "closed_won_deals": 0, "revenue": 0.0,
                                 "amount_unknown": False})
 
     for r in lead_rows:
@@ -555,7 +556,7 @@ def _build_trend(window_block: dict) -> dict:
                                     r.get("acquisition_group"))
         bstart = max(_bucket_start(day, bucket), start)
         c = cell(bstart, ch)
-        c["customers"] += 1
+        c["closed_won_deals"] += 1
         amount = r.get("deal_amount_usd")
         if amount is None:
             c["amount_unknown"] = True
@@ -567,14 +568,18 @@ def _build_trend(window_block: dict) -> dict:
         chans = []
         for exec_ch in EXEC_CHANNEL_ORDER:
             c = grid.get((bstart, exec_ch))
-            if not c or (c["sqls"] == 0 and c["customers"] == 0):
+            if not c or (c["sqls"] == 0 and c["closed_won_deals"] == 0):
                 continue
             chans.append({
                 "channel": exec_ch,
                 "channel_label": EXEC_CHANNEL_LABELS[exec_ch],
                 "sqls": c["sqls"],
-                "customers": c["customers"],
-                "revenue_usd": None if c["amount_unknown"] else _round2(c["revenue"]),
+                "closed_won_deals": c["closed_won_deals"],
+                # PR-ADS-161E: a bucket is a subset of the window, published
+                # only when the canonical verdict publishes the window's revenue.
+                "revenue_usd": (None if (c["amount_unknown"]
+                                         or not revenue_total_published)
+                                else _round2(c["revenue"])),
             })
         points.append({
             "period_start": bstart.isoformat(),
@@ -590,13 +595,13 @@ def _build_quality_matrix(channel_rows: list) -> list:
     for c in channel_rows:
         if c.get("sqls") is None:
             continue
-        if (c["sqls"] or 0) == 0 and (c["customers"] or 0) == 0:
+        if (c["sqls"] or 0) == 0 and (c["closed_won_deals"] or 0) == 0:
             continue
         out.append({
             "channel": c["channel"],
             "channel_label": c["channel_label"],
             "sqls": c["sqls"],
-            "customers": c["customers"],
+            "closed_won_deals": c["closed_won_deals"],
             "revenue_usd": c["won_revenue_usd"],  # None => bubble neutral/min
             "spend_connected": c["spend_connected"],
         })
@@ -622,15 +627,15 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
     cards = []
     by_channel = {c["channel"]: c for c in channel_rows}
     google = by_channel.get(CX_GOOGLE_ADS)
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
 
     # Scale — the spend-connected customer source (Google Ads) if it produced.
-    if google and google["spend_connected"] and (google.get("customers") or 0) > 0:
+    if google and google["spend_connected"] and (google.get("closed_won_deals") or 0) > 0:
         cards.append({
             "type": "scale", "title": "Scale",
-            "headline": "Google Ads is the only spend-connected customer source",
-            "body": (f"It produced {google['customers']} customer"
-                     f"{'s' if google['customers'] != 1 else ''} and "
+            "headline": "Google Ads is the only spend-connected won-deal source",
+            "body": (f"It won {google['closed_won_deals']} deal"
+                     f"{'s' if google['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(google['won_revenue_usd'])} closed-won revenue "
                      "with verified spend."),
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
@@ -638,24 +643,24 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
     else:
         # Highlight the top revenue-only customer producer instead.
         producers = [c for c in channel_rows if not c["spend_connected"]
-                     and (c.get("customers") or 0) > 0]
-        top = max(producers, key=lambda c: (c["customers"], c.get("won_revenue_usd") or 0.0),
+                     and (c.get("closed_won_deals") or 0) > 0]
+        top = max(producers, key=lambda c: (c["closed_won_deals"], c.get("won_revenue_usd") or 0.0),
                   default=None)
         if top:
             cards.append({
                 "type": "scale", "title": "Scale",
-                "headline": f"{top['channel_label']} produced customers without spend visibility",
+                "headline": f"{top['channel_label']} won deals without spend visibility",
                 "body": (f"Treat this as revenue attribution, not ROAS — "
-                         f"{top['channel_label']} closed {top['customers']} customer"
-                         f"{'s' if top['customers'] != 1 else ''}. Spend is unavailable "
+                         f"{top['channel_label']} won {top['closed_won_deals']} deal"
+                         f"{'s' if top['closed_won_deals'] != 1 else ''}. Spend is unavailable "
                          "because it is not a connected spend source."),
                 "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
             })
         else:
             cards.append({
                 "type": "scale", "title": "Scale",
-                "headline": "No spend-connected customer source yet",
-                "body": "No channel has both verified spend and closed-won customers in this window.",
+                "headline": "No spend-connected won-deal source yet",
+                "body": "No channel has both verified spend and closed-won deals in this window.",
                 "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
             })
 
@@ -668,8 +673,8 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
             "type": "watch", "title": "Watch",
             "headline": f"{top['channel_label']} has SQLs but no connected spend",
             "body": (f"It produced {top['sqls']} SQL{'s' if top['sqls'] != 1 else ''} and "
-                     f"{top.get('customers') or 0} customer"
-                     f"{'s' if (top.get('customers') or 0) != 1 else ''}, but ROAS is "
+                     f"{top.get('closed_won_deals') or 0} won deal"
+                     f"{'s' if (top.get('closed_won_deals') or 0) != 1 else ''}, but ROAS is "
                      "unavailable until a real spend source is connected."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
@@ -677,13 +682,13 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No unmeasured demand channels",
-            "body": "Every channel producing SQLs either has connected spend or no customers yet.",
+            "body": "Every channel producing SQLs either has connected spend or no won deals yet.",
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
 
     # Investigate — unclassified revenue.
     unclassified = by_channel.get(CX_UNCLASSIFIED)
-    if unclassified and ((unclassified.get("customers") or 0) > 0
+    if unclassified and ((unclassified.get("closed_won_deals") or 0) > 0
                          or (unclassified.get("won_revenue_usd") or 0) > 0):
         cards.append({
             "type": "investigate", "title": "Investigate",
@@ -714,7 +719,7 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
 
 def _build_truth_status(mart: dict, google_spend: dict, channel_rows: list,
                         readiness: dict) -> dict:
-    revenue = "ready" if readiness.get("revenue_integration_connected") else "blocked"
+    revenue = "ready" if readiness.get("canonical_revenue_available") else "blocked"
 
     fx = google_spend["fx_status"]
     cov = google_spend["campaign_spend_status"]
@@ -726,7 +731,7 @@ def _build_truth_status(mart: dict, google_spend: dict, channel_rows: list,
         google_ads_spend = "unavailable"
 
     unclassified = next((c for c in channel_rows if c["channel"] == CX_UNCLASSIFIED), None)
-    has_unclassified = bool(unclassified and ((unclassified.get("customers") or 0) > 0
+    has_unclassified = bool(unclassified and ((unclassified.get("closed_won_deals") or 0) > 0
                                               or (unclassified.get("won_revenue_usd") or 0) > 0
                                               or (unclassified.get("sqls") or 0) > 0))
 
@@ -743,7 +748,7 @@ def _build_truth_status(mart: dict, google_spend: dict, channel_rows: list,
 def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
                        readiness: dict, period_change: dict) -> list:
     out = []
-    if not readiness.get("revenue_integration_connected"):
+    if not readiness.get("canonical_revenue_available"):
         out.append({"metric": "closed_won_revenue_usd",
                     "reason": "Revenue integration not connected for this window."})
     if kpis.get("total_sqls") is None:
@@ -781,15 +786,15 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
         return {"available": False, "label": label, "note": note, "metrics": {},
                 "reason": "Previous period unavailable."}
     ps = prev_mart.get("summary") or {}
-    connected = bool((prev_mart.get("readiness") or {}).get("revenue_integration_connected"))
+    connected = bool((prev_mart.get("readiness") or {}).get("canonical_revenue_available"))
     prev_rev = ps.get("won_revenue_usd") if connected else None
-    prev_cust = ps.get("customers") if connected else None
+    prev_cust = ps.get("closed_won_deals") if connected else None
     # SQLs on this tab are source-based (from the taxonomy), so the previous-period
     # baseline must be too — a campaign-mart SQL count is a different denominator.
     prev_sqls = sum((g.get("sqls") or 0) for g in (prev_source.get("groups") or []))
     metrics = {
         "closed_won_revenue_usd": _delta_metric(kpis.get("closed_won_revenue_usd"), prev_rev),
-        "total_customers": _delta_metric(kpis.get("total_customers"), prev_cust),
+        "total_closed_won_deals": _delta_metric(kpis.get("total_closed_won_deals"), prev_cust),
         "total_sqls": _delta_metric(kpis.get("total_sqls"), prev_sqls),
     }
     return {
@@ -798,6 +803,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_dashboard_channels(window: str = "current_quarter",
                              now: datetime | None = None) -> dict:
     """Build the Dashboard Channels & Platforms contract for one business window.
@@ -811,7 +817,7 @@ def build_dashboard_channels(window: str = "current_quarter",
     mart = build_revenue_decision_mart(view="campaign", window=window, now=now)
     window_block = mart.get("window") or {}
     readiness = mart.get("readiness") or {}
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
 
     source = build_revenue_by_source(window, now=now)
     source_groups = source.get("groups") or []
@@ -843,12 +849,12 @@ def build_dashboard_channels(window: str = "current_quarter",
         # connected when only the REVENUE integration is down. But ROAS needs
         # revenue, so roas and roas_available are cleared (kept consistent).
         for c in channel_rows:
-            c["customers"] = None
+            c["closed_won_deals"] = None
             c["won_revenue_usd"] = None
             c["roas"] = None
             c["roas_available"] = False
         for p in platforms:
-            p["customers"] = None
+            p["closed_won_deals"] = None
             p["won_revenue_usd"] = None
             p["roas"] = None
             p["roas_available"] = False
@@ -870,6 +876,14 @@ def build_dashboard_channels(window: str = "current_quarter",
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)
     kpis["top_channel"] = top_channel
     kpis["top_platform"] = top_platform
+    # PR-ADS-161E: channel rows count closed-won DEALS (additive across
+    # channels). Customers — distinct proven HubSpot companies — are not
+    # additive, so the page's customer figure is the canonical window metric.
+    _summary = mart.get("summary") or {}
+    kpis["customers"] = _summary.get("customers") if revenue_connected else None
+    kpis["customers_status"] = _summary.get("customers_status")
+    kpis["customers_reason"] = _summary.get("customers_reason")
+    kpis["metrics"] = _summary.get("metrics")
     total = kpis.get("closed_won_revenue_usd")
     sc = kpis.get("spend_connected_revenue_usd")
     kpis["spend_connected_share"] = (
@@ -877,9 +891,10 @@ def build_dashboard_channels(window: str = "current_quarter",
     )
 
     period_change = _build_period_change(window, ref_now, kpis)
-    trend = _build_trend(window_block) if revenue_connected else {
+    trend = _build_trend(window_block, revenue_total_published=bool(
+        _revenue_verdict["publishable"])) if revenue_connected else {
         "bucket": None, "points": [], "status": "unavailable",
-        "reason": "Revenue integration not connected — a channel series cannot be shown without fabricating zeros."}
+        "reason": "The canonical closed-won population is unavailable — a channel series cannot be shown without fabricating zeros."}
     # The quality matrix plots customers (y) and revenue (bubble) — both unknown
     # without a connected revenue integration, so it is withheld rather than
     # plotting channels at a fabricated zero.
@@ -911,12 +926,22 @@ def build_dashboard_channels(window: str = "current_quarter",
                           else canonical_contract.TRUTH_NOT_READY),
          "unavailable_reason": _revenue_verdict["reason"],
          "violation_codes": _revenue_verdict["violation_codes"]},
-        {"metric": "customers",
+        {"metric": "closed_won_deals",
          "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
          "scope": "all_source_business_revenue",
          "truth_status": (canonical_contract.TRUTH_READY
-                          if kpis.get("total_customers") is not None
+                          if kpis.get("total_closed_won_deals") is not None
                           else canonical_contract.TRUTH_NOT_READY)},
+        # PR-ADS-161E: customers are not additive across channels, so the page
+        # republishes the mart's canonical window metric.
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("customers_status") == "published"
+                          and kpis.get("customers") is not None
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": kpis.get("customers_reason")},
         {"metric": "source_group_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
          "scope": "source_group_sqls",

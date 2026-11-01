@@ -361,7 +361,6 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
         monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
                             lambda s, e, *_a, **_k: {"available": True, "chunks": cov})

@@ -15,7 +15,7 @@ authoritative documents. It does not restate the product or the architecture.
 
 | Document | What it is | Trust its status claims? |
 | --- | --- | --- |
-| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-191; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
+| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-161E; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
 | `docs/DOCTRINE.md` | the governing advisory rules | Yes |
 | `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
 | `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |
@@ -25,7 +25,7 @@ authoritative documents. It does not restate the product or the architecture.
 | `CLAUDE_CODE_BRIEFING.md` | original strategy→build handoff | **No — stale.** Its "what needs to be built" list is years out of date (it lists `api/server.py` and the dashboard as unbuilt; both exist) |
 | `docs/07_AGENT_BRIEFING.md` | architecture + layer rules | Architecture yes; its status narrative is explicitly marked stale |
 
-The repo is at **PR-ADS-191**. Any doc describing "Phase 1" as current is
+The repo is at **PR-ADS-161E**. Any doc describing "Phase 1" as current is
 historical.
 
 ---
@@ -267,9 +267,31 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   The won deals that block a customer or revenue total are named by the CRM
   Truth Exceptions workbench (PR-ADS-191, `docs/47_*`), which consumes these
   verdicts and never restates them.
-  Many existing readers still call won deals "customers" — PR-ADS-161E migrates
-  them. The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
+  The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
   cross-check whose disagreement withholds, never a filter. See `docs/46_*` §5.
+
+- **Every production reader of closed-won deals, customers, revenue, ROAS, CAC
+  or SQL-to-customer reads the reader contract** (PR-ADS-161E, `docs/48_*`):
+  `canonical_revenue_service.load_won_deals` for the window's population and
+  `reader_row` / `subset_metrics` for a row's figures, inside ONE snapshot
+  (`@single_snapshot` on the page builder). A page never decides publication:
+  it republishes `{value, status, reason}`. `closed_won_deals` and `customers`
+  are two fields. A row's customers are distinct companies and are **never
+  summed** across rows. ROAS and CAC come only from `derive_roas` /
+  `derive_cac`, and CAC divides by customers, never by deals.
+  SQL-to-customer, revenue-per-SQL and lead-to-customer are unavailable: two
+  cohorts.
+
+  `revenue_integration_connected()` (an existence check over
+  `gclid_attribution`) is deleted. Never gate canonical figures on a legacy
+  table again.
+
+  A new reader must be added to `INVENTORY` in
+  `scripts/audit_customer_revenue_reader_cutover.py`, or that audit fails.
+  The UI renders these metrics with `canonicalMetricHtml` / `rowMetricHtml`:
+  0 for a published zero, and "Withheld" or "Unavailable" with the reason
+  otherwise, never a dash. An admin also gets "View blockers" into the CRM
+  Truth Exceptions workbench.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

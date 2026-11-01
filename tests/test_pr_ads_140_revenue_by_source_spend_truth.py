@@ -227,7 +227,6 @@ def _patch_full_durable(monkeypatch):
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": []})
     patch_canonical_ledger(monkeypatch, from_source_rows(SOURCE_REV))
     monkeypatch.setattr(writers, "source_attribution_health_counts",

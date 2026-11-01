@@ -86,8 +86,17 @@ def test_roas_null_when_revenue_not_wired():
     # different fact from "revenue not wired", and the status now says which.
     assert r["revenue_attribution_status"] == "no_campaign_attributable_deals_in_window"
     gulf = _by(r["campaigns"], "campaign_name", "gulf")
-    assert gulf["roas"] is None  # null, not 0
-    assert r["summary"]["roas"] is None
+    # PR-ADS-161E: published zero — this campaign's canonical revenue in the
+    # window is a proven $0 (the population is published; no deal is on it).
+    assert gulf["roas"] == 0.0
+    assert gulf["metrics"]["roas"]["status"] == "published"
+    # PR-ADS-161E: the canonical population IS published and holds no
+    # campaign-attributable deal, so closed-won revenue is a proven $0 and the
+    # period ROAS is a PUBLISHED zero — not "unknown". "Unknown" is only an
+    # unreadable or withheld population (see the next tests).
+    assert r["summary"]["won_revenue"] == 0.0
+    assert r["summary"]["roas"] == 0.0
+    assert r["summary"]["metrics"]["roas"]["status"] == "published"
 
 
 def test_roas_zero_when_revenue_available_but_campaign_has_none():

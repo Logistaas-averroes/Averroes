@@ -191,7 +191,7 @@ def test_nested_group_channel_platform_aggregation(monkeypatch):
     li = _platform(social, "linkedin")
     meta = _platform(social, "meta")
     # SQLs / customers / revenue aggregate per channel + platform.
-    assert social["leads"] == 2 and social["sqls"] == 1 and social["customers"] == 1
+    assert social["leads"] == 2 and social["sqls"] == 1 and social["closed_won_deals"] == 1
     assert social["won_revenue"] == 10000.0
     assert li["leads"] == 1 and li["sqls"] == 1 and li["won_revenue"] == 10000.0
     assert meta["leads"] == 1 and meta["sqls"] == 0 and meta["won_revenue"] == 0.0
@@ -456,10 +456,14 @@ def test_detail_endpoint_registered():
 
 def test_frontend_renders_hierarchy():
     section = _slice(JS, "function renderSourceGroupSection", span=2000)
+    # PR-ADS-161E: won DEALS and canonical customers (distinct companies) are
+    # two columns; "Customer Rate" divided won deals by acquisition-cohort
+    # leads — two populations — and is retired.
     for col in (">Channel / Platform<", ">Leads<", ">SQLs<", ">SQL Rate<",
-                ">Customers<", ">Customer Rate<", ">Won Revenue<", ">Spend<",
+                ">Won Deals<", ">Customers<", ">Won Revenue<", ">Spend<",
                 ">ROAS / Status<"):
         assert col in section, f"source table missing column {col}"
+    assert ">Customer Rate<" not in section
     # Channel + platform rows exist.
     assert "source-channel-row" in JS
     assert "source-platform-row" in JS

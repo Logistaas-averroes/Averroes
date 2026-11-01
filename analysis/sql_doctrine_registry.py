@@ -746,6 +746,9 @@ _SQL_BOUNDARY = "PR-ADS-160 prospective SQL coverage boundary"
 _CLOSED_WON = ("PR-ADS-161D closed-won truth (acquisition-cohort membership by "
                "contact creation; reads no SQL)")
 _SQL_EVIDENCE = "PR-ADS-161C post-boundary SQL evidence forensics and repair"
+_READER_CUTOVER = ("PR-ADS-161E reader contract — SQL-to-customer, revenue-per-SQL "
+                   "and lead-to-customer rates are retired as unavailable; it "
+                   "reads and publishes no SQL")
 _SQL_PUBLICATION = ("PR-ADS-161A-1 canonical SQL publication contract "
                     "(the only production-facing publication verdict)")
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
@@ -1154,6 +1157,10 @@ RULES: list[dict] = [
     # snapshot rows, independently of the service, to certify it.
     _r("closedwon.audit", "scripts/audit_customer_closed_won_truth.py",
        CLS_DIAGNOSTIC, _CLOSED_WON, symbol=["_expected"]),
+    # PR-ADS-161E: the reader-cutover audit's structural check searches the
+    # code for a ratio over SQLs — it names SQLs to prove none is computed.
+    _r("readercut.audit", "scripts/audit_customer_revenue_reader_cutover.py",
+       CLS_DIAGNOSTIC, _READER_CUTOVER, symbol=["structural_checks"]),
 
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),
@@ -1320,6 +1327,12 @@ RULES: list[dict] = [
     _r("ui.historical", "static/app.js", CLS_LEGACY, _HI, symbol="_renderHistoricalTable"),
     _r("ui.gclid", "static/app.js", CLS_LEGACY, _GCLID, symbol="renderGclidAttributionTable"),
     _r("ui.report", "static/app.js", CLS_LEGACY, _REPORT, symbol="copyLatestReport"),
+    # PR-ADS-161E: the canonical reason labels (the CANONICAL_REASON_LABELS
+    # literal follows `dashValue`, so the scanner attributes it there) and the
+    # Deals tab's rate cell say an SQL-based rate is unavailable — they render
+    # no SQL figure.
+    _r("ui.canonical_metrics", "static/app.js", CLS_DIAGNOSTIC, _READER_CUTOVER,
+       symbol=["dashValue", "dealRateCell"]),
     _m("ui.index", "static/index.html", CLS_LEGACY, _GEO,
        ["confirmed_sqls_ref", "frontend_sqls_label", "sqls_field_ref"]),
 ]

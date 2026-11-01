@@ -58,8 +58,10 @@ def test_scope_campaign_only_no_country_rebuild():
 def test_campaign_summary_strip_exists():
     assert "function renderRoasCampaignSummary" in JS
     # span widened in PR-ADS-119: a native/USD currency block now precedes the strip.
-    fn = _fn("function renderRoasCampaignSummary", span=2400)
-    for label in ("Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS"):
+    fn = _fn("function renderRoasCampaignSummary", span=3600)
+    # PR-ADS-161E: closed-won deals and customers are two cells; CAC is shown.
+    for label in ("Spend", "Leads", "SQLs", "Closed-Won Deals", "Customers",
+                  "Won Revenue", "ROAS", "CAC"):
         assert f">{label}<" in fn, f"summary strip missing {label}"
     assert "revenue-summary-strip" in fn
 
@@ -88,8 +90,10 @@ def test_filter_chip_event_delegation_scoped_to_campaign():
 
 def test_sorting_is_business_value_first():
     fn = _fn("function sortRoasCampaignRows", span=400)
-    # The sort keys must appear in this exact priority order.
-    order = ["customers", "won_revenue", "sqls", "spend"]
+    # The sort keys must appear in this exact priority order. PR-ADS-161E: the
+    # outcome key is the won-DEAL count (a row's customers can be withheld and
+    # are not a deal count).
+    order = ["closed_won_deals", "won_revenue", "sqls", "spend"]
     positions = [fn.find(k) for k in order]
     assert all(p != -1 for p in positions), f"missing sort key: {positions}"
     assert positions == sorted(positions), "sort keys not in business-value order"
@@ -165,11 +169,13 @@ def test_campaign_roas_uses_multiple_notation():
     assert '.toFixed(2) + "x"' in fn
     assert "Unavailable" in fn
     # Summary strip and campaign table use the multiple formatter, not fmtRoas.
-    summary = _fn("function renderRoasCampaignSummary", span=900)
-    assert "fmtRoasMultiple(s.roas)" in summary
+    # PR-ADS-161E: through the canonical adapter, with the multiple formatter —
+    # a withheld ROAS then names its reason instead of a bare "Unavailable".
+    summary = _fn("function renderRoasCampaignSummary", span=3600)
+    assert 'rowMetricHtml(s, "roas", fmtRoasMultiple' in summary
     assert "fmtRoas(s.roas)" not in summary
-    table = _fn("function renderRoasCampaignTable", span=1600)
-    assert "fmtRoasMultiple(r.roas)" in table
+    table = _fn("function renderRoasCampaignTable", span=3600)
+    assert 'rowMetricHtml(r, "roas", fmtRoasMultiple' in table
     assert "fmtRoas(r.roas)" not in table
 
 

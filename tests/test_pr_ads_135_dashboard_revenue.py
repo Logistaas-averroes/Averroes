@@ -35,7 +35,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -185,7 +186,6 @@ def _patch_durable(monkeypatch, *, won_rows=None, deal_rows=None, canonical=None
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     # PR-ADS-153E-B: the closed-won population is the canonical deal ledger, so
     # the same fixture deals are stubbed there instead of on the legacy read.
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(deals))
@@ -282,7 +282,13 @@ def test_revenue_from_hubspot_closed_won_only(monkeypatch):
     out = _revenue(monkeypatch)
     k = out["kpis"]
     assert k["closed_won_revenue_usd"] == 42000.0  # 18000+11000+9000+4000
-    assert k["customers"] == 4
+    # PR-ADS-161E: four closed-won DEALS. Customers are distinct proven HubSpot
+    # companies; this fixture stores no deal→company evidence, so the canonical
+    # customer count is withheld with its reason — never the deal count.
+    assert k["closed_won_deals"] == 4
+    assert k["customers"] is None
+    assert k["customers_status"] in ("withheld", "unavailable")
+    assert k["customers_reason"]
     assert k["largest_deal_usd"] == 18000.0
     assert out["google_ads_conversion_value_used"] is False
     # PR-ADS-153E-B: closed-won revenue is the canonical deal ledger, read at
@@ -299,10 +305,18 @@ def test_revenue_from_hubspot_closed_won_only(monkeypatch):
 def test_average_deal_value_and_rates(monkeypatch):
     out = _revenue(monkeypatch)
     k = out["kpis"]
-    assert k["average_deal_value_usd"] == 10500.0  # 42000 / 4
+    assert k["average_deal_value_usd"] == 10500.0  # 42000 / 4 deals
     assert k["sqls"] == 20
-    assert k["sql_to_customer_rate"] == 0.2  # 4 / 20
-    assert k["revenue_per_sql_usd"] == 2100.0  # 42000 / 20
+    # PR-ADS-161E: both ratios divided close-date outcomes (all sources) by
+    # campaign-attributable SQLs dated by contact creation — two populations.
+    # They are unavailable with the reason, never 4 / 20 or 42000 / 20.
+    assert k["sql_to_customer_rate"] is None
+    assert k["sql_to_customer_rate_status"] == "unavailable"
+    assert k["sql_to_customer_rate_reason"] == (
+        "sql_to_customer_rate_needs_one_acquisition_cohort_and_scope")
+    assert k["revenue_per_sql_usd"] is None
+    assert k["revenue_per_sql_reason"] == (
+        "revenue_per_sql_needs_one_acquisition_cohort_and_scope")
 
 
 def test_rates_unavailable_when_denominator_missing(monkeypatch):
@@ -330,7 +344,9 @@ def test_average_deal_value_unavailable_when_no_customers(monkeypatch):
 def test_disconnected_integration_never_fabricates_zero(monkeypatch):
     import db.revenue_repository as repo
     _patch_durable(monkeypatch, won_rows=[], deal_rows=[], source_rev_rows=[])
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: False)
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    make_canonical_unavailable(monkeypatch)
     from services.dashboard_revenue_service import build_dashboard_revenue
     out = build_dashboard_revenue(WINDOW, now=NOW)
     k = out["kpis"]
@@ -362,12 +378,14 @@ def test_revenue_trend_buckets_by_close_date(monkeypatch):
 def test_customer_trend_has_no_cross_grain_rate(monkeypatch):
     out = _revenue(monkeypatch)
     ct = out["customer_trend"]
-    assert ct["customers_status"] == "ready"
+    assert ct["deals_status"] == "ready"
     assert ct["sqls_status"] == "ready"
     # Per-bucket points carry the two real counts but NEVER a fabricated rate.
+    # PR-ADS-161E: the close-date series counts DEALS, under that name.
     for p in ct["points"]:
         assert "sql_to_customer_rate" not in p
-        assert set(p) >= {"period_start", "customers", "sqls"}
+        assert "customers" not in p
+        assert set(p) >= {"period_start", "closed_won_deals", "sqls"}
 
 
 def test_deal_concentration_logic(monkeypatch):
@@ -377,7 +395,7 @@ def test_deal_concentration_logic(monkeypatch):
     assert c["top_1_deal_share"] == 0.4286
     assert c["top_3_deals_share"] == 0.9048
     assert c["label"] == "Highly concentrated"
-    assert c["customers"] == 4
+    assert c["deals"] == 4
 
 
 # ── Null-amount doctrine (Copilot + review): a missing amount is never a $0 ──
@@ -397,7 +415,7 @@ def test_null_amount_makes_bucket_revenue_unavailable_not_zero(monkeypatch):
     # counts the deal/customer — never a fabricated $0 from the unknown amount.
     null_pts = [p for p in trend["points"] if p["revenue_usd"] is None and p["deals"] > 0]
     assert null_pts, "expected a bucket with a null amount to report null revenue"
-    assert all(p["customers"] >= 1 for p in null_pts)
+    assert all(p["deals"] >= 1 for p in null_pts)
     # A bucket that CONTAINS deals never fabricates $0 from an unknown amount:
     # it is either a real known sum or None. (An empty bucket — no deals — is a
     # genuine verified $0 inside a ready series, which is allowed.)
@@ -413,7 +431,7 @@ def test_null_amount_makes_group_revenue_unavailable(monkeypatch):
     # amount, so their revenue total is Unavailable (None), counts preserved.
     camp = next(r for r in out["breakdowns"]["by_campaign"] if r["campaign"] == "Global Competitors")
     assert camp["revenue_usd"] is None
-    assert camp["deals"] >= 1 and camp["customers"] >= 1
+    assert camp["deals"] >= 1 and "customers" not in camp
     country = next(r for r in out["breakdowns"]["by_country"] if r["country"] == "United States")
     assert country["revenue_usd"] is None
 
@@ -428,7 +446,7 @@ def test_null_amount_makes_avg_concentration_and_largest_unavailable(monkeypatch
     assert out["deal_concentration"] is None
     assert out["kpis"]["largest_deal_usd"] is None  # strict: unknown could be largest
     # Counts still include every closed-won deal.
-    assert out["kpis"]["customers"] == 4
+    assert out["kpis"]["closed_won_deals"] == 4
 
 
 def _card_strings(out):
@@ -501,7 +519,7 @@ def test_scale_card_says_unavailable_when_top_group_revenue_unknown(monkeypatch)
     out = _revenue(monkeypatch, won_rows=won, deal_rows=deals)
     scale = next(c for c in out["decision_cards"] if c["type"] == "scale")
     assert "$0" not in scale["body"]
-    assert "Unavailable" in scale["body"]
+    assert "withheld" in scale["body"]
     assert "Global Competitors" in scale["headline"]
 
 

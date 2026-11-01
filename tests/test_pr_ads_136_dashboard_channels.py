@@ -39,7 +39,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_source_rows, patch_canonical_ledger,
 )
 
@@ -213,7 +214,10 @@ def _patch_durable(monkeypatch, *, canonical=None, revenue_connected=True,
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    if not revenue_connected:
+        make_canonical_unavailable(monkeypatch)
     monkeypatch.setattr(repo, "fetch_revenue_deals",
                         lambda s, e: {"available": True, "rows": list(DEAL_ROWS)})
     monkeypatch.setattr(repo, "fetch_source_leads",
@@ -333,7 +337,7 @@ def test_revenue_is_hubspot_closed_won(monkeypatch):
     out = _channels(monkeypatch)
     k = out["kpis"]
     assert k["closed_won_revenue_usd"] == 42000.0
-    assert k["total_customers"] == 4
+    assert k["total_closed_won_deals"] == 4
     # SQLs are source-based on this tab (sum of channel rows): 20 google + 6 paid
     # social + 8 organic social = 34 — reconciles with the mix/trend, not the mart.
     assert k["total_sqls"] == 34
@@ -356,7 +360,7 @@ def test_kpis_reconcile_with_channel_rows(monkeypatch):
     k = out["kpis"]
     rows = out["channel_mix"]
     assert k["total_sqls"] == sum(c["sqls"] for c in rows)
-    assert k["total_customers"] == sum(c["customers"] for c in rows)  # revenue connected
+    assert k["total_closed_won_deals"] == sum(c["closed_won_deals"] for c in rows)  # revenue connected
     assert k["closed_won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in rows), 2)
     # KPI SQLs also equals the trend's SQL sum (same source taxonomy).
     trend_sqls = sum(ch["sqls"] for p in out["trend"]["points"] for ch in p["channels"])
@@ -374,7 +378,7 @@ def test_kpi_revenue_unavailable_when_any_channel_amount_unknown(monkeypatch):
     assert k["revenue_only_revenue_usd"] is None
     rows = out["channel_mix"]
     assert k["total_sqls"] == sum(c["sqls"] for c in rows)
-    assert k["total_customers"] == sum((c["customers"] or 0) for c in rows)
+    assert k["total_closed_won_deals"] == sum((c["closed_won_deals"] or 0) for c in rows)
 
 
 def test_channels_map_to_executive_buckets(monkeypatch):
@@ -383,11 +387,11 @@ def test_channels_map_to_executive_buckets(monkeypatch):
     paid_social = _ch(out, "paid_social")
     organic_social = _ch(out, "organic_social")
     unclassified = _ch(out, "unclassified")
-    assert google and google["sqls"] == 20 and google["customers"] == 2
+    assert google and google["sqls"] == 20 and google["closed_won_deals"] == 2
     assert google["won_revenue_usd"] == 29000.0
-    assert paid_social and paid_social["customers"] == 1 and paid_social["won_revenue_usd"] == 9000.0
-    assert organic_social and organic_social["sqls"] == 8 and organic_social["customers"] == 0
-    assert unclassified and unclassified["customers"] == 1 and unclassified["won_revenue_usd"] == 4000.0
+    assert paid_social and paid_social["closed_won_deals"] == 1 and paid_social["won_revenue_usd"] == 9000.0
+    assert organic_social and organic_social["sqls"] == 8 and organic_social["closed_won_deals"] == 0
+    assert unclassified and unclassified["closed_won_deals"] == 1 and unclassified["won_revenue_usd"] == 4000.0
 
 
 def test_unclassified_revenue_is_preserved(monkeypatch):
@@ -487,18 +491,18 @@ def test_disconnected_integration_never_fabricates_zero(monkeypatch):
     out = _channels(monkeypatch, revenue_connected=False)
     k = out["kpis"]
     assert k["closed_won_revenue_usd"] is None
-    assert k["total_customers"] is None
+    assert k["total_closed_won_deals"] is None
     assert k["spend_connected_revenue_usd"] is None
     assert k["revenue_only_revenue_usd"] is None
     for c in out["channel_mix"]:
         # Customers AND revenue derive from the revenue integration → both None.
-        assert c["customers"] is None, f"{c['channel']} customers must be None when disconnected"
+        assert c["closed_won_deals"] is None, f"{c['channel']} customers must be None when disconnected"
         assert c["won_revenue_usd"] is None, f"{c['channel']} revenue must be None when disconnected"
         assert c["roas"] is None
         # Leads / SQLs come from contacts and survive the revenue outage.
         assert c["sqls"] is not None
     for p in out["platform_matrix"]:
-        assert p["customers"] is None and p["won_revenue_usd"] is None and p["roas"] is None
+        assert p["closed_won_deals"] is None and p["won_revenue_usd"] is None and p["roas"] is None
     assert out["quality_matrix"] == []  # customers + revenue unknown → withheld
     assert out["trend"]["status"] == "unavailable"
     assert out["truth_status"]["revenue"] == "blocked"
@@ -570,12 +574,12 @@ def test_group_disagree_deal_not_force_credited_to_google(monkeypatch):
     unclassified = _ch(out, "unclassified")
     google = _ch(out, "google_ads")
     # Channel mix: the customer + $50k land in Unclassified, not Google Ads.
-    assert unclassified is not None and (unclassified["customers"] or 0) >= 1
-    assert google is None or (google["customers"] or 0) == 0
+    assert unclassified is not None and (unclassified["closed_won_deals"] or 0) >= 1
+    assert google is None or (google["closed_won_deals"] or 0) == 0
     # Trend: the same close-date bucket credits Unclassified, never Google Ads.
     trend_channels = {ch["channel"] for p in out["trend"]["points"] for ch in p["channels"]}
     assert "unclassified" in trend_channels
-    google_trend_cust = sum(ch["customers"] for p in out["trend"]["points"]
+    google_trend_cust = sum(ch["closed_won_deals"] for p in out["trend"]["points"]
                             for ch in p["channels"] if ch["channel"] == "google_ads")
     assert google_trend_cust == 0
 
@@ -590,9 +594,9 @@ def test_trend_buckets_sqls_by_created_and_revenue_by_close(monkeypatch):
     assert trend["bucket"] in ("week", "month")
     # SQLs land in the created-date buckets; revenue/customers in close-date ones.
     total_sqls = sum(ch["sqls"] for p in trend["points"] for ch in p["channels"])
-    total_customers = sum(ch["customers"] for p in trend["points"] for ch in p["channels"])
+    total_closed_won_deals = sum(ch["closed_won_deals"] for p in trend["points"] for ch in p["channels"])
     assert total_sqls == 34  # 20 google + 6 paid social + 8 organic social
-    assert total_customers == 4
+    assert total_closed_won_deals == 4
     win = out["window"]
     for p in trend["points"]:
         assert win["start_date"] <= p["period_start"] <= win["end_date"]
@@ -605,7 +609,7 @@ def test_trend_null_amount_reports_null_revenue_not_zero(monkeypatch):
     # The google channel's bucket for that close date has a customer but null
     # revenue — never a fabricated $0.
     null_cells = [ch for p in trend["points"] for ch in p["channels"]
-                  if ch["channel"] == "google_ads" and ch["revenue_usd"] is None and ch["customers"] > 0]
+                  if ch["channel"] == "google_ads" and ch["revenue_usd"] is None and ch["closed_won_deals"] > 0]
     assert null_cells, "expected a google bucket with a customer and null revenue"
 
 
@@ -627,11 +631,11 @@ def test_quality_matrix_axes(monkeypatch):
     qm = out["quality_matrix"]
     assert qm, "expected quality-matrix points"
     google = next(p for p in qm if p["channel"] == "google_ads")
-    assert google["sqls"] == 20 and google["customers"] == 2 and google["revenue_usd"] == 29000.0
+    assert google["sqls"] == 20 and google["closed_won_deals"] == 2 and google["revenue_usd"] == 29000.0
     assert google["spend_connected"] is True
     # A demand-only channel (SQLs, no customers) is still plotted.
     organic = next(p for p in qm if p["channel"] == "organic_social")
-    assert organic["sqls"] == 8 and organic["customers"] == 0
+    assert organic["sqls"] == 8 and organic["closed_won_deals"] == 0
 
 
 def test_decision_cards_shape_and_safety(monkeypatch):
@@ -784,9 +788,13 @@ def test_channels_reuses_pr134_design_system():
 
 def test_channels_momentum_metric_toggle_defaults_customers():
     block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Dashboard — Campaigns & Keywords tab")]
-    assert '_chanMomentumMetric = "customers"' in block
+    # PR-ADS-161E: a channel bucket counts won DEALS — customers (distinct
+    # companies) are not additive across channels or buckets.
+    assert '_chanMomentumMetric = "closed_won_deals"' in block
+    assert '_chanMomentumMetric = "customers"' not in block
+    assert '{ key: "closed_won_deals", label: "Won deals" }' in block
     assert "chan-metric-btn" in block
-    for m in ("SQLs", "Customers", "Revenue"):
+    for m in ("SQLs", "Won deals", "Customers", "Revenue"):
         assert m in block
 
 

@@ -31,7 +31,8 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -111,7 +112,10 @@ WON_ROWS = [
 # reproduce the old SRC_REVENUE truth exactly (all three deals Google Ads,
 # 29,000 + 4,000) — the fixture is unified, not changed.
 DEAL_ROWS = [
-    {"deal_id": "d1", "company": "Acme", "country": "United States", "campaign_name": "Global Competitors",
+    # PR-ADS-161E: contact c1 (Acme's SQL) is this won deal's associated
+    # contact — the canonical deal→contact fact the legacy fixture expressed as
+    # `has_closed_won_deal` on the SQL row.
+    {"deal_id": "d1", "contact_id": "c1", "company": "Acme", "country": "United States", "campaign_name": "Global Competitors",
      "deal_close_date": "2026-06-14", "deal_amount_usd": 18000.0, "deal_stage_label": "Deal Won",
      "match_status": "matched", "match_source": "gclid",
      "acquisition_group": "google_ads", "attribution_status": "attributed",
@@ -186,10 +190,13 @@ def _patch_durable(monkeypatch, *, deals=None, sql_leads=None, revenue_connected
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e, *_a, **_k: {"available": True, "chunks": [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified"}]})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: the closed-won population is the canonical deal ledger.
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl),
                            available=ledger_available)
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    if not revenue_connected:
+        make_canonical_unavailable(monkeypatch)
     monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": list(SRC_LEADS)})
     monkeypatch.setattr(repo, "fetch_source_revenue", lambda s, e: {"available": True, "rows": list(SRC_REVENUE)})
     monkeypatch.setattr(repo, "fetch_sql_lead_details", lambda s, e: dict(sl) if sl is not None else {"available": False, "rows": []})
@@ -296,9 +303,14 @@ def test_kpis_closed_won_and_sqls(monkeypatch):
     out = _deals(monkeypatch)
     k = out["kpis"]
     assert k["sqls"] == 25
-    assert k["closed_won_customers"] == 3
+    assert k["closed_won_deals"] == 3
     assert k["closed_won_revenue_usd"] == 33000.0
-    assert k["sql_to_customer_rate"] == round(3 / 25, 4)  # real full-funnel conversion
+    # PR-ADS-161E: retired. 3 / 25 divided all-source won deals (close date) by
+    # campaign-attributable SQLs (contact creation) — two populations, two
+    # cohorts — so it is unavailable with the reason, never a conversion.
+    assert k["sql_to_customer_rate"] is None
+    assert k["sql_to_customer_rate_reason"] == (
+        "sql_to_customer_rate_needs_one_acquisition_cohort_and_scope")
 
 
 def test_closed_won_revenue_only_from_closed_won_deals(monkeypatch):
@@ -396,7 +408,7 @@ def test_source_breakdown_closed_won_no_open_pipeline(monkeypatch):
     assert "google_ads" in by
     g = by["google_ads"]
     assert g["sqls"] == 23
-    assert g["closed_won_customers"] == 3
+    assert g["closed_won_deals"] == 3
     assert g["closed_won_revenue_usd"] == 33000.0
     # Open pipeline is not durable → Unavailable for every source.
     for r in out["source_breakdown"]:
@@ -405,10 +417,12 @@ def test_source_breakdown_closed_won_no_open_pipeline(monkeypatch):
 
 
 def test_campaign_breakdown_reconciles(monkeypatch):
-    out = _deals(monkeypatch)
+    # Every Google Ads deal here carries a campaign (Ghost, d4, is left out —
+    # see the next test), so per-campaign figures are exact.
+    out = _deals(monkeypatch, deals=DEAL_ROWS[:2])
     by = {r["campaign_name"]: r for r in out["campaign_breakdown"]}
     assert by["Global Competitors"]["sqls"] == 20
-    assert by["Global Competitors"]["closed_won_customers"] == 2
+    assert by["Global Competitors"]["closed_won_deals"] == 2
     assert by["Global Competitors"]["closed_won_revenue_usd"] == 29000.0
     for r in out["campaign_breakdown"]:
         assert r["open_pipeline_usd"] is None
@@ -470,13 +484,13 @@ def test_null_amount_withholds_aggregate_revenue(monkeypatch):
     deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None, campaign_name="Global Competitors")]
     out = _deals(monkeypatch, deals=deals)
     assert out["kpis"]["closed_won_revenue_usd"] is None  # never a lowered $0
-    assert out["kpis"]["closed_won_customers"] == 3       # customers still counted
+    assert out["kpis"]["closed_won_deals"] == 3       # won deals still counted
     assert "closed_won_revenue_usd" in {u["metric"] for u in out["unavailable"]}
     gc = next(r for r in out["campaign_breakdown"] if r["campaign_name"] == "Global Competitors")
     assert gc["closed_won_revenue_usd"] is None
     # All three fixture deals now carry the same campaign, and one canonical row
     # set feeds both the table and the breakdown — so the campaign holds 3.
-    assert gc["closed_won_customers"] == 3  # customers survive
+    assert gc["closed_won_deals"] == 3  # won deals survive
 
 
 def test_funnel_none_count_is_unavailable_not_no_activity(monkeypatch):
@@ -491,9 +505,24 @@ def test_funnel_none_count_is_unavailable_not_no_activity(monkeypatch):
 # ══════════════════ 6. Disconnected / ledger outage / period change ═════════
 
 
+def test_161e_an_unplaced_google_ads_deal_withholds_per_campaign_figures(monkeypatch):
+    """PR-ADS-161E: Ghost (d4) is a Google Ads deal with no campaign. It could
+    belong to any campaign, so every per-campaign deal count and revenue would
+    be a lower bound shown as a total — the canonical campaign rule withholds
+    them, with the reason, while the page's all-source figures still publish."""
+    out = _deals(monkeypatch)
+    gc = next(r for r in out["campaign_breakdown"]
+              if r["campaign_name"] == "Global Competitors")
+    assert gc["closed_won_deals"] is None
+    assert gc["closed_won_revenue_usd"] is None
+    assert out["kpis"]["closed_won_deals"] == 3
+    assert out["kpis"]["closed_won_revenue_usd"] == 33000.0
+
+
 def test_disconnected_integration_blanks_revenue(monkeypatch):
     out = _deals(monkeypatch, revenue_connected=False)
     k = out["kpis"]
+    assert k["closed_won_deals"] is None
     assert k["closed_won_customers"] is None
     assert k["closed_won_revenue_usd"] is None
     assert k["sql_to_customer_rate"] is None

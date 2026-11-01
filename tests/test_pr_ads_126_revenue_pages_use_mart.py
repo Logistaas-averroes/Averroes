@@ -120,9 +120,14 @@ def test_fx_incomplete_renders_unavailable_not_zero_in_ui():
     assert 'roas == null ? "Unavailable"' in st
     # Native spend uses the native-currency formatter (never "$" on GBP).
     assert "fmtNativeMoney(st.native_spend, st.native_currency)" in st
-    strip = _slice("function renderMartSummaryStrip", span=900)
+    strip = _slice("function renderMartSummaryStrip", span=1400)
     assert 's.spend_usd == null ? "Unavailable"' in strip
-    assert 's.roas == null ? "Unavailable"' in strip
+    # PR-ADS-161E: ROAS through the mart's canonical metric — a null renders
+    # Withheld / Unavailable with the reason, never $0 or 0.00x.
+    assert 'martMetricHtml(s, "roas", fmtRoasMultiple)' in strip
+    helper = _slice("function martMetricHtml", span=600)
+    assert "canonicalMetricHtml(m, formatter" in helper
+    assert "dashValue(" in helper
 
 
 def test_fx_incomplete_backend_nulls_usd_and_roas(monkeypatch):

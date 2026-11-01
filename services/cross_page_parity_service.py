@@ -133,7 +133,7 @@ _UNAVAILABLE_CLASSES = {
     # PR-ADS-155-F1: the revenue integration is not wired at all, so no scoped
     # revenue population exists to read. Classifiable, and emphatically not the
     # same as "we could not tell" — an operator connects the integration.
-    "revenue_integration_not_connected":
+    "canonical_closed_won_population_unavailable":
         ("population_unavailable", V_POPULATION_UNAVAILABLE,
          "the revenue integration is not connected, so no closed-won population "
          "is readable for this scope"),
@@ -267,19 +267,34 @@ METRIC_IDENTITIES = {
         ],
         "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
     },
+    # PR-ADS-161E: deals and customers are two identities. A closed-won DEAL is a
+    # HubSpot deal; a CUSTOMER is a distinct proven HubSpot company behind them.
+    "closed_won_deals": {
+        "label": "Closed-won deals, ALL sources",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "all_source_business_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
+        "consumers": [
+            ("dashboard/overview", "kpis.closed_won_deals"),
+            ("dashboard/revenue", "kpis.closed_won_deals"),
+            ("dashboard/channels", "kpis.total_closed_won_deals"),
+            ("dashboard/deals", "kpis.closed_won_deals"),
+            ("revenue_decision_mart", "summary.closed_won_deals"),
+        ],
+        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
+    },
     "customers": {
-        "label": "Closed-won customers, ALL sources",
+        "label": "Customers (distinct HubSpot companies), ALL sources",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "all_source_business_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
             ("dashboard/overview", "kpis.customers"),
             ("dashboard/revenue", "kpis.customers"),
-            ("dashboard/channels", "kpis.total_customers"),
+            ("dashboard/channels", "kpis.customers"),
             ("dashboard/deals", "kpis.closed_won_customers"),
             ("revenue_decision_mart", "summary.customers"),
         ],
-        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
     },
 
     # ── Campaign-ATTRIBUTABLE outcomes — a SUBSET, not the business total ────
@@ -293,8 +308,18 @@ METRIC_IDENTITIES = {
             ("revenue_decision_mart", "summary.attributed_won_revenue_usd"),
         ],
     },
+    "campaign_attributed_closed_won_deals": {
+        "label": "Closed-won deals attributable to a campaign",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "campaign_attributable_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
+        "consumers": [
+            ("dashboard/campaigns", "kpis.closed_won_deals"),
+            ("revenue_decision_mart", "summary.attributed_closed_won_deals"),
+        ],
+    },
     "campaign_attributed_customers": {
-        "label": "Closed-won customers attributable to a campaign",
+        "label": "Customers (distinct HubSpot companies) attributable to a campaign",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "campaign_attributable_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
@@ -316,13 +341,13 @@ METRIC_IDENTITIES = {
             ("dashboard/countries", "kpis.won_revenue_usd"),
         ],
     },
-    "country_attributed_customers": {
-        "label": "Closed-won customers attributed to a country",
+    "country_attributed_closed_won_deals": {
+        "label": "Closed-won deals attributed to a country",
         "canonical_source": SOURCE_CANONICAL_GEO,
         "scope": "country_attributed_revenue",
         "coverage_proof": PROOF_COUNTRY_REVENUE,
         "consumers": [
-            ("dashboard/countries", "kpis.customers"),
+            ("dashboard/countries", "kpis.closed_won_deals"),
         ],
     },
 

@@ -184,16 +184,18 @@ def test_truth_gate_excludes_excluded_leads():
 
 
 def test_integration_connected_with_empty_window_is_ready():
-    # Frontend readiness keys off integration connected, not window emptiness.
-    helper = _fn("function isRevenueIntegrationConnected", span=400)
-    assert 'revenue_integration_status === "connected"' in helper
+    # Frontend readiness keys off the CANONICAL population being available, not
+    # window emptiness. PR-ADS-161E: it used to key off a legacy
+    # `gclid_attribution` existence check; that gate is gone.
+    helper = _fn("function isCanonicalRevenueAvailable", span=400)
+    assert 'canonical_revenue_status === "canonical_available"' in helper
     fn = _fn("function isRevenueDecisionReady", span=400)
-    assert "isRevenueIntegrationConnected(sh)" in fn
-    # Backend splits the two facts.
+    assert "isCanonicalRevenueAvailable(sh)" in fn
+    # Backend splits the two facts, and the legacy gate is not called.
     svc = open(os.path.join(ROOT, "services", "revenue_attribution_service.py"), encoding="utf-8").read()
-    assert '"revenue_integration_status"' in svc
+    assert '"canonical_revenue_status"' in svc
     assert '"revenue_window_status"' in svc
-    assert "revenue_integration_connected()" in svc
+    assert "repo.revenue_integration_connected()" not in svc
 
 
 # ── 6. existing attributed rows untouched (read-only doctrine) ───────────────
@@ -298,9 +300,12 @@ def _patched_audit(monkeypatch):
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda *a, **k: empty)
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda *a, **k: leads)
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda *a, **k: {"available": True, "datasets": {}})
-        # 71 attributed deals exist all-time → integration connected.
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.writers.count_lead_exclusions", lambda: 3276)
+        # PR-ADS-161E: the canonical population is readable and proven, and the
+        # selected window holds no won deal — the state the legacy
+        # `revenue_integration_connected()` patch used to stand for.
+        from tests.canonical_ledger_fixtures import patch_canonical_ledger
+        patch_canonical_ledger(monkeypatch, [])
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
 
@@ -312,7 +317,8 @@ def test_audit_connected_integration_empty_window(monkeypatch):
         pytest.skip(f"service import unavailable: {exc}")
     _patched_audit(monkeypatch)
     audit = build_revenue_attribution_audit("current_quarter")
-    assert audit["revenue_integration_status"] == "connected"
+    # PR-ADS-161E: the canonical verdict, not a legacy gclid_attribution check.
+    assert audit["canonical_revenue_status"] == "canonical_available"
     assert audit["revenue_window_status"] == "no_closed_won"
     # Excluded legacy rows are surfaced for Revenue Health.
     assert audit["legacy_excluded_count"] == 3276
@@ -320,8 +326,11 @@ def test_audit_connected_integration_empty_window(monkeypatch):
 
 def test_health_renders_connected_safe_empty_no_resync():
     region = _fn("function renderRevenueHealth", span=4800)
-    # Uses the split contract, not the old wired-only fact.
-    assert "revenue_integration_status" in region
+    # Uses the split contract, not the old wired-only fact. PR-ADS-161E: the
+    # legacy gclid_attribution existence check is retired; health reads the
+    # canonical closed-won verdict instead.
+    assert "canonical_revenue_status" in region
+    assert "revenue_integration_status" not in region
     assert "revenue_window_status" in region
     assert "integrationConnected" in region
     # Health shows Connected + the safe-empty window state (not "Not wired").

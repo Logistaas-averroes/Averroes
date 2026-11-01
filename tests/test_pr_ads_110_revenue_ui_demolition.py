@@ -127,11 +127,15 @@ def test_blocked_decision_logic():
     fn = _fn("function isRevenueDecisionReady", span=400)
     assert 'lead_date_grain_status === "event_date"' in fn
     assert 'lead_metrics_status !== "withheld"' in fn
-    # PR-ADS-115: readiness now keys off the revenue INTEGRATION fact (connected),
+    # PR-ADS-115: readiness keys off whether the revenue source is available,
     # so a connected-but-empty window is a safe empty state, not a block.
-    assert "isRevenueIntegrationConnected(sh)" in fn
-    helper = _fn("function isRevenueIntegrationConnected", span=400)
-    assert 'revenue_integration_status === "connected"' in helper
+    # PR-ADS-161E: that fact is the CANONICAL closed-won verdict — the legacy
+    # gclid_attribution existence check (revenue_integration_status) is gone.
+    assert "isCanonicalRevenueAvailable(sh)" in fn
+    assert "isRevenueIntegrationConnected" not in JS
+    helper = _fn("function isCanonicalRevenueAvailable", span=400)
+    assert 'canonical_revenue_status === "canonical_available"' in helper
+    assert "revenue_integration_status" not in JS
 
 
 def test_blocked_state_returns_before_table_campaign():

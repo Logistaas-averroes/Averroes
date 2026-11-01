@@ -170,9 +170,12 @@ R_DEALS_WITHHELD = "closed_won_deal_count_withheld"
 R_REVENUE_WITHHELD = "closed_won_revenue_withheld"
 R_ACQ_UNRESOLVED = "acquisition_membership_unresolved"
 R_CAMPAIGN_UNPLACED = "google_ads_deals_not_placed_on_a_campaign"
-R_ROAS_NOT_CERTIFIED = ("roas_requires_compatible_numerator_and_denominator_"
-                        "cohorts_pr_ads_161e")
-R_CAC_NOT_CERTIFIED = "cac_requires_acquisition_cohort_spend_pr_ads_161e"
+# PR-ADS-161E: a window verdict carries no spend, so it publishes neither
+# ratio. Each is DERIVED per scope by the reader contract (``derive_roas`` /
+# ``derive_cac`` below), from this window's published revenue or customers and
+# the same window's Google Ads USD spend — a period ratio, stated as such.
+R_ROAS_NOT_CERTIFIED = "roas_derived_per_scope_by_reader_contract_with_spend"
+R_CAC_NOT_CERTIFIED = "cac_derived_per_scope_by_reader_contract_with_spend"
 
 
 def _as_utc(value):

@@ -49,12 +49,12 @@ Read-only. No external API calls, no writes.
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import datetime, timezone
 
 from analysis import revenue_scope
 from analysis.business_windows import resolve_window
-from analysis.unit_economics import compute_cac
 from services import canonical_revenue_service as canonical_revenue
 
 log = logging.getLogger(__name__)
@@ -88,6 +88,7 @@ def _avg(total, count):
     return round(float(total) / count, 2)
 
 
+@_canonical_snapshot.single_snapshot
 def build_unit_economics(window: str = "current_quarter",
                          scope: str = DEFAULT_ADVERTISING_SCOPE,
                          now: datetime | None = None) -> dict:
@@ -159,28 +160,44 @@ def build_unit_economics(window: str = "current_quarter",
         "revenue_deals", "currency_unavailable_deals", "currency_complete",
         "ambiguous_associations", "failed_associations")
 
+    # PR-ADS-161E: the canonical reader contract. Customers are distinct
+    # proven HubSpot companies (never the won-deal count), revenue is a total
+    # or None, and CAC / ROAS are derived only when every input is published.
+    business_canon = canonical_revenue.reader_row(
+        base, canonical_revenue.filter_deals(base.get("deals"),
+                                             revenue_scope.SCOPE_ALL_SOURCE))
     business = {
         **{k: all_source[k] for k in _SCOPE_FIELDS},
-        # Average deal value divides by the deals whose value was PROVEN, not by
-        # every won deal — dividing proven revenue by an unproven-inclusive count
-        # would report an average lower than any real deal. It is therefore the
-        # one place the proven sum is the right numerator.
-        "avg_deal_value_usd": _avg(all_source["known_revenue_usd"],
-                                   all_source["revenue_deals"]),
+        "closed_won_deals": business_canon["closed_won_deals"],
+        "customers": business_canon["customers"],
+        "revenue_usd": business_canon["won_revenue"],
+        # Average deal value = the published revenue TOTAL ÷ every won deal.
+        # Never the proven part divided by the proven deals: that would describe
+        # a different population than the deal count beside it.
+        "avg_deal_value_usd": _avg(business_canon["won_revenue"],
+                                   business_canon["closed_won_deals"]),
+        "metrics": business_canon["metrics"],
     }
 
-    customers = scoped["won_deals"]
-    cac = compute_cac(spend_usd, customers) if spend_usd is not None else None
+    spend_reason = (None if spend_usd is not None else
+                    f"google_ads_usd_spend_{spend_truth.get('state') or 'unavailable'}")
+    advertising_canon = canonical_revenue.reader_row(
+        base, canonical_revenue.filter_deals(base.get("deals"), scope),
+        spend_usd=spend_usd, spend_reason=spend_reason,
+        gate=(canonical_revenue.campaign_placement_gate(base)
+              if scope == revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE else None))
     advertising = {
         **{k: scoped[k] for k in _SCOPE_FIELDS},
-        "customers": customers,
+        "closed_won_deals": advertising_canon["closed_won_deals"],
+        "customers": advertising_canon["customers"],
+        "revenue_usd": advertising_canon["won_revenue"],
         "spend_usd": spend_usd,
         "spend_state": spend_truth.get("state"),
-        "cac": round(cac, 2) if cac else None,
-        "roas": (round(scoped["revenue_usd"] / spend_usd, 2)
-                 if (spend_usd and scoped["revenue_usd"] is not None) else None),
-        "avg_deal_value_usd": _avg(scoped["known_revenue_usd"],
-                                   scoped["revenue_deals"]),
+        "cac": advertising_canon["cac"],
+        "roas": advertising_canon["roas"],
+        "avg_deal_value_usd": _avg(advertising_canon["won_revenue"],
+                                   advertising_canon["closed_won_deals"]),
+        "metrics": advertising_canon["metrics"],
         # Every metric below needs per-deal recurring revenue.
         "ltv_to_cac": None,
         "payback_months": None,
@@ -194,19 +211,20 @@ def build_unit_economics(window: str = "current_quarter",
     attribution = build_revenue_attribution(window, now=now)
     by_campaign = []
     for row in attribution.get("campaigns") or []:
-        row_customers = row.get("customers")
-        row_spend = row.get("spend")
-        row_cac = (compute_cac(row_spend, row_customers)
-                   if (row_spend is not None and row_customers) else None)
+        # The ROAS-by-Campaign row already carries the canonical fields, CAC
+        # over distinct-company customers included; nothing is re-derived here.
         by_campaign.append({
             "campaign": row.get("campaign_name"),
-            "spend": row_spend,
-            "deals_won": row_customers,
+            "spend": row.get("spend"),
+            "closed_won_deals": row.get("closed_won_deals"),
+            "customers": row.get("customers"),
             "won_revenue_usd": row.get("won_revenue"),
             "revenue_unavailable_deals": row.get("revenue_unavailable_deals"),
-            "cac": round(row_cac, 2) if row_cac else None,
+            "cac": row.get("cac"),
             "roas": row.get("roas"),
-            "avg_deal_value_usd": _avg(row.get("won_revenue"), row_customers),
+            "metrics": row.get("metrics"),
+            "avg_deal_value_usd": _avg(row.get("won_revenue"),
+                                       row.get("closed_won_deals")),
             "ltv_to_cac": None,
             "payback_months": None,
             "verdict": None,
@@ -214,9 +232,15 @@ def build_unit_economics(window: str = "current_quarter",
         })
 
     unavailable = _unavailable_metrics()
-    if spend_usd is None:
+    if (advertising["metrics"]["cac"] or {}).get("status") != "published":
         unavailable.append({
             "metric": "cac",
+            "status": advertising["metrics"]["cac"].get("status"),
+            "reason": advertising["metrics"]["cac"].get("reason"),
+        })
+    if spend_usd is None:
+        unavailable.append({
+            "metric": "spend",
             "reason": ("Canonical Google Ads USD spend is unavailable "
                        f"({spend_truth.get('state')}) — CAC and ROAS are "
                        "withheld rather than divided by an assumed spend."),

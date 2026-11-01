@@ -38,7 +38,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -173,9 +174,12 @@ def _patch_durable(monkeypatch, *, canonical=None, deals=None, keyword_snapshot=
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl))
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    if not revenue_connected:
+        make_canonical_unavailable(monkeypatch)
     monkeypatch.setattr(repo, "fetch_keyword_theme_snapshot", lambda: dict(ks))
     monkeypatch.setattr(repo, "fetch_search_term_signals", lambda s, e: dict(ss))
     import db.writers as db_writers
@@ -287,7 +291,11 @@ def test_kpis_from_google_attributed_truth(monkeypatch):
     assert k["verified_spend_native"] == {"amount": 10000.0, "currency": "GBP"}
     assert k["verified_spend_usd"] == 13000.0
     assert k["sqls"] == 25  # 20 + 5
-    assert k["customers"] == 2  # Google-attributed only (Ghost Co unattributed excluded)
+    # PR-ADS-161E: two closed-won DEALS. Customers are the canonical
+    # campaign-attributable distinct companies; with no company evidence stored
+    # here they are withheld, never the deal count.
+    assert k["closed_won_deals"] == 2  # Google-attributed only (Ghost Co unattributed excluded)
+    assert k["customers"] is None
     assert k["won_revenue_usd"] == 29000.0  # Google-attributed only
     assert k["roas"] == round(29000.0 / 13000.0, 2)  # 2.23 — reconciles with canonical mart
 
@@ -297,7 +305,7 @@ def test_kpis_reconcile_with_google_campaign_rows(monkeypatch):
     k = out["kpis"]
     google = [c for c in out["campaigns"] if c["attribution_status"] != "unattributed"]
     assert k["sqls"] == sum(c["sqls"] for c in google)
-    assert k["customers"] == sum(c["customers"] for c in google)
+    assert k["closed_won_deals"] == sum(c["closed_won_deals"] for c in google)
     assert k["won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in google), 2)
 
 
@@ -457,7 +465,7 @@ def test_deal_proof_chip_in_truth_footer():
 def test_mapping_unavailable_makes_campaign_attribution_partial():
     from services.dashboard_campaigns_service import _build_truth_status
     spend_truth = {"fx_status": "verified", "campaign_spend_status": "verified"}
-    readiness = {"revenue_integration_connected": True}
+    readiness = {"canonical_revenue_available": True}
     ready_sig = {"status": "ready"}
     # A mapping-unavailable campaign, NO unattributed row → still partial.
     rows = [{"campaign_name": "X", "attribution_status": "mapping_unavailable",

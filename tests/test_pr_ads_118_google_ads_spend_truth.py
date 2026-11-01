@@ -207,7 +207,6 @@ def _patch_revattr(monkeypatch, *, canonical, geo_rows, coverage, revenue_rows):
         # ledger, so the same fixture rows are stubbed there.
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     except (ImportError, AttributeError) as exc:
@@ -271,7 +270,13 @@ def test_revenue_unchanged_by_spend_source(monkeypatch):
     out = build("current_quarter", now=_at("2026-06-22"))
     # Revenue truth is independent of the spend source.
     assert out["summary"]["won_revenue"] == 10000.0
-    assert out["summary"]["customers"] == 1
+    # PR-ADS-161E: the won-DEAL count. Customers are distinct proven companies;
+    # this ledger carries no company evidence, so they are withheld — None with
+    # the canonical reason, never the deal count and never 0.
+    assert out["summary"]["closed_won_deals"] == 1
+    assert out["summary"]["customers"] is None
+    cust = out["summary"]["metrics"]["customers"]
+    assert cust["status"] == "unavailable" and cust["reason"]
 
 
 # ════════════ correction 1: geo is never a ROAS denominator ════════════

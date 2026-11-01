@@ -44,9 +44,11 @@ Truth rules (unchanged, never loosened):
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import date, datetime, timezone
 
+from analysis import closed_won_truth as cwt
 from analysis import revenue_scope
 # PR-ADS-154C: THE canonical window anchor — the Google Ads account
 # calendar day, not UTC. Sharing `resolve_window` while disagreeing about
@@ -111,11 +113,13 @@ def _attribution_status(deal: dict, *, has_group: bool) -> str:
     return "attributed" if has_group else "unattributed"
 
 
-def _avg_deal_value(revenue_usd, customers):
-    """Average deal value = revenue / customers, or None (never a fabricated 0)."""
-    if revenue_usd is None or customers in (None, 0):
+def _avg_deal_value(revenue_usd, closed_won_deals):
+    """Average deal value = revenue / closed-won DEALS, or None (never a
+    fabricated 0). PR-ADS-161E: the divisor is the deal count, never customers
+    — a customer is a company and may hold several deals."""
+    if revenue_usd is None or closed_won_deals in (None, 0):
         return None
-    return _round2(revenue_usd / customers)
+    return _round2(revenue_usd / closed_won_deals)
 
 
 def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool,
@@ -126,6 +130,7 @@ def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool,
     if revenue_connected:
         revenue_usd = summary.get("won_revenue_usd")
         customers = summary.get("customers")
+        deals = summary.get("closed_won_deals")
         # Largest Deal is Unavailable when ANY closed-won deal amount is unknown:
         # the unknown deal could be the largest, so the max of known amounts is
         # not a safe "largest deal" (kept strict — no "Largest Known Deal").
@@ -133,21 +138,37 @@ def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool,
         largest_deal = _round2(max(amounts)) if (amounts_complete and amounts) else None
         # An average that would include an unknown amount is uncomputable — it is
         # Unavailable, never revenue/customers with a null deal silently as $0.
-        average = _avg_deal_value(revenue_usd, customers) if amounts_complete else None
+        average = _avg_deal_value(revenue_usd, deals) if amounts_complete else None
     else:
-        revenue_usd = customers = largest_deal = average = None
+        revenue_usd = customers = deals = largest_deal = average = None
 
+    # PR-ADS-161E: two retired ratios. Both divided close-date outcomes (won
+    # deals, closed-won revenue) over every source by campaign-attributable SQLs
+    # dated by contact creation — two populations, two cohorts. No canonical
+    # service supplies SQLs and customers over one acquisition cohort and one
+    # scope, so both are unavailable with the reason, never manufactured.
+    sql_to_customer = cwt.incompatible_rate(cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE)
+    revenue_per_sql = cwt.incompatible_rate(cwt.R_REVENUE_PER_SQL_INCOMPATIBLE)
     return {
         "closed_won_revenue_usd": revenue_usd,
+        "closed_won_deals": deals,
+        # Distinct proven HubSpot companies — withheld with the canonical reason
+        # whenever a member deal's company is unresolved, stale or unobserved.
         "customers": customers,
+        "customers_status": summary.get("customers_status"),
+        "customers_reason": summary.get("customers_reason"),
         "average_deal_value_usd": average,
         "largest_deal_usd": largest_deal,
         "sqls": sqls,
-        # customers / SQLs and revenue / SQLs — None when either side is unsafe.
-        "sql_to_customer_rate": _rate(customers, sqls),
-        "revenue_per_sql_usd": _round2(
-            revenue_usd / sqls if (revenue_usd is not None and sqls not in (None, 0)) else None
-        ),
+        "sql_to_customer_rate": sql_to_customer["value"],
+        "sql_to_customer_rate_status": sql_to_customer["status"],
+        "sql_to_customer_rate_reason": sql_to_customer["reason"],
+        "revenue_per_sql_usd": revenue_per_sql["value"],
+        "revenue_per_sql_status": revenue_per_sql["status"],
+        "revenue_per_sql_reason": revenue_per_sql["reason"],
+        "metrics": {**(summary.get("metrics") or {}),
+                    "sql_to_customer_rate": sql_to_customer,
+                    "revenue_per_sql_usd": revenue_per_sql},
     }
 
 
@@ -177,14 +198,16 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
 
     prev_summary = prev_mart.get("summary") or {}
     prev_connected = bool(
-        (prev_mart.get("readiness") or {}).get("revenue_integration_connected")
+        (prev_mart.get("readiness") or {}).get("canonical_revenue_available")
     )
     prev_revenue = prev_summary.get("won_revenue_usd") if prev_connected else None
     prev_customers = prev_summary.get("customers") if prev_connected else None
-    prev_avg = _avg_deal_value(prev_revenue, prev_customers) if prev_connected else None
+    prev_deals = prev_summary.get("closed_won_deals") if prev_connected else None
+    prev_avg = _avg_deal_value(prev_revenue, prev_deals) if prev_connected else None
 
     metrics = {
         "closed_won_revenue_usd": _delta_metric(kpis.get("closed_won_revenue_usd"), prev_revenue),
+        "closed_won_deals": _delta_metric(kpis.get("closed_won_deals"), prev_deals),
         "customers": _delta_metric(kpis.get("customers"), prev_customers),
         "average_deal_value_usd": _delta_metric(kpis.get("average_deal_value_usd"), prev_avg),
     }
@@ -226,7 +249,8 @@ def _bucket_label(bstart, bucket: str) -> str:
 
 
 def _build_revenue_trend(bounds, deal_rows: list, *,
-                         revenue_ready: bool, revenue_reason) -> dict:
+                         revenue_ready: bool, revenue_reason,
+                         revenue_total_published: bool = True) -> dict:
     """Revenue / customers / deals per bucket — withheld, never fabricated.
 
     ``bounds`` is a shared (start, end, bucket) tuple so the revenue and
@@ -262,13 +286,15 @@ def _build_revenue_trend(bounds, deal_rows: list, *,
     for bstart in _bucket_starts(start, end, bucket):
         # If any deal in the bucket has an unknown amount, the bucket revenue is
         # Unavailable (null) — the known partial sum would imply completeness.
-        revenue = None if unknown_amount_by.get(bstart) else _round2(revenue_by.get(bstart, 0.0))
+        # PR-ADS-161E: a bucket is a subset of the window, so its total is
+        # published only when the canonical verdict publishes the window's.
+        revenue = (None if (unknown_amount_by.get(bstart)
+                            or not revenue_total_published)
+                   else _round2(revenue_by.get(bstart, 0.0)))
         points.append({
             "period_start": bstart.isoformat(),
             "period_label": _bucket_label(bstart, bucket),
-            # A closed-won deal == a customer in this system (deduped per deal).
             "revenue_usd": revenue,
-            "customers": deals_by.get(bstart, 0),
             "deals": deals_by.get(bstart, 0),
         })
     return {"bucket": bucket, "points": points, "status": "ready", "reason": None}
@@ -276,7 +302,10 @@ def _build_revenue_trend(bounds, deal_rows: list, *,
 
 def _build_customer_trend(bounds, deal_rows: list, lead_rows: list, *,
                           revenue_ready: bool, sqls_ready: bool) -> dict:
-    """Customers (by close date) + SQLs (by created date) per bucket.
+    """Closed-won DEALS (by close date) + SQLs (by created date) per bucket.
+
+    PR-ADS-161E: the series counts deals, under that name — a customer is a
+    company, and per-bucket company counts are not additive.
 
     The two series live on DIFFERENT event-date grains (a long B2B cycle: the
     customers closing this week came from SQLs created weeks or months earlier),
@@ -288,7 +317,7 @@ def _build_customer_trend(bounds, deal_rows: list, lead_rows: list, *,
     """
     start, end, bucket = bounds
     if bucket is None:
-        return {"bucket": None, "points": [], "customers_status": "unavailable",
+        return {"bucket": None, "points": [], "deals_status": "unavailable",
                 "sqls_status": "ready" if sqls_ready else "unavailable"}
 
     customers_by: dict = {}
@@ -313,19 +342,19 @@ def _build_customer_trend(bounds, deal_rows: list, lead_rows: list, *,
         points.append({
             "period_start": bstart.isoformat(),
             "period_label": _bucket_label(bstart, bucket),
-            "customers": customers_by.get(bstart, 0) if revenue_ready else None,
+            "closed_won_deals": customers_by.get(bstart, 0) if revenue_ready else None,
             "sqls": sqls_by.get(bstart, 0) if sqls_ready else None,
         })
     return {
         "bucket": bucket,
         "points": points,
-        "customers_status": "ready" if revenue_ready else "unavailable",
+        "deals_status": "ready" if revenue_ready else "unavailable",
         "sqls_status": "ready" if sqls_ready else "unavailable",
     }
 
 
 def _group_deals(deal_rows: list, key_field: str, *, unknown_label: str,
-                 target_page: str) -> list:
+                 target_page: str, revenue_total_published: bool = True) -> list:
     """Group ledger deals by campaign/country, preserving unattributed revenue.
 
     Deals and customers are always counted (never dropped). The group's revenue
@@ -340,15 +369,17 @@ def _group_deals(deal_rows: list, key_field: str, *, unknown_label: str,
         has_group = bool(raw) and raw.lower() not in ("unknown", "(not set)")
         label = raw if has_group else unknown_label
         g = groups.setdefault(label, {
-            "label": label, "revenue_usd": 0.0, "customers": 0, "deals": 0,
-            "has_group": has_group, "attributed": 0, "amount_unknown": False,
+            "label": label, "revenue_usd": 0.0, "deals": 0,
+            "has_group": has_group, "attributed": 0,
+            # PR-ADS-161E: a group is a subset of the window — unknown whenever
+            # the canonical verdict withholds the window's revenue.
+            "amount_unknown": not revenue_total_published,
         })
         amount = _deal_amount(deal)
         if amount is None:
             g["amount_unknown"] = True
         else:
             g["revenue_usd"] += amount
-        g["customers"] += 1
         g["deals"] += 1
         if _attribution_status(deal, has_group=has_group) == "attributed":
             g["attributed"] += 1
@@ -375,7 +406,6 @@ def _breakdown_rows(grouped: list, *, name_key: str, target_page: str) -> list:
             # Unavailable (None) when any deal amount is unknown — never a
             # partial sum implying completeness, never a fabricated $0.
             "revenue_usd": None if g["amount_unknown"] else _round2(g["revenue_usd"]),
-            "customers": g["customers"],
             "deals": g["deals"],
             "attribution_status": status,
             "target_page": target_page,
@@ -397,6 +427,8 @@ def _build_source_breakdown(window: str, now, *, revenue_connected: bool) -> lis
         rows.append({
             "source_group": g.get("label") or g.get("group"),
             "revenue_usd": revenue,
+            "closed_won_deals": g.get("closed_won_deals"),
+            # Distinct companies in the group — not additive across groups.
             "customers": g.get("customers"),
             "spend_connected": bool(g.get("has_spend")),
             "status": ("Spend-connected" if g.get("has_spend")
@@ -433,7 +465,7 @@ def _build_deal_concentration(deal_rows: list, *, revenue_connected: bool,
     return {
         "top_1_deal_share": top_1,
         "top_3_deals_share": top_3,
-        "customers": len(amounts),
+        "deals": len(amounts),
         "label": label,
     }
 
@@ -483,7 +515,7 @@ def _build_top_deals(deal_rows: list, *, revenue_connected: bool) -> list:
 def _build_truth_status(readiness: dict, ledger_status: str | None,
                         by_campaign: list, by_country: list,
                         source_attribution_ready: bool) -> dict:
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
     if not revenue_connected:
         revenue = "blocked"
         deal_ledger = "blocked"
@@ -536,39 +568,40 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
                           by_campaign: list, by_source: list, by_country: list,
                           truth_status: dict, readiness: dict) -> list:
     cards = []
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
 
-    # Scale — a campaign or source that produced multiple customers.
-    multi = [r for r in by_campaign if (r.get("customers") or 0) >= 2 and r["attribution_status"] != "unattributed"]
+    # Scale — a campaign that won several deals. (Deals, not customers: a
+    # customer is a company and the breakdown counts deals.)
+    multi = [r for r in by_campaign if (r.get("deals") or 0) >= 2 and r["attribution_status"] != "unattributed"]
     if not revenue_connected:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "Revenue truth unavailable",
-            "body": "The HubSpot revenue integration is not connected, so customer production cannot be verified for this window.",
+            "body": "The canonical closed-won population is unavailable for this window, so won-deal production cannot be verified.",
             "target_page": "revenue-health", "target_label": "Open Revenue Health",
         })
     elif multi:
         top = multi[0]
         if top.get("revenue_usd") is None:
-            # A deal amount in this group is unknown -> the total is Unavailable,
-            # never a fabricated $0. Deals/customers counts are still real.
-            body = (f"{top['campaign']} closed {top['deals']} deals across "
-                    f"{top['customers']} customers; its revenue total is Unavailable "
-                    "(a deal amount is unknown) — verify before scaling.")
+            # The group's revenue total is withheld — never a fabricated $0.
+            # The deal count is still real.
+            body = (f"{top['campaign']} closed {top['deals']} deals; its revenue "
+                    "total is withheld (a deal amount in this window is not "
+                    "proven) — verify before scaling.")
         else:
             body = (f"{top['campaign']} closed {_fmt_usd_short(top['revenue_usd'])} across "
                     f"{top['deals']} deals — the strongest repeatable revenue producer this window.")
         cards.append({
             "type": "scale", "title": "Scale",
-            "headline": f"{top['campaign']} produced {top['customers']} customers",
+            "headline": f"{top['campaign']} won {top['deals']} deals",
             "body": body,
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
-            "headline": "No repeat customer producer yet",
-            "body": "No campaign closed more than one customer in this window.",
+            "headline": "No repeat won-deal producer yet",
+            "body": "No campaign won more than one deal in this window.",
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
         })
 
@@ -579,7 +612,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "type": "watch", "title": "Watch",
             "headline": f"Top 3 deals drove {pct}% of revenue",
             "body": (f"Revenue is {concentration['label'].lower()} across "
-                     f"{concentration['customers']} customers — validate repeatability before scaling."),
+                     f"{concentration['deals']} deals — validate repeatability before scaling."),
             "target_page": "deals", "target_label": "Open Deals",
         })
     else:
@@ -651,7 +684,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
 def _build_unavailable(kpis: dict, readiness: dict, revenue_trend: dict,
                        customer_trend: dict, period_change: dict) -> list:
     out = []
-    if not readiness.get("revenue_integration_connected"):
+    if not readiness.get("canonical_revenue_available"):
         out.append({"metric": "closed_won_revenue_usd",
                     "reason": "Revenue integration not connected for this window."})
     if kpis.get("sqls") is None:
@@ -680,6 +713,7 @@ def _build_unavailable(kpis: dict, readiness: dict, revenue_trend: dict,
     return out
 
 
+@_canonical_snapshot.single_snapshot
 def build_dashboard_revenue(window: str = "current_quarter",
                             now: datetime | None = None) -> dict:
     """Build the Dashboard Revenue & Customers contract for one business window.
@@ -722,18 +756,25 @@ def build_dashboard_revenue(window: str = "current_quarter",
         canonical.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
         if canonical.get("available") else None)
 
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
     revenue_ready = revenue_connected and ledger_status == "available"
     revenue_reason = None
     if not revenue_connected:
-        revenue_reason = "Revenue integration not connected — a $0 series would be fabricated."
+        revenue_reason = ("The canonical closed-won population is unavailable for "
+                          "this window — a $0 series would be fabricated.")
     elif ledger_status != "available":
         revenue_reason = "Closed-won deal ledger unavailable."
 
     # A window is amount-complete when every closed-won deal has a known amount;
     # any null makes completeness-requiring aggregates (average, concentration,
     # group/bucket totals) Unavailable rather than embed a fabricated $0.
-    amounts_complete = all(_deal_amount(d) is not None for d in deal_rows)
+    # PR-ADS-161E: and the canonical verdict publishes the window's revenue
+    # (which also refuses a negative or invalid amount).
+    revenue_total_published = (
+        ((canonical.get("publication") or {}).get("revenue_usd") or {})
+        .get("status") == "published")
+    amounts_complete = (revenue_total_published
+                        and all(_deal_amount(d) is not None for d in deal_rows))
 
     # Fetch the per-day SQL series once and resolve ONE (start, end, bucket) so
     # the revenue and customer trends always share the same time grain.
@@ -746,17 +787,20 @@ def build_dashboard_revenue(window: str = "current_quarter",
                        amounts_complete=amounts_complete)
     period_change = _build_period_change(window, ref_now, kpis)
     revenue_trend = _build_revenue_trend(
-        trend_bounds, deal_rows, revenue_ready=revenue_ready, revenue_reason=revenue_reason)
+        trend_bounds, deal_rows, revenue_ready=revenue_ready, revenue_reason=revenue_reason,
+        revenue_total_published=revenue_total_published)
     customer_trend = _build_customer_trend(
         trend_bounds, deal_rows, lead_rows, revenue_ready=revenue_ready, sqls_ready=sqls_ready)
 
     ledger_for_breakdown = deal_rows if revenue_ready else []
     grouped_campaign = _group_deals(ledger_for_breakdown, "campaign_name",
                                     unknown_label=UNCLASSIFIED_LABEL,
-                                    target_page="roas-campaigns")
+                                    target_page="roas-campaigns",
+                                    revenue_total_published=revenue_total_published)
     grouped_country = _group_deals(ledger_for_breakdown, "country",
                                    unknown_label=UNATTRIBUTED_LABEL,
-                                   target_page="roas-countries")
+                                   target_page="roas-countries",
+                                   revenue_total_published=revenue_total_published)
     by_campaign = _breakdown_rows(grouped_campaign, name_key="campaign",
                                   target_page="roas-campaigns")
     by_country = _breakdown_rows(grouped_country, name_key="country",
@@ -790,11 +834,19 @@ def build_dashboard_revenue(window: str = "current_quarter",
                           else canonical_contract.TRUTH_NOT_READY),
          "unavailable_reason": summary.get("revenue_total_unavailable_reason"),
          "violation_codes": summary.get("revenue_total_violation_codes")},
-        {"metric": "customers",
+        {"metric": "closed_won_deals",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "all_source_business_revenue",
          "truth_status": (canonical_contract.TRUTH_READY if revenue_ready
                           else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if revenue_ready
+                          and summary.get("customers_status") == "published"
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": summary.get("customers_reason")},
         # The SQL headline is the mart's campaign-attributable population, NOT
         # all-source business revenue — a separate identity with its own scope,
         # so it carries its own contract rather than borrowing the revenue one.

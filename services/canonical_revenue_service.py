@@ -259,6 +259,18 @@ def one_snapshot():
         _SNAPSHOT.reset(token)
 
 
+def single_snapshot(fn):
+    """Decorate a page builder so all of its closed-won reads share ONE
+    snapshot (:func:`one_snapshot`)."""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        with one_snapshot():
+            return fn(*args, **kwargs)
+    return _wrapped
+
+
 def load_won_deals(window=None, *, start=None, end=None, now=None,
                    require_ready: bool = True) -> dict:
     """The canonical won-deal population of one business window.
@@ -452,6 +464,78 @@ def subset_metrics(base: dict, rows) -> dict:
     return cwt.subset_outcomes(
         members, publication=base.get("publication"),
         company_ids_by_deal=base.get("company_ids_by_deal"))
+
+
+#: Reasons that mean the ledger could not be READ — an outage — as opposed to a
+#: readable ledger whose canonical population is not publishable (coverage
+#: unproven, an undated or conflicting won deal). Pages show the two differently.
+OUTAGE_REASONS = (REASON_LEDGER_UNREADABLE, REASON_SYNC_STATE_UNREADABLE,
+                  "database_unavailable")
+
+
+def is_ledger_outage(reason) -> bool:
+    """Is this unavailable-reason an outage rather than a withheld population?"""
+    return reason in OUTAGE_REASONS
+
+
+def campaign_placement_gate(base: dict) -> dict | None:
+    """Why per-campaign closed-won figures are withheld in this window, or None.
+
+    A Google Ads deal with no campaign label (in ``google_ads_source`` but not
+    ``campaign_attributable``) could belong to ANY campaign, so every
+    per-campaign deal count, revenue, customer count and ROAS would be a lower
+    bound published as a total — the canonical ``campaign_revenue`` rule
+    (``cwt.R_CAMPAIGN_UNPLACED``). The account-wide Google Ads figure is not
+    affected: it uses the whole ``google_ads_source`` scope.
+    """
+    from analysis import closed_won_truth as cwt
+    from analysis.revenue_scope import SCOPE_CAMPAIGN_ATTRIBUTABLE, SCOPE_GOOGLE_ADS_SOURCE
+
+    if not base.get("available"):
+        return None
+    deals = base.get("deals") or []
+    unplaced = (len(filter_deals(deals, SCOPE_GOOGLE_ADS_SOURCE))
+                - len(filter_deals(deals, SCOPE_CAMPAIGN_ATTRIBUTABLE)))
+    if unplaced <= 0:
+        return None
+    return {"status": cwt.WITHHELD, "reason": cwt.R_CAMPAIGN_UNPLACED,
+            "unplaced_google_ads_deals": unplaced}
+
+
+def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
+               roas_scope_ok: bool = True, gate: dict | None = None) -> dict:
+    """The canonical closed-won fields of one page row (a campaign, a country,
+    a source group, a summary), from one population.
+
+    ``closed_won_deals`` is a deal count, ``customers`` distinct proven HubSpot
+    companies (never a deal count), ``won_revenue`` a total or None, and ROAS /
+    CAC are derived from them by ``analysis.closed_won_truth`` — each withheld
+    with the reason of whichever input is not published. ``gate`` (e.g.
+    :func:`campaign_placement_gate`) withholds the row's deals, revenue and
+    customers for a reason the window carries. ``metrics`` holds every value
+    with its status and reason, for the page and its API to republish.
+    """
+    from analysis import closed_won_truth as cwt
+
+    m = subset_metrics(base, rows)
+    if gate is not None:
+        m = {k: cwt.metric(None, gate["status"], gate["reason"],
+                           **({"dedup_key": "hubspot_company_id",
+                               "additive": False} if k == "customers" else {}))
+             for k in cwt.SUBSET_METRICS}
+    roas = cwt.derive_roas(m["revenue_usd"], spend_usd,
+                           spend_reason=spend_reason,
+                           scope_compatible=roas_scope_ok)
+    cac = cwt.derive_cac(m["customers"], spend_usd, spend_reason=spend_reason,
+                         scope_compatible=roas_scope_ok)
+    return {
+        "closed_won_deals": m["closed_won_deals"]["value"],
+        "customers": m["customers"]["value"],
+        "won_revenue": m["revenue_usd"]["value"],
+        "roas": roas["value"],
+        "cac": cac["value"],
+        "metrics": {**m, "roas": roas, "cac": cac},
+    }
 
 
 def won_window_sql_bounds(window: str, *, now=None) -> tuple:

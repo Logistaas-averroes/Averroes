@@ -38,7 +38,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    company_evidence,
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -176,9 +178,16 @@ def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=No
                                                         if geo_coverage is None
                                                         else geo_coverage)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.
-    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl))
+    # PR-ADS-161E: proven, current company evidence for every won deal, so the
+    # canonical customer metric publishes (one company per deal here).
+    _ledger_rows = from_legacy_deal_rows(dl)
+    patch_canonical_ledger(monkeypatch, _ledger_rows,
+                           company_associations=company_evidence(_ledger_rows))
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    if not revenue_connected:
+        make_canonical_unavailable(monkeypatch)
     import db.writers as db_writers
     monkeypatch.setattr(db_writers, "source_attribution_health_counts",
                         lambda: {"classified_contacts": 25, "attributed_deals": 2,
@@ -287,9 +296,9 @@ def test_kpis_from_country_attributed_truth(monkeypatch):
     assert k["verified_spend_native"] == {"amount": 10000.0, "currency": "GBP"}
     assert k["verified_spend_usd"] == 13000.0
     assert k["countries_with_spend"] == 2
-    assert k["countries_with_customers"] == 1
+    assert k["countries_with_closed_won_deals"] == 1
     assert k["sqls"] == 25  # 20 US + 5 GB
-    assert k["customers"] == 2  # US only (Ghost Co has no country → residual)
+    assert k["closed_won_deals"] == 2  # US only (Ghost Co has no country → residual)
     assert k["won_revenue_usd"] == 29000.0
     assert k["geo_roas"] == round(29000.0 / 13000.0, 2)  # 2.23 — country-attributed
 
@@ -299,7 +308,7 @@ def test_kpis_reconcile_with_country_rows(monkeypatch):
     k = out["kpis"]
     real = [c for c in out["countries"] if not c["is_residual"]]
     assert k["sqls"] == sum(c["sqls"] for c in real)
-    assert k["customers"] == sum(c["customers"] for c in real)
+    assert k["closed_won_deals"] == sum(c["closed_won_deals"] for c in real)
     assert k["won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in real), 2)
     assert k["verified_spend_native"]["amount"] == round(sum(c["spend_native"] for c in real), 2)
     assert k["verified_spend_usd"] == round(sum(c["spend_usd"] for c in real), 2)
@@ -370,22 +379,32 @@ def test_roas_helper_never_fakes_zero():
 # ══════════════════ 4. Residual isolation (NEVER distributed) ════════════════
 
 
+#: PR-ADS-161E. Ghost Co (d4) has no Google Ads evidence — no campaign, no
+#: GCLID, unclassified source — so it is not a Google Ads deal at all. The old
+#: residual subtracted the Google Ads country rows from the ALL-SOURCE total and
+#: reported it as a Google Ads deal "that could not be assigned to a country".
+#: The residual now subtracts within the Google Ads-source scope; a Google Ads
+#: deal with no country is what it holds (see `_GHOST_GOOGLE_ADS`).
+_GHOST_GOOGLE_ADS = [dict(DEAL_ROWS[2], match_source="gclid")]
+
+
 def test_residual_revenue_preserved_not_a_country(monkeypatch):
-    # The closed-won deal with no country (Ghost Co) is preserved in the residual
-    # bucket — never forced onto a real country, never a real-country row.
-    out = _countries(monkeypatch)
+    # A Google Ads closed-won deal with no country (Ghost Co, with a GCLID) is
+    # preserved in the residual bucket — never forced onto a real country,
+    # never a real-country row.
+    out = _countries(monkeypatch, deals=DEAL_ROWS[:2] + _GHOST_GOOGLE_ADS)
     res = out["residual"]
     assert res["label"] == "Unknown / Unattributed country"
-    assert res["customers"] == 1
+    assert res["closed_won_deals"] == 1
     assert res["won_revenue_usd"] == 4000.0
     # It is NOT in the countries list and NO country row is a residual.
     assert all(not c["is_residual"] for c in out["countries"])
     assert all(c["country_name"] != "Unknown / Unattributed country" for c in out["countries"])
     # Residual revenue/customers surfaced as KPIs, separate from country totals.
     assert out["kpis"]["residual_revenue_usd"] == 4000.0
-    assert out["kpis"]["residual_customers"] == 1
+    assert out["kpis"]["residual_closed_won_deals"] == 1
     # Country-attributed customers exclude the residual customer.
-    assert out["kpis"]["customers"] == 2
+    assert out["kpis"]["closed_won_deals"] == 2
 
 
 def test_residual_never_mapped_never_roas_never_drawer(monkeypatch):
@@ -401,10 +420,12 @@ def test_build_residual_is_canonical_mart_minus_countries():
     # of the real country rows (canonical), NOT the drawer deal ledger. The geo
     # spend residual is carried from spend_truth. Never spread across countries.
     from services.dashboard_countries_service import _build_residual
-    summary = {"customers": 5, "won_revenue_usd": 90000.0, "sqls": 40}
+    # PR-ADS-161E: the residual subtracts from the GOOGLE ADS-SOURCE totals.
+    summary = {"google_ads_source_closed_won_deals": 5,
+               "google_ads_source_won_revenue_usd": 90000.0, "sqls": 40}
     real_rows = [
-        {"customers": 3, "won_revenue_usd": 60000.0, "sqls": 25},
-        {"customers": 1, "won_revenue_usd": 15000.0, "sqls": 10},
+        {"closed_won_deals": 3, "won_revenue_usd": 60000.0, "sqls": 25},
+        {"closed_won_deals": 1, "won_revenue_usd": 15000.0, "sqls": 10},
     ]
     spend_truth = {
         "native_currency": "GBP",
@@ -414,7 +435,7 @@ def test_build_residual_is_canonical_mart_minus_countries():
             "Google Ads geographic view does not assign this spend to a country.",
     }
     res = _build_residual(summary, real_rows, spend_truth, None, False, True)
-    assert res["customers"] == 1          # 5 − (3+1)
+    assert res["closed_won_deals"] == 1          # 5 − (3+1)
     assert res["won_revenue_usd"] == 15000.0   # 90000 − (60000+15000)
     assert res["sqls"] == 5               # 40 − (25+10)
     assert res["spend_native"] == 500.0
@@ -427,11 +448,12 @@ def test_build_residual_null_amount_is_unavailable_not_zero():
     # A residual deal with an unknown amount withholds residual revenue (never a
     # lowered $0) but customers stay countable from the canonical mart total.
     from services.dashboard_countries_service import _build_residual
-    summary = {"customers": 3, "won_revenue_usd": 33000.0, "sqls": 20}
-    real_rows = [{"customers": 2, "won_revenue_usd": 29000.0, "sqls": 20}]
+    summary = {"google_ads_source_closed_won_deals": 3,
+               "google_ads_source_won_revenue_usd": 33000.0, "sqls": 20}
+    real_rows = [{"closed_won_deals": 2, "won_revenue_usd": 29000.0, "sqls": 20}]
     res = _build_residual(summary, real_rows, {"native_currency": "GBP"}, None, True, True)
     assert res["won_revenue_usd"] is None  # never a lowered $0
-    assert res["customers"] == 1           # 3 − 2, still countable
+    assert res["closed_won_deals"] == 1           # 3 − 2, still countable
 
 
 def test_residual_withheld_not_zeroed_on_canonical_ledger_outage(monkeypatch):
@@ -445,7 +467,7 @@ def test_residual_withheld_not_zeroed_on_canonical_ledger_outage(monkeypatch):
     patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_countries_service import build_dashboard_countries
     out = build_dashboard_countries(WINDOW, now=NOW)
-    assert out["residual"]["customers"] != 0
+    assert out["residual"]["closed_won_deals"] != 0
     assert out["residual"]["won_revenue_usd"] != 0
     assert out["revenue_available"] is False
     assert out["legacy_fallback_used"] is False
@@ -457,10 +479,10 @@ def test_residual_deal_null_amount_withholds_revenue_keeps_customers(monkeypatch
     # The no-country residual deal (d4) has an unknown amount → residual revenue is
     # Unavailable (never a lowered $0), but customers stay countable, and the
     # unavailable payload flags residual_revenue_usd with the unknown-amount reason.
-    deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None)]
+    deals = DEAL_ROWS[:2] + [dict(_GHOST_GOOGLE_ADS[0], deal_amount_usd=None)]
     out = _countries(monkeypatch, deals=deals)
     assert out["residual"]["won_revenue_usd"] is None
-    assert out["residual"]["customers"] == 1
+    assert out["residual"]["closed_won_deals"] == 1
     assert out["kpis"]["residual_revenue_usd"] is None
     ru = next(u for u in out["unavailable"] if u["metric"] == "residual_revenue_usd")
     assert "amount" in ru["reason"].lower()
@@ -469,13 +491,13 @@ def test_residual_deal_null_amount_withholds_revenue_keeps_customers(monkeypatch
 def test_residual_excluded_from_country_kpis_and_roas(monkeypatch):
     # Residual is never a country row, never gets a ROAS, and is never in the
     # country-attributed KPI ROAS numerator.
-    out = _countries(monkeypatch)
+    out = _countries(monkeypatch, deals=DEAL_ROWS[:2] + _GHOST_GOOGLE_ADS)
     real = [c for c in out["countries"] if not c["is_residual"]]
     assert len(real) == len(out["countries"])  # residual is not in countries[]
     assert out["residual"]["roas"] is None and out["residual"]["roas_available"] is False
     assert out["residual"]["drawer_available"] is False
     # Country-attributed KPIs exclude the residual; ROAS numerator is real-only.
-    assert out["kpis"]["customers"] == sum(c["customers"] for c in real)
+    assert out["kpis"]["closed_won_deals"] == sum(c["closed_won_deals"] for c in real)
     assert out["kpis"]["won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in real), 2)
     assert out["kpis"]["won_revenue_usd"] == 29000.0
     assert out["kpis"]["residual_revenue_usd"] == 4000.0
@@ -500,15 +522,15 @@ def test_null_amount_makes_country_revenue_and_roas_unavailable(monkeypatch):
 def test_disconnected_integration_blanks_customers_and_revenue(monkeypatch):
     out = _countries(monkeypatch, revenue_connected=False)
     k = out["kpis"]
-    assert k["customers"] is None
+    assert k["closed_won_deals"] is None
     assert k["won_revenue_usd"] is None
     assert k["geo_roas"] is None
-    assert k["residual_customers"] is None
+    assert k["residual_closed_won_deals"] is None
     assert k["residual_revenue_usd"] is None
     assert k["verified_spend_native"]["amount"] == 10000.0  # spend survives
     assert k["sqls"] == 25  # SQLs come from leads and survive
     for c in out["countries"]:
-        assert c["customers"] is None, f"{c['country_name']} customers must be None"
+        assert c["closed_won_deals"] is None, f"{c['country_name']} customers must be None"
         assert c["won_revenue_usd"] is None and c["roas"] is None
     assert out["truth_status"]["revenue"] == "blocked"
 
@@ -609,8 +631,21 @@ def test_period_change_metrics_are_country_attributed(monkeypatch):
     out = _countries(monkeypatch, window="ytd")
     pc = out["period_change"]
     # Whatever the availability, the comparison metric keys are the country KPIs.
-    for key in ("won_revenue_usd", "customers", "sqls", "verified_spend_usd", "geo_roas"):
+    for key in ("won_revenue_usd", "closed_won_deals", "sqls", "verified_spend_usd",
+                "geo_roas"):
         assert key in pc["metrics"]
+
+
+def test_161e_a_non_google_ads_deal_is_not_the_country_residual(monkeypatch):
+    """PR-ADS-161E: a deal with no Google Ads evidence is not on this page.
+
+    Counterfactual for the residual scope: the old subtraction from the
+    ALL-SOURCE total reported Ghost Co (no campaign, no GCLID) as a Google Ads
+    deal that could not be placed in a country.
+    """
+    out = _countries(monkeypatch)
+    assert out["residual"]["closed_won_deals"] == 0
+    assert out["residual"]["won_revenue_usd"] == 0.0
 
 
 # ══════════════════ 6. Deal proof unavailable ═══════════════════════════════
@@ -650,8 +685,8 @@ def test_regional_mix_groups_countries(monkeypatch):
     mix = {r["region"]: r for r in out["regional_mix"]}
     assert "North America" in mix and "Europe" in mix
     assert mix["North America"]["won_revenue_usd"] == 29000.0
-    assert mix["North America"]["customers"] == 2
-    assert mix["Europe"]["customers"] == 0
+    assert mix["North America"]["closed_won_deals"] == 2
+    assert mix["Europe"]["closed_won_deals"] == 0
     # No fabricated percentages: a region's roas is only present when safe.
     assert mix["Europe"]["roas"] is None
 
@@ -765,9 +800,12 @@ def test_countries_tab_calls_its_endpoint():
 
 def test_countries_kpi_cards_render_six_metrics():
     fn = _slice(JS, "function renderCtryKpiRow", 4200)
-    for label in ("Verified Geo Spend", "SQLs", "Customers", "Won Revenue",
+    # PR-ADS-161E: the country KPI is closed-won DEALS — customers are distinct
+    # companies, not additive across countries, so no customer total is shown.
+    for label in ("Verified Geo Spend", "SQLs", "Closed-Won Deals", "Won Revenue",
                   "Geo ROAS", "Residual Revenue"):
         assert label in fn
+    assert 'label: "Customers"' not in fn
     assert "dash-kpi-card" in fn
 
 

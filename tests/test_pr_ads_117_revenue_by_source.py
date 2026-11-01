@@ -249,13 +249,15 @@ def test_deal_counted_once_across_groups(monkeypatch):
         ],
     )
     out = build("all_time", now=_at("2026-06-22"))
-    total_customers = sum(g["customers"] for g in out["groups"])
+    # PR-ADS-161E: the groups partition DEALS (customers are companies and
+    # do not add up across groups).
+    total_deals = sum(g["closed_won_deals"] for g in out["groups"])
     total_revenue = sum(g["won_revenue"] for g in out["groups"])
-    assert total_customers == 3, "each deal counted exactly once"
+    assert total_deals == 3, "each deal counted exactly once"
     assert total_revenue == 600.0
     # Ambiguous + unclassified fold into the Needs-Review section.
     nr = _group(out, "unclassified")
-    assert nr["customers"] == 2 and nr["won_revenue"] == 500.0
+    assert nr["closed_won_deals"] == 2 and nr["won_revenue"] == 500.0
 
 
 def test_window_correct_same_bounds_all_sources(monkeypatch):

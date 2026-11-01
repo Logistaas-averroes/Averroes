@@ -8504,6 +8504,38 @@ def api_campaign_mapping_exclude(body: CampaignExcludeRequest, request: Request)
             "match_method": "not_google_ads"}
 
 
+#: PR-ADS-161E. Readers that computed closed-won deals, customers, revenue,
+#: ROAS, CAC or verdicts from local JSON / Windsor instead of the canonical
+#: closed-won owner (docs/46, read through the reader contract, docs/48). They
+#: publish no figure: each is withheld with this reason, and the canonical
+#: replacement is named.
+LEGACY_REVENUE_WITHHELD_REASON = "legacy_local_revenue_not_canonical"
+_LEGACY_REVENUE_WITHHELD = {
+    "status": "withheld",
+    "reason": LEGACY_REVENUE_WITHHELD_REASON,
+    "revenue_status": {"status": "withheld",
+                       "reason": LEGACY_REVENUE_WITHHELD_REASON,
+                       "canonical_replacement": "/api/revenue-attribution"},
+}
+#: Snapshot fields that describe the snapshot itself, not an outcome.
+_LEGACY_SNAPSHOT_METADATA = ("id", "snapshot_id", "snapshot_date", "window",
+                             "generated_at", "created_at")
+
+
+def _withhold_legacy_roas_snapshot(snapshot):
+    """A persisted ROAS snapshot with every outcome figure removed.
+
+    The snapshot's spend, revenue, ACV/LTV, deal counts, ROAS, LTV/CAC and
+    verdict counts were computed from local JSON by the retired chain. Withheld
+    means absent: only the metadata and the withholding status are returned.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    out = {k: snapshot[k] for k in _LEGACY_SNAPSHOT_METADATA if k in snapshot}
+    out.update(_LEGACY_REVENUE_WITHHELD)
+    return out
+
+
 @app.get("/api/reports/roas/campaigns")
 async def get_roas_campaigns(
     window: str = Query(default="60d"),
@@ -8519,24 +8551,19 @@ async def get_roas_campaigns(
     Spend source: Google Ads API.
     Google Ads conversion value is NOT used.
     """
-    from analysis.roas_calculator import compute_all_campaign_roas
-
     window_days = _parse_window(window)
 
-    try:
-        campaigns = compute_all_campaign_roas(window_days=window_days)
-    except Exception as exc:
-        log.error("ROAS campaign computation failed: %s", exc)
-        raise HTTPException(status_code=500, detail="ROAS computation failed") from exc
-
+    # PR-ADS-161E: this report counted won deals as customers and summed
+    # revenue from local JSON, outside the canonical closed-won owner. It no
+    # longer computes anything: every figure is withheld with the reason, and
+    # the canonical replacement is named.
     return {
         "window": f"{window_days}d",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_truth": "hubspot_won_deals_plus_windsor_spend",
         "google_ads_conversion_value_used": False,
         "deprecated": True,
         "superseded_by": "/api/revenue-attribution",
-        "campaigns": campaigns,
+        **_LEGACY_REVENUE_WITHHELD,
     }
 
 
@@ -8551,25 +8578,16 @@ async def get_roas_countries(
     sources). Retained only for backward compatibility; no frontend path uses
     it. This is NOT competing truth — do not build new consumers on it.
     """
-    from analysis.roas_calculator import compute_all_country_roas
-
     window_days = _parse_window(window)
 
-    try:
-        countries = compute_all_country_roas(window_days=window_days)
-    except Exception as exc:
-        log.error("ROAS country computation failed: %s", exc)
-        raise HTTPException(status_code=500, detail="ROAS computation failed") from exc
-
+    # PR-ADS-161E: withheld — see get_roas_campaigns.
     return {
         "window": f"{window_days}d",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_truth": "hubspot_won_deals_plus_windsor_spend",
         "google_ads_conversion_value_used": False,
-        "country_level_estimate": True,
         "deprecated": True,
         "superseded_by": "/api/revenue-attribution",
-        "countries": countries,
+        **_LEGACY_REVENUE_WITHHELD,
     }
 
 
@@ -8642,7 +8660,7 @@ async def get_roas_snapshot_latest(
             status_code=404,
             detail=f"No ROAS snapshot found for window={window_days}d",
         )
-    return snapshot
+    return _withhold_legacy_roas_snapshot(snapshot)
 
 
 @app.get("/api/reports/roas/snapshots")
@@ -8664,7 +8682,8 @@ async def get_roas_snapshots(
         "window": f"{window_days}d",
         "limit": limit,
         "count": len(snapshots),
-        "snapshots": snapshots,
+        "snapshots": [_withhold_legacy_roas_snapshot(s) for s in snapshots],
+        **_LEGACY_REVENUE_WITHHELD,
     }
 
 
@@ -8693,7 +8712,15 @@ async def get_gclid_readiness(
         log.error("GCLID readiness audit failed: %s", exc)
         raise HTTPException(status_code=500, detail="GCLID readiness audit failed") from exc
 
-    return result
+    # PR-ADS-161E: the audit counts won deals in a local JSON file — not the
+    # canonical closed-won population — so that count is not published. The
+    # GCLID coverage figures stay: they measure joinability, not outcomes.
+    summary = dict(result.get("summary") or {})
+    summary["won_deals"] = None
+    summary["won_deals_status"] = {
+        "status": "withheld", "reason": LEGACY_REVENUE_WITHHELD_REASON,
+        "canonical_replacement": "/api/revenue-attribution"}
+    return {**result, "summary": summary}
 
 
 @app.get("/api/attribution/confidence-summary")

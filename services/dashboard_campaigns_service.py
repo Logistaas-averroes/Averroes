@@ -44,6 +44,7 @@ Truth rules (unchanged, never loosened):
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import datetime, timezone
 
@@ -189,18 +190,18 @@ def _group_deals_by_campaign(deals_rows: list, label_to_canonical: dict) -> tupl
     return deals_by_key, unknown_amount_keys
 
 
-def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
+def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, deals,
                      won_revenue, spend_state, amount_unknown) -> str:
     """Business status for a campaign row (never an engineering term)."""
     has_spend = native_spend is not None and native_spend > 0
     unmapped = spend_state in (None, "unmapped") and not has_spend
-    if (customers or 0) > 0 and (won_revenue or 0) > 0:
+    if (deals or 0) > 0 and (won_revenue or 0) > 0:
         return STATUS_REVENUE_PROVEN
-    if amount_unknown and (customers or 0) > 0:
+    if amount_unknown and (deals or 0) > 0:
         # Customers exist but their revenue can't be totalled → attribution review.
         return STATUS_ATTRIBUTION_MISSING
-    if (sqls or 0) > 0 or (customers or 0) > 0:
-        # Demand (SQLs) and/or customers, but no proven closed-won revenue yet.
+    if (sqls or 0) > 0 or (deals or 0) > 0:
+        # Demand (SQLs) and/or won deals, but no proven closed-won revenue yet.
         return STATUS_SQL_PRODUCER
     if has_spend:
         # Spend exists but no SQL/customer proof. If the USD spend is missing only
@@ -220,7 +221,8 @@ _MAPPING_STATUS = {"matched": "mapped", "unavailable": "mapping_unavailable"}
 
 
 def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
-                         unknown_amount_keys: set, native_currency: str = "GBP") -> list:
+                         unknown_amount_keys: set, native_currency: str = "GBP",
+                         revenue_total_published: bool = True) -> list:
     """Merge mart campaign rows (outcomes + mapping) with the per-campaign native/
     USD spend split and the closed-won proof deals. Preserves revenue that maps to
     no campaign under an Unattributed / Needs Review row."""
@@ -243,7 +245,7 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
 
         status = _campaign_status(
             native_spend=native_spend, usd_spend=usd_spend, fx_complete=fx_complete,
-            sqls=m.get("sqls"), customers=m.get("customers"), won_revenue=won,
+            sqls=m.get("sqls"), deals=m.get("closed_won_deals"), won_revenue=won,
             spend_state=m.get("spend_state"), amount_unknown=amount_unknown)
 
         rows.append({
@@ -254,7 +256,11 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "spend_usd": usd_spend,
             "fx_complete": fx_complete,
             "sqls": m.get("sqls"),
+            # PR-ADS-161E: closed-won DEALS, and this campaign's customers —
+            # distinct proven HubSpot companies (not additive across rows).
+            "closed_won_deals": m.get("closed_won_deals"),
             "customers": m.get("customers"),
+            "metrics": m.get("metrics"),
             "won_revenue_usd": won,
             "roas": row_roas,
             "roas_available": row_roas is not None,
@@ -268,10 +274,13 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
     # Preserve closed-won revenue that maps to no Google Ads campaign.
     unattributed_deals = deals_by_key.get(UNATTRIBUTED_LABEL) or []
     if unattributed_deals:
-        amount_unknown = UNATTRIBUTED_LABEL in unknown_amount_keys
-        customers = len(unattributed_deals)
+        # PR-ADS-161E: a subset of the window — its total is published only
+        # when the canonical verdict publishes the window's revenue.
+        amount_unknown = (UNATTRIBUTED_LABEL in unknown_amount_keys
+                          or not revenue_total_published)
+        deals = len(unattributed_deals)
         won = None if amount_unknown else _round2(
-            sum((d["amount_usd"] or 0.0) for d in unattributed_deals))
+            sum(d["amount_usd"] for d in unattributed_deals))
         rows.append({
             "campaign_id": None,
             "campaign_name": UNATTRIBUTED_LABEL,
@@ -280,7 +289,8 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "spend_usd": None,
             "fx_complete": False,
             "sqls": None,
-            "customers": customers,
+            "closed_won_deals": deals,
+            "customers": None,
             "won_revenue_usd": won,
             "roas": None,
             "roas_available": False,
@@ -296,13 +306,14 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
     rows.sort(key=lambda r: (
         r["campaign_name"] != UNATTRIBUTED_LABEL,
         r.get("won_revenue_usd") or 0.0,
-        r.get("customers") or 0,
+        r.get("closed_won_deals") or 0,
         r.get("spend_native") or 0.0,
     ), reverse=True)
     return rows
 
 
-def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
+def _build_kpis(campaign_rows: list, spend_truth: dict,
+                summary: dict | None = None) -> dict:
     """Hero KPIs derived from the campaign rows (so they reconcile with the
     leaderboard / bubble map) plus the canonical spend truth."""
     # KPIs are Google-Ads-scoped (exclude the Unattributed / Needs Review callout),
@@ -316,11 +327,12 @@ def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
     sqls_incomplete = any(r.get("sqls") is None for r in google_rows)
     total_sqls = None if sqls_incomplete else sum((r.get("sqls") or 0) for r in google_rows)
 
-    # Customers: Unavailable if any row withholds them (a disconnected revenue
-    # integration blanks them) — never a fabricated 0.
-    customers_incomplete = any(r.get("customers") is None for r in google_rows)
-    total_customers = (None if customers_incomplete
-                       else sum((r.get("customers") or 0) for r in google_rows))
+    # Won deals: Unavailable if any row withholds them — never a fabricated 0.
+    # Deals add up across campaigns; customers (companies) do not, so the
+    # page's customer figure is the canonical campaign-attributable metric.
+    deals_incomplete = any(r.get("closed_won_deals") is None for r in google_rows)
+    total_deals = (None if deals_incomplete
+                   else sum((r.get("closed_won_deals") or 0) for r in google_rows))
 
     # Revenue: Unavailable if ANY Google campaign's revenue is unknown (never a
     # partial sum implying completeness).
@@ -335,7 +347,10 @@ def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
         "verified_spend_native": {"amount": native, "currency": spend_truth.get("native_currency") or "GBP"},
         "verified_spend_usd": usd,
         "sqls": total_sqls,
-        "customers": total_customers,
+        "closed_won_deals": total_deals,
+        "customers": (summary or {}).get("attributed_customers"),
+        "customers_metric": (((summary or {}).get("metrics") or {})
+                             .get("attributed_customers")),
         "won_revenue_usd": total_won,
         "roas": _roas(total_won, usd),
     }
@@ -489,12 +504,12 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
     proven = [r for r in google_rows if r["status"] == STATUS_REVENUE_PROVEN]
     if proven:
         top = max(proven, key=lambda r: (r.get("won_revenue_usd") or 0.0,
-                                         r.get("customers") or 0))
+                                         r.get("closed_won_deals") or 0))
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": f"{top['campaign_name']} has revenue proof",
-            "body": (f"This campaign produced {top['customers']} customer"
-                     f"{'s' if top['customers'] != 1 else ''} and "
+            "body": (f"This campaign won {top['closed_won_deals']} deal"
+                     f"{'s' if top['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(top['won_revenue_usd'])} closed-won revenue with "
                      "verified Google Ads spend."),
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
@@ -504,20 +519,20 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
             "type": "scale", "title": "Scale",
             "headline": "No campaign has revenue proof yet",
             "body": "No Google Ads campaign has both verified spend and closed-won "
-                    "customers in this window.",
+                    "deals in this window.",
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
         })
 
     # Watch — spend without customer proof.
     no_proof = [r for r in google_rows if r["status"] in
                 (STATUS_SPEND_NO_PROOF, STATUS_SQL_PRODUCER)
-                and (r.get("spend_native") or 0) > 0 and (r.get("customers") or 0) == 0]
+                and (r.get("spend_native") or 0) > 0 and (r.get("closed_won_deals") or 0) == 0]
     if no_proof:
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "Campaign spend without customer proof",
             "body": (f"{len(no_proof)} campaign{'s' if len(no_proof) != 1 else ''} spent "
-                     "verified Google Ads budget but produced no customers in this "
+                     "verified Google Ads budget but won no deals in this "
                      "window. Review SQL quality before scaling."),
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
         })
@@ -616,7 +631,7 @@ def _build_truth_status(spend_truth: dict, readiness: dict, campaign_rows: list,
     return {
         "spend": google_ads_spend,
         "fx": "ready" if fx == "verified" else ("partial" if fx == "incomplete" else "unavailable"),
-        "revenue": "ready" if readiness.get("revenue_integration_connected") else "blocked",
+        "revenue": "ready" if readiness.get("canonical_revenue_available") else "blocked",
         "campaign_attribution": "partial" if attribution_partial else "ready",
         # Client/deal proof comes from the closed-won deal ledger; when that is
         # down we cannot prove campaigns even if the mart revenue is canonical.
@@ -702,16 +717,22 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
                 "reason": "Previous period unavailable."}
     ps = prev_mart.get("summary") or {}
     pst = prev_mart.get("spend_truth") or {}
-    connected = bool((prev_mart.get("readiness") or {}).get("revenue_integration_connected"))
+    connected = bool((prev_mart.get("readiness") or {}).get("canonical_revenue_available"))
     # The mart summary counts a null-amount deal as $0; if the previous window had
     # ANY unknown deal amount, its revenue total is not a trustworthy baseline —
     # withhold it (No comparison) rather than measuring against a lowered $0.
     prev_amount_unknown = (not prev_deals.get("available")) or any(
         d.get("deal_amount_usd") is None for d in (prev_deals.get("rows") or []))
     prev_rev = ps.get("won_revenue_usd") if (connected and not prev_amount_unknown) else None
-    prev_cust = ps.get("customers") if connected else None
+    # PR-ADS-161E: like for like. This page's KPIs are the campaign-attributable
+    # subset, so the previous period is that subset too — it used to compare
+    # against the previous ALL-SOURCE totals.
+    prev_rev = ps.get("attributed_won_revenue_usd") if prev_rev is not None else None
+    prev_cust = ps.get("attributed_customers") if connected else None
+    prev_deals = ps.get("attributed_closed_won_deals") if connected else None
     metrics = {
         "won_revenue_usd": _delta_metric(kpis.get("won_revenue_usd"), prev_rev),
+        "closed_won_deals": _delta_metric(kpis.get("closed_won_deals"), prev_deals),
         "customers": _delta_metric(kpis.get("customers"), prev_cust),
         "sqls": _delta_metric(kpis.get("sqls"), ps.get("sqls")),
         "verified_spend_usd": _delta_metric(kpis.get("verified_spend_usd"), pst.get("usd_spend")),
@@ -723,6 +744,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_dashboard_campaigns(window: str = "current_quarter",
                               now: datetime | None = None) -> dict:
     """Build the Dashboard Campaigns & Keywords contract for one business window.
@@ -738,7 +760,7 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     mart_rows = mart.get("rows") or []
     spend_truth = mart.get("spend_truth") or {}
     readiness = mart.get("readiness") or {}
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
     native_currency = spend_truth.get("native_currency") or "GBP"
 
     start = _parse_iso_date(window_block.get("start_date") or resolved.get("start_date"))
@@ -772,8 +794,11 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     deals_by_key, unknown_amount_keys = _group_deals_by_campaign(
         deal_rows, label_to_canonical)
 
-    campaign_rows = _build_campaign_rows(mart_rows, spend_maps, deals_by_key,
-                                         unknown_amount_keys, native_currency)
+    campaign_rows = _build_campaign_rows(
+        mart_rows, spend_maps, deals_by_key, unknown_amount_keys, native_currency,
+        revenue_total_published=(
+            ((canonical.get("publication") or {}).get("revenue_usd") or {})
+            .get("status") == "published"))
 
     if not revenue_connected:
         # Closed-won customers AND revenue come from the revenue integration, so
@@ -781,12 +806,14 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         # survive). The mart returns a mart-level $0/0 here, which would otherwise
         # render as a VERIFIED zero. Never fabricate a $0 or a 0-customer proof.
         for c in campaign_rows:
+            c["closed_won_deals"] = None
             c["customers"] = None
             c["won_revenue_usd"] = None
             c["roas"] = None
             c["roas_available"] = False
 
-    kpis = _build_kpis(campaign_rows, spend_truth)
+    kpis = _build_kpis(campaign_rows, spend_truth,
+                       summary=(mart.get("summary") or {}) if revenue_connected else {})
     period_change = _build_period_change(window, ref_now, kpis)
     keyword_themes = _build_keyword_themes(repo.fetch_keyword_theme_snapshot())
     search_signals = _build_search_term_signals(repo.fetch_search_term_signals(start, end))
@@ -837,6 +864,12 @@ def build_dashboard_campaigns(window: str = "current_quarter",
          "violation_codes": ([] if kpis.get("won_revenue_usd") is not None
                              else _attributed_disclosure.get("violation_codes") or [])},
         # The COUNT is complete whatever the amounts are, so it keeps its own status.
+        {"metric": "campaign_attributed_closed_won_deals",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("closed_won_deals") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
         {"metric": "campaign_attributed_customers",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "campaign_attributable_revenue",

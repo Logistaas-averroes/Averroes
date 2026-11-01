@@ -206,9 +206,14 @@ Exit codes:
 
 ## 8. Deferred and known limitations
 
-**"View blockers" links from withheld metrics.** No production page shows the
-canonical customer metric yet (PR-ADS-161E migrates readers). Revenue-withheld
-messages exist only on legacy readers, so linking from them would mean
-unrelated page refactors. The workbench is reachable from System Status.
+**"View blockers" links (PR-ADS-161E).** Since PR-ADS-161E every production
+page shows the canonical customer and revenue verdicts. When one is withheld
+for a CRM reason, an administrator sees **View blockers**, linking to
+`#/health?cte_window=<type>/<key>&cte_family=<family>`. The workbench reads
+those filters from the hash (`_ctePendingFilters`) and preselects them once its
+options load. Families: identity reasons → `customer_identity`, unproven USD →
+`revenue_proof`, undated or conflicting won deals → `won_deal_membership`.
+Outages get no link. Non-admins see the status and reason, but no link. See
+`docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md` §5.
 
 **Company names are not shown.** Association ingestion stores ids only.

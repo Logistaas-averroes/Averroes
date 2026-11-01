@@ -71,6 +71,9 @@ CERTIFICATION_CONSUMERS = (
     # membership block (``window_summary_republishes_no_total``).
     "services/crm_truth_exceptions_service.py",
     "scripts/audit_crm_truth_exceptions.py",
+    # PR-ADS-161E — the reader-cutover audit reads the truth service to prove
+    # every reader republishes its verdicts; it publishes nothing.
+    "scripts/audit_customer_revenue_reader_cutover.py",
 )
 #: Python packages scanned for any consumer of the service.
 PRODUCTION_PACKAGES = ("api", "services", "scheduler", "scripts", "connectors",

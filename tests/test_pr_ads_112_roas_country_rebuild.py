@@ -133,11 +133,14 @@ def test_summary_is_canonical_mart_summary():
 
 
 def test_country_roas_uses_multiple_notation():
+    # PR-ADS-161E: the totals strip derives ROAS only over a complete revenue
+    # total (dashValue: null → Unavailable); rows go through the canonical
+    # adapter so a withheld ROAS names its reason.
     summary = _fn("function renderRoasCountrySummary", span=900)
-    assert "fmtRoasMultiple(s.roas)" in summary
+    assert "dashValue(s.roas, fmtRoasMultiple)" in summary
     assert "fmtRoas(s.roas)" not in summary
-    table = _fn("function renderRoasCountryTable", span=1600)
-    assert "fmtRoasMultiple(r.roas)" in table
+    table = _fn("function renderRoasCountryTable", span=3600)
+    assert 'rowMetricHtml(r, "roas", fmtRoasMultiple' in table
     assert "fmtRoas(r.roas)" not in table
 
 
@@ -146,7 +149,7 @@ def test_country_roas_uses_multiple_notation():
 
 def test_country_sort_is_business_value_first():
     fn = _fn("function sortRoasCountryRows", span=400)
-    order = ["customers", "won_revenue", "sqls", "spend"]
+    order = ["closed_won_deals", "won_revenue", "sqls", "spend"]   # PR-ADS-161E
     positions = [fn.find(k) for k in order]
     assert all(p != -1 for p in positions)
     assert positions == sorted(positions), "sort keys not in business-value order"

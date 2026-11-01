@@ -215,7 +215,7 @@ def test_db_campaign_rows():
     assert gulf["spend"] == 1000
     assert gulf["leads"] == 2
     assert gulf["sqls"] == 1
-    assert gulf["customers"] == 2
+    assert gulf["closed_won_deals"] == 2
     assert gulf["won_revenue"] == 15000
     assert gulf["roas"] == 15.0
     assert gulf["confidence"] == "high"   # gclid + campaign scope -> tier_1 dominant
@@ -238,7 +238,7 @@ def test_db_summary():
     assert s["spend"] == 9500
     assert s["leads"] == 4
     assert s["sqls"] == 3
-    assert s["customers"] == 3
+    assert s["closed_won_deals"] == 3
     assert s["won_revenue"] == 17000
 
 

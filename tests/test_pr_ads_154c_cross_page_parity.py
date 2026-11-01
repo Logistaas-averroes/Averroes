@@ -203,7 +203,8 @@ def _payloads(**overrides):
             "google_ads_conversion_value_used": False,
             "kpis": {"google_ads_spend_usd": 13000.0,
                      "closed_won_revenue_usd": 33000.0,
-                     "customers": 3, "sqls": 25, "leads": 105,
+                     "closed_won_deals": 3, "customers": 3,
+                     "sqls": 25, "leads": 105,
                      "lifecycle_leads": 105, "lifecycle_mqls": 60,
                      "lifecycle_sqls": 30, "lifecycle_opportunities": 8,
                      "lifecycle_customers": 4, "lifecycle_available": True},
@@ -215,6 +216,7 @@ def _payloads(**overrides):
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
                 ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"),
                 ("campaign_attributable_leads", _MART, "campaign_attributable_leads"),
@@ -223,9 +225,11 @@ def _payloads(**overrides):
         "dashboard/revenue": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
-            "kpis": {"closed_won_revenue_usd": 33000.0, "customers": 3, "sqls": 25},
+            "kpis": {"closed_won_revenue_usd": 33000.0, "closed_won_deals": 3,
+                     "customers": 3, "sqls": 25},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
                 ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
         "dashboard/channels": {
@@ -235,21 +239,26 @@ def _payloads(**overrides):
             # Channels renders the all-source totals from the source-group
             # taxonomy, so it names THAT canonical authority — and its SQL count
             # is a different population, registered under its own identity.
-            "kpis": {"closed_won_revenue_usd": 33000.0, "total_customers": 3,
-                     "total_sqls": 0},
+            # PR-ADS-161E: deals add up across channels; customers do not, so
+            # the page republishes the mart's canonical customer metric.
+            "kpis": {"closed_won_revenue_usd": 33000.0, "total_closed_won_deals": 3,
+                     "customers": 3, "total_sqls": 0},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("closed_won_revenue_usd", _BY_SOURCE, "all_source_business_revenue"),
-                ("customers", _BY_SOURCE, "all_source_business_revenue"),
+                ("closed_won_deals", _BY_SOURCE, "all_source_business_revenue"),
+                ("customers", _MART, "all_source_business_revenue"),
                 ("source_group_sqls", _BY_SOURCE, "source_group_sqls"))},
         "dashboard/campaigns": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_decision_mart_campaign_view",
             "legacy_fallback_used": False,
             "kpis": {"verified_spend_usd": 13000.0, "won_revenue_usd": 29000.0,
-                     "customers": 2, "sqls": 25},
+                     "closed_won_deals": 2, "customers": 2, "sqls": 25},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
                 ("campaign_attributed_won_revenue_usd", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_closed_won_deals", _MART,
                  "campaign_attributable_revenue"),
                 ("campaign_attributed_customers", _MART,
                  "campaign_attributable_revenue"),
@@ -264,14 +273,15 @@ def _payloads(**overrides):
             # PR-ADS-154C-F3: this page's SQL headline is the REAL-COUNTRY total.
             # 23 assigned + 2 residual = the mart's 25, which is the production
             # 14 + 2 = 16 shape at this fixture's scale.
-            "kpis": {"won_revenue_usd": 29000.0, "customers": 2,
+            "kpis": {"won_revenue_usd": 29000.0, "closed_won_deals": 2,
                      "verified_spend_usd": 13000.0, "sqls": 23,
                      "sqls_scope": "country_attributed_sqls", "sqls_residual": 2},
             "residual": {"sqls": 2},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("country_attributed_won_revenue_usd", _GEO,
                  "country_attributed_revenue"),
-                ("country_attributed_customers", _GEO, "country_attributed_revenue"),
+                ("country_attributed_closed_won_deals", _GEO,
+                 "country_attributed_revenue"),
                 ("country_attributed_spend_usd", _GEO, "country_attributed_spend"),
                 # PR-ADS-154C-F3-F1 §3: mart-origin, geo-partitioned.
                 ("country_attributed_sqls", _MART, "country_attributed_sqls"),
@@ -280,10 +290,11 @@ def _payloads(**overrides):
         "dashboard/deals": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
-            "kpis": {"closed_won_revenue_usd": 33000.0, "closed_won_customers": 3,
-                     "sqls": 25},
+            "kpis": {"closed_won_revenue_usd": 33000.0, "closed_won_deals": 3,
+                     "closed_won_customers": 3, "sqls": 25},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
                 ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
         "revenue_decision_mart": {
@@ -298,14 +309,19 @@ def _payloads(**overrides):
             # window, not a quarter with no leads, and is not proof of either.
             "readiness": {"lead_metrics_ready": True, "lead_metrics_status": "db"},
             "summary": {"spend_usd": 13000.0, "won_revenue_usd": 33000.0,
-                        "customers": 3, "revenue_available": True,
+                        "closed_won_deals": 3, "customers": 3,
+                        "revenue_available": True,
                         "attributed_won_revenue_usd": 29000.0,
+                        "attributed_closed_won_deals": 2,
                         "attributed_customers": 2, "sqls": 25, "leads": 105},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
                 ("campaign_attributed_won_revenue_usd", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_closed_won_deals", _MART,
                  "campaign_attributable_revenue"),
                 ("campaign_attributed_customers", _MART,
                  "campaign_attributable_revenue"),
@@ -531,7 +547,6 @@ LEGACY_READ_REGISTRY = {
     ("services/revenue_attribution_service.py", "fetch_campaign_pollution_report"): "diagnostic",
     ("services/revenue_attribution_service.py", "fetch_lead_date_grain_health"): "diagnostic",
     ("services/revenue_attribution_service.py", "fetch_lead_quality"): "detail_rows",
-    ("services/revenue_attribution_service.py", "revenue_integration_connected"): "readiness",
     ("services/source_attribution_service.py", "fetch_source_contact_details"): "detail_rows",
 }
 
@@ -1262,7 +1277,8 @@ def test_f2_4_country_revenue_is_not_ready_on_geo_coverage_alone(monkeypatch):
         revenue_decision_mart={"summary.revenue_available": False}))
     assert out["ok"] is False
 
-    for key in ("country_attributed_won_revenue_usd", "country_attributed_customers"):
+    for key in ("country_attributed_won_revenue_usd",
+                "country_attributed_closed_won_deals"):
         entry = next(m for m in out["metrics"] if m["metric"] == key)
         assert entry["status"] == "unproven", key
     spend = next(m for m in out["metrics"]
@@ -1434,7 +1450,9 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
     assert rc == 0
     assert payload["ok"] is True
     assert len(payload["uncertified_consumers"]) == 2
-    assert len(payload["results"][0]["metrics"]) == 18
+    # PR-ADS-161E: 20 — closed-won deals and customers are now separate
+    # identities (all-source and campaign-attributable).
+    assert len(payload["results"][0]["metrics"]) == 20
     assert all(c["certified"] for c in payload["results"][0]["consumer_certification"])
 
 

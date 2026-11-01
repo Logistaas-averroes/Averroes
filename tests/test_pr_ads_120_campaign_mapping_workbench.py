@@ -266,7 +266,10 @@ def test_leads_sqls_customers_surfaced(monkeypatch):
     _patch_review(monkeypatch, canonical=canonical, revenue=revenue, leads=leads)
     review = idsvc.build_mapping_review("current_quarter", now=_at("2026-06-29T12:00:00"))
     row = {r["external_campaign_label"]: r for r in review["rows"]}["mexico,chile"]
-    assert row["customers"] == 2          # distinct deals
+    # PR-ADS-161E: two distinct closed-won DEALS; customers (companies) are
+    # withheld here — no deal→company evidence is stored in this fixture.
+    assert row["closed_won_deals"] == 2
+    assert row["customers"] is None
     assert row["leads"] == 2 and row["sqls"] == 1
     assert review["leads_available"] is True
 
@@ -341,7 +344,6 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, identity=N
     monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-    monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
     monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",

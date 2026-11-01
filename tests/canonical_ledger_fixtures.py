@@ -194,7 +194,14 @@ def fake_closed_won_universe(rows, *, available=True, reason=None,
                 {"deal_id": r["deal_id"],
                  "deal_close_date": r.get("deal_close_date")}
                 for r in rows if r.get("hs_is_closed_won") is None],
-            "acquisition_contacts": [],
+            # The deal→contact association table, as the ledger rows record
+            # it: each won deal's primary contact (creation time not held).
+            "acquisition_contacts": [
+                {"deal_id": r["deal_id"],
+                 "contact_id": str(r["primary_contact_id"]),
+                 "contact_created_at": None, "funnel_row_present": False}
+                for r in rows if r.get("hs_is_closed_won") is True
+                and r.get("primary_contact_id") is not None],
             "sync_state": dict(state) if state else None,
             "company_associations": company_associations,
         }
@@ -240,6 +247,80 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
                                  sync_available=sync_available,
                                  company_associations=company_associations))
     return rows
+
+
+def company_evidence(rows, *, companies=None, scan_started_at=None) -> dict:
+    """Proven, current deal→company evidence for every won row (PR-ADS-161E).
+
+    A successful full association scan, started at ``scan_started_at``, that
+    certified exactly the won deals, each observed successfully. ``companies``
+    maps ``deal_id`` → company ids; by default each deal belongs to its own
+    company (``co-<deal_id>``). Pass the same company for two deals to model
+    one customer with two won deals.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    # Default: the scan started now, so it is current for any test clock up to
+    # the configured maximum age (a scan "in the future" of a fixed test clock
+    # is not older than the threshold).
+    scan_started_at = scan_started_at or datetime.now(timezone.utc).isoformat()
+    won = [r for r in rows or [] if r.get("hs_is_closed_won") is True]
+    companies = companies or {}
+    observations, paths = [], []
+    for r in won:
+        deal = str(r["deal_id"])
+        cos = [str(c) for c in companies.get(deal, [f"co-{deal}"])]
+        observations.append({
+            "deal_id": deal, "last_attempt_status": "success",
+            "last_attempt_started_at": scan_started_at,
+            "last_success_started_at": scan_started_at,
+            "last_success_at": scan_started_at,
+            "success_company_count": len(set(cos)),
+            "success_path_count": len(cos),
+            "success_zero_companies": not cos,
+            "deal_lastmodified_at": None})
+        paths += [{"deal_id": deal, "company_id": c} for c in cos]
+    ids = sorted(str(r["deal_id"]) for r in won)
+    return {"available": True, "paths": paths, "observations": observations,
+            "sync_state": {
+                "last_run_status": "success", "last_run_complete": True,
+                "last_full_run_status": "success",
+                "last_full_run_complete": True,
+                "last_complete_scan_started_at": scan_started_at,
+                "last_complete_scan_finished_at": scan_started_at,
+                "last_complete_scan_deal_ids": ids,
+                "last_complete_scan_population": len(ids)}}
+
+
+#: A ledger whose historical bootstrap never completed: readable, but its
+#: coverage is unproven, so the canonical truth publishes nothing from it.
+UNPROVEN_SYNC_STATE = {**READY_SYNC_STATE, "bootstrap_status": "running",
+                       "bootstrap_completed_at": None}
+
+
+def make_canonical_unavailable(monkeypatch):
+    """Make the canonical closed-won population unavailable for this window.
+
+    PR-ADS-161E: pages used to blank closed-won figures on the legacy
+    ``revenue_integration_connected()`` check (a ``gclid_attribution`` existence
+    test). That gate is gone; the state it stood for — "closed-won figures are
+    not publishable here" — is now the CANONICAL population being unavailable.
+    The ledger stays readable (rows are still served), but its coverage is
+    unproven, which is the realistic way production reaches that state. Call it
+    AFTER :func:`patch_canonical_ledger`.
+    """
+    import db.deal_ledger_repository as ledger_repo  # noqa: PLC0415
+
+    real_universe = ledger_repo.fetch_closed_won_universe
+
+    def _universe(*a, **k):
+        u = real_universe(*a, **k)
+        return ({**u, "sync_state": dict(UNPROVEN_SYNC_STATE)}
+                if u.get("available") else u)
+
+    monkeypatch.setattr(ledger_repo, "fetch_closed_won_universe", _universe)
+    monkeypatch.setattr(ledger_repo, "fetch_sync_state", lambda: {
+        "available": True, "row": dict(UNPROVEN_SYNC_STATE)})
 
 
 def capture_canonical_bounds(monkeypatch, sink, key=None):
@@ -309,4 +390,6 @@ def canonical_ledger_patch(rows=(), *, available=True, reason=None,
 
 __all__ = ["READY_SYNC_STATE", "DEFAULT_CLOSE_DATE", "ledger_row", "from_legacy_deal_rows",
            "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch",
-           "fake_closed_won_universe", "capture_canonical_bounds"]
+           "fake_closed_won_universe", "capture_canonical_bounds",
+           "UNPROVEN_SYNC_STATE", "make_canonical_unavailable",
+           "company_evidence"]

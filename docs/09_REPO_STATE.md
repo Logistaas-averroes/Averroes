@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-191 — CRM Truth Exceptions workbench (October 2026)
+**Last updated:** PR-ADS-161E — Production readers migrated to canonical customer and closed-won truth (November 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1442,3 +1442,74 @@ definition, no HubSpot or Google Ads call, no write.
 step and did-run list.
 
 Doctrine: `docs/47_CRM_TRUTH_EXCEPTIONS.md`.
+
+---
+
+## PR-ADS-161E — Production readers migrated to canonical customer and closed-won truth (November 2026)
+
+**Why.** PR-ADS-161D/161D2 built one certified definition of closed-won deals,
+customers and revenue, and PR-ADS-191 named the deals that block it. No
+production page read it. Pages still called won deals "customers", divided CAC
+by won deals, and gated canonical revenue on a legacy table's existence
+(`revenue_integration_connected()` over `gclid_attribution`). They also mixed
+two cohorts in `sql_to_customer_rate`. All Time dropped undated won deals and
+admitted closes later today.
+
+**Built.**
+* Reader contract in `services/canonical_revenue_service.py`:
+  * `load_won_deals` is now a reader of
+    `canonical_customer_revenue_service.window_view`. It releases the
+    population only when the canonical deal count publishes, and carries the
+    canonical verdicts.
+  * `subset_metrics` / `reader_row` produce a row's deals, customers, revenue,
+    ROAS and CAC through `analysis.closed_won_truth.subset_outcomes`,
+    `derive_roas` and `derive_cac`.
+  * `one_snapshot` / `single_snapshot` give each page one READ ONLY universe.
+* Migrated:
+  * the Revenue Decision Mart, revenue attribution (ROAS by Campaign / Country),
+    Revenue by Source, campaign mapping review and Unit Economics;
+  * all six dashboard tabs and cross-page parity.
+  * Every one now publishes `closed_won_deals` and canonical `customers` as
+    two metrics, each with status and reason.
+* Removed: `db/revenue_repository.revenue_integration_connected()`. Readiness
+  reads `canonical_revenue_available` and `canonical_revenue_status`.
+* Retired:
+  * `sql_to_customer_rate`, `revenue_per_sql` and `lead_to_customer_rate` are
+    unavailable, with the reason (two cohorts).
+  * The Deals tab reads won-deal contacts from the canonical snapshot, not
+    `gclid_attribution.has_closed_won_deal`.
+* Withheld legacy routes: `/api/reports/roas/campaigns|countries`,
+  `/api/reports/roas/snapshots*`, and the GCLID readiness won-deal count
+  (`legacy_local_revenue_not_canonical`).
+* UI (`static/app.js`):
+  * `canonicalMetricHtml` / `rowMetricHtml` render the value, `0`,
+    "Withheld" + reason, or "Unavailable" + reason, never a dash;
+  * admin-only **View blockers** deep-links into the CRM Truth Exceptions
+    workbench with the window and family preselected;
+  * channel, campaign and country charts count won deals; customers are never
+    summed across rows.
+* Placement gate: per-campaign deals, revenue, customers, ROAS and CAC are
+  withheld while any Google Ads won deal in the window has no campaign
+  (`google_ads_deals_not_placed_on_a_campaign`).
+* Country residual: the Google Ads-source canonical total minus the country
+  rows. It used to subtract from the all-source total, which put non-Google
+  deals in the "no country" bucket.
+* Found by the new audit: the Mart's revenue metric carried the legacy reason
+  code. In a window withheld for an undated deal, it also said "unavailable"
+  where the canonical verdict is "withheld". It now republishes the canonical
+  status and reason whenever either side withholds.
+* `scripts/audit_customer_revenue_reader_cutover.py` — 17 checks, exit 0/1/2;
+  CRM findings alone never fail it. `INVENTORY` is the reader matrix.
+
+**Not changed.** The won predicate, customer identity, revenue proof, window
+definitions and every publication gate are unchanged. No HubSpot or Google
+Ads call, no write. Marketing SQLs stay on the acquisition cohort.
+
+**Deferred** (docs/48 §7): `/api/attribution/confidence-summary` (tier counts
+only), `/api/audit/revenue-truth` (admin shadow diagnostic), and the daily
+local ROAS snapshot job (its routes withhold).
+
+**Suite.** `tests/test_pr_ads_161e_reader_cutover.py`, in CI's PostgreSQL step
+and did-run list, with a counterfactual on base `028effc`.
+
+Doctrine: `docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.
