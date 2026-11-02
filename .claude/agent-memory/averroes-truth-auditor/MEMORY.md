@@ -487,3 +487,34 @@ Recurring patterns (durable):
   test_130::test_frontend_has_expandable_campaign_row — fixed-span source slices
   (3000/3400 chars) that renderRoasCampaignTable outgrew (markers at 3044/3387).
   Lesson: tar snapshots (no .git) make test_123:140 skip and 161E test_26 fail.
+
+## PR-ADS-161E decision-1 rename review (uncommitted diff on 64b2ce3, 2026-11-02)
+- CORRECTION of the first-review note above: `derive_roas`/`derive_cac` are
+  gone. Contract now: `cwt.derive_period_revenue_per_ad_spend` /
+  `derive_period_spend_per_customer_won` (metadata ratio_kind +
+  cohort_basis + disclosure); `cwt.certified_roas()/certified_cac()` are
+  UNCONDITIONALLY unavailable. `reader_row` emits `roas`/`cac` None. Window
+  verdict marks roas/cac `not_published` (a different status word).
+- Dashboards (campaigns/countries/channels) still compute their OWN raw-float
+  ratio (`_period_ratio`, `_google_period_ratio`; won<=0 -> None, unlike the
+  contract's published 0.0) — no ratio_kind/disclosure metadata, so audit
+  check 18's disclosure leg never applies to them.
+- Audit check 18 (`no_period_ratio_named_roas_or_cac`) is LEXICAL. Verified
+  misses (executed): nested dict under a roas key without status=published
+  (`period_change.metrics.roas.current` — the exact 64b2ce3 overview/campaigns
+  /countries shape); string figures; camelCase / synonym keys; ANY API-provided
+  text the UI renders (mart `diagnostics` "Only the Google Ads source carries
+  spend/ROAS", "Country ROAS is shown with ... residual"; GEO_GAP_MESSAGES
+  "Geo ROAS is withheld"); UI lines are exempted WHOLESALE if they contain
+  `LTV/CAC` or `const CERTIFIED_RATIO_LABELS =`; lowercase "Roas"; a period
+  ratio rendered under `CERTIFIED_RATIO_LABELS.roas`; `(^|\s)//` comment
+  stripper eats string text. Page walk = 10 builders (no mart country/source
+  view, no detail endpoints).
+- Kept booleans named roas: `campaign_roas_available`, `country_roas_available`,
+  `country_roas_unblockable`, AND `spend_truth.roas_available` (unit economics,
+  revenue-by-source) + analysis/source_classification `roas_available` — the
+  last two are not in the docs' "kept on purpose" list.
+- Real-code counterfactual technique that worked: `git archive <rev> | tar -x`
+  into scratch, copy the CURRENT audit script in, run its checks over the old
+  revision's page builders with that revision's own fixtures (t138
+  `_patch_durable` + t137 keyword/search patches build every page).
