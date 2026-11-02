@@ -1315,3 +1315,66 @@ def test_45_api_text_never_calls_the_period_ratio_roas(monkeypatch):
                             "other source group is revenue-only (ROAS unavailable, "
                             "never $0).")
     assert audit.ratio_name_violations(old)
+
+
+# ── PR review round 2 (Copilot) ───────────────────────────────────────────────
+
+def test_46_unit_economics_keeps_the_withheld_verdict_when_no_population_is_released(
+        monkeypatch):
+    """A window withheld for an undated won deal used to return
+    ``business: None`` / ``advertising: None``, so every KPI read a bare
+    "Unavailable" with no reason and no View blockers link."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    t137._patch_durable(monkeypatch)
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services import canonical_unit_economics_service as ue
+    withheld = {"available": False, "status": cwt.WITHHELD,
+                "reason": cwt.R_UNDATED_WON_DEALS}
+    monkeypatch.setattr(ue.canonical_revenue, "load_won_deals",
+                        lambda *a, **k: dict(withheld))
+    page = ue.build_unit_economics("ytd", scope="campaign_attributable", now=t137.NOW)
+    assert page["revenue_available"] is False
+    for block in ("business", "advertising"):
+        m = page[block]["metrics"]
+        for key in ("closed_won_deals", "customers", "revenue_usd"):
+            assert m[key] == {"value": None, "status": cwt.WITHHELD,
+                              "reason": cwt.R_UNDATED_WON_DEALS}, (block, key)
+            assert page[block][key if key != "revenue_usd" else "revenue_usd"] is None
+    adv = page["advertising"]["metrics"]
+    for key in cwt.PERIOD_RATIO_KEYS:
+        assert adv[key]["status"] == cwt.WITHHELD and adv[key]["value"] is None
+    assert adv["cac"]["status"] == cwt.UNAVAILABLE
+    assert audit.ratio_name_violations(page) == []
+    # The UI renders the canonical word and reason, not a bare "Unavailable".
+    payload = json.loads(json.dumps(page["business"]))
+    out = _node({"customers": ["rowMetricHtml", [payload, "customers", "__fmt"]]},
+                role="admin")
+    assert "Withheld" in out["customers"] and "no close date" in out["customers"]
+    assert "View blockers" in out["customers"]
+
+
+def test_47_parity_classifies_every_canonical_customer_identity_refusal():
+    """Customers withheld for a customer-identity reason were reported as
+    ``canonical_source_unavailable`` ("none of which the audit can classify")."""
+    from services import cross_page_parity_service as cpp
+    expect = {
+        cwt.R_CUSTOMER_IDENTITY: cpp.V_CUSTOMER_IDENTITY_UNRESOLVED,
+        cwt.R_CUSTOMER_IDENTITY_STALE: cpp.V_CUSTOMER_ASSOCIATION_COVERAGE,
+        cwt.R_CUSTOMER_IDENTITY_UNAVAILABLE: cpp.V_CUSTOMER_ASSOCIATION_COVERAGE,
+        cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT: cpp.V_CUSTOMER_ASSOCIATION_COVERAGE,
+        cwt.R_CUSTOMER_IDENTITY_NOT_INGESTED: cpp.V_CUSTOMER_ASSOCIATION_COVERAGE,
+        cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE: cpp.V_DB_UNREADABLE,
+    }
+    for reason, code in expect.items():
+        readings = [{"consumer": c, "unavailable_reason": reason}
+                    for c in ("revenue_decision_mart", "dashboard_overview")]
+        _, got, detail = cpp._classify_unavailable(readings, "customers")
+        assert got == code, (reason, got, detail)
+        assert "none of which the audit can classify" not in detail
+    # Every customer-identity reason the canonical module defines is registered.
+    identity = {v for k, v in vars(cwt).items()
+                if k.startswith(("R_CUSTOMER_IDENTITY", "R_COMPANY_ASSOCIATIONS"))}
+    assert identity <= set(cpp._UNAVAILABLE_CLASSES), identity - set(cpp._UNAVAILABLE_CLASSES)

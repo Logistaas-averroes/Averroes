@@ -130,6 +130,31 @@ def build_unit_economics(window: str = "current_quarter",
     spend_usd = spend_truth.get("usd_spend")
 
     if not base.get("available"):
+        # PR-ADS-161E: the population is not released (an undated or
+        # conflicting won deal, unproven coverage, an outage), but the page
+        # still republishes the canonical verdicts — "Withheld" with the reason
+        # (and the admin View blockers link), never a bare "Unavailable".
+        spend_reason = (None if spend_usd is not None else
+                        f"google_ads_usd_spend_{spend_truth.get('state') or 'unavailable'}")
+        business_canon = canonical_revenue.reader_row(base, [])
+        advertising_canon = canonical_revenue.reader_row(
+            base, [], spend_usd=spend_usd, spend_reason=spend_reason,
+            period_ratio_scope_ok=scope in (revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+                                            revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE))
+        withheld_block = lambda canon, label_scope: {  # noqa: E731
+            "scope": label_scope,
+            "scope_label": revenue_scope.SCOPE_LABELS[label_scope],
+            "closed_won_deals": None, "customers": None, "revenue_usd": None,
+            "avg_deal_value_usd": None, "metrics": canon["metrics"]}
+        advertising_unavailable = {
+            **withheld_block(advertising_canon, scope),
+            "spend_usd": spend_usd,
+            "spend_state": spend_truth.get("state"),
+            "period_revenue_per_ad_spend": None,
+            "period_spend_per_customer_won": None,
+            "cac": None, "roas": None,
+            "ltv_to_cac": None, "payback_months": None, "avg_deal_mrr": None,
+        }
         return {
             "window": resolved,
             "generated_at": generated_at,
@@ -140,8 +165,9 @@ def build_unit_economics(window: str = "current_quarter",
             "revenue_unavailable_reason": base.get("reason"),
             "revenue_violation_codes": base.get("violation_codes") or [],
             "as_of": base.get("as_of"),
-            "business": None,
-            "advertising": None,
+            "business": withheld_block(business_canon,
+                                       revenue_scope.SCOPE_ALL_SOURCE),
+            "advertising": advertising_unavailable,
             "by_campaign": [],
             "spend_truth": spend_truth,
             "unavailable": _unavailable_metrics() + [{

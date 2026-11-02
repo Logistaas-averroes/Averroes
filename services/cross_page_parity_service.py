@@ -111,6 +111,13 @@ V_POPULATION_UNAVAILABLE = "revenue_population_unavailable"
 V_TOTAL_UNPUBLISHABLE = "revenue_total_unpublishable_missing_amount"
 #: The lifecycle funnel is readable but stage-entry evidence is incomplete.
 V_LIFECYCLE_PARTIAL = "lifecycle_coverage_partial"
+#: PR-ADS-161E. The deal population is available; the CUSTOMER total is unknown
+#: because a won deal in it has no company, or several — a CRM record to fix,
+#: named by the CRM Truth Exceptions workbench.
+V_CUSTOMER_IDENTITY_UNRESOLVED = "customer_total_unpublishable_identity_unresolved"
+#: PR-ADS-161E. The company-association evidence is missing, stale, or its full
+#: scan is not current — the association sync must run, no CRM record is wrong.
+V_CUSTOMER_ASSOCIATION_COVERAGE = "customer_association_coverage_unproven"
 
 #: Canonical unavailable-reasons → the class of problem they represent. The keys
 #: are `canonical_revenue_service`'s own constants, so a reason renamed there
@@ -156,6 +163,32 @@ _UNAVAILABLE_CLASSES = {
     cwt.R_DEALS_WITHHELD:
         ("population_unavailable", V_POPULATION_UNAVAILABLE,
          "the closed-won deal count is withheld for this window"),
+    # PR-ADS-161E: the canonical customer-identity refusals. Each names who
+    # fixes it — a CRM record, the association sync, or an engineer.
+    cwt.R_CUSTOMER_IDENTITY:
+        ("customer_identity_unresolved", V_CUSTOMER_IDENTITY_UNRESOLVED,
+         "a won deal in this window has no HubSpot company, or several, so the "
+         "distinct-company total is unknown — resolved in HubSpot; the CRM Truth "
+         "Exceptions workbench names the deal"),
+    cwt.R_CUSTOMER_IDENTITY_STALE:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "a won deal's company evidence is stale — the association sync must "
+         "re-observe it"),
+    cwt.R_CUSTOMER_IDENTITY_UNAVAILABLE:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "a won deal's company was never successfully observed — the "
+         "association sync must observe it"),
+    cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "the latest full company-association scan is not current for the won "
+         "set — the association scan must run"),
+    cwt.R_CUSTOMER_IDENTITY_NOT_INGESTED:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "company associations have not been ingested — the association sync "
+         "must run"),
+    cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE:
+        ("database_unreadable", V_DB_UNREADABLE,
+         "the company-association tables could not be read"),
 }
 
 

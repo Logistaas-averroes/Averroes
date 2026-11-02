@@ -1575,6 +1575,16 @@ directed by the owner in review:**
   Customer Won This Period unavailable, never "$0", and the dead
   `compute_roas` / `compute_cac` helpers are deleted.
   docs/46's 161D line ("neither") stands: no ROAS or CAC is published.
+* **PR review round 2 (Copilot, on `4f0f199`).** Two findings, both fixed:
+  * Unit Economics now republishes the canonical verdicts when the window
+    releases no population. It used to return `business`/`advertising: null`,
+    so the KPIs read a bare "Unavailable" with no reason and no View blockers.
+  * Cross-page parity now classifies every canonical customer-identity reason.
+    It used to report them as the catch-all `canonical_source_unavailable`. A
+    CRM finding is `customer_total_unpublishable_identity_unresolved`. Stale,
+    unobserved, unscanned or uningested evidence is
+    `customer_association_coverage_unproven`.
+  * Tests 46–47 cover both; each fails without its fix.
 * **Decision 2 (approved).** Per-campaign figures follow the canonical
   placement verdict. Account and scope totals stay independent when their own
   evidence is complete. A withheld campaign count is never zero, "waste" or
