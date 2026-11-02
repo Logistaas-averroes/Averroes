@@ -7,7 +7,7 @@ closed-won truth.
 §1  customers are distinct proven companies (PG: real ledger writer, real
     association sync, real reader contract and Revenue Decision Mart)
 §2  revenue, customers and deals withhold independently
-§3  derived metrics: ROAS, CAC, SQL-to-customer
+§3  derived metrics: the period ratios (never ROAS / CAC), SQL-to-customer
 §4  the won predicate, won/stage conflicts, undated and future-dated deals,
     Europe/London evidence windows through DST
 §5  the UI adapters, evaluated in node: 0, Withheld, Unavailable, View blockers
@@ -20,6 +20,7 @@ No production total is hardcoded: every number comes from the fixtures here.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -265,32 +266,47 @@ def _base(*, revenue=cwt.PUBLISHED, customers=cwt.PUBLISHED, companies=None):
             "company_ids_by_deal": companies or {"1": ["901"], "2": ["901"]}}
 
 
-def test_11_roas_is_withheld_when_revenue_is_withheld():
+def test_11_period_revenue_per_ad_spend_is_withheld_when_revenue_is_withheld():
+    P = cwt.PERIOD_REVENUE_PER_AD_SPEND
     base = _base(revenue=cwt.WITHHELD)
     row = crs.reader_row(base, base["deals"], spend_usd=500.0)
-    assert row["roas"] is None
-    assert row["metrics"]["roas"]["status"] == cwt.WITHHELD
-    assert row["metrics"]["roas"]["blocked_by"]["reason"] == cwt.R_REVENUE_UNPROVEN
+    assert row[P] is None
+    assert row["metrics"][P]["status"] == cwt.WITHHELD
+    assert row["metrics"][P]["blocked_by"]["reason"] == cwt.R_REVENUE_UNPROVEN
     ok = crs.reader_row(_base(), _base()["deals"], spend_usd=500.0)
-    assert ok["roas"] == 2.0
-    assert ok["metrics"]["roas"]["cohort_basis"] == cwt.PERIOD_COHORT_BASIS
+    assert ok[P] == 2.0
+    assert ok["metrics"][P]["cohort_basis"] == cwt.PERIOD_COHORT_BASIS
+    assert ok["metrics"][P]["ratio_kind"] == cwt.RATIO_KIND_OPERATIONAL
+    assert "Closed-won outcomes may originate from earlier advertising periods" \
+        in ok["metrics"][P]["disclosure"]
+    # Decision 1: the same published inputs never make a ROAS. Attribution
+    # ROAS is unavailable until revenue and spend share one acquisition cohort.
+    assert ok["roas"] is None
+    assert ok["metrics"]["roas"] == {"value": None, "status": cwt.UNAVAILABLE,
+                                     "reason": cwt.R_ROAS_NOT_CERTIFIED}
     # Spend unknown: unavailable, with the spend reason — never 0.
     no_spend = crs.reader_row(_base(), _base()["deals"], spend_usd=None,
                               spend_reason=cwt.R_SPEND_UNAVAILABLE)
-    assert (no_spend["roas"], no_spend["metrics"]["roas"]["reason"]) == \
+    assert (no_spend[P], no_spend["metrics"][P]["reason"]) == \
         (None, cwt.R_SPEND_UNAVAILABLE)
 
 
-def test_12_cac_divides_by_canonical_customers_never_won_deals():
+def test_12_spend_per_customer_won_divides_by_canonical_customers_never_won_deals():
+    P = cwt.PERIOD_SPEND_PER_CUSTOMER_WON
     base = _base()                        # two deals, one company
     row = crs.reader_row(base, base["deals"], spend_usd=500.0)
     assert (row["closed_won_deals"], row["customers"]) == (2, 1)
-    assert row["cac"] == 500.0            # not 250.0 (spend ÷ deals)
+    assert row[P] == 500.0                # not 250.0 (spend ÷ deals)
+    assert row["metrics"][P]["ratio_kind"] == cwt.RATIO_KIND_OPERATIONAL
+    # Decision 1: CAC is unavailable — spend and customers are not one cohort.
+    assert row["cac"] is None
+    assert row["metrics"]["cac"] == {"value": None, "status": cwt.UNAVAILABLE,
+                                     "reason": cwt.R_CAC_NOT_CERTIFIED}
     held = _base(customers=cwt.WITHHELD)
     row = crs.reader_row(held, held["deals"], spend_usd=500.0)
-    assert row["cac"] is None
-    assert row["metrics"]["cac"]["status"] == cwt.WITHHELD
-    assert row["metrics"]["cac"]["blocked_by"]["reason"] == cwt.R_CUSTOMER_IDENTITY
+    assert row[P] is None
+    assert row["metrics"][P]["status"] == cwt.WITHHELD
+    assert row["metrics"][P]["blocked_by"]["reason"] == cwt.R_CUSTOMER_IDENTITY
 
 
 def test_13_sql_to_customer_rate_is_unavailable_across_two_cohorts():
@@ -413,7 +429,10 @@ def test_18_europe_london_evidence_windows_hold_through_dst(monkeypatch):
 _JS_PIECES = ("escapeHtml", "dashValue", "canonicalReasonLabel",
               "crmBlockerFamily", "crmBlockersHref", "canonicalBlockingReason",
               "canonicalMetricHtml", "rowMetricHtml", "_ctePendingFilters")
-_JS_CONSTS = ("CANONICAL_REASON_LABELS", "CRM_BLOCKER_FAMILY", "ROW_METRIC_KEYS")
+_JS_CONSTS = ("CANONICAL_REASON_LABELS", "CRM_BLOCKER_FAMILY", "ROW_METRIC_KEYS",
+              "CANONICAL_BASIS_LABELS")
+#: String constants, extracted up to their terminating ``";``.
+_JS_STRING_CONSTS = ("PERIOD_RATIO_DISCLOSURE",)
 
 
 def _js_extract(source: str, head: str) -> str:
@@ -434,7 +453,9 @@ def _node(calls: dict, *, role=None, hash_="") -> dict:
     node = shutil.which("node")
     assert node, "node is a CI dependency (node --check static/app.js)"
     src = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
-    parts = [_js_extract(src, f"const {c} = ") for c in _JS_CONSTS]
+    parts = [re.search(rf"const {c} =[\s\S]*?\";", src).group(0)
+             for c in _JS_STRING_CONSTS]
+    parts += [_js_extract(src, f"const {c} = ") for c in _JS_CONSTS]
     parts += [_js_extract(src, f"function {f}(") for f in _JS_PIECES]
     user = "null" if role is None else json.dumps({"role": role})
     script = (f"let _currentUser = {user};\n"
@@ -491,14 +512,18 @@ def test_19_api_output_and_ui_adapters_preserve_status_and_reason():
     base = _base(customers=cwt.WITHHELD)
     row = crs.reader_row(base, base["deals"], spend_usd=500.0)
     payload = json.loads(json.dumps(row))          # what the API serializes
-    for m in ("customers", "cac"):
+    P = cwt.PERIOD_SPEND_PER_CUSTOMER_WON
+    for m in ("customers", P):
         assert payload["metrics"][m]["status"] == cwt.WITHHELD
     assert payload["metrics"]["customers"]["reason"] == cwt.R_CUSTOMER_IDENTITY
     out = _node({"customers": ["rowMetricHtml", [payload, "customers", "__fmt"]],
+                 "per_customer": ["rowMetricHtml", [payload, P, "__fmt"]],
                  "cac": ["rowMetricHtml", [payload, "cac", "__fmt"]]})
     assert "Withheld" in out["customers"] and "no company, or several" in out["customers"]
-    # CAC names the input that blocked it, not a generic word.
-    assert "Withheld" in out["cac"] and "no company, or several" in out["cac"]
+    # The period ratio names the input that blocked it, not a generic word.
+    assert "Withheld" in out["per_customer"] and "no company, or several" in out["per_customer"]
+    # Certified CAC reads Unavailable with its cohort reason, whatever the inputs.
+    assert "Unavailable" in out["cac"] and "one acquisition cohort" in out["cac"]
 
 
 def test_20_admin_view_blockers_select_the_family_and_window():
@@ -817,7 +842,8 @@ def test_29_per_campaign_placement_is_the_canonical_verdict(monkeypatch):
     assert ra["closed_won_truth"]["campaign_placement_gate"]["reason"] == \
         cwt.R_CAMPAIGN_UNPLACED
     gc = next(c for c in ra["campaigns"] if c["campaign_name"] == "Global Competitors")
-    assert gc["won_revenue"] is None and gc["roas"] is None
+    assert gc["won_revenue"] is None and gc[cwt.PERIOD_REVENUE_PER_AD_SPEND] is None
+    assert gc["roas"] is None
     assert gc["verdict"] != "winner"
     # Control: the same label mapped → placed → published.
     patch_canonical_ledger(monkeypatch, rows,
@@ -854,7 +880,7 @@ def test_30_a_negative_amount_is_never_netted_into_any_total(monkeypatch):
     assert crs.summarize_deals(rows, "all_source")["currency_unavailable_deals"] == 1
 
 
-def test_31_roas_and_cac_need_a_scope_google_ads_spend_can_have_produced(
+def test_31_period_ratios_need_a_scope_google_ads_spend_can_have_produced(
         monkeypatch):
     from tests import test_pr_ads_137_dashboard_campaigns as t137
     t137._patch_durable(monkeypatch)
@@ -864,13 +890,21 @@ def test_31_roas_and_cac_need_a_scope_google_ads_spend_can_have_produced(
                            company_associations=company_evidence(rows))
     from services.canonical_unit_economics_service import build_unit_economics
     allsrc = build_unit_economics("ytd", scope="all_source", now=t137.NOW)["advertising"]
-    for m in ("roas", "cac"):
+    for m in cwt.PERIOD_RATIO_KEYS:
         assert allsrc[m] is None
         assert allsrc["metrics"][m]["reason"] == cwt.R_SCOPE_INCOMPATIBLE
     camp = build_unit_economics("ytd", scope="campaign_attributable",
                                 now=t137.NOW)["advertising"]
-    assert camp["metrics"]["roas"]["status"] == cwt.PUBLISHED
-    assert camp["metrics"]["roas"]["cohort_basis"] == cwt.PERIOD_COHORT_BASIS
+    P = cwt.PERIOD_REVENUE_PER_AD_SPEND
+    assert camp["metrics"][P]["status"] == cwt.PUBLISHED
+    assert camp["metrics"][P]["cohort_basis"] == cwt.PERIOD_COHORT_BASIS
+    # Even at a compatible scope, certified ROAS / CAC stay unavailable.
+    for page in (allsrc, camp):
+        for m, reason in (("roas", cwt.R_ROAS_NOT_CERTIFIED),
+                          ("cac", cwt.R_CAC_NOT_CERTIFIED)):
+            assert page[m] is None
+            assert page["metrics"][m]["status"] == cwt.UNAVAILABLE
+            assert page["metrics"][m]["reason"] == reason
 
 
 def test_32_legacy_outcome_payloads_withhold_every_recoverable_figure():
@@ -990,23 +1024,29 @@ def test_35_a_withheld_source_revenue_keeps_its_groups_and_says_why(monkeypatch)
     assert "windowDeals.status !== \"published\"" in panel
 
 
-def test_36_roas_available_is_said_only_when_canonical_roas_publishes(
+def test_36_period_ratio_available_is_said_only_when_the_period_ratio_publishes(
         monkeypatch):
     from services import source_attribution_service as sas
-    withheld = {"metrics": {"roas": cwt.metric(None, cwt.WITHHELD,
-                                               cwt.R_REVENUE_WITHHELD)}}
-    status, label, reason = sas._roas_publication(
-        withheld, "available", sas.STATUS_ROAS_AVAILABLE)
-    assert (status, label, reason) == (cwt.WITHHELD, sas.STATUS_ROAS_WITHHELD,
+    P = cwt.PERIOD_REVENUE_PER_AD_SPEND
+    withheld = {"metrics": {P: cwt.metric(None, cwt.WITHHELD,
+                                          cwt.R_REVENUE_WITHHELD)}}
+    status, label, reason = sas._period_ratio_publication(
+        withheld, "available", sas.STATUS_PERIOD_RATIO_AVAILABLE)
+    assert (status, label, reason) == (cwt.WITHHELD, sas.STATUS_PERIOD_RATIO_WITHHELD,
                                        cwt.R_REVENUE_WITHHELD)
-    published = {"metrics": {"roas": cwt.metric(2.0, cwt.PUBLISHED)}}
-    assert sas._roas_publication(published, "available",
-                                 sas.STATUS_ROAS_AVAILABLE)[1] == sas.STATUS_ROAS_AVAILABLE
+    published = {"metrics": {P: cwt.metric(2.0, cwt.PUBLISHED)}}
+    assert sas._period_ratio_publication(
+        published, "available",
+        sas.STATUS_PERIOD_RATIO_AVAILABLE)[1] == sas.STATUS_PERIOD_RATIO_AVAILABLE
     # Spend not ready keeps its own honest label (FX withheld, coverage …).
-    assert sas._roas_publication(withheld, "unavailable_fx",
-                                 sas.STATUS_FX_WITHHELD)[1] == sas.STATUS_FX_WITHHELD
+    assert sas._period_ratio_publication(withheld, "unavailable_fx",
+                                         sas.STATUS_FX_WITHHELD)[1] == sas.STATUS_FX_WITHHELD
+    # No status label calls the ratio ROAS.
+    for label in (sas.STATUS_PERIOD_RATIO_AVAILABLE, sas.STATUS_PERIOD_RATIO_WITHHELD,
+                  sas.STATUS_FX_WITHHELD):
+        assert "ROAS" not in label
     # End to end: an unpriced deal anywhere withholds the window's revenue, so
-    # the Google Ads group's ROAS is withheld and never labelled available.
+    # the Google Ads group's ratio is withheld and never labelled available.
     from tests import test_pr_ads_135_dashboard_revenue as t135
     from tests.canonical_ledger_fixtures import from_legacy_deal_rows
     deals = [dict(d) for d in t135.DEAL_ROWS[:3]] + [
@@ -1017,12 +1057,13 @@ def test_36_roas_available_is_said_only_when_canonical_roas_publishes(
                            company_associations=company_evidence(rows))
     out = sas.build_revenue_by_source("ytd", now=t135.NOW)
     for g in out["groups"]:
-        if g.get("roas") is None:
-            assert g.get("spend_status_label") != sas.STATUS_ROAS_AVAILABLE, g["group"]
+        assert g.get("roas") is None
+        if g.get(P) is None:
+            assert g.get("spend_status_label") != sas.STATUS_PERIOD_RATIO_AVAILABLE, g["group"]
         for ch in g.get("channels") or []:
             for pf in ch.get("platforms") or []:
-                if pf.get("roas") is None:
-                    assert pf.get("status") != sas.STATUS_ROAS_AVAILABLE, pf
+                if pf.get(P) is None:
+                    assert pf.get("status") != sas.STATUS_PERIOD_RATIO_AVAILABLE, pf
 
 
 @_needs_pg
@@ -1045,3 +1086,232 @@ def test_37_the_audit_goes_red_on_a_per_campaign_figure_under_the_placement_gate
     assert report["exit_code"] == audit.EXIT_VIOLATION
     assert any("dashboard_revenue" in v and "per-campaign placement" in v
                for v in report["violations"]), report["violations"]
+
+
+# ── PR-ADS-161E decision 1: a close-date ratio is never ROAS or CAC ──────────
+
+def _old_naming(row: dict) -> dict:
+    """The reader row as it was published at 64b2ce3: the close-date ratios
+    under ``roas`` / ``cac``, in the value and in ``metrics``."""
+    out = dict(row, roas=row[cwt.PERIOD_REVENUE_PER_AD_SPEND],
+               cac=row[cwt.PERIOD_SPEND_PER_CUSTOMER_WON])
+    out["metrics"] = dict(row["metrics"],
+                          roas=row["metrics"][cwt.PERIOD_REVENUE_PER_AD_SPEND],
+                          cac=row["metrics"][cwt.PERIOD_SPEND_PER_CUSTOMER_WON])
+    for k in cwt.PERIOD_RATIO_KEYS:
+        out.pop(k)
+        out["metrics"].pop(k)
+    return out
+
+
+def test_38_the_audit_fails_a_close_date_ratio_published_as_roas_or_cac():
+    """Counterfactual: the previous naming — the same published ratio under
+    ``roas`` / ``cac`` — fails check 18; the current naming holds."""
+    row = crs.reader_row(_base(), _base()["deals"], spend_usd=500.0)
+    assert audit.ratio_name_violations(row) == []
+    old = audit.ratio_name_violations(_old_naming(row))
+    assert any(v.endswith(".roas=2.0") for v in old), old
+    assert any(v.endswith(".cac=500.0") for v in old), old
+    assert any("metrics.roas" in v for v in old), old
+    assert any("named 'roas'" in v for v in old) and any("named 'cac'" in v for v in old)
+    # Any ROAS-named key carrying a figure is caught, at any depth.
+    for key in ("roas", "geo_roas", "google_ads_roas", "cac", "roas_value"):
+        assert audit.ratio_name_violations({"rows": [{key: 1.5}]}), key
+    # A readiness boolean and a null are not figures.
+    assert audit.ratio_name_violations(
+        {"country_roas_unblockable": True, "roas": None, "ltv_to_cac": None}) == []
+    # A period ratio stripped of its disclosure is caught under its own name.
+    bare = {"period_revenue_per_ad_spend": {
+        "value": 2.0, "status": "published", "cohort_basis": cwt.PERIOD_COHORT_BASIS}}
+    assert audit.ratio_name_violations({"metrics": bare})
+
+
+def _old_naming_payload(value):
+    """A whole page payload in the 64b2ce3 shape: every period ratio, value or
+    metric, renamed back to ``roas`` / ``cac``."""
+    names = {cwt.PERIOD_REVENUE_PER_AD_SPEND: "roas",
+             cwt.PERIOD_SPEND_PER_CUSTOMER_WON: "cac"}
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k in ("roas", "cac") and any(n in value for n in names):
+                continue
+            out[names.get(k, k)] = _old_naming_payload(v)
+        return out
+    if isinstance(value, list):
+        return [_old_naming_payload(v) for v in value]
+    return value
+
+
+def test_39_the_audit_goes_red_when_a_page_publishes_the_old_names(monkeypatch):
+    """End to end through a real page builder: the audit's page walk holds on
+    the page as built, and fails the same page under the old names."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    t137._patch_durable(monkeypatch)
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services.canonical_unit_economics_service import build_unit_economics
+    page = build_unit_economics("ytd", scope="campaign_attributable", now=t137.NOW)
+    assert page["advertising"][cwt.PERIOD_REVENUE_PER_AD_SPEND] is not None
+    a = audit.Audit()
+    audit._ratio_name_check(a, "ytd unit_economics", page)
+    assert a.checks["no_period_ratio_named_roas_or_cac"], a.violations
+    a = audit.Audit()
+    audit._ratio_name_check(a, "ytd unit_economics", _old_naming_payload(page))
+    assert not a.checks["no_period_ratio_named_roas_or_cac"]
+    assert any(".advertising.roas=" in v for v in a.violations), a.violations
+
+
+def test_40_no_ui_text_presents_a_period_ratio_as_roas_or_cac():
+    """Counterfactual over the real UI source: the labels shipped at 64b2ce3
+    ("ROAS", "CAC", "Google Ads ROAS", "Geo ROAS") fail the check."""
+    js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    html = (_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert audit.ui_ratio_label_violations(js, html) == []
+    label = 'const PERIOD_RATIO_LABEL = "Period Revenue / Ad Spend";'
+    assert label in js
+    for old in ('const PERIOD_RATIO_LABEL = "ROAS";',
+                'const PERIOD_RATIO_LABEL = "Google Ads ROAS";'):
+        bad = audit.ui_ratio_label_violations(js.replace(label, old), html)
+        assert any("ROAS" in v for v in bad), old
+    per = 'const PERIOD_SPEND_PER_CUSTOMER_LABEL = "Spend per Customer Won This Period";'
+    assert per in js
+    assert audit.ui_ratio_label_violations(
+        js.replace(per, 'const PERIOD_SPEND_PER_CUSTOMER_LABEL = "CAC";'), html)
+    # The previous table headers, page titles and KPI labels.
+    for snippet in ("<th>ROAS</th>", 'label: "Geo ROAS",', "<h1>ROAS by Campaign</h1>",
+                    '<span title="x">CAC</span>'):
+        assert audit.ui_ratio_label_violations(js + "\n" + snippet, html), snippet
+    assert audit.ui_ratio_label_violations(
+        js, html + '\n<span class="nav-item__label">ROAS by Country</span>')
+    # Removing the disclosure fails, too.
+    assert audit.ui_ratio_label_violations(
+        js.replace("Closed-won outcomes may originate from earlier advertising periods",
+                   "Closed-won outcomes"), html)
+
+
+def test_41_the_ui_shows_the_disclosure_beside_a_published_period_ratio():
+    P = cwt.PERIOD_REVENUE_PER_AD_SPEND
+    row = json.loads(json.dumps(crs.reader_row(_base(), _base()["deals"],
+                                               spend_usd=500.0)))
+    out = _node({"ratio": ["rowMetricHtml", [row, P, "__fmt"]],
+                 "roas": ["rowMetricHtml", [row, "roas", "__fmt"]]})
+    assert ">2<" in out["ratio"]
+    assert "Non-cohort operational ratio" in out["ratio"]
+    assert "Closed-won outcomes may originate from earlier advertising periods" in out["ratio"]
+    # Certified ROAS over the same inputs: Unavailable, with the cohort reason.
+    assert "Unavailable" in out["roas"] and "one acquisition cohort" in out["roas"]
+    assert ">2<" not in out["roas"]
+
+
+def test_42_the_contract_no_longer_derives_roas_or_cac():
+    """``derive_roas`` / ``derive_cac`` are gone, and check 18 fails if they
+    come back or if certified ROAS publishes."""
+    assert not hasattr(cwt, "derive_roas") and not hasattr(cwt, "derive_cac")
+    a = audit.Audit()
+    audit.pure_checks(a)
+    assert a.checks["no_period_ratio_named_roas_or_cac"], a.violations
+    import pytest as _pt
+    with _pt.MonkeyPatch.context() as mp:
+        mp.setattr(cwt, "derive_roas", lambda *a_, **k: None, raising=False)
+        a = audit.Audit()
+        audit.pure_checks(a)
+        assert not a.checks["no_period_ratio_named_roas_or_cac"]
+    with _pt.MonkeyPatch.context() as mp:
+        mp.setattr(cwt, "certified_roas", lambda: cwt.metric(2.0, cwt.PUBLISHED))
+        a = audit.Audit()
+        audit.pure_checks(a)
+        assert not a.checks["no_period_ratio_named_roas_or_cac"]
+
+
+# ── Truth review of decision 1: check 18 had lexical gaps ────────────────────
+
+def test_43_check_18_catches_every_shape_the_truth_review_found(monkeypatch):
+    """Each of these passed check 18 in the first cut of decision 1."""
+    shapes = (
+        {"period_change": {"metrics": {"roas": {"current": 2.23, "status": "ok"}}}},
+        {"period_change": {"metrics": {"geo_roas": {"current": 2.23}}}},
+        {"kpis": [{"key": "roas", "value": 2.4}]},
+        {"roas_display": "2.40x"},
+        {"geoRoas": 2.1},
+        {"return_on_ad_spend": 2.0},
+        {"customer_acquisition_cost": 500.0},
+        {"cac": {"value": None, "status": "withheld", "reason": "x"}},
+        {"diagnostics": [{"message": "Only Google Ads carries spend/ROAS."}]},
+        {"warnings": ["ROAS is unavailable until they are re-run"]},
+    )
+    for shape in shapes:
+        assert audit.ratio_name_violations(shape), shape
+    # Still clean: certified metrics, their reasons, ids, readiness flags.
+    clean = {
+        "metrics": {"roas": cwt.certified_roas(), "cac": cwt.certified_cac()},
+        "unavailable": [{"metric": "roas", "reason": "Unavailable: attribution ROAS "
+                         "requires revenue and spend over one acquisition cohort."}],
+        "target_page": "roas-campaigns", "country_roas_unblockable": True,
+        "ltv_to_cac": None, "note": "LTV, LTV/CAC and payback are withheld",
+        "verdict": {"roas": {"status": cwt.NOT_PUBLISHED,
+                             "reason": cwt.R_ROAS_NOT_CERTIFIED}},
+    }
+    assert audit.ratio_name_violations(clean) == []
+    # A real page with ONE key reverted (the Overview's period change).
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    t137._patch_durable(monkeypatch)
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    page = build_dashboard_campaigns("ytd", now=t137.NOW)
+    assert audit.ratio_name_violations(page) == []
+    pc = json.loads(json.dumps(page["period_change"]))
+    pc["metrics"]["roas"] = pc["metrics"].pop(cwt.PERIOD_REVENUE_PER_AD_SPEND)
+    pc["metrics"]["roas"]["current"] = 2.23
+    assert audit.ratio_name_violations(dict(page, period_change=pc))
+
+
+def test_44_check_18_ui_scan_has_no_line_or_case_bypass():
+    js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert audit.ui_ratio_label_violations(js, "") == []
+    for bad in ("<th>LTV/CAC</th><th>ROAS</th>",       # exempt token, same line
+                'x = "Google Ads Roas";',               # case
+                'y = "Return on Ad Spend";',            # synonym
+                'z = "Spend // ROAS";',                 # "comment" inside a string
+                '<td>${rowMetricHtml(s, "period_revenue_per_ad_spend", f)} '
+                '${CERTIFIED_RATIO_LABELS.roas}</td>'):  # certified label on a value
+        assert audit.ui_ratio_label_violations(js + "\n" + bad, ""), bad
+    widened = js.replace('cac: "CAC (acquisition cohort)" };',
+                         'cac: "CAC (acquisition cohort)", period: "ROAS" };')
+    assert widened != js and audit.ui_ratio_label_violations(widened, "")
+
+
+def test_45_api_text_never_calls_the_period_ratio_roas(monkeypatch):
+    """The Mart's diagnostics, attribution warnings and geo-gap reasons are
+    rendered on screen. They said "carries spend/ROAS", "Country ROAS is shown",
+    "Geo ROAS is withheld"; the audit now builds the source and country Mart
+    views and reads every string."""
+    from services import google_ads_geo_sync_service as geo
+    assert not [m for m in geo.GEO_GAP_MESSAGES.values()
+                if audit._names_ratio_in_text(m)]
+    names = [n for n, _ in audit._page_builders()]
+    assert {"revenue_decision_mart_source", "revenue_decision_mart_country"} <= set(names)
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    t137._patch_durable(monkeypatch)
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows))
+    from services.revenue_decision_mart import build_revenue_decision_mart
+    mart = build_revenue_decision_mart(view="source", window="ytd", now=t137.NOW)
+    diags = mart["diagnostics"]
+    scope = next(d for d in diags if d.get("code") == "source_spend_scope")
+    assert "period revenue / ad spend" in scope["message"]
+    assert audit.ratio_name_violations(mart) == []
+    old = json.loads(json.dumps(mart))
+    for d in old["diagnostics"]:
+        if d.get("code") == "source_spend_scope":
+            d["message"] = ("Only the Google Ads source carries spend/ROAS; every "
+                            "other source group is revenue-only (ROAS unavailable, "
+                            "never $0).")
+    assert audit.ratio_name_violations(old)

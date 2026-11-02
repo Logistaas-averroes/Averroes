@@ -451,7 +451,7 @@ def _attach_verdicts(rows: list, canonical: dict, *, gate: dict | None = None) -
 
 
 def _build_source_breakdown(window: str, now, *, revenue_connected: bool) -> list:
-    """Revenue by source group (PR-ADS-133). Never any ROAS on these rows."""
+    """Revenue by source group (PR-ADS-133). Never any spend ratio on these rows."""
     if not revenue_connected:
         return []
     source = build_revenue_by_source(window, now=now)
@@ -633,7 +633,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
                      + (f" ({reason})" if reason else "")
                      + ", so no campaign is named as a repeat producer."),
             "reason": reason,
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
     elif multi:
         top = multi[0]
@@ -650,14 +650,14 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "type": "scale", "title": "Scale",
             "headline": f"{top['campaign']} won {top['deals']} deals",
             "body": body,
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "No repeat won-deal producer yet",
             "body": "No campaign won more than one deal in this window.",
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
 
     # Watch — revenue concentration.

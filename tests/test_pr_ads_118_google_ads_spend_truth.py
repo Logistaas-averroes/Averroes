@@ -567,11 +567,14 @@ def test_spend_truth_panel_and_gates_present():
     assert "function renderSpendTruth" in JS
     assert "/api/google-ads-spend-audit?window=" in JS
     assert "data-spend-backfill-action" in JS
-    # Campaign page ROAS gate on incomplete spend coverage.
+    # Campaign page period-ratio gate on incomplete spend coverage
+    # (PR-ADS-161E: the ratio is period revenue / ad spend, never "ROAS").
     assert "function spendCoverageIncomplete" in JS
-    assert "Spend coverage incomplete — ROAS unavailable" in JS
+    assert "Spend coverage incomplete — Period Revenue / Ad Spend unavailable" in JS
+    assert "Spend coverage incomplete — ROAS unavailable" not in JS
     # Country page reconciliation gate.
     assert "country_spend_reconciled === false" in JS
     # PR-ADS-128 reworded the country blocked card with cause-specific copy; the
-    # reconciliation gate still blocks the trusted ROAS table.
-    assert "Country ROAS is blocked" in JS
+    # reconciliation gate still blocks the trusted country ratio table.
+    assert "Country Period Revenue / Ad Spend is blocked" in JS
+    assert "Country ROAS is blocked" not in JS

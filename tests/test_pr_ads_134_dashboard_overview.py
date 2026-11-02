@@ -379,6 +379,10 @@ def test_missing_fx_blocks_usd_spend_and_roas_never_zero(monkeypatch):
     # None, not a fabricated $0 / 0.00x.
     assert k["google_ads_spend_usd"] is None and k["google_ads_spend_usd"] != 0
     assert k["google_ads_roas"] is None and k["google_ads_roas"] != 0
+    # PR-ADS-161E: the close-date ratio is published only under its explicit
+    # name; missing FX withholds it too — None, never a fabricated 0.00x.
+    assert (k["google_ads_period_revenue_per_ad_spend"] is None
+            and k["google_ads_period_revenue_per_ad_spend"] != 0)
     # Native GBP stays visible and stays GBP.
     assert k["native_spend"]["amount"] == 10000.0
     assert k["native_spend"]["currency"] == "GBP"
@@ -386,6 +390,7 @@ def test_missing_fx_blocks_usd_spend_and_roas_never_zero(monkeypatch):
     metrics = {u["metric"] for u in out["unavailable"]}
     assert "google_ads_spend_usd" in metrics
     assert "google_ads_roas" in metrics
+    assert "google_ads_period_revenue_per_ad_spend" in metrics
     assert out["truth_status"]["fx"] != "ready"
 
 
@@ -394,19 +399,24 @@ def test_missing_spend_source_reports_unavailable(monkeypatch):
     k = out["kpis"]
     assert k["google_ads_spend_usd"] is None
     assert k["google_ads_roas"] is None
+    assert k["google_ads_period_revenue_per_ad_spend"] is None
     assert out["truth_status"]["spend"] != "ready"
 
 
-def test_non_google_sources_never_get_roas(monkeypatch):
+def test_non_google_sources_never_get_period_ratio(monkeypatch):
     out = _overview(monkeypatch)
     mix = {s["key"]: s for s in out["source_mix"]}
     assert set(mix) == {"google_ads", "other_paid", "organic", "offline", "unclassified"}
     for key, row in mix.items():
-        # Review fix: NO mix row carries ROAS — not even Google Ads. The
-        # source-page group ROAS is a geo-spend ratio ungated by coverage/FX
-        # safety and could contradict the hero ROAS on the same screen; the
-        # hero KPI is the only ROAS this page shows.
-        assert row["roas"] is None, f"{key} must never carry ROAS on the mix"
+        # Review fix: NO mix row carries a spend ratio — not even Google Ads.
+        # The source-page group ratio is a geo-spend ratio ungated by
+        # coverage/FX safety and could contradict the hero ratio on the same
+        # screen; the hero KPI is the only spend ratio this page shows.
+        # PR-ADS-161E: mix rows carry no ratio key at all (neither the retired
+        # `roas` nor `period_revenue_per_ad_spend`).
+        assert "roas" not in row, f"{key} must never carry ROAS on the mix"
+        assert "period_revenue_per_ad_spend" not in row, \
+            f"{key} must never carry a spend ratio on the mix"
         if key == "google_ads":
             assert row["spend_connected"] is True
             continue
@@ -443,6 +453,7 @@ def test_disconnected_revenue_integration_never_shows_fake_zero_revenue(monkeypa
     assert k["customers"] is None
     assert k["customer_rate"] is None
     assert k["google_ads_roas"] is None
+    assert k["google_ads_period_revenue_per_ad_spend"] is None
     # The trend never emits a flat $0 "ready" revenue series.
     assert out["trend"]["revenue_status"] == "unavailable"
     assert all(p["revenue_usd"] is None for p in out["trend"]["points"])
@@ -516,12 +527,14 @@ def test_all_time_has_no_previous_period(monkeypatch):
 
 def test_unavailable_previous_metric_is_no_comparison_not_zero(monkeypatch):
     # Coverage is verified for 2026 only, so the prior-YEAR ytd window has an
-    # untrusted spend denominator: prior ROAS is None -> no_comparison.
+    # untrusted spend denominator: prior period revenue / ad spend is None ->
+    # no_comparison. (PR-ADS-161E: the period_change key is the explicit name.)
     out = _overview(monkeypatch, window="ytd")
-    roas_delta = out["period_change"]["metrics"]["roas"]
-    assert roas_delta["status"] == "no_comparison"
-    assert roas_delta["delta_pct"] is None
-    assert roas_delta["delta_pct"] != 0
+    assert "roas" not in out["period_change"]["metrics"]
+    ratio_delta = out["period_change"]["metrics"]["period_revenue_per_ad_spend"]
+    assert ratio_delta["status"] == "no_comparison"
+    assert ratio_delta["delta_pct"] is None
+    assert ratio_delta["delta_pct"] != 0
 
 
 def test_zero_baseline_is_no_comparison_not_percent(monkeypatch):
@@ -762,21 +775,25 @@ def test_dashboard_no_longer_uses_ad_windows():
 def test_kpi_cards_render_all_five_hero_metrics():
     fn = _slice(JS, "function renderDashKpiRow", 5200)
     for label in ("Google Ads Spend", "Closed-Won Revenue", "Customers",
-                  "SQLs", "Google Ads ROAS"):
+                  "SQLs", "PERIOD_RATIO_LABEL"):
         assert label in fn
+    # PR-ADS-161E: the close-date ratio is never labelled ROAS.
+    assert "ROAS" not in fn
+    assert "PERIOD_RATIO_DISCLOSURE" in fn
     # Native GBP line under spend, via the currency-correct formatter.
     assert "fmtCompactCurrency(native.amount, native.currency" in fn
-    # ROAS renders through the safe formatter only.
-    assert "fmtRoasMultiple" in fn
+    # The period ratio renders through the safe formatter only.
+    assert "fmtPeriodRatio" in fn
 
 
 def test_unavailable_renders_as_unavailable_never_blank():
     fn = _slice(JS, "function dashValue", 400)
     assert 'Unavailable' in fn
     assert "null" in fn and "undefined" in fn  # explicit guards
-    # fmtRoasMultiple(null) is the house "Unavailable" (pinned in PR-109 too).
-    roas_fn = _slice(JS, "function fmtRoasMultiple", 200)
-    assert '"Unavailable"' in roas_fn
+    # fmtPeriodRatio(null) is the house "Unavailable" (pinned in PR-109 too;
+    # renamed from fmtRoasMultiple in PR-ADS-161E).
+    ratio_fn = _slice(JS, "function fmtPeriodRatio", 200)
+    assert '"Unavailable"' in ratio_fn
 
 
 def test_no_undefined_or_null_leaks_in_dash_renderers():
@@ -801,6 +818,8 @@ def test_channel_mix_never_renders_roas():
     assert mix_start != -1 and mix_end > mix_start
     mix_block = JS[mix_start:mix_end]  # includes dashDonutSVG
     assert "fmtRoasMultiple" not in mix_block
+    assert "fmtPeriodRatio" not in mix_block
+    assert "period_revenue_per_ad_spend" not in mix_block
     assert "Needs review" in mix_block
     # Unknown revenue renders Unavailable, never an implied verified $0 ring.
     assert "revenueKnown" in mix_block

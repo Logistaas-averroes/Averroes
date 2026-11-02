@@ -19,17 +19,22 @@ channel/platform language and composes canonical read-only contracts:
     (view="campaign")                  won revenue) + the CANONICAL Google Ads
                                         spend truth (FX-gated USD + native GBP) and
                                         readiness. The source-page geo spend is NOT
-                                        used for ROAS (it is ungated); the mart's
+                                        used for the period ratio (it is ungated); the mart's
                                         FX-verified spend is.
   - repo.fetch_source_*_daily        -> per-day classified source rows for the
                                         channel trend (read-only).
 
 Truth rules (unchanged, never loosened):
-  - Only Google Ads / Paid Search is spend-connected and ROAS-eligible. Paid
+  - Only Google Ads / Paid Search is spend-connected and ratio-eligible. Paid
     Social, Organic, Email, Events, SalesNash, Referrals, Direct, Offline are
-    revenue/SQL/customer attribution only — spend and ROAS stay null with a
+    revenue/SQL/customer attribution only — spend and the ratio stay null with a
     "no connected spend source" status. Never fake Meta/LinkedIn/Organic spend
-    or ROAS.
+    or a ratio.
+  - PR-ADS-161E: the one ratio is ``period_revenue_per_ad_spend`` — closed-won
+    revenue CLOSED in the window ÷ the same window's spend. A non-cohort
+    operational ratio: closed-won outcomes may originate from earlier
+    advertising periods. Attribution ROAS is never published (no field named
+    ``roas`` carries it).
   - HubSpot closed-won deals are the only revenue truth; the Google Ads
     conversion value is never used. Reporting revenue is USD; native spend is
     GBP; native GBP is never labelled USD.
@@ -186,8 +191,10 @@ def _canonical_google_spend(mart: dict) -> dict:
     }
 
 
-def _google_roas(google_won_revenue, usd_spend):
-    """Google Ads ROAS = Google-attributed revenue / canonical USD spend.
+def _google_period_ratio(google_won_revenue, usd_spend):
+    """Google Ads period revenue / ad spend = Google-attributed revenue closed
+    in the window / the same window's canonical USD spend. A non-cohort
+    operational ratio, never attribution ROAS.
 
     Only when the canonical USD spend is safe (FX + coverage verified, so
     non-null and positive). Never a fabricated 0.00x, never from geo/native spend.
@@ -220,7 +227,7 @@ def _unknown_amount_maps(revenue_rows: list) -> tuple[set, set]:
     We re-read the same canonical closed-won rows (PR-ADS-153E-B) and, using the
     source service's OWN section/taxonomy helpers (no new taxonomy), record which
     executive channel and which (group, channel, platform) bucket holds a deal
-    whose amount is unknown. Those buckets' revenue (and any ROAS) must render
+    whose amount is unknown. Those buckets' revenue (and any ratio) must render
     Unavailable — never a lowered $0.
     """
     exec_unknown: set = set()
@@ -242,14 +249,15 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
     """Fold the nested source taxonomy into executive channels + a platform matrix.
 
     Every level's counts and revenue come straight from build_revenue_by_source
-    (which already summed them from the durable classified rows). Spend/ROAS
-    attach ONLY to the Google Ads channel, and only from the canonical mart spend.
-    A channel/platform whose raw rows include an unknown deal amount reports its
-    revenue (and ROAS) as null — never a silently lowered $0.
+    (which already summed them from the durable classified rows). Spend and the
+    period ratio attach ONLY to the Google Ads channel, and only from the
+    canonical mart spend. A channel/platform whose raw rows include an unknown
+    deal amount reports its revenue (and ratio) as null — never a silently
+    lowered $0.
 
     ``amounts_verifiable`` is False when the raw closed-won source rows could not
     be re-read to detect unknown amounts; then NO revenue total can be trusted as
-    complete, so every channel/platform revenue (and ROAS) is reported as
+    complete, so every channel/platform revenue (and ratio) is reported as
     Unavailable — fail closed, never a silently lowered total.
     """
     channels: dict = {}
@@ -275,11 +283,13 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                 pf_amount_known = (amounts_verifiable and pf.get("won_revenue") is not None
                                    and pf_key not in platform_unknown)
                 pf_won = pf.get("won_revenue") if pf_amount_known else None
-                pf_roas = _google_roas(pf_won, google_spend["usd"]) if is_google else None
+                pf_ratio = (_google_period_ratio(pf_won, google_spend["usd"])
+                            if is_google else None)
                 # spend_connected reflects the Google Ads spend SOURCE being connected —
                 # i.e. native (GBP) spend exists. It does NOT require USD/FX: when FX
                 # is missing the source stays connected, native GBP is shown, and USD
-                # spend + ROAS are Unavailable. roas_available is the separate ROAS gate.
+                # spend + the ratio are Unavailable. period_ratio_available is the
+                # separate ratio gate.
                 spend_connected = bool(is_google and google_spend["native_amount"] is not None)
                 platforms.append({
                     "platform": pf.get("platform"),
@@ -296,9 +306,9 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                     "native_spend": ({"amount": google_spend["native_amount"],
                                       "currency": google_spend["native_currency"]}
                                      if is_google else None),
-                    "roas": pf_roas,
+                    "period_revenue_per_ad_spend": pf_ratio,
                     "spend_connected": spend_connected,
-                    "roas_available": pf_roas is not None,
+                    "period_ratio_available": pf_ratio is not None,
                     "status": _channel_status(exec_ch, spend_connected),
                 })
 
@@ -310,10 +320,11 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             continue
         is_google = exec_ch == CX_GOOGLE_ADS
         won = None if agg["amount_unknown"] else _round2(agg["won_revenue"])
-        roas = _google_roas(won, google_spend["usd"]) if is_google else None
+        ratio = _google_period_ratio(won, google_spend["usd"]) if is_google else None
         # spend_connected reflects the Google Ads spend SOURCE being connected
-        # (native GBP spend exists), independent of USD/FX and of revenue. ROAS is
-        # gated separately: roas_available iff roas is a real, USD-based number.
+        # (native GBP spend exists), independent of USD/FX and of revenue. The
+        # ratio is gated separately: period_ratio_available iff it is a real,
+        # USD-based number.
         spend_connected = bool(is_google and google_spend["native_amount"] is not None)
         channel_rows.append({
             "channel": exec_ch,
@@ -326,9 +337,9 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             "native_spend": ({"amount": google_spend["native_amount"],
                               "currency": google_spend["native_currency"]}
                              if is_google else None),
-            "roas": roas,
+            "period_revenue_per_ad_spend": ratio,
             "spend_connected": spend_connected,
-            "roas_available": roas is not None,
+            "period_ratio_available": ratio is not None,
             "status": _channel_status(exec_ch, spend_connected),
         })
 
@@ -638,7 +649,7 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                      f"{'s' if google['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(google['won_revenue_usd'])} closed-won revenue "
                      "with verified spend."),
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
     else:
         # Highlight the top revenue-only customer producer instead.
@@ -650,7 +661,7 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
             cards.append({
                 "type": "scale", "title": "Scale",
                 "headline": f"{top['channel_label']} won deals without spend visibility",
-                "body": (f"Treat this as revenue attribution, not ROAS — "
+                "body": (f"Treat this as revenue attribution, not a spend ratio — "
                          f"{top['channel_label']} won {top['closed_won_deals']} deal"
                          f"{'s' if top['closed_won_deals'] != 1 else ''}. Spend is unavailable "
                          "because it is not a connected spend source."),
@@ -663,14 +674,14 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                 "headline": "Channel closed-won outcomes are withheld",
                 "body": ("Closed-won deals are withheld for this window, so no "
                          "channel is claimed to have produced none."),
-                "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+                "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
             })
         else:
             cards.append({
                 "type": "scale", "title": "Scale",
                 "headline": "No spend-connected won-deal source yet",
                 "body": "No channel has both verified spend and closed-won deals in this window.",
-                "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+                "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
             })
 
     # Watch — a revenue-only channel with SQLs but no connected spend.
@@ -686,7 +697,8 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                         if top.get("closed_won_deals") is None else
                         f" and {top['closed_won_deals']} won deal"
                         f"{'s' if top['closed_won_deals'] != 1 else ''}")
-                     + ", but ROAS is unavailable until a real spend source is connected."),
+                     + ", but no spend ratio is available until a real spend source "
+                       "is connected."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
     else:
@@ -722,7 +734,7 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         "type": "unavailable", "title": "Unavailable",
         "headline": "Non-Google platform spend unavailable",
         "body": ("Only Google Ads spend is connected. Paid Social and Organic channels "
-                 "are revenue-only in this dashboard — ROAS is intentionally withheld."),
+                 "are revenue-only in this dashboard — no spend ratio is published."),
         "target_page": "revenue-health", "target_label": "Open Revenue Health",
     })
     return cards
@@ -768,8 +780,8 @@ def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
     if google_spend["usd"] is None:
         out.append({"metric": "google_ads_spend_usd",
                     "reason": "Google Ads USD spend requires verified spend coverage and FX."})
-    # Non-Google spend/ROAS is structurally unavailable.
-    out.append({"metric": "paid_social_roas",
+    # Non-Google spend and any ratio over it are structurally unavailable.
+    out.append({"metric": "paid_social_period_revenue_per_ad_spend",
                 "reason": "Paid Social spend source is not connected."})
     out.append({"metric": "non_google_spend",
                 "reason": "Only Google Ads spend is connected; other channels are revenue-only."})
@@ -857,18 +869,18 @@ def build_dashboard_channels(window: str = "current_quarter",
         # count from an unwired integration. The hero KPIs derive from these rows,
         # so they become Unavailable in lockstep — no separate mart gate needed.
         # spend_connected/status stay as-is: the Google Ads SPEND source remains
-        # connected when only the REVENUE integration is down. But ROAS needs
-        # revenue, so roas and roas_available are cleared (kept consistent).
+        # connected when only the REVENUE integration is down. But the ratio
+        # needs revenue, so it and its availability flag are cleared.
         for c in channel_rows:
             c["closed_won_deals"] = None
             c["won_revenue_usd"] = None
-            c["roas"] = None
-            c["roas_available"] = False
+            c["period_revenue_per_ad_spend"] = None
+            c["period_ratio_available"] = False
         for p in platforms:
             p["closed_won_deals"] = None
             p["won_revenue_usd"] = None
-            p["roas"] = None
-            p["roas_available"] = False
+            p["period_revenue_per_ad_spend"] = None
+            p["period_ratio_available"] = False
 
     # Hero KPIs derive from the channel rows so they reconcile with the mix /
     # matrix / trend (all Revenue-by-Source), never a mart total on a different

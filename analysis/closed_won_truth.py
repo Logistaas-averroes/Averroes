@@ -170,12 +170,14 @@ R_DEALS_WITHHELD = "closed_won_deal_count_withheld"
 R_REVENUE_WITHHELD = "closed_won_revenue_withheld"
 R_ACQ_UNRESOLVED = "acquisition_membership_unresolved"
 R_CAMPAIGN_UNPLACED = "google_ads_deals_not_placed_on_a_campaign"
-# PR-ADS-161E: a window verdict carries no spend, so it publishes neither
-# ratio. Each is DERIVED per scope by the reader contract (``derive_roas`` /
-# ``derive_cac`` below), from this window's published revenue or customers and
-# the same window's Google Ads USD spend — a period ratio, stated as such.
-R_ROAS_NOT_CERTIFIED = "roas_derived_per_scope_by_reader_contract_with_spend"
-R_CAC_NOT_CERTIFIED = "cac_derived_per_scope_by_reader_contract_with_spend"
+# PR-ADS-161E: certified ROAS / CAC need spend and outcomes joined through ONE
+# acquisition cohort and attribution scope. No canonical service supplies that
+# join, so neither is ever published — not by the window verdict, not by any
+# reader. The close-date ratios the product can compute are NOT these metrics:
+# they are published under explicit names (``derive_period_revenue_per_ad_spend``
+# / ``derive_period_spend_per_customer_won``) as non-cohort operational ratios.
+R_ROAS_NOT_CERTIFIED = "roas_requires_revenue_and_spend_in_one_acquisition_cohort"
+R_CAC_NOT_CERTIFIED = "cac_requires_spend_and_customers_in_one_acquisition_cohort"
 
 
 def _as_utc(value):
@@ -813,8 +815,16 @@ R_LEAD_TO_CUSTOMER_INCOMPATIBLE = (
 R_REVENUE_PER_SQL_INCOMPATIBLE = (
     "revenue_per_sql_needs_one_acquisition_cohort_and_scope")
 
-#: The cohort a published ROAS / CAC is computed over, carried on the metric.
+#: The basis of a period operational ratio, carried on the metric.
 PERIOD_COHORT_BASIS = "close_date_outcomes_over_same_window_spend"
+#: What a period ratio is, and the disclosure every surface shows with it.
+RATIO_KIND_OPERATIONAL = "non_cohort_operational_ratio"
+PERIOD_RATIO_DISCLOSURE = ("Non-cohort operational ratio. Closed-won outcomes may "
+                           "originate from earlier advertising periods.")
+#: The explicit API names of the two period ratios. Never ``roas`` / ``cac``.
+PERIOD_REVENUE_PER_AD_SPEND = "period_revenue_per_ad_spend"
+PERIOD_SPEND_PER_CUSTOMER_WON = "period_spend_per_customer_won"
+PERIOD_RATIO_KEYS = (PERIOD_REVENUE_PER_AD_SPEND, PERIOD_SPEND_PER_CUSTOMER_WON)
 
 SUBSET_METRICS = ("closed_won_deals", "revenue_usd", "customers")
 
@@ -899,14 +909,22 @@ def _blocked(input_name, input_metric, reason) -> dict:
         "reason": (input_metric or {}).get("reason")})
 
 
-def derive_roas(revenue: dict, spend_usd, *, spend_reason=None,
-                scope_compatible: bool = True) -> dict:
-    """Return on ad spend: closed-won revenue ÷ Google Ads USD spend, same window.
+def _period(value) -> dict:
+    return metric(value, PUBLISHED, cohort_basis=PERIOD_COHORT_BASIS,
+                  ratio_kind=RATIO_KIND_OPERATIONAL,
+                  disclosure=PERIOD_RATIO_DISCLOSURE)
 
-    Published only when the revenue metric is published, the USD spend is known
-    and positive, and the caller's numerator scope is one spend can have
-    produced. The cohort is stated on the metric: revenue CLOSED in the window
-    over spend IN the window (a period ROAS), never an acquisition-cohort ROAS.
+
+def derive_period_revenue_per_ad_spend(revenue: dict, spend_usd, *,
+                                       spend_reason=None,
+                                       scope_compatible: bool = True) -> dict:
+    """Period revenue ÷ ad spend: revenue from deals CLOSED in the window over
+    the same window's Google Ads USD spend.
+
+    A non-cohort operational ratio, NOT ROAS: in a long B2B sales cycle a deal
+    closed this period may come from spend in an earlier one. Published only
+    when the revenue metric is published, the USD spend is known and positive,
+    and the numerator's scope is one Google Ads spend can have produced.
     """
     if not scope_compatible:
         return metric(None, UNAVAILABLE, R_SCOPE_INCOMPATIBLE)
@@ -916,16 +934,19 @@ def derive_roas(revenue: dict, spend_usd, *, spend_reason=None,
         return metric(None, UNAVAILABLE, spend_reason or R_SPEND_UNAVAILABLE)
     if float(spend_usd) <= 0:
         return metric(None, UNAVAILABLE, R_NO_SPEND_IN_WINDOW)
-    return metric(round(float(revenue["value"]) / float(spend_usd), 2),
-                  PUBLISHED, cohort_basis=PERIOD_COHORT_BASIS)
+    return _period(round(float(revenue["value"]) / float(spend_usd), 2))
 
 
-def derive_cac(customers: dict, spend_usd, *, spend_reason=None,
-               scope_compatible: bool = True) -> dict:
-    """Customer acquisition cost: Google Ads USD spend ÷ canonical customers.
+def derive_period_spend_per_customer_won(customers: dict, spend_usd, *,
+                                         spend_reason=None,
+                                         scope_compatible: bool = True) -> dict:
+    """Spend per customer won this period: the window's Google Ads USD spend ÷
+    the distinct proven companies whose deals CLOSED in the window.
 
-    The denominator is distinct proven HubSpot companies — never a won-deal
-    count. Withheld whenever the customer count is withheld.
+    A non-cohort operational ratio, NOT CAC: it counts repeat and expansion
+    companies, and a company won this period may have been acquired by earlier
+    spend. Withheld whenever the customer count is withheld; never divides by
+    won deals.
     """
     if not scope_compatible:
         return metric(None, UNAVAILABLE, R_SCOPE_INCOMPATIBLE)
@@ -933,10 +954,25 @@ def derive_cac(customers: dict, spend_usd, *, spend_reason=None,
         return _blocked("customers", customers, R_CUSTOMERS_WITHHELD)
     if spend_usd is None:
         return metric(None, UNAVAILABLE, spend_reason or R_SPEND_UNAVAILABLE)
+    # No spend in the window: "$0 per customer" would read as free
+    # acquisition, so the ratio is unavailable — as for revenue / spend.
+    if float(spend_usd) <= 0:
+        return metric(None, UNAVAILABLE, R_NO_SPEND_IN_WINDOW)
     if not customers.get("value"):
         return metric(None, UNAVAILABLE, R_NO_CUSTOMERS_IN_WINDOW)
-    return metric(round(float(spend_usd) / int(customers["value"]), 2),
-                  PUBLISHED, cohort_basis=PERIOD_COHORT_BASIS)
+    return _period(round(float(spend_usd) / int(customers["value"]), 2))
+
+
+def certified_roas() -> dict:
+    """Attribution ROAS — revenue and spend over ONE acquisition cohort and
+    compatible scope. No canonical service supplies that join: unavailable."""
+    return metric(None, UNAVAILABLE, R_ROAS_NOT_CERTIFIED)
+
+
+def certified_cac() -> dict:
+    """CAC — spend and distinct customers joined through ONE acquisition cohort
+    and attribution scope. No canonical service supplies that join: unavailable."""
+    return metric(None, UNAVAILABLE, R_CAC_NOT_CERTIFIED)
 
 
 def incompatible_rate(reason: str) -> dict:

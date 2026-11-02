@@ -37,8 +37,15 @@ What it withholds, and why
 LTV/CAC and payback need recurring revenue per deal. ``hs_mrr`` / ``hs_arr`` are
 not part of the canonical ledger, and the local JSON that carried them is not an
 admissible source. So those metrics are returned as ``None`` with a stated
-reason rather than computed from a source this PR just removed. CAC, average
-deal value and ROAS are fully canonical and are returned as real numbers.
+reason rather than computed from a source this PR just removed. Average deal
+value is canonical and is returned as a real number.
+
+PR-ADS-161E: CAC and attribution ROAS are UNAVAILABLE here. Closed-won outcomes
+are dated by close, spend by the day it was spent; in a long B2B sales cycle a
+deal closing this window was usually acquired by spend from an earlier one, so
+the two do not share an acquisition cohort. What is published instead is two
+explicitly named non-cohort operational ratios over the same window:
+``period_revenue_per_ad_spend`` and ``period_spend_per_customer_won``.
 
 Withholding is the honest outcome: an LTV/CAC of 4.2x derived from a file nobody
 maintains is worse than an explicit "not available — recurring revenue is not
@@ -59,8 +66,8 @@ from services import canonical_revenue_service as canonical_revenue
 
 log = logging.getLogger(__name__)
 
-# The scope an ADVERTISING efficiency metric is computed at. CAC and ROAS divide
-# by Google Ads spend, so their numerator must be the population that spend could
+# The scope an ADVERTISING efficiency metric is computed at. The period ratios
+# divide by (or into) Google Ads spend, so their numerator must be the population that spend could
 # plausibly have produced — never the whole business.
 DEFAULT_ADVERTISING_SCOPE = revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE
 
@@ -97,8 +104,10 @@ def build_unit_economics(window: str = "current_quarter",
     Returns a contract carrying BOTH populations, each labelled:
 
     * ``business`` — ``all_source`` customers and revenue. This is the company.
-    * ``advertising`` — the selected scope, plus canonical Google Ads spend, CAC
-      and ROAS. This is the subset advertising can be measured against.
+    * ``advertising`` — the selected scope, plus canonical Google Ads spend and
+      the two period ratios (``period_revenue_per_ad_spend``,
+      ``period_spend_per_customer_won``). CAC and ROAS are unavailable: not one
+      acquisition cohort.
 
     Fails closed: when the canonical ledger is unreadable or its coverage is not
     proven, every revenue-derived figure is ``None`` with a reason, and no legacy
@@ -117,7 +126,7 @@ def build_unit_economics(window: str = "current_quarter",
     spend_truth = build_google_ads_spend_truth(window, now=now)
     # `usd_spend` is None whenever FX or coverage is unverified — the spend truth
     # already refuses to relabel native GBP as USD, so a null here means the
-    # denominator is unknown and CAC/ROAS must stay unknown with it.
+    # denominator is unknown and the period ratios must stay unknown with it.
     spend_usd = spend_truth.get("usd_spend")
 
     if not base.get("available"):
@@ -162,7 +171,8 @@ def build_unit_economics(window: str = "current_quarter",
 
     # PR-ADS-161E: the canonical reader contract. Customers are distinct
     # proven HubSpot companies (never the won-deal count), revenue is a total
-    # or None, and CAC / ROAS are derived only when every input is published.
+    # or None, and the period ratios are derived only when every input is
+    # published. CAC and ROAS are never derived here (not one cohort).
     business_canon = canonical_revenue.reader_row(
         base, canonical_revenue.filter_deals(base.get("deals"),
                                              revenue_scope.SCOPE_ALL_SOURCE))
@@ -183,13 +193,13 @@ def build_unit_economics(window: str = "current_quarter",
                     f"google_ads_usd_spend_{spend_truth.get('state') or 'unavailable'}")
     # PR-ADS-161E: Google Ads spend can only have produced Google Ads deals.
     # A ratio of all-source (or any non-Google) revenue or customers over Google
-    # Ads spend credits advertising with outcomes it did not produce, so ROAS
-    # and CAC are unavailable for those scopes (``numerator_and_denominator_
+    # Ads spend credits advertising with outcomes it did not produce, so the
+    # period ratios are unavailable for those scopes (``numerator_and_denominator_
     # scopes_differ``). The scope total itself is exact and is not gated.
     advertising_canon = canonical_revenue.reader_row(
         base, canonical_revenue.filter_deals(base.get("deals"), scope),
         spend_usd=spend_usd, spend_reason=spend_reason,
-        roas_scope_ok=scope in (revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+        period_ratio_scope_ok=scope in (revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
                                 revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE))
     advertising = {
         **{k: scoped[k] for k in _SCOPE_FIELDS},
@@ -198,8 +208,15 @@ def build_unit_economics(window: str = "current_quarter",
         "revenue_usd": advertising_canon["won_revenue"],
         "spend_usd": spend_usd,
         "spend_state": spend_truth.get("state"),
-        "cac": advertising_canon["cac"],
-        "roas": advertising_canon["roas"],
+        # Non-cohort operational ratios over the same window (docs/48 §4).
+        "period_revenue_per_ad_spend":
+            advertising_canon["period_revenue_per_ad_spend"],
+        "period_spend_per_customer_won":
+            advertising_canon["period_spend_per_customer_won"],
+        # Certified CAC / attribution ROAS: unavailable (one acquisition
+        # cohort is required); the reason is in ``metrics``.
+        "cac": None,
+        "roas": None,
         "avg_deal_value_usd": _avg(advertising_canon["won_revenue"],
                                    advertising_canon["closed_won_deals"]),
         "metrics": advertising_canon["metrics"],
@@ -209,15 +226,15 @@ def build_unit_economics(window: str = "current_quarter",
         "avg_deal_mrr": None,
     }
 
-    # Per-campaign rows reuse the ROAS-by-Campaign build rather than assembling a
+    # Per-campaign rows reuse the campaign attribution build rather than assembling a
     # second campaign table. One table, one join, one set of numbers: a separate
     # aggregation here is exactly how two pages come to disagree about the same
     # campaign's spend.
     attribution = build_revenue_attribution(window, now=now)
     by_campaign = []
     for row in attribution.get("campaigns") or []:
-        # The ROAS-by-Campaign row already carries the canonical fields, CAC
-        # over distinct-company customers included; nothing is re-derived here.
+        # The campaign attribution row already carries the canonical fields,
+        # the period ratios included; nothing is re-derived here.
         by_campaign.append({
             "campaign": row.get("campaign_name"),
             "spend": row.get("spend"),
@@ -225,8 +242,12 @@ def build_unit_economics(window: str = "current_quarter",
             "customers": row.get("customers"),
             "won_revenue_usd": row.get("won_revenue"),
             "revenue_unavailable_deals": row.get("revenue_unavailable_deals"),
-            "cac": row.get("cac"),
-            "roas": row.get("roas"),
+            "period_revenue_per_ad_spend":
+                row.get("period_revenue_per_ad_spend"),
+            "period_spend_per_customer_won":
+                row.get("period_spend_per_customer_won"),
+            "cac": None,
+            "roas": None,
             "metrics": row.get("metrics"),
             "avg_deal_value_usd": _avg(row.get("won_revenue"),
                                        row.get("closed_won_deals")),
@@ -237,17 +258,17 @@ def build_unit_economics(window: str = "current_quarter",
         })
 
     unavailable = _unavailable_metrics()
-    if (advertising["metrics"]["cac"] or {}).get("status") != "published":
-        unavailable.append({
-            "metric": "cac",
-            "status": advertising["metrics"]["cac"].get("status"),
-            "reason": advertising["metrics"]["cac"].get("reason"),
-        })
+    for m in ("cac", "roas", "period_spend_per_customer_won",
+              "period_revenue_per_ad_spend"):
+        verdict = advertising["metrics"].get(m) or {}
+        if verdict.get("status") != "published":
+            unavailable.append({"metric": m, "status": verdict.get("status"),
+                                "reason": verdict.get("reason")})
     if spend_usd is None:
         unavailable.append({
             "metric": "spend",
             "reason": ("Canonical Google Ads USD spend is unavailable "
-                       f"({spend_truth.get('state')}) — CAC and ROAS are "
+                       f"({spend_truth.get('state')}) — the period ratios are "
                        "withheld rather than divided by an assumed spend."),
         })
     if not all_source["currency_complete"]:

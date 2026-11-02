@@ -88,16 +88,42 @@ creation, not a close date, proves its membership.
 The two are reported side by side and never combined. This service computes
 no ROAS or CAC: a window verdict carries no spend.
 
-**PR-ADS-161E doctrine change.** The reader contract derives a **period**
-ROAS and CAC (`cwt.derive_roas` / `derive_cac`): close-date revenue, or
-distinct companies, over the same window's Google Ads USD spend. They are
-labelled `cohort_basis: close_date_outcomes_over_same_window_spend`, and the
-UI shows that basis. They are not acquisition-cohort ratios.
+**PR-ADS-161E doctrine (decision 1, final).** Attribution **ROAS and CAC are
+unavailable** on every surface. Closed-won outcomes are dated by close and
+spend by the day it was spent; in a long B2B sales cycle a deal closed this
+window was usually acquired by spend in an earlier one, so the two are not one
+acquisition cohort.
 
-* Period CAC counts every company whose won deal closed in the window,
-  including repeat and expansion customers. It is "spend per customer won this
-  period", not "cost to acquire a new customer".
-* Both ratios publish only when every input is published.
+* Certified ROAS stays `unavailable`
+  (`roas_requires_revenue_and_spend_in_one_acquisition_cohort`) until revenue
+  and spend use the same acquisition cohort and a compatible attribution scope.
+* Certified CAC stays `unavailable`
+  (`cac_requires_spend_and_customers_in_one_acquisition_cohort`) until spend
+  and distinct customers are joined through the same acquisition cohort and
+  attribution scope.
+* The close-date calculation is kept only as two **non-cohort operational
+  ratios**, under explicit names that cannot be read as attribution metrics:
+  * `period_revenue_per_ad_spend` — **Period Revenue / Ad Spend**: revenue
+    from deals closed in the window ÷ that window's Google Ads USD spend
+    (`cwt.derive_period_revenue_per_ad_spend`).
+  * `period_spend_per_customer_won` — **Spend per Customer Won This Period**:
+    that window's spend ÷ the distinct companies whose won deals closed in it
+    (`cwt.derive_period_spend_per_customer_won`). It counts repeat and
+    expansion companies and never divides by won deals.
+* Each carries `ratio_kind: non_cohort_operational_ratio`,
+  `cohort_basis: close_date_outcomes_over_same_window_spend` and the
+  disclosure "Non-cohort operational ratio. Closed-won outcomes may originate
+  from earlier advertising periods." The UI shows that disclosure beside the
+  value.
+* No API field named `roas` or `cac` (or `geo_roas`, `google_ads_roas`, …)
+  carries a figure. The cutover audit's check 18
+  (`no_period_ratio_named_roas_or_cac`) fails on one, and on any UI text that
+  calls a period ratio ROAS or CAC.
+* Both period ratios publish only when every input is published, and only at a
+  scope Google Ads spend can have produced.
+
+This supersedes the earlier PR-ADS-161E draft, which published these ratios
+under the names ROAS and CAC.
 * Both are unavailable when the numerator scope is not one Google Ads spend
   can have produced. Only `google_ads_source` and `campaign_attributable`
   qualify.

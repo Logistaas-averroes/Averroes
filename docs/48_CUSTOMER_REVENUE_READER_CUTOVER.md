@@ -1,14 +1,15 @@
 # 48 — Customer and Closed-Won Revenue Reader Cutover
 
 **PR-ADS-161E.** Every production page, API route and service that publishes
-closed-won deals, customers, closed-won revenue, ROAS, CAC or SQL-to-customer
-conversion now reads the canonical owner and republishes its verdict. This PR
+closed-won deals, customers, closed-won revenue, a spend ratio or
+SQL-to-customer conversion now reads the canonical owner and republishes its
+verdict. Attribution ROAS and CAC are unavailable everywhere (§4). This PR
 adds no classifier, population, won predicate, customer identity rule or
 revenue gate. It removes the readers that had their own.
 
 | Owner | Role |
 | --- | --- |
-| `analysis/closed_won_truth.py` | states, membership, publication; reader contract (`metric`, `subset_outcomes`, `derive_roas`, `derive_cac`, `incompatible_rate`) |
+| `analysis/closed_won_truth.py` | states, membership, publication; reader contract (`metric`, `subset_outcomes`, `derive_period_revenue_per_ad_spend`, `derive_period_spend_per_customer_won`, `certified_roas`, `certified_cac`, `incompatible_rate`) |
 | `services/canonical_customer_revenue_service.py` | per-window truth (`get_closed_won_truth`, `window_view`) over one snapshot |
 | `services/canonical_revenue_service.py` | the ONE snapshot (`one_snapshot`, `single_snapshot`), `load_won_deals`, `subset_metrics`, `reader_row` |
 
@@ -41,8 +42,11 @@ A page never decides whether a figure publishes. It calls:
   `canonical_window`, `cohort` and `company_ids_by_deal`.
 * `reader_row(base, rows, spend_usd=…)` — a row's (campaign, country, source
   group, label, scope, summary) `closed_won_deals`, `customers`,
-  `won_revenue`, `roas` and `cac`, plus `metrics`: each as
-  `{value, status, reason}`.
+  `won_revenue`, `period_revenue_per_ad_spend` and
+  `period_spend_per_customer_won`, plus `metrics`: each as
+  `{value, status, reason}`. `roas` and `cac` are always `null`, and
+  `metrics.roas` / `metrics.cac` are always `unavailable` with the cohort
+  reason.
 
 A subset inherits the window's verdict. A campaign's revenue publishes only
 when the window's revenue publishes; its customers only when the window's
@@ -88,18 +92,56 @@ not a bare "Unavailable".
 
 ## 4. Derived metrics
 
-| Metric | Rule |
-| --- | --- |
-| ROAS | `derive_roas`: published revenue ÷ the same window's Google Ads USD spend. Withheld when revenue is withheld, with `blocked_by`. Unavailable when spend is unknown, zero, or the scopes differ. A **period** ratio (`cohort_basis: close_date_outcomes_over_same_window_spend`). |
-| CAC | `derive_cac`: Google Ads USD spend ÷ **canonical customers**, never won deals. Withheld when customers are withheld. |
-| SQL-to-customer, revenue-per-SQL, lead-to-customer | Unavailable (`*_needs_one_acquisition_cohort_and_scope`). No canonical service supplies SQLs or leads and customers over one acquisition cohort and one attribution scope. |
-| Average deal value | The published revenue total ÷ every won deal in the same population. |
+**Attribution ROAS and CAC are unavailable** (decision 1). A closed-won
+outcome is dated by its close and spend by the day it was spent. In a long B2B
+sales cycle, a deal closing this window was usually acquired by spend in an
+earlier one. So close-date revenue (or customers) over same-window spend is
+not an acquisition-cohort ratio, and it is never published as one.
 
-The window verdict (`get_closed_won_truth`) carries no spend, so it still
-publishes neither ratio. Its reasons now say they are derived per scope by the
-reader contract.
+| Metric | API field | Rule |
+| --- | --- | --- |
+| Attribution ROAS | `roas` (always `null`); `metrics.roas` | `unavailable`: `roas_requires_revenue_and_spend_in_one_acquisition_cohort`. Stays unavailable until revenue and spend use one acquisition cohort and a compatible scope. |
+| CAC | `cac` (always `null`); `metrics.cac` | `unavailable`: `cac_requires_spend_and_customers_in_one_acquisition_cohort`. Stays unavailable until spend and distinct customers are joined through one acquisition cohort and attribution scope. |
+| **Period Revenue / Ad Spend** | `period_revenue_per_ad_spend` | `derive_period_revenue_per_ad_spend`: published revenue from deals CLOSED in the window ÷ that window's Google Ads USD spend. Withheld when revenue is withheld, with `blocked_by`. Unavailable when spend is unknown or zero, or when the scopes differ. |
+| **Spend per Customer Won This Period** | `period_spend_per_customer_won` | `derive_period_spend_per_customer_won`: that window's spend ÷ **canonical customers** whose deals closed in it, never won deals. It counts repeat and expansion companies. Withheld when customers are withheld. |
+| SQL-to-customer, revenue-per-SQL, lead-to-customer | — | Unavailable (`*_needs_one_acquisition_cohort_and_scope`). No canonical service supplies SQLs or leads and customers over one acquisition cohort and one attribution scope. |
+| Average deal value | `avg_deal_value_usd` | The published revenue total ÷ every won deal in the same population. |
 
-**Scope rule.** ROAS and CAC publish only for `google_ads_source` and
+Each period ratio carries:
+
+* `ratio_kind: non_cohort_operational_ratio`;
+* `cohort_basis: close_date_outcomes_over_same_window_spend`;
+* the disclosure "Non-cohort operational ratio. Closed-won outcomes may
+  originate from earlier advertising periods."
+
+The UI shows the disclosure beside every value, header and KPI.
+
+Dashboard rows carry the same names. Examples:
+
+* `period_revenue_per_ad_spend` with `period_ratio_available`;
+* `geo_period_revenue_per_ad_spend`;
+* `google_ads_period_revenue_per_ad_spend`;
+* `period_ratio_status` and `period_ratio_reason` on Revenue by Source.
+
+Kept on purpose: the route ids (`#/roas-campaigns`, `#/roas-countries`) and
+the source-health booleans (`campaign_roas_available`,
+`country_roas_available`, `country_roas_unblockable`). They are not ratio
+values. The spend-truth and source-classification readiness flags are renamed
+`period_ratio_available`.
+
+**Where the ratios are computed.** Reader-contract rows (Mart, attribution,
+Revenue by Source, Unit Economics) use the two `derive_*` functions and carry
+the metadata. The Campaigns, Countries and Channels dashboard rows divide the
+same published inputs themselves and carry no metadata; they return `null`
+rather than 0 for zero revenue. Zero spend makes either ratio unavailable
+(`no_google_ads_spend_in_window`), never "$0". The page titles read "Campaign Revenue & Spend" and "Country Revenue &
+Spend".
+
+The window verdict (`get_closed_won_truth`) carries no spend, so it publishes
+neither period ratio and marks ROAS / CAC `not_published` with the cohort
+reasons.
+
+**Scope rule.** The period ratios publish only for `google_ads_source` and
 `campaign_attributable`. Otherwise they are unavailable with
 `numerator_and_denominator_scopes_differ`; for example, Unit Economics at
 `all_source`.
@@ -110,7 +152,7 @@ republishes that canonical partition. A Google Ads won deal that resolves to no
 campaign (no label, an unmapped label, or no resolver) is in
 `google_ads_unplaced`. While one exists:
 
-* every **per-campaign** deal count, revenue, customer count, ROAS and CAC is
+* every **per-campaign** deal count, revenue, customer count and period ratio is
   withheld with `google_ads_deals_not_placed_on_a_campaign`
   (`campaign_placement_gate`);
 * the `campaign_attributable` **scope total** is still published, because it is
@@ -118,7 +160,7 @@ campaign (no label, an unmapped label, or no resolver) is in
 * the account-level Google Ads figures are not affected.
 
 **A withheld count is never judged.** A row whose deal count is withheld gets
-the verdict `outcome_withheld` (ROAS pages) or the status "Closed-won outcome
+the verdict `outcome_withheld` (Campaign / Country Revenue & Spend) or the status "Closed-won outcome
 withheld" (dashboards), never `waste`, "spend without proof" or "no won
 deals". Decision cards say that the outcome is withheld. Charts leave the row
 off instead of plotting it at 0.
@@ -151,12 +193,12 @@ description.
   and reason); attributed subset via `reader_row`; `google_ads_source_*` scope
   totals; `metrics` with each verdict. When either side withholds, the
   revenue metric carries the canonical status and reason.
-* **Revenue attribution** (ROAS by Campaign and by Country): `reader_row` per
-  campaign, country and summary, plus the placement gate.
+* **Revenue attribution** (Campaign / Country Revenue & Spend): `reader_row`
+  per campaign, country and summary, plus the placement gate.
 * **Revenue by Source:** `reader_row` per group, channel and platform. The
   "Customer Rate" column (won deals ÷ leads) is retired.
-* **Mapping review, Unit Economics:** `reader_row`. CAC is over canonical
-  customers.
+* **Mapping review, Unit Economics:** `reader_row`. CAC is unavailable;
+  Spend per Customer Won This Period is over canonical customers.
 * **Dashboards:**
   * Overview, Revenue, Channels, Campaigns and Countries: deals and customers
     are separate. Channel, campaign and country rows count won deals. The
@@ -183,7 +225,7 @@ description.
 | --- | --- |
 | `/api/attribution/confidence-summary` | Publishes attribution tier counts only, with no deal, customer, revenue or ratio value. |
 | `/api/audit/revenue-truth` | An admin shadow-reconciliation diagnostic that compares the ledger to the legacy ledgers. It is not a page publishing a total. |
-| Daily ROAS snapshot job (`scheduler/daily.py`) | Still writes a local snapshot file (no external write). Every route that serves it withholds the figures. |
+| Daily legacy snapshot job (`scheduler/daily.py`) | Still writes a local snapshot file (no external write). Every route that serves it withholds the figures. |
 | Admin revenue-recovery job report (`revenue_recovery_service`) | Counts what one recovery run processed. It is a job report, not a window's business total. |
 | `source_attribution_health_counts` | Classification-health counts (ambiguous or unclassified deals) on Revenue by Source. They are a data-quality signal, not an outcome. |
 
@@ -198,18 +240,37 @@ description.
 
 `python -m scripts.audit_customer_revenue_reader_cutover [--json]`. It reads
 the snapshot, runs the ten page builders for every business window, and
-fingerprints the closed-won tables before and after. "No database writes" is
-measured, not declared. It runs 17 checks:
+fingerprints the closed-won tables before and after (and also builds the
+Mart's source and country views, for check 18). "No database writes" is
+measured, not declared. It runs 18 checks:
 
 * the inventory is complete; customer and revenue readers are canonical;
 * no won-deal-as-customer label; no legacy table gate;
 * windows reconcile (reader = canonical = an independent derivation);
 * status and reason are serialized;
 * withheld values are absent and not reconstructable; zero is distinguishable;
-* derived ratios inherit a withheld input; SQL-to-customer is not mixed;
+* period ratios inherit a withheld input; SQL-to-customer is not mixed;
 * All Time holds the undated deals and no future-dated one;
 * admin links resolve; non-admins get no link;
-* no external call and no write; the derivation is independent.
+* no external call and no write; the derivation is independent;
+* **no period ratio is named ROAS or CAC** (`no_period_ratio_named_roas_or_cac`).
+  It walks every page payload and fails on:
+  * a number, a digit-bearing string or a numeric descendant under any key
+    naming ROAS/CAC. That covers any case, camelCase and the synonyms
+    `return_on_ad_spend` / `customer_acquisition_cost`;
+  * a `roas`/`cac` metric whose status is not `unavailable`/`not_published`;
+  * a row naming ROAS/CAC by value with a number;
+  * any string, in a dict or a list, that calls something ROAS or CAC, outside
+    the exact certified-unavailable phrasings and LTV/CAC;
+  * a period ratio under another name or without its disclosure.
+
+  It also reads `static/app.js` and `static/index.html` and fails on:
+  * visible ROAS/CAC text (any case variant or synonym). Only the exact
+    allowed tokens are exempt, never a whole line;
+  * a certified label rendered beside anything but its own metric;
+  * a missing period label or disclosure.
+
+  Tests 38–45 are its counterfactuals; the UI at `64b2ce3` has 97 violations.
 
 Exit codes: **0** every reader contract holds, though metrics may still be
 withheld for CRM reasons, which are reported and are not failures. **1** a

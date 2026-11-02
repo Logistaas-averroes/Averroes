@@ -10,7 +10,7 @@ existing canonical read-only contracts:
   - build_revenue_decision_mart (view="campaign")  -> canonical window,
     spend_truth, summary, readiness, diagnostics, campaign rows. The mart is
     the single truth brain (PR-ADS-125); the overview never re-derives spend,
-    FX, ROAS, or lead safety.
+    FX, the period ratio, or lead safety.
   - build_revenue_by_source                        -> source-group mix
     (google_ads / other_paid / organic / offline / unclassified, PR-ADS-133).
   - build_revenue_deals                            -> closed-won deal ledger
@@ -75,7 +75,7 @@ PERIOD_CHANGE_METRICS = {
     "sqls": "SQLs",
     "closed_won_deals": "Closed-won deals",
     "customers": "Customers",
-    "roas": "Google Ads ROAS",
+    "period_revenue_per_ad_spend": "Google Ads period revenue / ad spend",
 }
 
 # Source-group status copy for the channel mix. Only Google Ads is
@@ -248,7 +248,10 @@ def _build_period_change(window: str, now: datetime, summary: dict) -> dict:
                                           prev_summary.get("closed_won_deals")),
         # Canonical customers on both sides; a withheld side is "unavailable".
         "customers": _delta_metric(summary.get("customers"), prev_summary.get("customers")),
-        "roas": _delta_metric(summary.get("roas"), prev_summary.get("roas")),
+        # Non-cohort operational ratio (docs/48 §4), never attribution ROAS.
+        "period_revenue_per_ad_spend": _delta_metric(
+            summary.get("period_revenue_per_ad_spend"),
+            prev_summary.get("period_revenue_per_ad_spend")),
     }
     prev_window_block = prev_mart.get("window") or {}
     return {
@@ -436,10 +439,10 @@ def _build_trend(window_block: dict, readiness: dict, spend_truth: dict,
 def _build_source_mix(source_groups: list, *, revenue_connected: bool) -> list:
     """Compact channel-mix rows from the canonical source groups (PR-ADS-133).
 
-    No ROAS on any mix row — including Google Ads. The source-page group ROAS
-    is a geo-spend ratio that is NOT gated by the mart's coverage/FX safety, so
-    surfacing it here could contradict the hero ROAS card on the same screen.
-    The hero KPI (canonical mart ROAS) is the only ROAS this page shows.
+    No spend ratio on any mix row — including Google Ads. The hero KPI (the
+    mart's ``period_revenue_per_ad_spend``) is the only spend ratio this page
+    shows, so a mix row can never contradict it. No ROAS anywhere: attribution
+    ROAS needs one acquisition cohort.
 
     When the revenue integration is not connected, per-source revenue/customers
     are unknown — None, never a fabricated $0.
@@ -457,9 +460,8 @@ def _build_source_mix(source_groups: list, *, revenue_connected: bool) -> list:
             # across groups (one company can sit in two).
             "customers": group.get("customers") if revenue_connected else None,
             "revenue_usd": _round2(group.get("won_revenue")) if revenue_connected else None,
-            # Only Google Ads is spend-connected; ROAS never appears on mix rows.
+            # Only Google Ads is spend-connected; no ratio appears on mix rows.
             "spend_connected": bool(group.get("has_spend")),
-            "roas": None,
             "status": _SOURCE_GROUP_STATUS.get(key, "Revenue-only"),
         })
     return mix
@@ -509,7 +511,8 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
             "label": best_campaign.get("campaign_name"),
             "revenue_usd": _round2(best_campaign.get("won_revenue")),
             "closed_won_deals": best_campaign.get("closed_won_deals"),
-            "roas": best_campaign.get("roas"),
+            "period_revenue_per_ad_spend":
+                best_campaign.get("period_revenue_per_ad_spend"),
             "target_page": "roas-campaigns",
         }
 
@@ -561,7 +564,7 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
                 "campaign_count": len(waste_rows),
                 "top_campaign": top_waste.get("campaign_name"),
                 "severity": "high" if waste_total > 0 else "low",
-                # Evidence lives in ROAS by Campaign (its Waste decision filter
+                # Evidence lives in Campaign Revenue & Spend (its Waste decision filter
                 # shows exactly these campaigns on the same business window).
                 # The #/waste page is ad-window search-term waste and cannot
                 # evidence this campaign-level signal; the Investigate decision
@@ -670,7 +673,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 f"{_fmt_usd_short(best['revenue_usd'])} closed-won revenue in this window."
             ),
             "target_page": "roas-campaigns",
-            "target_label": "Open ROAS by Campaign",
+            "target_label": "Open Campaign Revenue & Spend",
         })
     elif withheld:
         cards.append({
@@ -681,7 +684,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                      f"campaign{'s' if len(withheld) != 1 else ''} in this window, "
                      "so won-deal production is not claimed either way."),
             "target_page": "roas-campaigns",
-            "target_label": "Open ROAS by Campaign",
+            "target_label": "Open Campaign Revenue & Spend",
         })
     else:
         cards.append({
@@ -690,7 +693,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "headline": "No verified won-deal producers yet",
             "body": "No campaign has a closed-won deal in this window.",
             "target_page": "roas-campaigns",
-            "target_label": "Open ROAS by Campaign",
+            "target_label": "Open Campaign Revenue & Spend",
         })
 
     if sqls_available:
@@ -711,7 +714,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                     "closed-won proof — promising, not yet verified."
                 ),
                 "target_page": "roas-campaigns",
-                "target_label": "Open ROAS by Campaign",
+                "target_label": "Open Campaign Revenue & Spend",
             })
         elif any((r.get("sqls") or 0) > 0 for r in withheld):
             cards.append({
@@ -721,7 +724,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 "body": ("Closed-won deals are withheld for campaigns with SQLs in "
                          "this window, so unproven pipelines are not claimed."),
                 "target_page": "roas-campaigns",
-                "target_label": "Open ROAS by Campaign",
+                "target_label": "Open Campaign Revenue & Spend",
             })
         else:
             cards.append({
@@ -778,7 +781,7 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "body": ("Closed-won deals are withheld for campaigns with spend and no "
                      "SQLs, so unexplained spend is neither claimed nor ruled out."),
             "target_page": "roas-campaigns",
-            "target_label": "Open ROAS by Campaign",
+            "target_label": "Open Campaign Revenue & Spend",
         })
     else:
         cards.append({
@@ -898,9 +901,15 @@ def _build_unavailable(summary: dict, spend_truth: dict, readiness: dict,
         else:
             out.append({"metric": "google_ads_spend_usd",
                         "reason": "Canonical spend coverage incomplete or unavailable."})
-    if summary.get("roas") is None:
-        out.append({"metric": "google_ads_roas",
-                    "reason": "ROAS requires verified spend, complete FX, and closed-won revenue."})
+    # Attribution ROAS is never published: closed-won revenue is dated by
+    # close, spend by the day it was spent, so they are not one cohort.
+    out.append({"metric": "google_ads_roas",
+                "reason": ("Unavailable: attribution ROAS requires revenue and "
+                           "spend over one acquisition cohort.")})
+    if summary.get("period_revenue_per_ad_spend") is None:
+        out.append({"metric": "google_ads_period_revenue_per_ad_spend",
+                    "reason": ("Period revenue / ad spend requires verified spend, "
+                               "complete FX, and published closed-won revenue.")})
     if summary.get("leads") is None or summary.get("sqls") is None:
         out.append({"metric": "leads_sqls",
                     "reason": "Lead metrics withheld — business event dates unavailable."})
@@ -951,12 +960,13 @@ def build_dashboard_overview(window: str = "current_quarter",
     revenue_connected = bool(readiness.get("canonical_revenue_available"))
     won_revenue_usd = summary.get("won_revenue_usd") if revenue_connected else None
     customers = summary.get("customers") if revenue_connected else None
-    roas = summary.get("roas") if revenue_connected else None
+    period_ratio = (summary.get("period_revenue_per_ad_spend")
+                    if revenue_connected else None)
     gated_summary = {
         **summary,
         "won_revenue_usd": won_revenue_usd,
         "customers": customers,
-        "roas": roas,
+        "period_revenue_per_ad_spend": period_ratio,
     }
 
     source_contract = build_revenue_by_source(window, now=now)
@@ -997,7 +1007,7 @@ def build_dashboard_overview(window: str = "current_quarter",
     # PR-ADS-153C §21/§22: CRM lifecycle metrics now come from the canonical
     # HubSpot funnel (stage-entry events, each dated by its OWN
     # hs_v2_date_entered_* timestamp) rather than the legacy contact-created-date
-    # proxy. REVENUE metrics (customers / closed-won revenue / ROAS) deliberately
+    # proxy. REVENUE metrics (customers / closed-won revenue / period ratios) deliberately
     # stay on their existing revenue contract until PR-ADS-153E — a lifecycle
     # customer is NOT a revenue customer and must never be silently substituted.
     lifecycle_funnel = _lifecycle_funnel_block(window, now=now)
@@ -1017,7 +1027,10 @@ def build_dashboard_overview(window: str = "current_quarter",
             "currency": spend_truth.get("native_currency") or "GBP",
         },
         "closed_won_revenue_usd": won_revenue_usd,
-        "google_ads_roas": roas,
+        # A non-cohort operational ratio: closed-won revenue CLOSED in the
+        # window over the same window's spend. Attribution ROAS is unavailable.
+        "google_ads_period_revenue_per_ad_spend": period_ratio,
+        "google_ads_roas": None,
         "leads": summary.get("leads"),
         # PR-ADS-152 §1 — the SQL headline: canonical Google Ads-source SQLs.
         "google_ads_source_sqls": _ga_source_display,

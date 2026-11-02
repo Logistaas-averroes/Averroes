@@ -300,7 +300,10 @@ def test_kpis_from_country_attributed_truth(monkeypatch):
     assert k["sqls"] == 25  # 20 US + 5 GB
     assert k["closed_won_deals"] == 2  # US only (Ghost Co has no country → residual)
     assert k["won_revenue_usd"] == 29000.0
-    assert k["geo_roas"] == round(29000.0 / 13000.0, 2)  # 2.23 — country-attributed
+    # PR-ADS-161E: the close-date ratio publishes only under its explicit name;
+    # no geo ROAS is published.
+    assert k["geo_period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)  # 2.23 — country-attributed
+    assert k.get("geo_roas") is None
 
 
 def test_kpis_reconcile_with_country_rows(monkeypatch):
@@ -327,10 +330,10 @@ def test_country_rows_carry_region(monkeypatch):
     assert _ctry(out, "GB")["region"] == "Europe"
 
 
-# ══════════════════ 3. Spend / FX / ROAS truth ══════════════════════════════
+# ══════════════════ 3. Spend / FX / period-ratio truth ══════════════════════════════
 
 
-def test_fx_incomplete_keeps_native_gbp_but_withholds_usd_and_roas(monkeypatch):
+def test_fx_incomplete_keeps_native_gbp_but_withholds_usd_and_period_ratio(monkeypatch):
     canon = dict(CANONICAL, fx_complete=False, fx_missing_days=5, total_spend_usd=None,
                  rows=[dict(r, spend_usd=None, fx_complete=False) for r in CANONICAL["rows"]])
     geo = dict(GEO_BY_COUNTRY, total_spend_usd=None, fx_complete=False,
@@ -339,41 +342,45 @@ def test_fx_incomplete_keeps_native_gbp_but_withholds_usd_and_roas(monkeypatch):
     k = out["kpis"]
     assert k["verified_spend_native"]["amount"] == 10000.0  # native GBP still present
     assert k["verified_spend_usd"] is None  # USD Unavailable
-    assert k["geo_roas"] is None  # ROAS Unavailable
+    assert k["geo_period_revenue_per_ad_spend"] is None  # period ratio Unavailable
     us = _ctry(out, "US")
     assert us["spend_native"] == 6000.0 and us["spend_native"] != 0
     assert us["spend_usd"] is None
-    assert us["roas"] is None and us["roas_available"] is False
-    # ROAS unavailable reason must cite FX / USD.
-    roas_u = next(u for u in out["unavailable"] if u["metric"] == "geo_roas")
-    assert "FX" in roas_u["reason"] or "USD" in roas_u["reason"]
+    assert us["period_revenue_per_ad_spend"] is None and us["period_ratio_available"] is False
+    # The period-ratio unavailable reason must cite FX / USD.
+    ratio_u = next(u for u in out["unavailable"]
+                   if u["metric"] == "geo_period_revenue_per_ad_spend")
+    assert "FX" in ratio_u["reason"] or "USD" in ratio_u["reason"]
 
 
-def test_geo_roas_only_when_spend_and_revenue_safe(monkeypatch):
+def test_geo_period_ratio_only_when_spend_and_revenue_safe(monkeypatch):
     out = _countries(monkeypatch)
     us = _ctry(out, "US")
-    assert us["roas"] == round(29000.0 / 8000.0, 2) and us["roas_available"] is True
+    assert (us["period_revenue_per_ad_spend"] == round(29000.0 / 8000.0, 2)
+            and us["period_ratio_available"] is True)
+    assert us.get("roas") is None  # attribution ROAS is never published
     # A country with verified spend but ZERO revenue shows no misleading 0.00x —
     # its status conveys the outcome.
     gb = _ctry(out, "GB")
-    assert gb["roas"] is None and gb["roas_available"] is False
+    assert gb["period_revenue_per_ad_spend"] is None and gb["period_ratio_available"] is False
     assert gb["status"] == "SQL producer"
 
 
-def test_geo_roas_is_revenue_over_spend_only(monkeypatch):
+def test_geo_period_ratio_is_revenue_over_spend_only(monkeypatch):
     assert "conversion value" in SERVICE.lower()
     out = _countries(monkeypatch)
     assert out["google_ads_conversion_value_used"] is False
-    assert out["kpis"]["geo_roas"] == round(29000.0 / 13000.0, 2)
+    assert out["kpis"]["geo_period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)
 
 
-def test_roas_helper_never_fakes_zero():
-    from services.dashboard_countries_service import _roas
-    assert _roas(29000, 8000) == round(29000 / 8000, 2)
-    assert _roas(0, 8000) is None      # zero revenue → no 0.00x
-    assert _roas(29000, 0) is None     # zero spend → no divide
-    assert _roas(None, 8000) is None
-    assert _roas(29000, None) is None
+def test_period_ratio_helper_never_fakes_zero():
+    # PR-ADS-161E: `_roas` renamed `_period_ratio` (same math).
+    from services.dashboard_countries_service import _period_ratio
+    assert _period_ratio(29000, 8000) == round(29000 / 8000, 2)
+    assert _period_ratio(0, 8000) is None      # zero revenue → no 0.00x
+    assert _period_ratio(29000, 0) is None     # zero spend → no divide
+    assert _period_ratio(None, 8000) is None
+    assert _period_ratio(29000, None) is None
 
 
 # ══════════════════ 4. Residual isolation (NEVER distributed) ════════════════
@@ -407,11 +414,11 @@ def test_residual_revenue_preserved_not_a_country(monkeypatch):
     assert out["kpis"]["closed_won_deals"] == 2
 
 
-def test_residual_never_mapped_never_roas_never_drawer(monkeypatch):
+def test_residual_never_mapped_never_period_ratio_never_drawer(monkeypatch):
     out = _countries(monkeypatch)
     res = out["residual"]
-    assert res["roas"] is None
-    assert res["roas_available"] is False
+    assert res["period_revenue_per_ad_spend"] is None
+    assert res["period_ratio_available"] is False
     assert res["drawer_available"] is False
 
 
@@ -440,7 +447,7 @@ def test_build_residual_is_canonical_mart_minus_countries():
     assert res["sqls"] == 5               # 40 − (25+10)
     assert res["spend_native"] == 500.0
     assert res["spend_usd"] == 640.0
-    assert res["roas"] is None and res["drawer_available"] is False
+    assert res["period_revenue_per_ad_spend"] is None and res["drawer_available"] is False
     assert "does not assign this spend to a country" in res["reason"]
 
 
@@ -488,35 +495,36 @@ def test_residual_deal_null_amount_withholds_revenue_keeps_customers(monkeypatch
     assert "amount" in ru["reason"].lower()
 
 
-def test_residual_excluded_from_country_kpis_and_roas(monkeypatch):
-    # Residual is never a country row, never gets a ROAS, and is never in the
-    # country-attributed KPI ROAS numerator.
+def test_residual_excluded_from_country_kpis_and_period_ratio(monkeypatch):
+    # Residual is never a country row, never gets a spend ratio, and is never in
+    # the country-attributed KPI period-ratio numerator.
     out = _countries(monkeypatch, deals=DEAL_ROWS[:2] + _GHOST_GOOGLE_ADS)
     real = [c for c in out["countries"] if not c["is_residual"]]
     assert len(real) == len(out["countries"])  # residual is not in countries[]
-    assert out["residual"]["roas"] is None and out["residual"]["roas_available"] is False
+    assert (out["residual"]["period_revenue_per_ad_spend"] is None
+            and out["residual"]["period_ratio_available"] is False)
     assert out["residual"]["drawer_available"] is False
-    # Country-attributed KPIs exclude the residual; ROAS numerator is real-only.
+    # Country-attributed KPIs exclude the residual; ratio numerator is real-only.
     assert out["kpis"]["closed_won_deals"] == sum(c["closed_won_deals"] for c in real)
     assert out["kpis"]["won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in real), 2)
     assert out["kpis"]["won_revenue_usd"] == 29000.0
     assert out["kpis"]["residual_revenue_usd"] == 4000.0
-    assert out["kpis"]["geo_roas"] == round(29000.0 / 13000.0, 2)
+    assert out["kpis"]["geo_period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)
 
 
 # ══════════════════ 5. No fake $0 / disconnected / period change ═════════════
 
 
-def test_null_amount_makes_country_revenue_and_roas_unavailable(monkeypatch):
-    # A US deal with an unknown amount → that country's revenue (and ROAS)
+def test_null_amount_makes_country_revenue_and_period_ratio_unavailable(monkeypatch):
+    # A US deal with an unknown amount → that country's revenue (and period ratio)
     # Unavailable, never a lowered $0. KPI revenue also Unavailable.
     deals = [dict(DEAL_ROWS[0], deal_amount_usd=None)] + DEAL_ROWS[1:]
     out = _countries(monkeypatch, deals=deals)
     us = _ctry(out, "US")
     assert us["won_revenue_usd"] is None and us["won_revenue_usd"] != 0
-    assert us["roas"] is None
+    assert us["period_revenue_per_ad_spend"] is None
     assert out["kpis"]["won_revenue_usd"] is None
-    assert out["kpis"]["geo_roas"] is None
+    assert out["kpis"]["geo_period_revenue_per_ad_spend"] is None
 
 
 def test_disconnected_integration_blanks_customers_and_revenue(monkeypatch):
@@ -524,14 +532,14 @@ def test_disconnected_integration_blanks_customers_and_revenue(monkeypatch):
     k = out["kpis"]
     assert k["closed_won_deals"] is None
     assert k["won_revenue_usd"] is None
-    assert k["geo_roas"] is None
+    assert k["geo_period_revenue_per_ad_spend"] is None
     assert k["residual_closed_won_deals"] is None
     assert k["residual_revenue_usd"] is None
     assert k["verified_spend_native"]["amount"] == 10000.0  # spend survives
     assert k["sqls"] == 25  # SQLs come from leads and survive
     for c in out["countries"]:
         assert c["closed_won_deals"] is None, f"{c['country_name']} customers must be None"
-        assert c["won_revenue_usd"] is None and c["roas"] is None
+        assert c["won_revenue_usd"] is None and c["period_revenue_per_ad_spend"] is None
     assert out["truth_status"]["revenue"] == "blocked"
 
 
@@ -553,10 +561,10 @@ def test_geo_source_outage_yields_unavailable_not_zero(monkeypatch):
     out = _countries(monkeypatch, geo_by_country={"available": False, "has_rows": False, "rows": []})
     assert out["kpis"]["verified_spend_native"]["amount"] is None
     assert out["kpis"]["verified_spend_usd"] is None
-    assert out["kpis"]["geo_roas"] is None
+    assert out["kpis"]["geo_period_revenue_per_ad_spend"] is None
     for c in out["countries"]:
         assert c["spend_native"] is None  # never a fabricated 0 on outage
-        assert c["roas"] is None
+        assert c["period_revenue_per_ad_spend"] is None
 
 
 def test_country_status_distinguishes_unavailable_spend_from_zero():
@@ -632,8 +640,10 @@ def test_period_change_metrics_are_country_attributed(monkeypatch):
     pc = out["period_change"]
     # Whatever the availability, the comparison metric keys are the country KPIs.
     for key in ("won_revenue_usd", "closed_won_deals", "sqls", "verified_spend_usd",
-                "geo_roas"):
+                "geo_period_revenue_per_ad_spend"):
         assert key in pc["metrics"]
+    # PR-ADS-161E: the retired key is not compared under the old name.
+    assert "geo_roas" not in pc["metrics"]
 
 
 def test_161e_a_non_google_ads_deal_is_not_the_country_residual(monkeypatch):
@@ -687,8 +697,8 @@ def test_regional_mix_groups_countries(monkeypatch):
     assert mix["North America"]["won_revenue_usd"] == 29000.0
     assert mix["North America"]["closed_won_deals"] == 2
     assert mix["Europe"]["closed_won_deals"] == 0
-    # No fabricated percentages: a region's roas is only present when safe.
-    assert mix["Europe"]["roas"] is None
+    # No fabricated percentages: a region's period ratio is only present when safe.
+    assert mix["Europe"]["period_revenue_per_ad_spend"] is None
 
 
 def test_decision_cards_shape_and_safety(monkeypatch):
@@ -803,8 +813,11 @@ def test_countries_kpi_cards_render_six_metrics():
     # PR-ADS-161E: the country KPI is closed-won DEALS — customers are distinct
     # companies, not additive across countries, so no customer total is shown.
     for label in ("Verified Geo Spend", "SQLs", "Closed-Won Deals", "Won Revenue",
-                  "Geo ROAS", "Residual Revenue"):
+                  '"Geo " + PERIOD_RATIO_LABEL', "Residual Revenue"):
         assert label in fn
+    # PR-ADS-161E: the close-date ratio is never labelled ROAS.
+    assert "ROAS" not in fn
+    assert "PERIOD_RATIO_DISCLOSURE" in fn
     assert 'label: "Customers"' not in fn
     assert "dash-kpi-card" in fn
 
@@ -827,10 +840,10 @@ def test_native_gbp_rendered_never_dollar():
     assert "spend_native" in fn and "spend_usd" in fn
 
 
-def test_geo_roas_cell_gated_on_availability():
+def test_geo_period_ratio_cell_gated_on_availability():
     fn = _slice(JS, "function ctryRoasCell", 500)
-    assert "roas_available" in fn
-    assert "ctry-status" in fn  # non-safe ROAS falls back to status, never a fake x
+    assert "period_ratio_available" in fn
+    assert "ctry-status" in fn  # non-safe ratio falls back to status, never a fake x
 
 
 def test_map_excludes_residual():

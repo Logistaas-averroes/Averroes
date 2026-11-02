@@ -1461,12 +1461,15 @@ admitted closes later today.
     `canonical_customer_revenue_service.window_view`. It releases the
     population only when the canonical deal count publishes, and carries the
     canonical verdicts.
-  * `subset_metrics` / `reader_row` produce a row's deals, customers, revenue,
-    ROAS and CAC through `analysis.closed_won_truth.subset_outcomes`,
-    `derive_roas` and `derive_cac`.
+  * `subset_metrics` / `reader_row` produce a row's deals, customers, revenue
+    and the two period ratios through `analysis.closed_won_truth.subset_outcomes`,
+    `derive_period_revenue_per_ad_spend` and
+    `derive_period_spend_per_customer_won`. Certified ROAS and CAC are
+    always unavailable (decision 1, below).
   * `one_snapshot` / `single_snapshot` give each page one READ ONLY universe.
 * Migrated:
-  * the Revenue Decision Mart, revenue attribution (ROAS by Campaign / Country),
+  * the Revenue Decision Mart, revenue attribution (Campaign / Country Revenue &
+    Spend, formerly "ROAS by Campaign / Country"),
     Revenue by Source, campaign mapping review and Unit Economics;
   * all six dashboard tabs and cross-page parity.
   * Every one now publishes `closed_won_deals` and canonical `customers` as
@@ -1490,7 +1493,7 @@ admitted closes later today.
     summed across rows.
 * Per-campaign placement republishes the canonical partition: the window is
   evaluated with Campaign Evidence's resolver. Per-campaign deals, revenue,
-  customers, ROAS and CAC are withheld while a Google Ads won deal resolves to
+  customers and period ratios are withheld while a Google Ads won deal resolves to
   no campaign (`google_ads_deals_not_placed_on_a_campaign`). The
   campaign-attributable scope total is not gated.
 * Country residual: the Google Ads-source canonical total minus the country
@@ -1500,7 +1503,7 @@ admitted closes later today.
   code. In a window withheld for an undated deal, it also said "unavailable"
   where the canonical verdict is "withheld". It now republishes the canonical
   status and reason whenever either side withholds.
-* `scripts/audit_customer_revenue_reader_cutover.py` — 17 checks, exit 0/1/2;
+* `scripts/audit_customer_revenue_reader_cutover.py` — 18 checks, exit 0/1/2;
   CRM findings alone never fail it. `INVENTORY` is the reader matrix.
 
 * **Truth review before push** (`averroes-truth-auditor`). It found 1 blocker
@@ -1514,7 +1517,7 @@ admitted closes later today.
     - a proof-deal list stayed beside a withheld count;
     - `summarize_deals` netted negative amounts;
     - the GCLID readiness sibling counts re-added to the withheld total.
-  - ROAS/CAC were published at `all_source` scope.
+  - The spend ratios were published at `all_source` scope.
   - The audit's leak walk covered the Mart only, and it missed the Mailchimp
     audit reader.
   - Headline revenue said "Unavailable" with no reason.
@@ -1527,18 +1530,62 @@ admitted closes later today.
   - Regressions: tests 28–33.
 
 **Not changed.** The won predicate, customer identity, revenue proof, window
-definitions and the canonical verdicts are unchanged. **Changed on purpose,
-for your sign-off:**
-* ROAS and CAC are now published as **period** ratios.
-  docs/46's 161D line ("neither") is superseded and recorded there.
-* Per-campaign figures follow the canonical placement verdict.
+definitions and the canonical verdicts are unchanged. **Changed on purpose, as
+directed by the owner in review:**
+* **Decision 1 (corrected).** Attribution ROAS and CAC are **unavailable**
+  everywhere: close-date outcomes and same-window spend are not one acquisition
+  cohort in a long B2B sales cycle. Reasons:
+  `roas_requires_revenue_and_spend_in_one_acquisition_cohort`,
+  `cac_requires_spend_and_customers_in_one_acquisition_cohort`.
+  The close-date calculation is kept as two non-cohort operational ratios:
+  * `period_revenue_per_ad_spend` — "Period Revenue / Ad Spend";
+  * `period_spend_per_customer_won` — "Spend per Customer Won This Period".
+
+  Each carries `ratio_kind: non_cohort_operational_ratio` and the disclosure
+  "Non-cohort operational ratio · Closed-won outcomes may originate from
+  earlier advertising periods", which the UI shows beside it. Renamed to match:
+  * every API row and KPI field (`roas`/`geo_roas`/`google_ads_roas` and
+    `cac` are null; `roas_available` (rows, `spend_truth` and the source
+    classification) is now `period_ratio_available`;
+    `roas_status`/`roas_reason` are now `period_ratio_status`/`period_ratio_reason`;
+    the Mart readiness `roas_ready` is now `period_ratio_ready`);
+  * every label, page title ("ROAS by Campaign/Country" are now "Campaign/Country
+    Revenue & Spend") and card.
+
+  Kept on purpose: route ids (`#/roas-campaigns`) and the source-health
+  booleans `campaign_roas_available`, `country_roas_available` and
+  `country_roas_unblockable`. They are not ratio values.
+  Audit check 18 (`no_period_ratio_named_roas_or_cac`) walks twelve page
+  payloads (the ten builders plus the Mart's source and country views). It fails
+  on any of these:
+  * a figure, digit-bearing string or numeric descendant under any `roas`/`cac`
+    key, in any case or camelCase, or a synonym;
+  * a row naming ROAS/CAC by value;
+  * any API string that calls something ROAS or CAC, outside the exact
+    certified-unavailable phrasings;
+  * a period ratio without its disclosure;
+  * UI text naming ROAS/CAC outside the exact certified labels, or a certified
+    label rendered beside a period value.
+
+  Tests 38–45 are its counterfactuals. The UI shipped at `64b2ce3` has 97
+  violations.
+  The truth review of this round found live diagnostics text ("carries
+  spend/ROAS", "Country ROAS is shown", "Geo ROAS is withheld") and lexical
+  bypasses of the first check 18; both are fixed. Zero spend now makes Spend per
+  Customer Won This Period unavailable, never "$0", and the dead
+  `compute_roas` / `compute_cac` helpers are deleted.
+  docs/46's 161D line ("neither") stands: no ROAS or CAC is published.
+* **Decision 2 (approved).** Per-campaign figures follow the canonical
+  placement verdict. Account and scope totals stay independent when their own
+  evidence is complete. A withheld campaign count is never zero, "waste" or
+  "no won deals".
 
 No HubSpot or Google Ads call, no write. Marketing SQLs stay on the
 acquisition cohort.
 
 **Deferred** (docs/48 §7): `/api/attribution/confidence-summary` (tier counts
 only), `/api/audit/revenue-truth` (admin shadow diagnostic), and the daily
-local ROAS snapshot job (its routes withhold).
+local snapshot job (its routes withhold).
 
 **Suite.** `tests/test_pr_ads_161e_reader_cutover.py`, in CI's PostgreSQL step
 and did-run list, with a counterfactual on base `028effc`.

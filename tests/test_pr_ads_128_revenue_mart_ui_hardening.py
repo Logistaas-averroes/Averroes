@@ -35,6 +35,16 @@ def _slice(marker, span=1800):
     return JS[i:i + span]
 
 
+def _fn(marker):
+    """The whole top-level app.js function starting at ``marker`` (to its
+    closing ``}`` at column 0) — robust to a body that grows."""
+    i = JS.find(marker)
+    assert i != -1, f"{marker} not found in app.js"
+    j = JS.find("\n}\n", i)
+    assert j != -1, f"end of {marker} not found in app.js"
+    return JS[i:j + 3]
+
+
 REVENUE_PAGES_MIN = ["roas-campaigns", "roas-countries", "revenue-by-source", "deals", "revenue-health"]
 
 
@@ -81,9 +91,12 @@ def test_revenue_pages_hide_monitoring_warning():
 def test_shared_clean_spend_truth_card():
     assert "function renderMartSpendTruth" in JS
     card = _slice("function renderMartSpendTruth", span=1100)
+    # PR-ADS-161E: the basis row describes the period revenue / ad spend ratio,
+    # never "ROAS".
     for label in ("Canonical Spend Truth", "Native Spend", "USD Reporting",
-                  "FX Coverage", "ROAS Basis"):
+                  "FX Coverage", "Period Ratio Basis"):
         assert label in card, f"spend card missing '{label}'"
+    assert "ROAS Basis" not in card
     # All four business page renderers use the SAME component.
     for page in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
                  "function renderRevenueBySourcePage", "function renderRevenueDealsPage"):
@@ -99,8 +112,9 @@ def test_no_native_labelled_as_usd():
     assert "fmtNativeMoney(st.native_spend, st.native_currency)" in card
     # USD reporting is Unavailable when null (never $0, never native).
     assert 'st.usd_spend == null ? "Unavailable"' in card
-    # ROAS basis is Unavailable when ROAS is null.
-    assert 's.roas == null ? "Unavailable"' in card
+    # Period ratio basis is Unavailable when the period ratio is null
+    # (PR-ADS-161E: the ratio is period revenue / ad spend, not ROAS).
+    assert 's.period_revenue_per_ad_spend == null ? "Unavailable"' in card
     # The card never formats native spend with the USD formatter.
     assert "fmtMoney(st.native_spend" not in card
     # fmtNativeMoney itself routes through the currency formatter, not fmtMoney.
@@ -132,10 +146,12 @@ def _css_block(selector_fragment):
 # ── Test 7 — Country blocked state branches by status ───────────────────────
 
 def test_country_blocked_state_branches_by_status():
-    fn = _slice("function renderCountrySpendUnreconciledState", span=3800)
+    fn = _fn("function renderCountrySpendUnreconciledState")
     assert "function renderCountrySpendUnreconciledState(spendTruth)" in JS
     assert 'status === "mismatch"' in fn
-    assert "Country ROAS is blocked" in fn
+    # PR-ADS-161E: the country ratio is period revenue / ad spend, never ROAS.
+    assert "Country Period Revenue / Ad Spend is blocked" in fn
+    assert "Country ROAS is blocked" not in fn
     assert "Country geo spend" in fn          # status chip label
     # Distinct cause copy for the two blockers.
     assert "does not reconcile" in fn         # mismatch

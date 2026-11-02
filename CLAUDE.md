@@ -270,17 +270,33 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   The won predicate is `hs_is_closed_won IS TRUE`; stage `326093516` is a
   cross-check whose disagreement withholds, never a filter. See `docs/46_*` §5.
 
-- **Every production reader of closed-won deals, customers, revenue, ROAS, CAC
-  or SQL-to-customer reads the reader contract** (PR-ADS-161E, `docs/48_*`):
+- **Every production reader of closed-won deals, customers, revenue, a spend
+  ratio or SQL-to-customer reads the reader contract** (PR-ADS-161E, `docs/48_*`):
   `canonical_revenue_service.load_won_deals` for the window's population and
   `reader_row` / `subset_metrics` for a row's figures, inside ONE snapshot
   (`@single_snapshot` on the page builder). A page never decides publication:
   it republishes `{value, status, reason}`. `closed_won_deals` and `customers`
   are two fields. A row's customers are distinct companies and are **never
-  summed** across rows. ROAS and CAC come only from `derive_roas` /
-  `derive_cac`, and CAC divides by customers, never by deals.
-  SQL-to-customer, revenue-per-SQL and lead-to-customer are unavailable: two
-  cohorts.
+  summed** across rows. SQL-to-customer, revenue-per-SQL and
+  lead-to-customer are unavailable: two cohorts.
+
+  **Attribution ROAS and CAC are unavailable** (`certified_roas` /
+  `certified_cac`). Close-date outcomes over same-window spend are not one
+  acquisition cohort in a long B2B cycle. That calculation exists only as
+  two non-cohort operational ratios:
+  * `period_revenue_per_ad_spend` ("Period Revenue / Ad Spend");
+  * `period_spend_per_customer_won` ("Spend per Customer Won This Period",
+    divided by customers, never by deals).
+
+  Reader-contract rows get them from `derive_period_revenue_per_ad_spend` /
+  `derive_period_spend_per_customer_won`, with `ratio_kind` and the
+  disclosure. The Campaigns, Countries and Channels dashboard rows divide the
+  same published inputs themselves and carry no metadata. Those rows return
+  None, not 0, for zero revenue. The UI shows the disclosure beside every
+  period value. **Never put a figure under a key named `roas` / `cac`
+  (`geo_roas`, `google_ads_roas` …) or a "ROAS"/"CAC" label on a period
+  ratio — nor ROAS/CAC prose in any API string.** Audit check 18
+  (`no_period_ratio_named_roas_or_cac`) fails on any of these (`docs/48_*` §4).
 
   `revenue_integration_connected()` (an existence check over
   `gclid_attribution`) is deleted. Never gate canonical figures on a legacy

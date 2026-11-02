@@ -54,7 +54,7 @@ def _truth_verified():
         "usd_spend": CANONICAL_USD,
         "fx_status": "verified",
         "spend_coverage_status": "verified",
-        "roas_available": True,
+        "period_ratio_available": True,
         "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic and is not used as the source-level "
                           "Google Ads denominator.",
@@ -70,7 +70,7 @@ def _truth_fx_incomplete():
         "usd_spend": None,
         "fx_status": "incomplete",
         "spend_coverage_status": "verified",
-        "roas_available": False,
+        "period_ratio_available": False,
         "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic.",
     }
@@ -85,7 +85,7 @@ def _truth_coverage_incomplete():
         "usd_spend": None,
         "fx_status": "verified",
         "spend_coverage_status": "incomplete",
-        "roas_available": False,
+        "period_ratio_available": False,
         "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic.",
     }
@@ -137,7 +137,7 @@ def test_source_uses_canonical_spend_not_geo(monkeypatch):
         truth=_truth_verified(),
         revenue_rows=[{"acquisition_group": "google_ads",
                        "attribution_status": "attributed",
-                       "deal_amount_usd": 194600.0}],   # -> ROAS 2.0 on 97300
+                       "deal_amount_usd": 194600.0}],   # -> period ratio 2.0 on 97300
     )
     out = build(WINDOW, now=NOW)
     g = _google(out)
@@ -145,7 +145,10 @@ def test_source_uses_canonical_spend_not_geo(monkeypatch):
     assert g["spend"] == CANONICAL_USD == 97300.0
     assert g["spend"] != GEO_USD
     assert g["spend"] != 20100.0
-    assert g["roas"] == 2.0
+    # PR-ADS-161E: the close-date ratio publishes under its explicit name;
+    # attribution ROAS is never published (not one acquisition cohort).
+    assert g["period_revenue_per_ad_spend"] == 2.0
+    assert g["roas"] is None
     # Proof block: canonical source, geo spend explicitly NOT used.
     proof = out["source_spend_truth"]
     assert proof["google_ads_spend_source"] == "canonical_campaign_daily_spend"
@@ -287,13 +290,14 @@ def test_fx_incomplete_withholds_usd_keeps_native(monkeypatch):
     out = build(WINDOW, now=NOW)
     g = _google(out)
     assert g["spend"] is None            # USD withheld
-    assert g["roas"] is None             # ROAS withheld
+    assert g["period_revenue_per_ad_spend"] is None   # period ratio withheld
+    assert g["roas"] is None             # attribution ROAS never published
     # Native GBP still present in the proof block.
     assert out["source_spend_truth"]["native_spend"] == CANONICAL_NATIVE_GBP
     # Status does NOT say "no connected spend source".
-    assert g["spend_status_label"] == "FX unavailable — USD ROAS withheld"
+    assert g["spend_status_label"] == "FX unavailable — USD period revenue / ad spend withheld"
     assert "no connected spend source" not in g["spend_status_label"].lower()
-    assert g["roas_status"] == "unavailable_fx"
+    assert g["period_ratio_status"] == "unavailable_fx"
 
 
 # ════════════════ 4. Spend coverage incomplete case ════════════════
@@ -310,14 +314,16 @@ def test_coverage_incomplete_unavailable_no_fake_zero(monkeypatch):
     out = build(WINDOW, now=NOW)
     g = _google(out)
     assert g["spend"] is None and g["spend"] != 0    # no fake $0
+    assert g["period_revenue_per_ad_spend"] is None
     assert g["roas"] is None
     assert g["spend_status_label"] == "Canonical spend coverage incomplete"
-    assert g["roas_status"] == "unavailable_coverage"
+    assert g["period_ratio_status"] == "unavailable_coverage"
 
 
-def test_verified_zero_spend_is_honest_not_roas_available(monkeypatch):
-    # Verified coverage + verified FX but a genuine $0 spend window: ROAS has no
-    # denominator, so the row must NOT be labelled "ROAS available" (Copilot review).
+def test_verified_zero_spend_is_honest_not_period_ratio_available(monkeypatch):
+    # Verified coverage + verified FX but a genuine $0 spend window: the period
+    # ratio has no denominator, so the row must NOT be labelled "Period revenue /
+    # ad spend available" (Copilot review; PR-ADS-161E rename of "ROAS available").
     build = _load_build()
     _patch_source_service(
         monkeypatch,
@@ -325,20 +331,22 @@ def test_verified_zero_spend_is_honest_not_roas_available(monkeypatch):
                "google_ads_spend_source": "canonical_campaign_daily_spend",
                "native_currency": "GBP", "native_spend": 0.0, "usd_spend": 0.0,
                "fx_status": "verified", "spend_coverage_status": "verified",
-               "roas_available": False, "geo_spend_used": False,
+               "period_ratio_available": False, "geo_spend_used": False,
                "geo_spend_note": "diagnostic"},
         revenue_rows=[{"acquisition_group": "google_ads",
                        "attribution_status": "attributed", "deal_amount_usd": 5000.0}],
     )
     out = build(WINDOW, now=NOW)
     g = _google(out)
-    # Spend is the verified $0 (matches the mart top-line), but ROAS is unavailable.
+    # Spend is the verified $0 (matches the mart top-line), but the period ratio
+    # is unavailable.
     assert g["spend"] == 0.0
+    assert g["period_revenue_per_ad_spend"] is None
     assert g["roas"] is None
-    assert g["roas_status"] == "unavailable_zero_spend"
+    assert g["period_ratio_status"] == "unavailable_zero_spend"
     assert g["spend_status_label"] == "No Google Ads spend in this window"
-    # The label is never "ROAS available" when ROAS is unavailable.
-    assert g["spend_status_label"] != "ROAS available"
+    # The label is never "available" when the period ratio is unavailable.
+    assert g["spend_status_label"] != "Period revenue / ad spend available"
 
 
 def test_derive_gates_roas_available_on_positive_usd(monkeypatch):
@@ -351,14 +359,14 @@ def test_derive_gates_roas_available_on_positive_usd(monkeypatch):
         "fx_coverage_status": "complete", "campaign_spend_coverage_status": "complete",
         "spend_native_currency": "GBP"})
     assert zero["state"] == "verified_zero_spend"
-    assert zero["roas_available"] is False
+    assert zero["period_ratio_available"] is False
     # A positive denominator stays verified with ROAS available.
     pos = derive_google_ads_spend_truth({
         "spend_source": "canonical_google_ads_api", "spend_native_total": 72281.92,
         "spend_usd_total": 97300.0, "campaign_roas_available": True,
         "fx_coverage_status": "complete", "campaign_spend_coverage_status": "complete",
         "spend_native_currency": "GBP"})
-    assert pos["state"] == "verified" and pos["roas_available"] is True
+    assert pos["state"] == "verified" and pos["period_ratio_available"] is True
 
 
 def test_no_google_spend_source_unavailable(monkeypatch):
@@ -368,7 +376,7 @@ def test_no_google_spend_source_unavailable(monkeypatch):
         truth={"state": "source_unavailable",
                "google_ads_spend_source": "unavailable", "native_currency": "GBP",
                "native_spend": None, "usd_spend": None, "fx_status": "unavailable",
-               "spend_coverage_status": "unavailable", "roas_available": False,
+               "spend_coverage_status": "unavailable", "period_ratio_available": False,
                "geo_spend_used": False, "geo_spend_note": "diagnostic"},
         revenue_rows=[{"acquisition_group": "google_ads",
                        "attribution_status": "attributed", "deal_amount_usd": 5000.0}],
@@ -376,8 +384,9 @@ def test_no_google_spend_source_unavailable(monkeypatch):
     out = build(WINDOW, now=NOW)
     g = _google(out)
     assert g["spend"] is None and g["roas"] is None
+    assert g["period_revenue_per_ad_spend"] is None
     assert g["spend_status_label"] == "Google Ads spend source unavailable"
-    assert g["roas_status"] == "unavailable_no_spend_source"
+    assert g["period_ratio_status"] == "unavailable_no_spend_source"
 
 
 # ════════════════ 5. Non-Google safety ════════════════
@@ -403,8 +412,10 @@ def test_non_google_sources_remain_revenue_only(monkeypatch):
     for key in ("other_paid", "organic", "offline", "unclassified"):
         g = next(x for x in out["groups"] if x["group"] == key)
         assert g["spend"] is None, f"{key} must never carry spend"
+        assert g["period_revenue_per_ad_spend"] is None, \
+            f"{key} must never show a period revenue / ad spend ratio"
         assert g["roas"] is None, f"{key} must never show ROAS"
-        assert g["roas_status"] == "unavailable_no_spend_source"
+        assert g["period_ratio_status"] == "unavailable_no_spend_source"
     # Revenue is still shown for the non-Google groups.
     assert next(x for x in out["groups"] if x["group"] == "other_paid")["won_revenue"] == 1000.0
 
@@ -467,8 +478,11 @@ def test_frontend_renders_canonical_spend_with_proof_chip():
 
 
 def test_frontend_status_label_covers_all_states():
-    fn = JS[JS.find("function sourceStatusLabel"):
-            JS.find("function sourceStatusLabel") + 900]
+    # Slice the whole function body (it grew past a fixed 900-char window when
+    # PR-ADS-161E added the period-ratio label + disclosure).
+    start = JS.find("function sourceStatusLabel")
+    assert start != -1
+    fn = JS[start:JS.find("\n}\n", start) + 3]
     # Google states use the backend spend_status_label; non-google stays revenue-only.
     assert "spend_status_label" in fn
     assert "Revenue-only — no connected spend source" in fn

@@ -16,6 +16,7 @@ from tests.canonical_ledger_fixtures import (  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+import analysis.closed_won_truth as cwt
 import db.revenue_repository as repo
 import services.revenue_attribution_service as svc
 from services.revenue_attribution_service import build_revenue_attribution
@@ -85,12 +86,17 @@ def test_roas_null_when_revenue_not_wired():
     r = _build(spend_rows=[{"campaign_name": "gulf", "country": "SA", "spend": 1000.0}],
                revenue_rows=[], ledger_available=False)
     gulf = _by(r["campaigns"], "campaign_name", "gulf")
+    # PR-ADS-161E: the close-date ratio is the period revenue / ad spend ratio;
+    # certified ROAS is never published.
+    assert (gulf["period_revenue_per_ad_spend"] is None
+            and r["summary"]["period_revenue_per_ad_spend"] is None)
     assert gulf["roas"] is None and r["summary"]["roas"] is None
     assert gulf["won_revenue"] is None
+    assert r["summary"]["metrics"]["period_revenue_per_ad_spend"]["status"] != "published"
     assert r["summary"]["metrics"]["roas"]["status"] != "published"
 
 
-def test_roas_is_a_published_zero_when_the_readable_ledger_has_no_deal():
+def test_period_ratio_is_a_published_zero_when_the_readable_ledger_has_no_deal():
     r = _build(
         spend_rows=[{"campaign_name": "gulf", "country": "SA", "spend": 1000.0}],
         revenue_rows=[],  # not wired
@@ -101,18 +107,26 @@ def test_roas_is_a_published_zero_when_the_readable_ledger_has_no_deal():
     gulf = _by(r["campaigns"], "campaign_name", "gulf")
     # PR-ADS-161E: published zero — this campaign's canonical revenue in the
     # window is a proven $0 (the population is published; no deal is on it).
-    assert gulf["roas"] == 0.0
-    assert gulf["metrics"]["roas"]["status"] == "published"
+    # The close-date ratio is published only as the period revenue / ad spend
+    # ratio; certified (acquisition-cohort) ROAS is always unavailable.
+    assert gulf["period_revenue_per_ad_spend"] == 0.0
+    assert gulf["metrics"]["period_revenue_per_ad_spend"]["status"] == "published"
+    assert gulf["roas"] is None
+    assert gulf["metrics"]["roas"]["status"] == "unavailable"
+    assert gulf["metrics"]["roas"]["reason"] == cwt.R_ROAS_NOT_CERTIFIED
     # PR-ADS-161E: the canonical population IS published and holds no
     # campaign-attributable deal, so closed-won revenue is a proven $0 and the
-    # period ROAS is a PUBLISHED zero — not "unknown". "Unknown" is only an
+    # period ratio is a PUBLISHED zero — not "unknown". "Unknown" is only an
     # unreadable or withheld population (see the next tests).
     assert r["summary"]["won_revenue"] == 0.0
-    assert r["summary"]["roas"] == 0.0
-    assert r["summary"]["metrics"]["roas"]["status"] == "published"
+    assert r["summary"]["period_revenue_per_ad_spend"] == 0.0
+    assert r["summary"]["metrics"]["period_revenue_per_ad_spend"]["status"] == "published"
+    assert r["summary"]["roas"] is None
+    assert r["summary"]["metrics"]["roas"]["status"] == "unavailable"
+    assert r["summary"]["metrics"]["roas"]["reason"] == cwt.R_ROAS_NOT_CERTIFIED
 
 
-def test_roas_zero_when_revenue_available_but_campaign_has_none():
+def test_period_ratio_zero_when_revenue_available_but_campaign_has_none():
     r = _build(
         spend_rows=[
             {"campaign_name": "gulf", "country": "SA", "spend": 1000.0},
@@ -124,9 +138,13 @@ def test_roas_zero_when_revenue_available_but_campaign_has_none():
     )
     assert r["revenue_attribution_status"] == "hubspot_deal_ledger"
     waste = _by(r["campaigns"], "campaign_name", "waste")
-    assert waste["roas"] == 0.0  # revenue source available, this campaign truly earned 0
+    # revenue source available, this campaign truly earned 0. PR-ADS-161E: the
+    # close-date ratio is the period ratio; certified ROAS stays None.
+    assert waste["period_revenue_per_ad_spend"] == 0.0
+    assert waste["roas"] is None
     gulf = _by(r["campaigns"], "campaign_name", "gulf")
-    assert gulf["roas"] == 5.0
+    assert gulf["period_revenue_per_ad_spend"] == 5.0
+    assert gulf["roas"] is None
 
 
 # ── Exclusions ───────────────────────────────────────────────────────────────

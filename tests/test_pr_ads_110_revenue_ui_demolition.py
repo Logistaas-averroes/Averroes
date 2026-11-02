@@ -114,7 +114,10 @@ def test_monitoring_warning_suppressed_on_revenue_pages():
 def test_blocked_state_helpers_exist():
     assert "function isRevenueDecisionReady" in JS
     assert "function renderRevenueBlockedState" in JS
-    assert "Revenue ROAS is not ready yet" in JS
+    # PR-ADS-161E: the close-date ratio is never called ROAS; the blocked card
+    # names the page ("Campaign Revenue & Spend").
+    assert "Campaign revenue &amp; spend is not ready yet" in JS
+    assert "Revenue ROAS is not ready yet" not in JS
     # PR-ADS-115: the misleading "Run HubSpot lead re-sync" copy was replaced by a
     # real action — Lead Event-Date Reconciliation in Revenue Health.
     assert "Run HubSpot lead re-sync" not in JS
@@ -164,7 +167,8 @@ def test_safe_empty_state_distinct_from_blocked():
     fn = _fn("function renderRevenueEmptyState", span=600)
     assert "No closed-won revenue found for this window" in fn
     assert "no HubSpot closed-won deals are attributed" in fn
-    assert "Revenue ROAS is not ready yet" not in fn
+    # PR-ADS-161E: the blocked heading is now "Campaign revenue & spend is not ready yet".
+    assert "Campaign revenue &amp; spend is not ready yet" not in fn
 
 
 def test_render_flow_blocked_then_empty_then_table():

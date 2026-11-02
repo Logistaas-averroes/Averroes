@@ -566,8 +566,15 @@ def test_blocked_country_card_has_recovery_cta():
     # Run actions are admin-gated; non-admin gets guidance.
     assert '_currentUser.role === "admin"' in fn
     assert "Ask an admin to run Google Ads Geo Sync from Revenue Health." in fn
-    # The unreconciled blocked card actually renders the CTA.
-    blocked = _fn("function renderCountrySpendUnreconciledState", span=3800)
+    # The unreconciled blocked card actually renders the CTA. PR-ADS-161E: the
+    # card's copy grew with the period-ratio rename ("Country Period Revenue /
+    # Ad Spend is blocked"), so scan the whole function body — up to the next
+    # top-level function — rather than a fixed character span.
+    start = JS.find("function renderCountrySpendUnreconciledState")
+    assert start != -1
+    end = JS.find("\nfunction ", start + 1)
+    assert end != -1
+    blocked = JS[start:end]
     assert "roasCountryCtaButtons()" in blocked
 
 

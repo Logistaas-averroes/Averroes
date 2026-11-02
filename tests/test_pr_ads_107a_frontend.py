@@ -149,9 +149,11 @@ def test_campaign_render_has_simple_columns():
     idx = JS.find("function renderRoasCampaignTable")
     assert idx != -1
     body = JS[idx:idx + 2500]
-    for col in ("Campaign", "Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "Decision"):
+    # PR-ADS-161E: the ratio column is the period ratio, never labelled ROAS.
+    for col in ("Campaign", "Spend", "Leads", "SQLs", "Customers", "Won Revenue",
+                "${PERIOD_RATIO_LABEL}", "Decision"):
         assert f">{col}<" in body, f"Missing campaign column header: {col}"
-    for gone in ("CAC", "Confidence", "Notes"):
+    for gone in ("ROAS", "CAC", "Confidence", "Notes"):
         assert f">{gone}<" not in body, f"Column should be removed: {gone}"
 
 
@@ -160,9 +162,11 @@ def test_country_render_has_simple_columns():
     idx = JS.find("function renderRoasCountryTable")
     assert idx != -1
     body = JS[idx:idx + 2500]
-    for col in ("Country", "Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "Decision"):
+    # PR-ADS-161E: the ratio column is the period ratio, never labelled ROAS.
+    for col in ("Country", "Spend", "Leads", "SQLs", "Customers", "Won Revenue",
+                "${PERIOD_RATIO_LABEL}", "Decision"):
         assert f">{col}<" in body, f"Missing country column header: {col}"
-    for gone in ("Top Campaign", "CAC", "Confidence", "Notes"):
+    for gone in ("ROAS", "Top Campaign", "CAC", "Confidence", "Notes"):
         assert f">{gone}<" not in body, f"Column should be removed: {gone}"
 
 
@@ -181,4 +185,5 @@ def test_empty_state_uses_clean_copy():
     body = JS[idx:idx + 800]
     assert "No closed-won revenue found for this window" in body
     assert "no HubSpot closed-won deals are attributed" in body
-    assert "Revenue ROAS is not ready yet" not in body
+    # PR-ADS-161E: the blocked heading is now "Campaign revenue & spend is not ready yet".
+    assert "Campaign revenue &amp; spend is not ready yet" not in body

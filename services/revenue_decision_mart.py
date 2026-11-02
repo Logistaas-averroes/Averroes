@@ -400,8 +400,13 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
                                        and summary.get("won_revenue") is not None
                                        else None),
         "attributed_revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
-        "roas": summary.get("roas"),
-        "cac": summary.get("cac"),
+        # PR-ADS-161E decision 1: the close-date ratios under explicit names.
+        # Certified ROAS / CAC need one acquisition cohort and are never
+        # published: ``roas`` / ``cac`` stay None, their metrics unavailable.
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: summary.get(cwt.PERIOD_REVENUE_PER_AD_SPEND),
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: summary.get(cwt.PERIOD_SPEND_PER_CUSTOMER_WON),
+        "roas": None,
+        "cac": None,
         # Every canonical value with its status and reason, so a page renders
         # "Withheld — <reason>" rather than a blank or a zero.
         "metrics": {
@@ -420,8 +425,10 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
             "attributed_closed_won_deals": core_metrics.get("closed_won_deals"),
             "attributed_customers": core_metrics.get("customers"),
             "attributed_revenue_usd": core_metrics.get("revenue_usd"),
-            "roas": core_metrics.get("roas"),
-            "cac": core_metrics.get("cac"),
+            cwt.PERIOD_REVENUE_PER_AD_SPEND: core_metrics.get(cwt.PERIOD_REVENUE_PER_AD_SPEND),
+            cwt.PERIOD_SPEND_PER_CUSTOMER_WON: core_metrics.get(cwt.PERIOD_SPEND_PER_CUSTOMER_WON),
+            "roas": cwt.certified_roas(),
+            "cac": cwt.certified_cac(),
         },
         # The Google Ads-source scope (Google Ads evidence, any campaign): the
         # population the country rows partition. Deals add up; customers do not.
@@ -461,7 +468,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             "code": "fx_coverage",
             "message": (
                 "FX coverage is "
-                f"'{spend_truth['fx_status']}' — USD spend / ROAS are withheld "
+                f"'{spend_truth['fx_status']}' — USD spend and period revenue / ad spend are withheld "
                 "until every spend day has a daily FX rate."
             ),
         })
@@ -484,14 +491,14 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
                      "spend backfill for that period, or verify it was zero spend.")
         elif req_start and first_spend and first_spend > req_start:
             extra = (f" Durable spend rows start {first_spend}; verify "
-                     f"{req_start} → {first_spend} was zero spend to unblock ROAS.")
+                     f"{req_start} → {first_spend} was zero spend to unblock period revenue / ad spend.")
         else:
             extra = ""
         diags.append({
             "code": "campaign_spend_coverage",
             "message": (
                 "Canonical campaign spend coverage is "
-                f"'{spend_truth['campaign_spend_status']}' — ROAS is unavailable "
+                f"'{spend_truth['campaign_spend_status']}' — period revenue / ad spend is unavailable "
                 f"(never a fake $0) until coverage is complete.{extra}"
             ),
         })
@@ -500,7 +507,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             "code": "country_spend_reconciliation",
             "message": (
                 "Country (geo) spend does not reconcile with canonical campaign "
-                "spend within tolerance — Country ROAS is withheld."
+                "spend within tolerance — country period revenue / ad spend is withheld."
             ),
         })
     if spend_truth["country_spend_status"] == "reconciled_with_residual":
@@ -510,7 +517,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
         diags.append({
             "code": "country_spend_residual",
             "message": (
-                "Country ROAS is shown with an explicit "
+                "Country period revenue / ad spend is shown with an explicit "
                 f"'{country_identity.RESIDUAL_LABEL}' residual of {res_native} {cur}"
                 f"{'' if res_pct is None else f' ({res_pct}%)'} — Google Ads assigned "
                 "most spend to countries, and this shortfall is spend the geographic "
@@ -524,8 +531,9 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
         diags.append({
             "code": "source_spend_scope",
             "message": (
-                "Only the Google Ads source carries spend/ROAS; every other "
-                "source group is revenue-only (ROAS unavailable, never $0)."
+                "Only the Google Ads source carries spend and period revenue / ad "
+                "spend (a non-cohort operational ratio); every other source group "
+                "is revenue-only (no ratio, never $0)."
             ),
         })
     return diags
@@ -569,7 +577,10 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
         "revenue_decision_ready": revenue_decision_ready,
         "spend_decision_ready": bool(spend_decision_ready),
         "country_decision_ready": country_decision_ready,
-        "roas_ready": (core.get("summary") or {}).get("roas") is not None,
+        # PR-ADS-161E: whether the period revenue / ad spend ratio is computable
+        # (certified ROAS never is — no acquisition-cohort join).
+        "period_ratio_ready": ((core.get("summary") or {})
+                               .get(cwt.PERIOD_REVENUE_PER_AD_SPEND) is not None),
         "lead_metrics_ready": bool(lead_metrics_ready),
         "canonical_revenue_available": bool(canonical_revenue_available),
         # Statuses the blocked-state renderer needs (presentation only).
@@ -663,7 +674,7 @@ def build_revenue_decision_mart(
     payload = _view_payload(view, window, core, now)
     diagnostics = _diagnostics(core, view, spend_truth)
 
-    # PR-ADS-152: the mart top-line (and ROAS by Campaign) is the
+    # PR-ADS-152: the mart top-line (and Campaign Revenue & Spend) is the
     # campaign-attributable SQL subset — campaign ROAS requires campaign identity.
     # Disclose that scope explicitly and reconcile against the canonical
     # population, so the top-line is never mistaken for every Google Ads-source SQL.
@@ -684,7 +695,7 @@ def build_revenue_decision_mart(
         "window": window_block,
         "spend_truth": spend_truth,
         # PR-ADS-153F §8: the shared country-truth disclosure, present on the
-        # country view so ROAS by Country and Dashboard Countries disclose the
+        # country view so Country Revenue & Spend and Dashboard Countries disclose the
         # SAME facts — sources, scope, exact UTC bounds, freshness, coverage,
         # reconciliation, residual, and whether the residual was accepted.
         "country_truth": (geo_gate.build_country_truth_disclosure(
@@ -927,8 +938,8 @@ def build_revenue_performance_audit(
 
     tolerance = 0.02  # mirrors SPEND_VARIANCE_TOLERANCE for reconciliation
     pages_spec = [
-        ("roas_by_campaign", "ROAS by Campaign", "spend", campaign_page_spend, mart_spend),
-        ("roas_by_country", "ROAS by Country", "spend", country_page_spend, mart_spend),
+        ("roas_by_campaign", "Campaign Revenue & Spend", "spend", campaign_page_spend, mart_spend),
+        ("roas_by_country", "Country Revenue & Spend", "spend", country_page_spend, mart_spend),
         ("revenue_by_source", "Revenue by Source", "spend", source_google_spend, mart_spend),
         ("deals", "Deals", "revenue", deals_revenue, mart_revenue),
     ]

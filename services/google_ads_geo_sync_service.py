@@ -815,37 +815,37 @@ def country_geo_ready(country_spend_status) -> bool:
 # real question ("what do I fix?") with the wrong instruction.
 GEO_GAP_MESSAGES = {
     GEO_GAP_NOT_LIKE_FOR_LIKE:
-        "Geo ROAS is withheld — the campaign and geographic totals were measured "
+        "Geo period revenue / ad spend is withheld — the campaign and geographic totals were measured "
         "over different Google Ads accounts or different currencies, so comparing "
         "them would say nothing about whether the data is correct.",
     GEO_GAP_CAMPAIGN_SPEND_UNREADABLE:
-        "Geo ROAS requires canonical campaign spend as its reconciliation baseline — "
+        "Geo period revenue / ad spend requires canonical campaign spend as its reconciliation baseline — "
         "that spend could not be read for this window.",
     GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE:
-        "Geo ROAS requires complete canonical campaign spend coverage — part of this "
+        "Geo period revenue / ad spend requires complete canonical campaign spend coverage — part of this "
         "window was never fetched or failed, so the baseline is incomplete.",
     GEO_GAP_FX_COVERAGE_INCOMPLETE:
-        "Geo ROAS requires verified FX / USD spend; native spend is shown instead.",
+        "Geo period revenue / ad spend requires verified FX / USD spend; native spend is shown instead.",
     GEO_GAP_GEO_ROWS_UNREADABLE:
-        "Geo ROAS requires canonical Google Ads geographic spend — those rows could "
+        "Geo period revenue / ad spend requires canonical Google Ads geographic spend — those rows could "
         "not be read for this window.",
     GEO_GAP_GEO_COVERAGE_UNREADABLE:
-        "Geo ROAS requires the durable geo coverage ledger — it could not be read, so "
+        "Geo period revenue / ad spend requires the durable geo coverage ledger — it could not be read, so "
         "'never fetched' cannot be told apart from 'fetched and genuinely zero'.",
     GEO_GAP_GEO_COVERAGE_INCOMPLETE:
-        "Geo ROAS requires proven geographic coverage — part of this window was never "
+        "Geo period revenue / ad spend requires proven geographic coverage — part of this window was never "
         "synced, so country spend would understate silently. Run the geo backfill.",
     GEO_GAP_GEO_CHUNKS_FAILED:
-        "Geo ROAS is withheld — one or more geographic sync chunks in this window "
+        "Geo period revenue / ad spend is withheld — one or more geographic sync chunks in this window "
         "failed and were never repaired. Re-run the geo sync.",
     GEO_GAP_MISSING_DATES:
-        "Geo ROAS is withheld — some days with campaign spend have no geographic "
+        "Geo period revenue / ad spend is withheld — some days with campaign spend have no geographic "
         "spend at all, which is missing data rather than unattributed spend.",
     GEO_GAP_CAMPAIGN_WITHOUT_GEO:
-        "Geo ROAS is withheld — some campaigns that spent have no geographic spend "
+        "Geo period revenue / ad spend is withheld — some campaigns that spent have no geographic spend "
         "at all, which is missing data rather than unattributed spend.",
     GEO_GAP_TOTALS_DIFFER:
-        "Geo ROAS requires Google Ads geographic spend that reconciles with the "
+        "Geo period revenue / ad spend requires Google Ads geographic spend that reconciles with the "
         "canonical campaign spend — it does not for this window.",
 }
 

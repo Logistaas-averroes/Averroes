@@ -667,10 +667,23 @@ def test_14_google_ads_spend_still_comes_from_the_google_ads_canonical_path():
     src = (_ROOT / "services" / "canonical_revenue_service.py").read_text()
     tree = ast.parse(src)
     called = {
-        node.func.attr for node in ast.walk(tree)
+        (node.func.value.id if isinstance(node.func.value, ast.Name) else None,
+         node.func.attr)
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert not {c for c in called if "spend" in c}, called
+    # PR-ADS-161E: the period ratios (formerly ``cwt.derive_roas`` /
+    # ``cwt.derive_cac``, whose names did not mention spend) are pure arithmetic
+    # in analysis/closed_won_truth over a spend figure the CALLER passes in —
+    # they read no spend. Exactly those two ``cwt`` derivations are exempt;
+    # any other spend-named call (a spend read) still fails.
+    pure_period_ratio_derivations = {
+        ("cwt", "derive_period_revenue_per_ad_spend"),
+        ("cwt", "derive_period_spend_per_customer_won"),
+    }
+    assert pure_period_ratio_derivations <= called, called
+    spend_calls = {c for c in called if "spend" in c[1]}
+    assert not (spend_calls - pure_period_ratio_derivations), called
 
     # And the spend truth the pages use is still the Google Ads canonical one.
     unit_econ = (_ROOT / "services" / "canonical_unit_economics_service.py").read_text()
@@ -961,6 +974,17 @@ def _js_function(name, span=3000):
     return _JS[i:i + span]
 
 
+def _js_whole_function(name):
+    """The whole top-level app.js function starting at ``name`` (to its closing
+    ``}`` at column 0) — robust to a body that grows (PR-ADS-161E's explicit
+    period-ratio KPI cards pushed later code past a fixed span)."""
+    i = _JS.find(name)
+    assert i != -1, f"{name} not found in app.js"
+    j = _JS.find("\n}\n", i)
+    assert j != -1, f"end of {name} not found in app.js"
+    return _JS[i:j + 3]
+
+
 def test_18_unit_economics_uses_business_windows_not_the_rolling_60d_contract():
     select = re.search(r'<select[^>]*id="unit-economics-window"[^>]*>.*?</select>',
                        _HTML, re.S).group(0)
@@ -1003,7 +1027,7 @@ def test_18d_deal_rows_prefer_the_canonical_deal_name():
 
 
 def test_18e_unavailable_revenue_renders_unavailable_never_zero():
-    renderer = _js_function("function renderUnitEconomicsPage")
+    renderer = _js_whole_function("function renderUnitEconomicsPage")
     assert "Unavailable" in renderer
     assert "revenue_available" in renderer
     # No hard-coded zero standing in for a withheld figure.
@@ -1048,7 +1072,7 @@ def test_18g_no_frontend_revenue_path_implies_the_retired_windsor_lineage():
         assert retired not in loader, retired
 
     # Metrics the canonical ledger cannot support are shown as withheld.
-    renderer = _js_function("function renderUnitEconomicsPage")
+    renderer = _js_whole_function("function renderUnitEconomicsPage")
     if "LTV/CAC" in renderer:
         assert "Unavailable" in renderer
 
@@ -1063,7 +1087,9 @@ def test_unit_economics_page_uses_business_windows_and_renders_unavailable():
 
     loader = js[js.find("async function loadUnitEconomics"):][:600]
     assert "getRoasBusinessWindow()" in loader
-    renderer = js[js.find("function renderUnitEconomicsPage"):][:3000]
+    _start = js.find("function renderUnitEconomicsPage")
+    assert _start != -1
+    renderer = js[_start:js.find("\n}\n", _start) + 3]
     assert "Unavailable" in renderer
     assert "revenue_available" in renderer
 

@@ -551,17 +551,25 @@ def campaign_placement_gate(base: dict) -> dict | None:
 
 
 def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
-               roas_scope_ok: bool = True, gate: dict | None = None) -> dict:
+               period_ratio_scope_ok: bool = True, gate: dict | None = None) -> dict:
     """The canonical closed-won fields of one page row (a campaign, a country,
     a source group, a summary), from one population.
 
     ``closed_won_deals`` is a deal count, ``customers`` distinct proven HubSpot
-    companies (never a deal count), ``won_revenue`` a total or None, and ROAS /
-    CAC are derived from them by ``analysis.closed_won_truth`` — each withheld
-    with the reason of whichever input is not published. ``gate`` (e.g.
-    :func:`campaign_placement_gate`) withholds the row's deals, revenue and
-    customers for a reason the window carries. ``metrics`` holds every value
-    with its status and reason, for the page and its API to republish.
+    companies (never a deal count), ``won_revenue`` a total or None. ``gate``
+    (e.g. :func:`campaign_placement_gate`) withholds the row's deals, revenue
+    and customers for a reason the window carries.
+
+    Ratios (PR-ADS-161E, decision 1):
+
+    * ``roas`` / ``cac`` are ALWAYS None, their metrics ``unavailable``:
+      certified ROAS and CAC need spend and outcomes joined through one
+      acquisition cohort, which no canonical service supplies.
+    * ``period_revenue_per_ad_spend`` / ``period_spend_per_customer_won`` are
+      the close-date operational ratios, under explicit names, each carrying
+      ``ratio_kind: non_cohort_operational_ratio`` and its disclosure.
+
+    ``metrics`` holds every value with its status and reason.
     """
     from analysis import closed_won_truth as cwt
 
@@ -571,18 +579,25 @@ def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
                            **({"dedup_key": "hubspot_company_id",
                                "additive": False} if k == "customers" else {}))
              for k in cwt.SUBSET_METRICS}
-    roas = cwt.derive_roas(m["revenue_usd"], spend_usd,
-                           spend_reason=spend_reason,
-                           scope_compatible=roas_scope_ok)
-    cac = cwt.derive_cac(m["customers"], spend_usd, spend_reason=spend_reason,
-                         scope_compatible=roas_scope_ok)
+    per_spend = cwt.derive_period_revenue_per_ad_spend(
+        m["revenue_usd"], spend_usd, spend_reason=spend_reason,
+        scope_compatible=period_ratio_scope_ok)
+    per_customer = cwt.derive_period_spend_per_customer_won(
+        m["customers"], spend_usd, spend_reason=spend_reason,
+        scope_compatible=period_ratio_scope_ok)
     return {
         "closed_won_deals": m["closed_won_deals"]["value"],
         "customers": m["customers"]["value"],
         "won_revenue": m["revenue_usd"]["value"],
-        "roas": roas["value"],
-        "cac": cac["value"],
-        "metrics": {**m, "roas": roas, "cac": cac},
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: per_spend["value"],
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: per_customer["value"],
+        "roas": None,
+        "cac": None,
+        "metrics": {**m,
+                    cwt.PERIOD_REVENUE_PER_AD_SPEND: per_spend,
+                    cwt.PERIOD_SPEND_PER_CUSTOMER_WON: per_customer,
+                    "roas": cwt.certified_roas(),
+                    "cac": cwt.certified_cac()},
     }
 
 

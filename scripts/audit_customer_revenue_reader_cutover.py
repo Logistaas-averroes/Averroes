@@ -2,8 +2,15 @@
 scripts/audit_customer_revenue_reader_cutover.py
 
 PR-ADS-161E — read-only proof that every production reader of closed-won
-deals, customers, closed-won revenue, ROAS, CAC and SQL-to-customer conversion
-reads the canonical owner, and says what that owner decided.
+deals, customers, closed-won revenue, spend ratios and SQL-to-customer
+conversion reads the canonical owner, and says what that owner decided.
+
+Attribution ROAS and CAC are UNAVAILABLE everywhere (PR-ADS-161E decision 1):
+closed-won outcomes are dated by close and spend by the day it was spent, so in
+a long B2B sales cycle they are not one acquisition cohort. The close-date
+ratios that are published carry explicit names —
+``period_revenue_per_ad_spend`` and ``period_spend_per_customer_won`` — and
+check 18 fails when one is presented as ROAS or CAC.
 
     python -m scripts.audit_customer_revenue_reader_cutover
     python -m scripts.audit_customer_revenue_reader_cutover --json
@@ -24,13 +31,17 @@ decide any verdict. It proves:
  8  withheld_values_absent                a withheld metric has no value
  9  withheld_not_reconstructable          no subset re-exposes a withheld total
 10  zero_distinguishable                  published 0 renders "0", not a gap
-11  roas_cac_withheld_on_withheld_input   derived ratios inherit the block
+11  period_ratios_withheld_on_withheld_input  derived ratios inherit the block
 12  sql_to_customer_not_mixed             no rate across two cohorts
 13  all_time_undated_and_no_future        All Time holds undated, no future
 14  admin_links_resolve                   View blockers → workbench filters
 15  non_admin_has_no_link                 viewers get no workbench link
 16  no_external_calls_no_writes           no HubSpot / Google Ads / write path
 17  independent_derivation_used           the audit restates, never reuses
+18  no_period_ratio_named_roas_or_cac     no API field named roas/cac carries a
+                                          figure; no UI calls a period ratio
+                                          ROAS or CAC; certified ROAS/CAC are
+                                          unavailable
 
 A metric WITHHELD for a CRM reason (a won deal without a company, without a
 proven USD amount, without a close date) is a source finding, not a failure:
@@ -85,17 +96,17 @@ INVENTORY = (
                               "subset via reader_row",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Customers = distinct companies or Withheld + reason; deals shown separately",
-     "families": ("customers", "revenue", "roas", "cac"),
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "canonical_metrics", "status": "migrated"},
     {"consumer": "services/revenue_attribution_service.py",
-     "surface": "/api/revenue-attribution*, /api/revenue-deals; ROAS by Campaign / Country",
+     "surface": "/api/revenue-attribution*, /api/revenue-deals; Campaign Revenue & Spend / Country",
      "existing_source": "len(campaign deals), proven-amount sums",
      "existing_meaning": "per-campaign won deals as customers; partial sums",
      "canonical_replacement": "reader_row per campaign / country / summary; "
                               "campaign_placement_gate",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Won deals + customers columns; withheld rows say why",
-     "families": ("customers", "revenue", "roas", "cac"),
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/source_attribution_service.py",
      "surface": "/api/revenue-by-source; Revenue by Source",
@@ -105,7 +116,7 @@ INVENTORY = (
                               "lead_to_customer_rate incompatible",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Customer Rate column retired; customers per bucket, not additive",
-     "families": ("customers", "revenue", "roas"),
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/campaign_identity_service.py",
      "surface": "/api/campaign-mapping-review",
@@ -120,11 +131,13 @@ INVENTORY = (
      "surface": "/api/reports/unit-economics; Unit Economics",
      "existing_source": "compute_cac(spend, won_deals)",
      "existing_meaning": "CAC over won deals",
-     "canonical_replacement": "reader_row: CAC over canonical customers, "
-                              "withheld when customers are",
+     "canonical_replacement": "reader_row: CAC and ROAS unavailable (not one "
+                              "acquisition cohort); period_spend_per_customer_won "
+                              "over canonical customers, withheld when customers are",
      "window_cohort": "business window · close-date cohort",
-     "ui_effect": "CAC Withheld + reason when customers are withheld",
-     "families": ("customers", "revenue", "roas", "cac"),
+     "ui_effect": "CAC Unavailable + reason; Spend per Customer Won This Period "
+                  "with the non-cohort disclosure",
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/dashboard_overview_service.py",
      "surface": "/api/dashboard/overview",
@@ -163,7 +176,7 @@ INVENTORY = (
                               "from the mart's canonical metric",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Momentum / mix / matrix count won deals; Customers KPI canonical",
-     "families": ("customers", "revenue", "roas"),
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "customers_status", "status": "migrated"},
     {"consumer": "services/dashboard_campaigns_service.py",
      "surface": "/api/dashboard/campaigns",
@@ -173,7 +186,7 @@ INVENTORY = (
                               "attributed_customers",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Won deals + customers columns; KPI canonical",
-     "families": ("customers", "revenue", "roas"),
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "attributed_customers", "status": "migrated"},
     {"consumer": "services/dashboard_countries_service.py",
      "surface": "/api/dashboard/countries",
@@ -183,7 +196,7 @@ INVENTORY = (
                               "google_ads_source canonical total",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Closed-won deals KPI; customers per country, not summed",
-     "families": ("customers", "revenue", "roas"),
+     "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "google_ads_source_closed_won_deals", "status": "migrated"},
     {"consumer": "services/cross_page_parity_service.py",
      "surface": "/api/audit/cross-page-parity",
@@ -212,7 +225,7 @@ INVENTORY = (
                               "superseded_by /api/revenue-attribution",
      "window_cohort": "n/a",
      "ui_effect": "none (no frontend consumer)",
-     "families": ("customers", "revenue", "roas"),
+     "families": ("customers", "revenue", "legacy_roas"),
      "canonical_via": "_LEGACY_REVENUE_WITHHELD", "status": "withheld"},
     {"consumer": "api/server.py",
      "surface": "/api/reports/roas/snapshots, /api/reports/roas/snapshots/latest",
@@ -220,8 +233,8 @@ INVENTORY = (
      "existing_meaning": "revenue, ROAS, LTV/CAC and verdict counts",
      "canonical_replacement": "withheld: metadata only, every outcome removed",
      "window_cohort": "n/a",
-     "ui_effect": "Snapshot history says Withheld + reason; links ROAS by Campaign",
-     "families": ("revenue", "roas", "cac"),
+     "ui_effect": "Snapshot history says Withheld + reason; links Campaign Revenue & Spend",
+     "families": ("revenue", "legacy_roas", "legacy_cac"),
      "canonical_via": "_withhold_legacy_roas_snapshot", "status": "withheld"},
     {"consumer": "api/server.py",
      "surface": "/api/attribution/gclid-readiness (won_deals)",
@@ -283,14 +296,15 @@ INVENTORY = (
      "window_cohort": "n/a", "ui_effect": "none",
      "families": (), "canonical_via": None, "status": "deferred"},
     {"consumer": "static/app.js",
-     "surface": "every dashboard, ROAS, Revenue by Source, Unit Economics, mapping page",
+     "surface": "every dashboard, Campaign / Country Revenue & Spend, Revenue by "
+                "Source, Unit Economics, mapping page",
      "existing_source": "API `customers` / revenue fields",
      "existing_meaning": "a value or a dash",
      "canonical_replacement": "canonicalMetricHtml / rowMetricHtml: value, 0, "
                               "Withheld + reason, Unavailable + reason; View "
                               "blockers for admins",
      "window_cohort": "as served", "ui_effect": "the four states, never a dash",
-     "families": ("customers", "revenue", "roas", "cac", "sql_to_customer"),
+     "families": ("customers", "revenue", "period_ratios", "sql_to_customer"),
      "canonical_via": "canonicalMetricHtml", "status": "migrated"},
 )
 
@@ -565,6 +579,10 @@ def structural_checks(a: Audit) -> dict:
                 "compute_all_" not in region,
                 f"{fn} still computes from the legacy chain")
 
+    # 18 — no UI text presents a period ratio as ROAS or CAC.
+    ui_bad = ui_ratio_label_violations(js, _text("static/index.html"))
+    a.check("no_period_ratio_named_roas_or_cac", not ui_bad, "; ".join(ui_bad[:8]))
+
     # 17 — the audit's derivation does not call the module it audits.
     own = _text(AUDIT_FILE)
     body = own[own.find("# ── independent derivation"):
@@ -711,12 +729,16 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
         a.check("status_and_reason_serialized", False, f"{key}: {exc}")
     # 11 — derived ratios inherit a withheld input.
     rev, cust = row["metrics"]["revenue_usd"], row["metrics"]["customers"]
-    a.check("roas_cac_withheld_on_withheld_input",
-            rev["status"] == "published" or row["metrics"]["roas"]["status"] != "published",
-            f"{key}: ROAS published over {rev['status']} revenue")
-    a.check("roas_cac_withheld_on_withheld_input",
-            cust["status"] == "published" or row["metrics"]["cac"]["status"] != "published",
-            f"{key}: CAC published over {cust['status']} customers")
+    per_spend = row["metrics"].get(PERIOD_REVENUE_PER_AD_SPEND) or {}
+    per_customer = row["metrics"].get(PERIOD_SPEND_PER_CUSTOMER_WON) or {}
+    a.check("period_ratios_withheld_on_withheld_input",
+            rev["status"] == "published" or per_spend.get("status") != "published",
+            f"{key}: period revenue / ad spend published over {rev['status']} revenue")
+    a.check("period_ratios_withheld_on_withheld_input",
+            cust["status"] == "published" or per_customer.get("status") != "published",
+            f"{key}: spend per customer won published over {cust['status']} customers")
+    # 18 — the reader contract itself names no period ratio ROAS or CAC.
+    _ratio_name_check(a, f"{key} reader_row", row)
     # Customers are companies, never the deal count.
     if cust["status"] == "published" and base.get("available"):
         ids = set()
@@ -731,8 +753,10 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
     if mart is not None:
         page = mart_checks(a, key, pub, truth_w, mart)
         page_leak_checks(a, key, "revenue_decision_mart", pub, mart, placement)
+        _ratio_name_check(a, f"{key} revenue_decision_mart", mart)
     for name, payload in (pages or {}).items():
         page_leak_checks(a, key, name, pub, payload, placement)
+        _ratio_name_check(a, f"{key} {name}", payload)
     return {"window": key, "publication": {m: pub.get(m) for m in
                                            ("closed_won_deals", "revenue_usd",
                                             "customers")},
@@ -907,8 +931,15 @@ def _page_builders():
             import importlib  # noqa: PLC0415
             return getattr(importlib.import_module(module), fn)(w, now=now, **kw)
         return build
+    def mart_view(view):
+        def build(w, now):
+            from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
+            return build_revenue_decision_mart(view=view, window=w, now=now)
+        return build
     return (
         ("revenue_decision_mart", mart),
+        ("revenue_decision_mart_source", mart_view("source")),
+        ("revenue_decision_mart_country", mart_view("country")),
         ("revenue_attribution", mod("services.revenue_attribution_service",
                                     "build_revenue_attribution")),
         ("revenue_by_source", mod("services.source_attribution_service",
@@ -931,19 +962,38 @@ def _page_builders():
 
 
 def pure_checks(a: Audit) -> None:
-    """11 / 8 on the contract functions themselves, independent of data."""
+    """11 / 8 / 18 on the contract functions themselves, independent of data."""
     from analysis import closed_won_truth as cwt  # noqa: PLC0415
     withheld = cwt.metric(None, cwt.WITHHELD, cwt.R_CUSTOMER_IDENTITY)
-    roas = cwt.derive_roas(withheld, 100.0)
-    cac = cwt.derive_cac(withheld, 100.0)
-    a.check("roas_cac_withheld_on_withheld_input",
-            roas["status"] == cwt.WITHHELD and roas["value"] is None
-            and cac["status"] == cwt.WITHHELD and cac["value"] is None,
-            f"derived over a withheld input: roas={roas} cac={cac}")
-    zero = cwt.derive_roas(cwt.metric(0.0, cwt.PUBLISHED), 100.0)
+    per_spend = cwt.derive_period_revenue_per_ad_spend(withheld, 100.0)
+    per_customer = cwt.derive_period_spend_per_customer_won(withheld, 100.0)
+    a.check("period_ratios_withheld_on_withheld_input",
+            per_spend["status"] == cwt.WITHHELD and per_spend["value"] is None
+            and per_customer["status"] == cwt.WITHHELD
+            and per_customer["value"] is None,
+            f"derived over a withheld input: {per_spend} {per_customer}")
+    zero = cwt.derive_period_revenue_per_ad_spend(cwt.metric(0.0, cwt.PUBLISHED), 100.0)
     a.check("zero_distinguishable",
             zero["status"] == cwt.PUBLISHED and zero["value"] == 0.0,
-            f"a published zero revenue must give a published 0 ROAS: {zero}")
+            f"a published zero revenue must give a published 0 ratio: {zero}")
+    # 18 — a published period ratio declares itself non-cohort, and certified
+    # ROAS / CAC are unavailable whatever the inputs.
+    for d in (zero, cwt.derive_period_spend_per_customer_won(
+            cwt.metric(4, cwt.PUBLISHED), 100.0)):
+        a.check("no_period_ratio_named_roas_or_cac",
+                d.get("status") == cwt.PUBLISHED
+                and d.get("ratio_kind") == RATIO_KIND_OPERATIONAL
+                and d.get("cohort_basis") == PERIOD_COHORT_BASIS
+                and all(p in (d.get("disclosure") or "") for p in DISCLOSURE_PHRASES),
+                f"a published period ratio lacks its non-cohort disclosure: {d}")
+    for d in (cwt.certified_roas(), cwt.certified_cac()):
+        a.check("no_period_ratio_named_roas_or_cac",
+                d.get("status") == cwt.UNAVAILABLE and d.get("value") is None
+                and bool(d.get("reason")),
+                f"certified ROAS / CAC must be unavailable with a reason: {d}")
+    a.check("no_period_ratio_named_roas_or_cac",
+            not any(hasattr(cwt, n) for n in ("derive_roas", "derive_cac")),
+            "closed_won_truth still exports derive_roas / derive_cac")
     leaked = cwt.metric(5, cwt.WITHHELD, "x")
     a.check("withheld_values_absent", leaked["value"] is None,
             "metric() kept a value under a withheld status")
@@ -951,6 +1001,160 @@ def pure_checks(a: Audit) -> None:
     a.check("sql_to_customer_not_mixed",
             rate["value"] is None and rate["status"] == cwt.UNAVAILABLE,
             f"incompatible rate published: {rate}")
+
+
+# ── 18: a close-date period ratio is never presented as ROAS or CAC ──────────
+
+#: The two published close-date ratios, by their only permitted names.
+PERIOD_REVENUE_PER_AD_SPEND = "period_revenue_per_ad_spend"
+PERIOD_SPEND_PER_CUSTOMER_WON = "period_spend_per_customer_won"
+PERIOD_RATIO_KEYS = (PERIOD_REVENUE_PER_AD_SPEND, PERIOD_SPEND_PER_CUSTOMER_WON)
+PERIOD_COHORT_BASIS = "close_date_outcomes_over_same_window_spend"
+RATIO_KIND_OPERATIONAL = "non_cohort_operational_ratio"
+#: The disclosure every surface states beside a period ratio.
+DISCLOSURE_PHRASES = ("Non-cohort operational ratio",
+                      "Closed-won outcomes may originate from earlier advertising periods")
+#: The visible labels of the two period ratios.
+PERIOD_RATIO_LABELS = ("Period Revenue / Ad Spend", "Spend per Customer Won This Period")
+#: A key (or a row's ``key``/``metric`` value) that names ROAS or CAC, after
+#: camelCase is split: ``roas``, ``geo_roas``, ``geoRoas``, ``cac``,
+#: ``ltv_to_cac``, ``return_on_ad_spend``, ``customer_acquisition_cost`` …
+_RATIO_NAME = re.compile(
+    r"(?:^|_)(?:roas|cac|return_on_ad_spend|customer_acquisition_cost)(?:$|_)")
+#: ROAS / CAC named in prose — a payload string or UI text. Case variants are
+#: explicit so a JS identifier (``campRoasCell``, ``r.roas``) is not prose.
+_RATIO_WORD = re.compile(r"\b(?:ROAS|Roas|CAC|Cac)\b"
+                         r"|(?i:return on ad spend|customer acquisition cost)")
+#: The status words a certified ROAS / CAC may carry.
+_CERTIFIED_STATUSES = ("unavailable", "not_published")
+#: Exact texts that may name ROAS / CAC. Each SAYS the metric is unavailable
+#: (or is LTV/CAC, a recurring-revenue metric that is always withheld). Only the
+#: token is exempt — the rest of its line or string is still scanned.
+_ALLOWED_RATIO_TEXT = (
+    "Unavailable: attribution ROAS requires revenue and spend over one acquisition cohort.",
+    "attribution ROAS needs revenue and spend over one acquisition cohort",
+    "CAC needs spend and customers over one acquisition cohort",
+    "LTV/CAC", "LTV / CAC",
+)
+#: The UI's certified labels: defined once, rendered only beside ``roas``/``cac``.
+_CERTIFIED_LABELS_LINE = ('const CERTIFIED_RATIO_LABELS = { roas: "Attribution ROAS '
+                          '(acquisition cohort)", cac: "CAC (acquisition cohort)" };')
+
+
+def _ratio_named(key) -> bool:
+    if not isinstance(key, str):
+        return False
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key).lower()
+    return bool(_RATIO_NAME.search(snake))
+
+
+def _names_ratio_in_text(text: str) -> bool:
+    for allowed in _ALLOWED_RATIO_TEXT:
+        text = text.replace(allowed, "")
+    return bool(_RATIO_WORD.search(text))
+
+
+def _leaves(value, path=""):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield from _leaves(v, f"{path}.{k}")
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            yield from _leaves(v, f"{path}[{i}]")
+    else:
+        yield path, value
+
+
+def ratio_name_violations(payload) -> list:
+    """Every place in ``payload`` that presents a figure as ROAS or CAC.
+
+    * a key naming ROAS / CAC (any case, camelCase, or a synonym) that carries
+      a number, a string with a digit, or a container holding any number
+      anywhere — or a metric under it whose status is not unavailable;
+    * a row that names ROAS / CAC by value (``{"key": "roas", "value": 2.4}``)
+      and carries a number;
+    * any payload text that calls something ROAS or CAC, except the exact
+      certified-unavailable phrasings and LTV/CAC;
+    * a published close-date ratio (``cohort_basis``) under any other name, or
+      without its ``ratio_kind`` and disclosure.
+    """
+    out = []
+    for path, d in _walk(payload):
+        for k, v in d.items():
+            where = f"{path}.{k}"
+            if _ratio_named(k):
+                if _is_figure(v):
+                    out.append(f"{where}={v}")
+                elif isinstance(v, str) and re.search(r"\d", v):
+                    out.append(f"{where}={v!r}")
+                elif isinstance(v, (dict, list, tuple)):
+                    if isinstance(v, dict) and "status" in v \
+                            and v.get("status") not in _CERTIFIED_STATUSES:
+                        out.append(f"{where} has status {v.get('status')!r}")
+                    figures = [q for q, x in _leaves(v) if _is_figure(x)]
+                    if figures:
+                        out.append(f"{where} carries a figure at {figures[:3]}")
+        for name_key in ("key", "metric", "name", "id"):
+            if _ratio_named(d.get(name_key)):
+                rest = {kk: vv for kk, vv in d.items() if kk != name_key}
+                figures = [q for q, x in _leaves(rest) if _is_figure(x)]
+                if figures:
+                    out.append(f"{path} names {d.get(name_key)!r} and carries "
+                               f"a figure at {figures[:3]}")
+    # Every string, wherever it sits (dict values and list items alike).
+    for where, v in _leaves(payload):
+        if isinstance(v, str) and " " in v and _names_ratio_in_text(v):
+            out.append(f"{where}: text names ROAS/CAC: {v[:90]!r}")
+    for path, d in _metric_dicts(payload):
+        if d.get("status") != "published" or d.get("cohort_basis") != PERIOD_COHORT_BASIS:
+            continue
+        name = path.rsplit(".", 1)[-1]
+        if name not in PERIOD_RATIO_KEYS:
+            out.append(f"{path}: a close-date period ratio named {name!r}")
+        if d.get("ratio_kind") != RATIO_KIND_OPERATIONAL or not all(
+                p in (d.get("disclosure") or "") for p in DISCLOSURE_PHRASES):
+            out.append(f"{path}: a period ratio without its non-cohort disclosure")
+    return out
+
+
+def _ratio_name_check(a: Audit, where: str, payload) -> None:
+    bad = ratio_name_violations(payload)
+    a.check("no_period_ratio_named_roas_or_cac", not bad, f"{where}: {bad[:6]}")
+
+
+def _strip_comments(src: str) -> str:
+    """Block comments, HTML comments and WHOLE-LINE ``//`` comments only. A
+    trailing ``//`` is left in place: it may sit inside a string, and a
+    comment that names ROAS beside code is cheap to reword."""
+    keep_lines = lambda m: "\n" * m.group(0).count("\n")  # noqa: E731
+    src = re.sub(r"/\*.*?\*/", keep_lines, src, flags=re.S)
+    src = re.sub(r"<!--.*?-->", keep_lines, src, flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$", "", src)
+
+
+def ui_ratio_label_violations(js: str, html: str = "") -> list:
+    """Every visible ROAS / CAC word in the UI that is not an exact certified-
+    unavailable text, a certified label rendered beside anything but its own
+    metric, plus a missing period-ratio label or disclosure."""
+    out = []
+    for name, src in (("app.js", js), ("index.html", html)):
+        for i, line in enumerate(_strip_comments(src).splitlines(), 1):
+            text = line.replace(_CERTIFIED_LABELS_LINE, "")
+            if _names_ratio_in_text(text):
+                out.append(f"{name}:{i}: {line.strip()[:100]}")
+    if js.count(_CERTIFIED_LABELS_LINE) != 1:
+        out.append("app.js: CERTIFIED_RATIO_LABELS must be defined exactly once, "
+                   "with only the two certified labels")
+    for i, line in enumerate(js.splitlines(), 1):
+        for metric in re.findall(r"CERTIFIED_RATIO_LABELS\.(\w+)", line):
+            if metric not in ("roas", "cac") or f'"{metric}"' not in line \
+                    or any(k in line for k in PERIOD_RATIO_KEYS):
+                out.append(f"app.js:{i}: CERTIFIED_RATIO_LABELS.{metric} is not "
+                           f"rendered beside its own certified metric")
+    for text in (*PERIOD_RATIO_LABELS, *DISCLOSURE_PHRASES):
+        if text not in js:
+            out.append(f"app.js: missing {text!r}")
+    return out
 
 
 def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict]:

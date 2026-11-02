@@ -244,7 +244,10 @@ def test_approved_manual_mapping_changes_aggregation(monkeypatch):
     assert em["spend_state"] == "mapped_manual"
     assert em["won_revenue"] == 1270.0
     assert em["spend"] == 6.35  # canonical USD spend
-    assert em["roas"] == round(1270.0 / 6.35, 2)
+    # PR-ADS-161E decision 1: the close-date ratio publishes as period revenue /
+    # ad spend; certified attribution ROAS is never published (not one cohort).
+    assert em["period_revenue_per_ad_spend"] == round(1270.0 / 6.35, 2)
+    assert em["roas"] is None
 
 
 def test_mexico_chile_unmapped_shows_unavailable_not_zero(monkeypatch):
@@ -259,6 +262,7 @@ def test_mexico_chile_unmapped_shows_unavailable_not_zero(monkeypatch):
     mc = next(c for c in out["campaigns"] if c["campaign_name"] == "mexico,chile")
     assert mc["spend_state"] == "unmapped"
     assert mc["spend"] is None  # never $0
+    assert mc["period_revenue_per_ad_spend"] is None
     assert mc["roas"] is None
     assert mc["verdict"] == "mapping_required"
 
@@ -295,12 +299,13 @@ def test_fx_incomplete_blocks_usd_roas(monkeypatch):
     assert sh["fx_coverage_status"] == "incomplete"
     assert sh["campaign_roas_available"] is False
     gulf = next(c for c in out["campaigns"] if c["campaign_name"] == "Gulf")
-    assert gulf["roas"] is None            # USD ROAS blocked
+    assert gulf["period_revenue_per_ad_spend"] is None   # USD period ratio blocked
+    assert gulf["roas"] is None            # certified ROAS never published
     assert gulf["spend"] is not None       # native spend may still display
     assert gulf["spend_state"] in ("mapped_exact", "mapped_manual")
 
 
-def test_fx_complete_permits_usd_roas(monkeypatch):
+def test_fx_complete_permits_usd_period_ratio(monkeypatch):
     build = _load_revattr()
     rows = [{"campaign_id": "1", "campaign_name": "Gulf", "cost_micros": 5_000_000,
              "spend": 5.0, "spend_usd": 6.35, "fx_complete": True}]
@@ -312,7 +317,10 @@ def test_fx_complete_permits_usd_roas(monkeypatch):
     sh = out["source_health"]
     assert sh["campaign_roas_available"] is True
     gulf = next(c for c in out["campaigns"] if c["campaign_name"] == "Gulf")
-    assert gulf["roas"] == round(500.0 / 6.35, 2)
+    # PR-ADS-161E: the USD ratio publishes as period revenue / ad spend; the
+    # certified attribution ROAS stays unavailable.
+    assert gulf["period_revenue_per_ad_spend"] == round(500.0 / 6.35, 2)
+    assert gulf["roas"] is None
 
 
 # ════════════ 10. read-only w.r.t. HubSpot + Google Ads ════════════

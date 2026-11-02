@@ -286,7 +286,7 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check Admin Backfill to verify historical data availability."
   },
   "roas-campaigns": {
-    title: "ROAS by Campaign",
+    title: "Campaign Revenue & Spend",
     purpose: "Revenue attribution by campaign over business windows — which campaigns produce SQLs, customers, and closed-won revenue.",
     source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
     dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
@@ -294,7 +294,7 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check that HubSpot deals are synced and campaigns have Google Ads API spend data for the selected window."
   },
   "roas-countries": {
-    title: "ROAS by Country",
+    title: "Country Revenue & Spend",
     purpose: "Revenue attribution by country over business windows — where SQLs, customers, and closed-won revenue come from.",
     source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
     dependsOn: ["hubspot/deals", "google_ads_api/geo"],
@@ -311,7 +311,7 @@ const PAGE_EXPLANATIONS = {
   },
   "churn-input": {
     title: "Churn Input",
-    purpose: "Admin page for manual monthly churn rate overrides used in LTV/ROAS calculations.",
+    purpose: "Admin page for manual monthly churn rate overrides used in LTV calculations.",
     source: "Local YAML configuration.",
     dependsOn: [],
     emptyMeans: "Default churn rate is applied when no overrides are set.",
@@ -328,8 +328,8 @@ const PAGE_HELP_CONTENT = {
   dashboard: {
     what: "Executive overview of Google Ads spend, HubSpot closed-won revenue, pipeline conversion, source mix, and computed action signals for one business window.",
     source: "Canonical Revenue Decision Mart (Google Ads spend truth + HubSpot closed-won revenue truth), Revenue by Source, and the closed-won deal ledger.",
-    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (ROAS by Campaign, Revenue by Source, Action Queue) to drill down.",
-    doNotAssume: "'Unavailable' means the truth layer withheld a metric (FX, coverage, or lead-date safety) — it is never a $0. ROAS applies to Google Ads only; other sources are revenue-only.",
+    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaign Revenue & Spend, Revenue by Source, Action Queue) to drill down.",
+    doNotAssume: "'Unavailable' means the truth layer withheld a metric (FX, coverage, or lead-date safety) — it is never a $0. Period Revenue / Ad Spend (a non-cohort operational ratio) applies to Google Ads only; other sources are revenue-only.",
     checkNext: "Revenue Health for truth blockers, or Action Queue for items needing human review."
   },
   "action-queue": {
@@ -351,7 +351,7 @@ const PAGE_HELP_CONTENT = {
     source: "Canonical daily Google Ads API spend (native GBP + FX-safe USD — the same source as Revenue by Source) reconciled with deduplicated HubSpot lead outcomes on the HubSpot event date (contact_created_at). Lead labels are mapped to canonical Google Ads campaigns through the approved campaign-identity table; unmatched labels appear as Mapping Review rows.",
     howToUse: "Pick an Evidence Window (7d…All time; All time is genuine cumulative totals). Filter by status/outcome and sort. Click a row to open the drawer — its lead evidence aggregates across the campaign's approved aliases and reconciles exactly with the row.",
     doNotAssume: "Read-only — no Google Ads or HubSpot changes are made. Spend is canonical Google Ads truth, never a snapshot; overall CPQL uses mapped Google Ads SQLs only (unmatched / Not-Google-Ads SQLs are disclosed, never fold into it).",
-    checkNext: "Campaign detail drawer for drill-down, or ROAS by Campaign for revenue attribution."
+    checkNext: "Campaign detail drawer for drill-down, or Campaign Revenue & Spend for revenue attribution."
   },
   "search-terms": {
     what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = durable flag OR safely-confirmed waste evidence · Reviewed clean = every row stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
@@ -373,7 +373,7 @@ const PAGE_HELP_CONTENT = {
     source: "Google Ads API geo reports merged with HubSpot lead quality by country.",
     howToUse: "Compare spend, lead count, and junk rate across countries. Look for high-spend countries with poor lead quality.",
     doNotAssume: "Country attribution uses Google Ads geographic reporting. It does not use IP geolocation or GCLID-level precision.",
-    checkNext: "ROAS by Country for revenue attribution at the country level."
+    checkNext: "Country Revenue & Spend for revenue attribution at the country level."
   },
   leads: {
     what: "HubSpot lead-quality breakdown — lifecycle stages, junk rate, campaign attribution, and quality scoring.",
@@ -394,35 +394,35 @@ const PAGE_HELP_CONTENT = {
     source: "HubSpot CRM deals synced via the HubSpot connector.",
     howToUse: "Review deal values by campaign to understand revenue attribution. Filter by stage or time window.",
     doNotAssume: "Deal attribution uses HubSpot's native campaign field. It does not re-attribute deals using click-level GCLID data (that requires GCLID bridge).",
-    checkNext: "ROAS by Campaign for campaign-level profitability, or Unit Economics for LTV/CAC."
+    checkNext: "Campaign Revenue & Spend for campaign-level profitability, or Unit Economics for LTV/CAC."
   },
   "roas-campaigns": {
-    what: "Revenue Truth ROAS by campaign — shows which campaigns win closed-won deals and revenue (HubSpot) against Google Ads API spend. Customers are distinct proven HubSpot companies, never a deal count.",
+    what: "Campaign revenue and spend — shows which campaigns win closed-won deals and revenue (HubSpot) against Google Ads API spend in the same window. Period Revenue / Ad Spend is a non-cohort operational ratio: closed-won outcomes may originate from earlier advertising periods. Customers are distinct proven HubSpot companies, never a deal count.",
     source: "HubSpot closed-won deal revenue + Google Ads API campaign spend. This does NOT use Google Ads conversion value.",
-    howToUse: "Compare campaigns by LTV ROAS, ACV ROAS, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
+    howToUse: "Compare campaigns by won revenue, Period Revenue / Ad Spend, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
     doNotAssume: "This is HubSpot revenue truth, not Google Ads conversion tracking. Revenue comes from actual closed-won deals, not estimated conversion values. INSUFFICIENT_DATA means not enough signal to judge.",
-    checkNext: "Unit Economics for portfolio-level LTV/CAC, or ROAS by Country for geographic breakdown."
+    checkNext: "Unit Economics for portfolio-level LTV/CAC, or Country Revenue & Spend for geographic breakdown."
   },
   "roas-countries": {
-    what: "Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
-    source: "HubSpot closed-won deal revenue + Google Ads API geo spend. Country ROAS is an estimate because deal-to-country mapping is approximate without full GCLID coverage.",
+    what: "Country-level revenue and spend — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
+    source: "HubSpot closed-won deal revenue + Google Ads API geo spend. Country Period Revenue / Ad Spend is an estimate because deal-to-country mapping is approximate without full GCLID coverage.",
     howToUse: "Use for directional diagnosis — identify countries that are clearly profitable or clearly losing money. Do not use for precise budget allocation until GCLID attribution is fully wired.",
     doNotAssume: "These are estimates, not exact figures. Country attribution precision will improve as GCLID coverage increases. Do not make final budget decisions based solely on these numbers.",
-    checkNext: "GCLID Attribution page to check coverage readiness, or ROAS by Campaign for campaign-level precision."
+    checkNext: "GCLID Attribution page to check coverage readiness, or Campaign Revenue & Spend for campaign-level precision."
   },
   "gclid-attribution": {
     what: "GCLID click-to-lead matching — a readiness and confidence audit showing how well Google Ads clicks can be traced to HubSpot leads.",
     source: "GCLID match engine joining Windsor click data with HubSpot contact records.",
     howToUse: "Review match rates, coverage percentages, and confidence tiers. This page audits attribution readiness — it does not implement a GCLID-to-revenue bridge.",
     doNotAssume: "This is a readiness/confidence audit only. It does NOT implement actual GCLID bridge attribution, OCT upload, or offline conversion tracking. It measures how ready the data is for those future capabilities.",
-    checkNext: "ROAS by Country to see how estimates will improve with better coverage, or System Status for GCLID pipeline health."
+    checkNext: "Country Revenue & Spend to see how estimates will improve with better coverage, or System Status for GCLID pipeline health."
   },
   "unit-economics": {
-    what: "Executive SaaS economics — LTV, CAC, LTV/CAC ratio, payback months, and profitability verdicts at the portfolio level.",
-    source: "Revenue Truth Layer computed from HubSpot deals + Google Ads API campaigns + churn rate configuration.",
-    howToUse: "Review overall LTV/CAC and payback. Compare with industry benchmarks. A ratio above 3:1 generally indicates healthy unit economics.",
+    what: "Closed-won deals, customers, revenue and average deal value for the business, plus Period Revenue / Ad Spend and Spend per Customer Won This Period for the advertising scope. Those two are non-cohort operational ratios: closed-won outcomes may originate from earlier advertising periods. Acquisition-cohort cost and return ratios, LTV ratios and payback are shown as Unavailable with the reason.",
+    source: "Canonical HubSpot deal ledger + canonical Google Ads spend.",
+    howToUse: "Read the business totals first, then the advertising scope. Use the period ratios as operating signals, not as cohort economics.",
     doNotAssume: "LTV calculations use the configured churn rate (default 3%). If actual churn differs, LTV will be inaccurate. Adjust via Churn Input page.",
-    checkNext: "Churn Input to verify/update churn rate, or ROAS by Campaign for campaign-level detail."
+    checkNext: "Churn Input to verify/update churn rate, or Campaign Revenue & Spend for campaign-level detail."
   },
   scheduler: {
     what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for daily/weekly/monthly jobs.",
@@ -446,11 +446,11 @@ const PAGE_HELP_CONTENT = {
     checkNext: "System Status to verify post-backfill freshness, or the relevant data page to confirm new rows."
   },
   "churn-input": {
-    what: "Admin page for manual monthly churn rate overrides. Churn rate is used in LTV and ROAS calculations.",
+    what: "Admin page for manual monthly churn rate overrides. Churn rate is used in LTV calculations.",
     source: "Local YAML configuration file. Not synced from or written to any external system.",
     howToUse: "Enter a month (YYYY-MM) and the observed monthly churn rate (0–1). The override applies to LTV calculations for that month onward.",
-    doNotAssume: "This updates local configuration ONLY. It does NOT write to HubSpot, Google Ads, or any external service. Changes affect future LTV/ROAS calculations locally.",
-    checkNext: "Unit Economics to see updated LTV calculations, or ROAS by Campaign to see how churn affects campaign verdicts."
+    doNotAssume: "This updates local configuration ONLY. It does NOT write to HubSpot, Google Ads, or any external service. Changes affect future LTV calculations locally.",
+    checkNext: "Unit Economics to see updated LTV calculations, or Campaign Revenue & Spend to see how churn affects campaign verdicts."
   }
 };
 
@@ -2174,7 +2174,7 @@ const DASH_DELTA_VALENCE = {
   sqls: "up-good",
   customers: "up-good",
   closed_won_deals: "up-good",
-  roas: "up-good",
+  period_revenue_per_ad_spend: "up-good",
   // PR-ADS-135 revenue-tab metric keys.
   closed_won_revenue_usd: "up-good",
   average_deal_value_usd: "up-good",
@@ -2185,7 +2185,7 @@ const DASH_DELTA_VALENCE = {
   won_revenue_usd: "up-good",
   verified_spend_usd: "neutral",
   // PR-ADS-138 countries-tab metric key.
-  geo_roas: "up-good",
+  geo_period_revenue_per_ad_spend: "up-good",
   // PR-ADS-139 deals-tab metric keys.
   closed_won_customers: "up-good",
   sql_to_customer_rate: "up-good",
@@ -2385,10 +2385,25 @@ const CANONICAL_REASON_LABELS = {
     "revenue and SQLs are different populations and cohorts",
   lead_to_customer_rate_needs_one_acquisition_cohort_and_scope:
     "leads and won deals are different populations and cohorts",
+  roas_requires_revenue_and_spend_in_one_acquisition_cohort: "attribution ROAS needs revenue and spend over one acquisition cohort",
+  cac_requires_spend_and_customers_in_one_acquisition_cohort: "CAC needs spend and customers over one acquisition cohort",
 };
 
+// PR-ADS-161E decision 1: a close-date ratio is NOT ROAS or CAC. In a long B2B
+// sales cycle a deal closed this window was usually acquired by earlier spend,
+// so revenue (or customers) closed in a window over that window's spend is a
+// non-cohort operational ratio. It is shown under these explicit labels, always
+// with the disclosure, and the API never carries it in a field named roas/cac.
+const PERIOD_RATIO_LABEL = "Period Revenue / Ad Spend";
+const PERIOD_SPEND_PER_CUSTOMER_LABEL = "Spend per Customer Won This Period";
+const PERIOD_RATIO_DISCLOSURE =
+  "Non-cohort operational ratio · Closed-won outcomes may originate from earlier advertising periods";
+// Certified attribution metrics: always Unavailable until spend and outcomes
+// are joined over one acquisition cohort and attribution scope.
+const CERTIFIED_RATIO_LABELS = { roas: "Attribution ROAS (acquisition cohort)", cac: "CAC (acquisition cohort)" };
+
 const CANONICAL_BASIS_LABELS = {
-  close_date_outcomes_over_same_window_spend: "period ratio: deals closed in this window ÷ this window's spend",
+  close_date_outcomes_over_same_window_spend: PERIOD_RATIO_DISCLOSURE,
 };
 
 function canonicalReasonLabel(reason) {
@@ -2427,7 +2442,7 @@ function crmBlockersHref(opts) {
   return `#/health?${p.toString()}`;
 }
 
-// The input a derived metric (ROAS, CAC) is blocked by names the CRM family.
+// The input a derived metric (a period ratio) is blocked by names the CRM family.
 function canonicalBlockingReason(metric) {
   const m = metric || {};
   return (m.blocked_by && m.blocked_by.reason) || m.reason || null;
@@ -2437,9 +2452,9 @@ function canonicalMetricHtml(metric, formatter, opts) {
   const m = metric || {};
   if (m.status === "published" && m.value !== null && m.value !== undefined) {
     const text = escapeHtml(formatter ? formatter(m.value) : String(m.value));
-    // A derived ratio states its basis (PR-ADS-161E): period ROAS / CAC are
+    // A derived ratio states its basis (PR-ADS-161E): the period ratios are
     // close-date outcomes over the same window's spend, not an acquisition
-    // cohort.
+    // cohort — the disclosure is always shown beside the value.
     return m.cohort_basis
       ? `<span title="${escapeHtml(CANONICAL_BASIS_LABELS[m.cohort_basis] || m.cohort_basis)}">${text}</span>`
         + ` <small class="metric-reason">${escapeHtml(CANONICAL_BASIS_LABELS[m.cohort_basis] || m.cohort_basis)}</small>`
@@ -2661,15 +2676,18 @@ function renderDashKpiRow(d) {
         && k.google_ads_source_sqls !== null && k.google_ads_source_sqls !== undefined,
     },
     {
-      key: "roas",
-      label: "Google Ads ROAS",
-      value: dashValue(k.google_ads_roas, fmtRoasMultiple),
-      sub: k.google_ads_roas !== null && k.google_ads_roas !== undefined
-        ? "Verified spend + revenue" : "Needs verified spend, FX, revenue",
-      delta: dashDeltaChip("roas", pc),
+      key: "period_revenue_per_ad_spend",
+      label: PERIOD_RATIO_LABEL,
+      value: dashValue(k.google_ads_period_revenue_per_ad_spend, fmtPeriodRatio),
+      sub: (k.google_ads_period_revenue_per_ad_spend !== null
+        && k.google_ads_period_revenue_per_ad_spend !== undefined
+        ? "Verified spend + revenue · " : "Needs verified spend, FX, revenue · ")
+        + PERIOD_RATIO_DISCLOSURE,
+      delta: dashDeltaChip("period_revenue_per_ad_spend", pc),
       spark: "",
       source: "Google Ads only",
-      ok: k.google_ads_roas !== null && k.google_ads_roas !== undefined,
+      ok: k.google_ads_period_revenue_per_ad_spend !== null
+        && k.google_ads_period_revenue_per_ad_spend !== undefined,
     },
   ];
 
@@ -3470,10 +3488,11 @@ const DASH_SIGNAL_DEFS = [
 
 function dashSignalBody(key, s) {
   if (key === "best_campaign" || key === "best_country") {
-    const roas = s.roas !== null && s.roas !== undefined ? ` · ${fmtRoasMultiple(s.roas)}` : "";
+    const ratio = s.period_revenue_per_ad_spend !== null && s.period_revenue_per_ad_spend !== undefined
+      ? ` · ${fmtPeriodRatio(s.period_revenue_per_ad_spend)} ${PERIOD_RATIO_LABEL} (${PERIOD_RATIO_DISCLOSURE})` : "";
     return {
       value: s.label,
-      line: `${fmtMoney(s.revenue_usd)} closed-won · ${fmtCount(s.closed_won_deals)} won deal${(s.closed_won_deals || 0) === 1 ? "" : "s"}${roas}`,
+      line: `${fmtMoney(s.revenue_usd)} closed-won · ${fmtCount(s.closed_won_deals)} won deal${(s.closed_won_deals || 0) === 1 ? "" : "s"}${ratio}`,
     };
   }
   if (key === "best_source") {
@@ -4730,7 +4749,7 @@ const CHAN_SPEND_UNAVAILABLE = "Unavailable — no connected spend source";
 
 function chanPlatformSpendCell(p) {
   // Show USD spend whenever present (Google Ads, FX-verified). Spend is
-  // independent of ROAS, which is gated separately by roas_available.
+  // independent of the period ratio, gated separately by period_ratio_available.
   if (p.spend_usd !== null && p.spend_usd !== undefined) {
     return escapeHtml(fmtMoney(p.spend_usd));
   }
@@ -4744,10 +4763,12 @@ function chanPlatformSpendCell(p) {
 }
 
 function chanPlatformRoasCell(p) {
-  // ROAS is shown ONLY when the platform is spend-connected (Google Ads) with a
-  // real ROAS. Non-connected platforms never show a multiple — not even $0/0.00x.
-  if (p.roas_available && p.roas !== null && p.roas !== undefined) {
-    return escapeHtml(fmtRoasMultiple(p.roas));
+  // The period ratio is shown ONLY when the platform is spend-connected (Google
+  // Ads) with a real value. Non-connected platforms never show a multiple — not
+  // even $0/0.00x.
+  if (p.period_ratio_available && p.period_revenue_per_ad_spend !== null
+      && p.period_revenue_per_ad_spend !== undefined) {
+    return escapeHtml(fmtPeriodRatio(p.period_revenue_per_ad_spend));
   }
   return `<span class="dash-unavailable">Unavailable</span>`;
 }
@@ -4761,7 +4782,7 @@ function renderChanPlatformMatrix(d) {
       </div>
       <p class="rev-breakdown-empty">No platform activity in this window.</p>`;
   }
-  const head = ["Platform", "Channel", "Leads", "SQLs", "Won deals", "Revenue", "Spend", "ROAS", "Status"]
+  const head = ["Platform", "Channel", "Leads", "SQLs", "Won deals", "Revenue", "Spend", PERIOD_RATIO_LABEL, "Status"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((p) => `
     <tr class="chan-platform-row">
@@ -4781,7 +4802,7 @@ function renderChanPlatformMatrix(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Platform Matrix</h3>
-        <p class="dash-panel__sub">Every platform's SQLs, closed-won deals and revenue · spend &amp; ROAS only where a spend source is connected</p>
+        <p class="dash-panel__sub">Every platform's SQLs, closed-won deals and revenue · spend &amp; Period Revenue / Ad Spend only where a spend source is connected · ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
       </div>
     </div>
     <div class="chan-platform-scroll">
@@ -4807,12 +4828,12 @@ function renderChanChannelList(d) {
     // fall back to native GBP (spend source connected, FX/USD unavailable); else
     // Unavailable. Mirrors chanPlatformSpendCell / chanPlatformRoasCell gating.
     const spendKnown = r.spend_usd !== null && r.spend_usd !== undefined;
-    const roasKnown = r.roas_available && r.roas !== null && r.roas !== undefined;
+    const ratioKnown = r.period_ratio_available && r.period_revenue_per_ad_spend !== null && r.period_revenue_per_ad_spend !== undefined;
     const nat = r.native_spend;
     const nativeKnown = nat && nat.amount !== null && nat.amount !== undefined;
     let spendCell;
     if (spendKnown) {
-      spendCell = `${escapeHtml(fmtMoney(r.spend_usd))}${roasKnown ? ` · ${escapeHtml(fmtRoasMultiple(r.roas))}` : ""}`;
+      spendCell = `${escapeHtml(fmtMoney(r.spend_usd))}${ratioKnown ? ` · <span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${escapeHtml(PERIOD_RATIO_LABEL + " " + fmtPeriodRatio(r.period_revenue_per_ad_spend))}</span> <small class="metric-reason">${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</small>` : ""}`;
     } else if (nativeKnown) {
       spendCell = escapeHtml(fmtCompactCurrency(nat.amount, nat.currency || "GBP"));
     } else {
@@ -4871,7 +4892,7 @@ function wireChanChannelDrawers(root, d) {
       </div>
       <p class="chan-channel-drawer__note">Platform-level SQLs, closed-won deals and revenue for this channel — not individual client/deal records.</p>
       <table class="chan-drawer-table">
-        <thead><tr><th>Platform</th><th>SQLs</th><th>Won deals</th><th>Revenue</th><th>Spend</th><th>ROAS</th></tr></thead>
+        <thead><tr><th>Platform</th><th>SQLs</th><th>Won deals</th><th>Revenue</th><th>Spend</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th></tr></thead>
         <tbody>${pfBody}</tbody>
       </table>`;
     drawer.querySelector(".chan-channel-drawer__close").addEventListener("click", () => drawer.remove());
@@ -5037,9 +5058,11 @@ function campSpendCell(row) {
 }
 
 function campRoasCell(row) {
-  // ROAS only when it is a real, trusted value; else the status conveys the outcome.
-  if (row.roas_available && row.roas !== null && row.roas !== undefined) {
-    return `<span class="camp-roas">${escapeHtml(fmtRoasMultiple(row.roas))}</span>`;
+  // The period ratio only when it is a real, trusted value; else the status
+  // conveys the outcome. Never labelled ROAS: a non-cohort operational ratio.
+  if (row.period_ratio_available && row.period_revenue_per_ad_spend !== null
+      && row.period_revenue_per_ad_spend !== undefined) {
+    return `<span class="camp-roas" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${escapeHtml(fmtPeriodRatio(row.period_revenue_per_ad_spend))}</span>`;
   }
   return `<span class="camp-status" style="--camp-accent:${campStatusColor(row.status)}">${escapeHtml(row.status || "—")}</span>`;
 }
@@ -5105,15 +5128,15 @@ function renderCampKpiRow(d) {
       ok: k.won_revenue_usd !== null && k.won_revenue_usd !== undefined,
     },
     {
-      key: "roas", label: "Google Ads ROAS",
-      value: (k.roas !== null && k.roas !== undefined)
-        ? escapeHtml(fmtRoasMultiple(k.roas))
+      key: "period_revenue_per_ad_spend", label: PERIOD_RATIO_LABEL,
+      value: (k.period_revenue_per_ad_spend !== null && k.period_revenue_per_ad_spend !== undefined)
+        ? escapeHtml(fmtPeriodRatio(k.period_revenue_per_ad_spend))
         : '<span class="dash-unavailable">Unavailable</span>',
       // Plain-text sub (the card template escapes it) — never embed dashValue HTML.
-      sub: `${(k.campaigns_with_spend === null || k.campaigns_with_spend === undefined) ? "—" : fmtCount(k.campaigns_with_spend)} campaigns with spend`,
-      delta: dashDeltaChip("roas", pc),
-      source: "Revenue ÷ verified USD spend",
-      ok: k.roas !== null && k.roas !== undefined,
+      sub: `${(k.campaigns_with_spend === null || k.campaigns_with_spend === undefined) ? "—" : fmtCount(k.campaigns_with_spend)} campaigns with spend · ${PERIOD_RATIO_DISCLOSURE}`,
+      delta: dashDeltaChip("period_revenue_per_ad_spend", pc),
+      source: "Revenue closed this window ÷ this window's verified USD spend",
+      ok: k.period_revenue_per_ad_spend !== null && k.period_revenue_per_ad_spend !== undefined,
     },
   ];
 
@@ -5255,14 +5278,15 @@ function wireCampBubbleHover(root, d) {
     title.textContent = r.campaign_name || "";
     tooltip.appendChild(title);
     const usd = (r.spend_usd !== null && r.spend_usd !== undefined) ? fmtMoney(r.spend_usd) : "Unavailable";
-    const roas = (r.roas_available && r.roas !== null && r.roas !== undefined) ? fmtRoasMultiple(r.roas) : "Unavailable";
+    const ratio = (r.period_ratio_available && r.period_revenue_per_ad_spend !== null && r.period_revenue_per_ad_spend !== undefined) ? fmtPeriodRatio(r.period_revenue_per_ad_spend) : "Unavailable";
     [["Spend (£)", r.spend_native !== null && r.spend_native !== undefined ? fmtCompactCurrency(r.spend_native, r.native_currency || "GBP") : "Unavailable"],
      ["Spend (USD)", usd],
      ["SQLs", r.sqls === null || r.sqls === undefined ? "Unavailable" : String(r.sqls)],
      ["Won deals", r.closed_won_deals === null || r.closed_won_deals === undefined ? "Unavailable" : String(r.closed_won_deals)],
      ["Customers", campCustomersText(r)],
      ["Revenue", r.won_revenue_usd === null || r.won_revenue_usd === undefined ? "Unavailable" : fmtMoney(r.won_revenue_usd)],
-     ["ROAS", roas],
+     [PERIOD_RATIO_LABEL, ratio],
+     ["Basis", PERIOD_RATIO_DISCLOSURE],
      ["Status", r.status || "—"]].forEach(([label, val]) => {
       const rowEl = document.createElement("div");
       rowEl.className = "dash-chart-tooltip__row";
@@ -5287,11 +5311,11 @@ function wireCampBubbleHover(root, d) {
 }
 
 const CAMP_NEXT_ACTION = {
-  "Revenue proven": "Scale — open ROAS by Campaign",
+  "Revenue proven": "Scale — open Campaign Revenue & Spend",
   "SQL producer": "Review SQL quality",
   "Spend without SQL / customer proof": "Review — spend without proof",
   "Revenue attribution missing": "Open Revenue Health",
-  "FX unavailable": "FX incomplete — USD/ROAS withheld",
+  "FX unavailable": "FX incomplete — USD spend and period ratio withheld",
   "Mapping needs review": "Map campaign spend",
   "Closed-won outcome withheld": "Not judged — closed-won deals withheld",
 };
@@ -5303,7 +5327,7 @@ function renderCampLeaderboard(d) {
       <div class="dash-panel__header"><div><h3 class="dash-panel__title">Campaign Leaderboard</h3></div></div>
       <p class="rev-breakdown-empty">No campaign activity in this window.</p>`;
   }
-  const head = ["Campaign", "Spend", "SQLs", "Won deals", "Customers", "Revenue", "ROAS / Status", "Next action"]
+  const head = ["Campaign", "Spend", "SQLs", "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r, i) => {
     const isUnattributed = r.attribution_status === "unattributed";
@@ -5318,14 +5342,14 @@ function renderCampLeaderboard(d) {
       <td class="camp-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="camp-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td>${campRoasCell(r)}</td>
-      <td class="camp-next">${escapeHtml(CAMP_NEXT_ACTION[r.status] || "Open ROAS by Campaign")}</td>
+      <td class="camp-next">${escapeHtml(CAMP_NEXT_ACTION[r.status] || "Open Campaign Revenue & Spend")}</td>
     </tr>`;
   }).join("");
   return `
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Campaign Leaderboard</h3>
-        <p class="dash-panel__sub">Every campaign's spend, SQLs, closed-won deals, customers and revenue · click a row for proof · ROAS only when spend + FX + revenue are safe</p>
+        <p class="dash-panel__sub">Every campaign's spend, SQLs, closed-won deals, customers and revenue · click a row for proof · Period Revenue / Ad Spend only when spend + FX + revenue are safe · ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
       </div>
     </div>
     <div class="camp-scroll">
@@ -5353,7 +5377,7 @@ function renderCampKeywordThemes(d) {
     return `${header}
       <p class="camp-keyword-note">Keyword themes are unavailable${kt.reason ? ` — ${escapeHtml(kt.reason)}` : ""}. ${kwLink}</p>`;
   }
-  const note = `<p class="camp-keyword-note">Recent keyword snapshot${kt.run_date ? ` (as of ${escapeHtml(kt.run_date)})` : ""} — not window-scoped, and keyword-level SQLs / customers / revenue / ROAS have no durable attribution.</p>`;
+  const note = `<p class="camp-keyword-note">Recent keyword snapshot${kt.run_date ? ` (as of ${escapeHtml(kt.run_date)})` : ""} — not window-scoped, and keyword-level SQLs / customers / revenue / spend ratios have no durable attribution.</p>`;
   const rows = kt.themes.map((t) => `
     <li class="camp-theme-row">
       <span class="camp-theme-row__name">${escapeHtml(t.theme_label || "—")}</span>
@@ -5445,7 +5469,7 @@ function wireCampDrawers(root, d) {
         : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
 
     const links = [
-      ["roas-campaigns", "Open ROAS by Campaign"],
+      ["roas-campaigns", "Open Campaign Revenue & Spend"],
       ["keywords", "Open Keywords"],
       ["search-terms", "Open Search Terms"],
       ["revenue-health", "Open Revenue Health"],
@@ -5470,7 +5494,7 @@ function wireCampDrawers(root, d) {
         <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
-        <div><dt>ROAS / status</dt><dd>${campRoasCell(r)}</dd></div>
+        <div><dt>${PERIOD_RATIO_LABEL} / status</dt><dd>${campRoasCell(r)}<br><small class="metric-reason">${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</small></dd></div>
         <div><dt>Mapping</dt><dd>${escapeHtml(r.attribution_status || "—")}</dd></div>
       </dl>
       <div class="camp-drawer__section">
@@ -5554,11 +5578,11 @@ function ctryStatusColor(status) {
 }
 
 const CTRY_NEXT_ACTION = {
-  "Revenue proven": "Scale — open ROAS by Country",
+  "Revenue proven": "Scale — open Country Revenue & Spend",
   "Customer proven": "Confirm revenue attribution",
   "SQL producer": "Review SQL quality",
   "Spend without customer proof": "Review — spend without proof",
-  "FX unavailable": "FX incomplete — USD/ROAS withheld",
+  "FX unavailable": "FX incomplete — USD spend and period ratio withheld",
   "Geo attribution needs review": "Open Revenue Health",
   "No spend in window": "No spend to judge",
   "Closed-won outcome withheld": "Not judged — closed-won deals withheld",
@@ -5663,8 +5687,9 @@ function ctrySpendCell(row) {
 }
 
 function ctryRoasCell(row) {
-  if (row.roas_available && row.roas !== null && row.roas !== undefined) {
-    return `<span class="ctry-roas">${escapeHtml(fmtRoasMultiple(row.roas))}</span>`;
+  if (row.period_ratio_available && row.period_revenue_per_ad_spend !== null
+      && row.period_revenue_per_ad_spend !== undefined) {
+    return `<span class="ctry-roas" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${escapeHtml(fmtPeriodRatio(row.period_revenue_per_ad_spend))}</span>`;
   }
   return `<span class="ctry-status" style="--ctry-accent:${ctryStatusColor(row.status)}">${escapeHtml(row.status || "—")}</span>`;
 }
@@ -5728,14 +5753,14 @@ function renderCtryKpiRow(d) {
       ok: k.won_revenue_usd !== null && k.won_revenue_usd !== undefined,
     },
     {
-      key: "roas", label: "Geo ROAS",
-      value: (k.geo_roas !== null && k.geo_roas !== undefined)
-        ? escapeHtml(fmtRoasMultiple(k.geo_roas))
+      key: "geo_period_revenue_per_ad_spend", label: "Geo " + PERIOD_RATIO_LABEL,
+      value: (k.geo_period_revenue_per_ad_spend !== null && k.geo_period_revenue_per_ad_spend !== undefined)
+        ? escapeHtml(fmtPeriodRatio(k.geo_period_revenue_per_ad_spend))
         : '<span class="dash-unavailable">Unavailable</span>',
-      sub: `${(k.countries_with_spend === null || k.countries_with_spend === undefined) ? "—" : fmtCount(k.countries_with_spend)} countries with spend`,
-      delta: dashDeltaChip("geo_roas", pc),
-      source: "Revenue ÷ verified USD spend",
-      ok: k.geo_roas !== null && k.geo_roas !== undefined,
+      sub: `${(k.countries_with_spend === null || k.countries_with_spend === undefined) ? "—" : fmtCount(k.countries_with_spend)} countries with spend · ${PERIOD_RATIO_DISCLOSURE}`,
+      delta: dashDeltaChip("geo_period_revenue_per_ad_spend", pc),
+      source: "Revenue closed this window ÷ this window's verified USD spend",
+      ok: k.geo_period_revenue_per_ad_spend !== null && k.geo_period_revenue_per_ad_spend !== undefined,
     },
     {
       key: "residual", label: "Residual Revenue",
@@ -5887,14 +5912,15 @@ function wireCtryBubbleHover(root, d) {
     title.textContent = `${r.country_name || "—"} · ${r.region || ""}`;
     tooltip.appendChild(title);
     const usd = (r.spend_usd !== null && r.spend_usd !== undefined) ? fmtMoney(r.spend_usd) : "Unavailable";
-    const roas = (r.roas_available && r.roas !== null && r.roas !== undefined) ? fmtRoasMultiple(r.roas) : "Unavailable";
+    const ratio = (r.period_ratio_available && r.period_revenue_per_ad_spend !== null && r.period_revenue_per_ad_spend !== undefined) ? fmtPeriodRatio(r.period_revenue_per_ad_spend) : "Unavailable";
     [["Spend (£)", r.spend_native !== null && r.spend_native !== undefined ? fmtCompactCurrency(r.spend_native, r.native_currency || "GBP") : "Unavailable"],
      ["Spend (USD)", usd],
      ["SQLs", r.sqls === null || r.sqls === undefined ? "Unavailable" : String(r.sqls)],
      ["Won deals", r.closed_won_deals === null || r.closed_won_deals === undefined ? "Unavailable" : String(r.closed_won_deals)],
      ["Customers", campCustomersText(r)],
      ["Revenue", r.won_revenue_usd === null || r.won_revenue_usd === undefined ? "Unavailable" : fmtMoney(r.won_revenue_usd)],
-     ["ROAS", roas],
+     [PERIOD_RATIO_LABEL, ratio],
+     ["Basis", PERIOD_RATIO_DISCLOSURE],
      ["Status", r.status || "—"]].forEach(([lbl, val]) => {
       const rowEl = document.createElement("div");
       rowEl.className = "dash-chart-tooltip__row";
@@ -5926,7 +5952,7 @@ function renderCtryLeaderboard(d) {
       <div class="dash-panel__header"><div><h3 class="dash-panel__title">Country Leaderboard</h3></div></div>
       <p class="rev-breakdown-empty">No country activity in this window.</p>`;
   }
-  const head = ["Country", "Region", "Spend", "SQLs", "Won deals", "Customers", "Revenue", "ROAS / Status", "Next action"]
+  const head = ["Country", "Region", "Spend", "SQLs", "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = real.map((r, i) => `
     <tr class="ctry-row" data-ctry-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.country_name || "country")} detail">
@@ -5940,7 +5966,7 @@ function renderCtryLeaderboard(d) {
       <td class="ctry-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="ctry-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td>${ctryRoasCell(r)}</td>
-      <td class="ctry-next">${escapeHtml(CTRY_NEXT_ACTION[r.status] || "Open ROAS by Country")}</td>
+      <td class="ctry-next">${escapeHtml(CTRY_NEXT_ACTION[r.status] || "Open Country Revenue & Spend")}</td>
     </tr>`).join("");
 
   // Residual row — pinned to the bottom, NOT clickable, never a ROAS. It is the
@@ -5964,7 +5990,7 @@ function renderCtryLeaderboard(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Country Leaderboard</h3>
-        <p class="dash-panel__sub">Every market's spend, SQLs, closed-won deals, customers and revenue · click a row for proof · ROAS only when spend + FX + revenue + geo reconciliation are safe</p>
+        <p class="dash-panel__sub">Every market's spend, SQLs, closed-won deals, customers and revenue · click a row for proof · Period Revenue / Ad Spend only when spend + FX + revenue + geo reconciliation are safe · ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
       </div>
     </div>
     <div class="ctry-scroll">
@@ -6019,7 +6045,7 @@ function renderCtryRegionalMix(d) {
           <span>${escapeHtml(fmtCount(r.countries || 0))} ${r.countries === 1 ? "market" : "markets"}</span>
           <span>Spend ${r.spend_native === null || r.spend_native === undefined ? "—" : escapeHtml(fmtCompactCurrency(r.spend_native, r.native_currency || "GBP"))}</span>
           <span>Won deals ${dashValue(r.closed_won_deals, fmtCount)}</span>
-          <span>${r.roas_available && r.roas !== null && r.roas !== undefined ? "ROAS " + escapeHtml(fmtRoasMultiple(r.roas)) : escapeHtml(r.status || "—")}</span>
+          <span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${r.period_ratio_available && r.period_revenue_per_ad_spend !== null && r.period_revenue_per_ad_spend !== undefined ? escapeHtml(PERIOD_RATIO_LABEL + " " + fmtPeriodRatio(r.period_revenue_per_ad_spend) + " · " + PERIOD_RATIO_DISCLOSURE) : escapeHtml(r.status || "—")}</span>
         </div>
       </li>`;
   }).join("");
@@ -6079,7 +6105,7 @@ function wireCtryDrawers(root, d) {
         : `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this country in this window.</td></tr>`;
 
     const links = [
-      ["roas-countries", "Open ROAS by Country"],
+      ["roas-countries", "Open Country Revenue & Spend"],
       ["deals", "Open Deals"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
@@ -6104,7 +6130,7 @@ function wireCtryDrawers(root, d) {
         <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
-        <div><dt>Geo ROAS / status</dt><dd>${ctryRoasCell(r)}</dd></div>
+        <div><dt>Geo ${PERIOD_RATIO_LABEL} / status</dt><dd>${ctryRoasCell(r)}<br><small class="metric-reason">${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</small></dd></div>
         <div><dt>Top campaign</dt><dd>${dashValue(r.top_campaign)}</dd></div>
       </dl>
       <div class="ctry-drawer__section">
@@ -6431,7 +6457,7 @@ function renderDealSourcePipeline(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Source → Pipeline</h3>
-        <p class="dash-panel__sub">Which source wins deals &amp; revenue · no ROAS here</p>
+        <p class="dash-panel__sub">Which source wins deals &amp; revenue · no spend ratio here</p>
       </div>
     </div>`;
   if (!rows.length) {
@@ -6461,12 +6487,12 @@ function renderDealCampaignPipeline(d) {
   const linkCampaigns = dashCanNavigate("dashboard")
     ? '<a class="deal-link" href="#/dashboard?tab=campaigns">Open Campaigns tab →</a>' : "";
   const linkRoas = dashCanNavigate("roas-campaigns")
-    ? '<a class="deal-link" href="#/roas-campaigns">Open ROAS by Campaign →</a>' : "";
+    ? '<a class="deal-link" href="#/roas-campaigns">Open Campaign Revenue & Spend →</a>' : "";
   const header = `
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Campaign → Pipeline</h3>
-        <p class="dash-panel__sub">Google Ads campaigns · SQLs → closed-won deals → revenue · ROAS lives on the spend pages</p>
+        <p class="dash-panel__sub">Google Ads campaigns · SQLs → closed-won deals → revenue · spend ratios live on the spend pages</p>
       </div>
     </div>`;
   if (!rows.length) {
@@ -6561,7 +6587,7 @@ function wireDealDrawers(root, d) {
     const tiles = DEAL_DRAWER_FIELDS.map(([key, label]) =>
       `<div><dt>${escapeHtml(label)}</dt><dd>${dealDrawerCell(r, key)}</dd></div>`).join("");
     const links = [
-      ["roas-campaigns", "Open ROAS by Campaign"],
+      ["roas-campaigns", "Open Campaign Revenue & Spend"],
       ["deals", "Open Deals ledger"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
@@ -8663,7 +8689,7 @@ function geoReconcileNextActionText(nextAction) {
   switch (nextAction) {
     case "none": return "No action needed.";
     case "run_geo_sync_for_missing_dates": return "Run Google Ads Geo Sync for the missing dates.";
-    case "inspect_geo_query_parity": return "Inspect geo/campaign query parity — running Geo Sync again will not close this gap. Country ROAS stays blocked until the geo source can reconcile.";
+    case "inspect_geo_query_parity": return "Inspect geo/campaign query parity — running Geo Sync again will not close this gap. Country Period Revenue / Ad Spend stays blocked until the geo source can reconcile.";
     default: return "Inspect the geo/campaign reconciliation gap.";
   }
 }
@@ -8683,7 +8709,7 @@ function renderGeoReconcileDetail(r, cur) {
         <div><span>Geo country-attributed spend</span><strong>${money(r.geo_total)}</strong></div>
         <div><span>Unknown / Unattributed country residual</span><strong>${money(r.country_residual_native)}${pct}</strong></div>
       </div>
-      <p class="revenue-geo-cause">Country ROAS is shown with a residual row. Real country rows use country-attributed spend only. Running Geo Sync again will not close this gap — the geographic view does not assign this spend to a country by design.</p>
+      <p class="revenue-geo-cause">Country Period Revenue / Ad Spend is shown with a residual row. Real country rows use country-attributed spend only. Running Geo Sync again will not close this gap — the geographic view does not assign this spend to a country by design.</p>
     </div>`;
   }
   if (!r || !r.status || r.status === "reconciled" || r.status === "no_geo_data" || r.status === "unavailable") {
@@ -8744,7 +8770,7 @@ function renderGeoSyncPanel(reconcile, status) {
     <div class="panel recovery-panel">
       <div class="panel__header">Google Ads Geo Sync</div>
       <div class="panel__body">
-        <p class="revenue-footnote">Country ROAS needs geo-table spend to reconcile with canonical campaign spend. Runs in the background. Reads Google Ads read-only (geographic_view) and writes only the local database; never writes to Google Ads or HubSpot.</p>
+        <p class="revenue-footnote">Country Period Revenue / Ad Spend needs geo-table spend to reconcile with canonical campaign spend. Runs in the background. Reads Google Ads read-only (geographic_view) and writes only the local database; never writes to Google Ads or HubSpot.</p>
         <div class="revenue-status-grid">
           ${geoSyncStatusBadge(r.country_spend_status === "reconciled_with_residual" ? "reconciled_with_residual" : r.status)}
         </div>
@@ -9053,15 +9079,18 @@ function fmtSourceRate(numer, denom) {
   return (100 * numer / denom).toFixed(0) + "%";
 }
 
-// Group-level ROAS / status cell: Google shows ROAS; others show why not.
+// Group-level period ratio / status cell: Google shows Period Revenue / Ad
+// Spend; others show why not.
 function sourceStatusLabel(group) {
   if (group.has_spend === true) {
-    if (group.roas !== null && group.roas !== undefined) return fmtRoasMultiple(group.roas);
-    // PR-ADS-140: when canonical Google Ads spend/ROAS is withheld, show the exact
-    // honest reason (FX withheld / coverage incomplete / source unavailable) —
-    // never a bare "Unavailable" and never "no connected spend source".
-    // PR-ADS-161E: a withheld canonical ROAS names its reason.
-    const why = canonicalReasonLabel(group.roas_reason);
+    if (group.period_revenue_per_ad_spend !== null && group.period_revenue_per_ad_spend !== undefined) {
+      return `${PERIOD_RATIO_LABEL} ${fmtPeriodRatio(group.period_revenue_per_ad_spend)} · ${PERIOD_RATIO_DISCLOSURE}`;
+    }
+    // PR-ADS-140: when canonical Google Ads spend or the ratio is withheld, show
+    // the exact honest reason (FX withheld / coverage incomplete / source
+    // unavailable) — never a bare "Unavailable" and never "no connected spend
+    // source". PR-ADS-161E: a withheld period ratio names its reason.
+    const why = canonicalReasonLabel(group.period_ratio_reason);
     return (group.spend_status_label || "Unavailable") + (why ? ` (${why})` : "");
   }
   if (group.group === "offline") return "Imported CRM records — no reliable source attribution";
@@ -9088,13 +9117,13 @@ function sourcePlatformExpandControl(idx, group, channel, platform, label) {
 }
 
 function renderSourcePlatformRow(group, ch, pf, idx) {
-  // ROAS shows ONLY for a spend-connected platform (the canonical Google Ads
-  // bucket). fmtRoasMultiple already renders a null ROAS as "Unavailable", so a
-  // spend-connected-but-zero bucket never shows NaN; every other bucket shows its
-  // honest status string, never a fabricated ROAS. (group.has_spend gates the
-  // group; pf.spend gates the individual bucket — see PR-133 review.)
+  // The period ratio shows ONLY for a spend-connected platform (the canonical
+  // Google Ads bucket), with its canonical status and reason when it is not
+  // published; every other bucket shows its honest status string, never a
+  // fabricated ratio. (group.has_spend gates the group; pf.spend gates the
+  // individual bucket — see PR-133 review.)
   const hasSpend = pf.spend !== null && pf.spend !== undefined;
-  const statusCell = hasSpend ? fmtRoasMultiple(pf.roas) : `<span class="source-status">${escapeHtml(pf.status || "")}</span>`;
+  const statusCell = hasSpend ? rowMetricHtml(pf, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts()) : `<span class="source-status">${escapeHtml(pf.status || "")}</span>`;
   const spendCell = hasSpend ? fmtMoney(pf.spend) : '<span class="detail-unavailable">Unavailable</span>';
   return `
     <tr class="source-platform-row">
@@ -9114,11 +9143,12 @@ function renderSourcePlatformRow(group, ch, pf, idx) {
 }
 
 function renderSourceChannelRows(group, ch, gi, ci) {
-  // Only the spend-connected (canonical Paid Search) channel carries spend/ROAS;
-  // gate on ch.spend so a non-canonical channel in the Google group never shows it.
+  // Only the spend-connected (canonical Paid Search) channel carries spend and
+  // the period ratio; gate on ch.spend so a non-canonical channel in the Google
+  // group never shows it.
   const hasSpend = ch.spend !== null && ch.spend !== undefined;
   const spendCell = hasSpend ? fmtMoney(ch.spend) : '<span class="detail-unavailable">Unavailable</span>';
-  const statusCell = hasSpend ? fmtRoasMultiple(ch.roas) : "—";
+  const statusCell = hasSpend ? rowMetricHtml(ch, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts()) : "—";
   const channelHead = `
     <tr class="source-channel-row">
       <td class="source-channel-name">${escapeHtml(ch.label)}</td>
@@ -9164,12 +9194,13 @@ function renderSourceGroupSection(group, gi, spendTruth) {
       <th title="Distinct proven HubSpot companies — not additive across rows">Customers</th>
       <th>Won Revenue</th>
       <th>Spend</th>
-      <th>ROAS / Status</th>
+      <th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL} / Status</th>
     </tr>`;
   const body = channels.length
     ? channels.map((ch, ci) => renderSourceChannelRows(group, ch, gi, ci)).join("")
     : `<tr><td colspan="9" class="source-drilldown-empty">No attributed activity in this window.</td></tr>`;
-  // Group KPI strip — Google shows Spend/ROAS; others show the revenue-only reason.
+  // Group KPI strip — Google shows Spend and the period ratio; others show the
+  // revenue-only reason.
   const isGoogle = group.has_spend === true;
   // PR-ADS-140: the Google Ads spend chip is the CANONICAL campaign spend (the
   // same USD number shown at the top), with the native GBP evidence as a subline —
@@ -9384,7 +9415,8 @@ function renderRevenueBySourcePage(data) {
   if (!body) return;
   // PR-ADS-126: rows ARE the per-source groups from the canonical mart. PR-ADS-133
   // enriches each group with a channel → platform breakdown; only the Google Ads
-  // group carries spend/ROAS (the mart sets has_spend / roas), so the frontend
+  // group carries spend and the period ratio (the mart sets has_spend /
+  // period_revenue_per_ad_spend), so the frontend
   // never decides which source has spend. Empty groups are dropped to keep the
   // page a clean attribution view, not a diagnostics wall.
   const groups = (data && data.rows) || [];
@@ -9400,7 +9432,7 @@ function renderRevenueBySourcePage(data) {
     ${renderMartSpendTruth(data)}
     ${renderMartDiagnostics(data)}
     ${sections}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads provides spend, so only Google Ads shows ROAS. Every other channel/platform is revenue-only; ROAS is never fabricated. Expand a platform to prove the clients/deals behind it.</p>
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads provides spend, so only Google Ads shows Period Revenue / Ad Spend — ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}. Every other channel/platform is revenue-only; no ratio is ever fabricated. Expand a platform to prove the clients/deals behind it.</p>
   `;
 }
 
@@ -9624,7 +9656,7 @@ function renderSpendTruth(audit, backfill) {
         </div>
         ${(a.account_reconciliation_status === "mismatch") ? `<p class="revenue-footnote">Campaign-daily sum does not yet reconcile to the direct account-daily total for this window — the delta above is shown instead of claiming success.</p>` : ""}
         ${(a.missing_chunks && a.missing_chunks.length) ? `<p class="revenue-footnote">Missing / unverified chunks: ${a.missing_chunks.map((c) => escapeHtml(`${c.start}→${c.end}`)).join(", ")}. Missing rows are never treated as £0 spend.</p>` : ""}
-        ${(a.fx_missing_dates && a.fx_missing_dates.length) ? `<p class="revenue-footnote">FX coverage incomplete — missing rates for ${a.fx_missing_dates.length} date(s). USD ROAS is unavailable until FX coverage is complete.</p>` : ""}
+        ${(a.fx_missing_dates && a.fx_missing_dates.length) ? `<p class="revenue-footnote">FX coverage incomplete — missing rates for ${a.fx_missing_dates.length} date(s). USD spend and Period Revenue / Ad Spend are unavailable until FX coverage is complete.</p>` : ""}
         ${adminPanel}
       </div>
     </div>
@@ -9846,7 +9878,7 @@ function renderCampaignMappingCard(row, nativeCur, customerId, options) {
       <div class="mapping-card mapping-card--excluded" data-label="${escapeHtml(row.external_campaign_label || "")}">
         ${head}
         ${metrics}
-        <div class="mapping-excluded-note">Not Google Ads — Excluded from Google Ads ROAS.</div>
+        <div class="mapping-excluded-note">Not Google Ads — excluded from Google Ads campaign revenue and spend.</div>
         <div class="mapping-card__controls">
           <div class="mapping-picker">
             <input type="text" class="mapping-search" data-mapping-search placeholder="Search campaigns…" aria-label="Search Google Ads campaigns" />
@@ -9924,7 +9956,7 @@ function renderCampaignMapping(review) {
         </div>
         ${noticeHtml}
         <div class="mapping-cards">${cardsHtml}</div>
-        <p class="revenue-footnote">Map identity only: HubSpot label → Google Ads campaign ID. Spend is sourced only from canonical Google Ads spend — no manual spend entry. Exact normalized matches auto-link; unmatched labels show "Spend mapping unavailable" (never $0). "Mark as Not Google Ads" excludes a label from Google Ads ROAS. Mappings are auditable (approved_by / approved_at) and never overwrite the raw Google Ads campaign identity.</p>
+        <p class="revenue-footnote">Map identity only: HubSpot label → Google Ads campaign ID. Spend is sourced only from canonical Google Ads spend — no manual spend entry. Exact normalized matches auto-link; unmatched labels show "Spend mapping unavailable" (never $0). "Mark as Not Google Ads" excludes a label from Google Ads campaign revenue and spend. Mappings are auditable (approved_by / approved_at) and never overwrite the raw Google Ads campaign identity.</p>
       </div>
     </div>
   `;
@@ -9959,7 +9991,7 @@ async function saveCampaignMapping(label, campaignId, campaignName, customerId) 
       setCampaignMappingNotice("error", "Mapping could not be saved.");
       return;
     }
-    campaignMappingNotice = { type: "ok", msg: `Mapped "${label}" → ${campaignName}. Refresh ROAS by Campaign to see it applied.` };
+    campaignMappingNotice = { type: "ok", msg: `Mapped "${label}" → ${campaignName}. Refresh Campaign Revenue & Spend to see it applied.` };
   } catch (err) {
     console.error("[saveCampaignMapping]", err);
     setCampaignMappingNotice("error", "Mapping request failed.");
@@ -9986,7 +10018,7 @@ async function excludeCampaignLabel(label, customerId) {
       setCampaignMappingNotice("error", "Label could not be excluded.");
       return;
     }
-    campaignMappingNotice = { type: "ok", msg: `"${label}" excluded from Google Ads ROAS.` };
+    campaignMappingNotice = { type: "ok", msg: `"${label}" excluded from Google Ads campaign revenue and spend.` };
   } catch (err) {
     console.error("[excludeCampaignLabel]", err);
     setCampaignMappingNotice("error", "Exclude request failed.");
@@ -16055,7 +16087,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-  // Wire up ROAS by Campaign controls (business windows — PR-ADS-107A)
+  // Wire up Campaign Revenue & Spend controls (business windows — PR-ADS-107A)
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
   if (roasCampRefresh) roasCampRefresh.addEventListener("click", loadRoasCampaigns);
@@ -16064,7 +16096,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     roasCampWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-  // Wire up ROAS by Country controls (business windows — PR-ADS-107A)
+  // Wire up Country Revenue & Spend controls (business windows — PR-ADS-107A)
   const roasCountryRefresh = document.getElementById("roas-countries-refresh-btn");
   const roasCountryWindow  = document.getElementById("roas-countries-window");
   if (roasCountryRefresh) roasCountryRefresh.addEventListener("click", loadRoasCountries);
@@ -16204,7 +16236,7 @@ async function loadGclidReadiness() {
             : escapeHtml(String(summary.tier_3_estimated_required || 0))}</div>
         </div>
       </div>
-      <p class="readiness-note">${status === "READY" ? "GCLID bridge is ready for exact attribution." : "GCLID bridge is not fully wired yet. Current ROAS remains partly directional."}</p>
+      <p class="readiness-note">${status === "READY" ? "GCLID bridge is ready for exact attribution." : "GCLID bridge is not fully wired yet. Current campaign revenue attribution remains partly directional."}</p>
     `;
 
     // Render blockers
@@ -16391,7 +16423,7 @@ function fmtCount(v) {
 }
 
 // ── Business revenue windows (PR-ADS-107A) ────────────────────────────────
-// ROAS by Campaign / ROAS by Country use business windows (not ad-style
+// Campaign Revenue & Spend / Country Revenue & Spend use business windows (not ad-style
 // 7d/14d/30d/60d day windows). Spend = Google Ads API platform evidence;
 // revenue = HubSpot closed-won truth. Both pages share one truth contract.
 const BUSINESS_WINDOWS = [
@@ -16441,7 +16473,7 @@ function handleBusinessWindowSelectChange(e) {
     case "revenue-health":  loadRevenueHealth(); break;
     case "revenue-by-source": loadRevenueBySource(); break;
     // PR-ADS-153E-B: Unit Economics now shares this selector, so it must reload
-    // ITSELF — falling through to the default reloaded ROAS by Campaign instead.
+    // ITSELF — falling through to the default reloaded Campaign Revenue & Spend instead.
     case "unit-economics":  loadUnitEconomics(); break;
     default:                loadRoasCampaigns();
   }
@@ -16458,7 +16490,7 @@ function getConfidenceBadge(confidence) {
 
 function getBusinessVerdictBadge(verdict) {
   switch ((verdict || "").toLowerCase()) {
-    case "winner":   return '<span class="roas-verdict-badge roas-verdict-badge--scale" title="Revenue/customers exist and ROAS is healthy">Winner</span>';
+    case "winner":   return '<span class="roas-verdict-badge roas-verdict-badge--scale" title="Revenue/customers exist and Period Revenue / Ad Spend (a non-cohort operational ratio) is healthy">Winner</span>';
     case "watch":    return '<span class="roas-verdict-badge roas-verdict-badge--hold" title="SQLs exist but weak customers/revenue">Watch</span>';
     case "waste":    return '<span class="roas-verdict-badge roas-verdict-badge--cut" title="Spend exists but no SQLs/customers/revenue">Waste</span>';
     case "learning": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Low spend or insufficient data">Learning</span>';
@@ -16520,7 +16552,7 @@ function setWindowRangeLoading(elId) {
 }
 
 
-// PR-ADS-110: ROAS by Campaign / Country are business decision pages, not
+// PR-ADS-110: Campaign Revenue & Spend / Country are business decision pages, not
 // diagnostics pages. Decisions are shown only when the truth layer is safe;
 // otherwise a single clean blocked card explains why — no debug/audit clutter.
 // (Diagnostics live in System Status / Revenue Attribution Health.)
@@ -16562,7 +16594,7 @@ function renderRevenueBlockedState(sourceHealth) {
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
-      <h3>Revenue ROAS is not ready yet</h3>
+      <h3>Campaign revenue &amp; spend is not ready yet</h3>
       <p>This page is blocked because the data is not safe enough for business decisions.</p>
       <div class="revenue-status-grid">
         ${chip("Spend", true, "Available", "Available")}
@@ -16600,7 +16632,7 @@ function renderRevenueEmptyState(scope) {
 let roasCampaignMart = null;
 let roasCountryMart = null;
 let revenueDealsMart = null;
-// PR-ADS-130: geo reconciliation root-cause for the blocked ROAS by Country card.
+// PR-ADS-130: geo reconciliation root-cause for the blocked Country Revenue & Spend card.
 let roasCountryGeoReconcile = null;
 
 async function fetchRevenuePerformance(view, windowKey) {
@@ -16669,7 +16701,7 @@ function renderMartSpendTruth(data) {
         <div><span>Native Spend</span><strong>${fmtNativeMoney(st.native_spend, st.native_currency)}</strong></div>
         <div><span>USD Reporting</span><strong>${st.usd_spend == null ? "Unavailable" : fmtMoney(st.usd_spend)}</strong></div>
         <div><span>FX Coverage</span><strong>${labelizeStatus(st.fx_status)}</strong></div>
-        <div><span>ROAS Basis</span><strong>${s.roas == null ? "Unavailable" : "USD reporting spend"}</strong></div>
+        <div><span>Period Ratio Basis</span><strong>${s.period_revenue_per_ad_spend == null ? "Unavailable" : "USD reporting spend"}</strong></div>
       </div>
     </section>
   `;
@@ -16694,8 +16726,10 @@ function renderMartSummaryStrip(data) {
       <div><span>Closed-Won Deals</span><strong>${martMetricHtml(s, "closed_won_deals", fmtCount)}</strong></div>
       <div><span>Customers</span><strong>${martMetricHtml(s, "customers", fmtCount)}</strong></div>
       <div><span>Won Revenue</span><strong>${martMetricHtml(s, "revenue_usd", fmtMoney)}</strong></div>
-      <div><span title="Campaign-attributed closed-won revenue ÷ Google Ads USD spend, same window">ROAS</span><strong>${martMetricHtml(s, "roas", fmtRoasMultiple)}</strong></div>
-      <div><span title="Google Ads USD spend ÷ campaign-attributed customers">CAC</span><strong>${martMetricHtml(s, "cac", fmtMoney)}</strong></div>
+      <div><span title="Campaign-attributed revenue closed this window ÷ this window's Google Ads USD spend. ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</span><strong>${martMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio)}</strong></div>
+      <div><span title="This window's Google Ads USD spend ÷ campaign-attributed customers won this window. ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_SPEND_PER_CUSTOMER_LABEL}</span><strong>${martMetricHtml(s, "period_spend_per_customer_won", fmtMoney)}</strong></div>
+      <div><span>${CERTIFIED_RATIO_LABELS.roas}</span><strong>${martMetricHtml(s, "roas", fmtPeriodRatio)}</strong></div>
+      <div><span>${CERTIFIED_RATIO_LABELS.cac}</span><strong>${martMetricHtml(s, "cac", fmtMoney)}</strong></div>
     </div>
   `;
 }
@@ -16766,7 +16800,7 @@ function martCountrySourceHealth(data) {
   };
 }
 
-// ── ROAS by Campaign (PR-ADS-111) ─────────────────────────────────────────
+// ── Campaign Revenue & Spend (PR-ADS-111) ─────────────────────────────────────────
 // Executive decision page: "Which Google Ads campaigns are producing qualified
 // pipeline, customers, and closed-won revenue?" — not a diagnostics page.
 // Blocked card when the truth layer is unsafe; otherwise a summary strip,
@@ -16775,13 +16809,12 @@ function martCountrySourceHealth(data) {
 let roasCampaignsData = [];
 let roasCampaignsStatus = "idle";
 
-// Frontend-only decision-bucket filter (does not affect ROAS by Country).
+// Frontend-only decision-bucket filter (does not affect Country Revenue & Spend).
 let roasCampaignFilter = "all";
 
-// Executive ROAS notation for the Campaign page: a multiple (2.20x), not a
-// percent. "Unavailable" when null. Campaign-only — ROAS by Country still
-// uses fmtRoas() until PR-ADS-112.
-function fmtRoasMultiple(v) {
+// Period Revenue / Ad Spend notation: a multiple (2.20x), not a percent.
+// "Unavailable" when null. Never called ROAS (PR-ADS-161E).
+function fmtPeriodRatio(v) {
   if (v === null || v === undefined) return "Unavailable";
   return v.toFixed(2) + "x";
 }
@@ -16815,9 +16848,9 @@ function sortRoasCampaignRows(rows) {
 function renderRoasCampaignSummary(summary, spendIncomplete) {
   const s = summary || {};
   const sh = roasCampaignSourceHealth || {};
-  const roasCell = spendIncomplete ? "Unavailable" : fmtRoasMultiple(s.roas);
-  // PR-ADS-119: Google Ads native spend is GBP; USD ROAS uses daily-FX reporting
-  // spend. Never render native GBP with "$".
+  const ratioCell = spendIncomplete ? "Unavailable" : fmtPeriodRatio(s.period_revenue_per_ad_spend);
+  // PR-ADS-119: Google Ads native spend is GBP; the USD period ratio uses
+  // daily-FX reporting spend. Never render native GBP with "$".
   const native = sh.spend_native_total;
   const usd = sh.spend_usd_total;
   const nativeCur = sh.spend_native_currency || "GBP";
@@ -16833,7 +16866,7 @@ function renderRoasCampaignSummary(summary, spendIncomplete) {
         <div><span>Native</span><strong title="${fmtCurrency(native, nativeCur)}">${fmtCompactCurrency(native, nativeCur)}</strong></div>
         <div><span>Reporting</span><strong title="${usd === null || usd === undefined ? "" : fmtUSD(usd)}">${usd === null || usd === undefined ? "FX incomplete" : fmtCompactCurrency(usd, "USD")}</strong></div>
         <div><span>FX</span><strong>${fxComplete ? "Verified" : "Incomplete"}</strong></div>
-        <div><span>ROAS</span><strong>${spendIncomplete ? "Unavailable" : "USD reporting spend"}</strong></div>
+        <div><span>Period ratio basis</span><strong>${spendIncomplete ? "Unavailable" : "USD reporting spend"}</strong></div>
       </div>
     </div>` : "";
   // KPI strip Spend cell: compact USD reporting when FX complete; otherwise a
@@ -16850,8 +16883,9 @@ function renderRoasCampaignSummary(summary, spendIncomplete) {
       <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount, businessBlockerOpts())}</strong></div>
       <div><span>Customers</span><strong>${rowMetricHtml(s, "customers", fmtCount, businessBlockerOpts())}</strong></div>
       <div><span>Won Revenue</span><strong>${rowMetricHtml(s, "won_revenue", fmtMoney, businessBlockerOpts())}</strong></div>
-      <div><span>ROAS</span><strong>${spendIncomplete ? roasCell : rowMetricHtml(s, "roas", fmtRoasMultiple, businessBlockerOpts())}</strong></div>
-      <div><span>CAC</span><strong>${rowMetricHtml(s, "cac", fmtMoney, businessBlockerOpts())}</strong></div>
+      <div><span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</span><strong>${spendIncomplete ? ratioCell : rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</strong></div>
+      <div><span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_SPEND_PER_CUSTOMER_LABEL}</span><strong>${rowMetricHtml(s, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</strong></div>
+      <div><span>${CERTIFIED_RATIO_LABELS.cac}</span><strong>${rowMetricHtml(s, "cac", fmtMoney, businessBlockerOpts())}</strong></div>
     </div>
   `;
 }
@@ -16963,15 +16997,15 @@ function renderSpendCoverageNotice(sh) {
     return `
     <div class="revenue-blocked-card revenue-empty-card">
       <div class="revenue-blocked-card__eyebrow">Currency normalization</div>
-      <h3>FX coverage incomplete — ROAS unavailable</h3>
+      <h3>FX coverage incomplete — Period Revenue / Ad Spend unavailable</h3>
       <p>Google Ads native spend is GBP and HubSpot revenue is USD. One or more spend dates have no daily FX rate, so USD reporting spend cannot be computed for the whole window. Run the FX backfill in System Status → Revenue Health. Native spend is shown for diagnostics only.</p>
     </div>`;
   }
   return `
     <div class="revenue-blocked-card revenue-empty-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
-      <h3>Spend coverage incomplete — ROAS unavailable</h3>
-      <p>Canonical Google Ads spend for this window has missing or unverified date chunks, so ROAS would use a partial denominator. Run the Google Ads spend backfill in System Status → Revenue Health. Observed partial spend is shown below for diagnostics only.</p>
+      <h3>Spend coverage incomplete — Period Revenue / Ad Spend unavailable</h3>
+      <p>Canonical Google Ads spend for this window has missing or unverified date chunks, so the period ratio would use a partial denominator. Run the Google Ads spend backfill in System Status → Revenue Health. Observed partial spend is shown below for diagnostics only.</p>
     </div>`;
 }
 
@@ -17034,7 +17068,7 @@ function renderRoasCampaignsPage() {
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered, spendIncomplete)}
     ${renderRevenueScopeDisclosure(data)}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend powers ROAS; HubSpot closed-won deals provide revenue.</p>
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend is the denominator of Period Revenue / Ad Spend; HubSpot closed-won deals provide revenue. ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}.</p>
   `;
 }
 
@@ -17058,7 +17092,7 @@ function renderMartCampaignCoverage(data) {
       <div class="revenue-blocked-card revenue-empty-card">
         <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
         <h3>Coverage complete</h3>
-        <p>${escapeHtml(detail.requested_start || "—")} → ${escapeHtml(detail.first_spend_date || "—")} was verified as zero spend. ROAS uses verified spend for this window.</p>
+        <p>${escapeHtml(detail.requested_start || "—")} → ${escapeHtml(detail.first_spend_date || "—")} was verified as zero spend. Period Revenue / Ad Spend uses verified spend for this window.</p>
       </div>`;
   }
 
@@ -17103,7 +17137,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across campaigns">Customers</th>
       <th>Won Revenue</th>
-      <th>ROAS</th>
+      <th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th>
       <th>Decision</th>
     </tr>
   `;
@@ -17129,9 +17163,9 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
     } else {
       const amt = usdReady ? fmtMoney(r.spend) : fmtCurrency(r.spend, nativeCur);
       spendCell = `${amt}${spendStatusLabel(state)}`;
-      // PR-ADS-161E: a withheld ROAS says why (revenue withheld, a deal with
-      // no campaign), never a bare "Unavailable".
-      roasCell = spendIncomplete ? "Unavailable" : rowMetricHtml(r, "roas", fmtRoasMultiple, businessBlockerOpts());
+      // PR-ADS-161E: a withheld period ratio says why (revenue withheld, a deal
+      // with no campaign), never a bare "Unavailable".
+      roasCell = spendIncomplete ? "Unavailable" : rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts());
       decisionCell = getBusinessVerdictBadge(r.verdict);
     }
     // PR-ADS-130: an expand control opens a per-campaign drawer of the closed-won
@@ -17172,7 +17206,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
 
 // Decision-bucket filter chips (campaign page only) — event delegation so the
 // chips work after every re-render. Scoped via the data attribute so the
-// ROAS by Country page is unaffected.
+// Country Revenue & Spend page is unaffected.
 document.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-roas-campaign-filter]");
   if (!btn) return;
@@ -17180,7 +17214,7 @@ document.addEventListener("click", (e) => {
   renderRoasCampaignsPage();
 });
 
-// ── PR-ADS-130: ROAS by Campaign row drilldown (clients / deals behind revenue) ──
+// ── PR-ADS-130: Campaign Revenue & Spend row drilldown (clients / deals behind revenue) ──
 // Expand control toggles a per-campaign drawer that lazily fetches the closed-won
 // client/deal detail from the read-only campaign-detail endpoint. Details are
 // rendered exactly as the backend provides them — missing company/contact ids
@@ -17505,12 +17539,12 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && _spendProofOpen) closeSpendProof();
 });
 
-// ── ROAS by Country ───────────────────────────────────────────────────────
+// ── Country Revenue & Spend ───────────────────────────────────────────────────────
 
 let roasCountriesData = [];
 let roasCountriesStatus = "idle";
 
-// PR-ADS-112: ROAS by Country is its own decision page. Its readiness needs the
+// PR-ADS-112: Country Revenue & Spend is its own decision page. Its readiness needs the
 // shared revenue truth layer to be safe AND country-level Google Ads geo spend
 // to be available — Campaign ROAS being ready does not imply Country is ready.
 let roasCountrySourceHealth = null;
@@ -17529,7 +17563,7 @@ function countryNumber(value) {
 // PR-ADS-161E: won DEALS add up across countries; customers (distinct
 // companies) do not, so no customer total is summed here. A country whose
 // revenue is withheld (null) makes the total unknown — never a partial sum
-// that reads as complete — and ROAS goes with it.
+// that reads as complete — and the period ratio goes with it.
 function summarizeRoasCountryRows(rows) {
   const real = rows.filter((row) => !(row && row.is_residual));
   const totals = rows.reduce((sum, row) => ({
@@ -17546,7 +17580,7 @@ function summarizeRoasCountryRows(rows) {
     ...totals,
     closed_won_deals: closedWonDeals,
     won_revenue: wonRevenue,
-    roas: (wonRevenue !== null && totals.spend > 0) ? wonRevenue / totals.spend : null,
+    period_revenue_per_ad_spend: (wonRevenue !== null && totals.spend > 0) ? wonRevenue / totals.spend : null,
   };
 }
 
@@ -17591,7 +17625,7 @@ function renderRoasCountrySummary(summary) {
       <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
       <div><span>Closed-Won Deals</span><strong>${dashValue(s.closed_won_deals, fmtCount)}</strong></div>
       <div><span>Won Revenue</span><strong>${dashValue(s.won_revenue, fmtMoney)}</strong></div>
-      <div><span>ROAS</span><strong>${dashValue(s.roas, fmtRoasMultiple)}</strong></div>
+      <div><span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</span><strong>${rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</strong></div>
     </div>
   `;
 }
@@ -17634,7 +17668,7 @@ function renderCountryRevenueBlockedState(sourceHealth) {
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
-      <h3>Country ROAS is not ready yet</h3>
+      <h3>Country revenue &amp; spend is not ready yet</h3>
       <p>This page is blocked because country-level data is not safe enough for business decisions.</p>
       <div class="revenue-status-grid">
         ${chip("Country spend", countrySpendReady, "Available", "Rebuilding")}
@@ -17835,7 +17869,7 @@ function renderCountrySpendUnreconciledState(spendTruth) {
   const isMismatch = status === "mismatch";
   const cause = isMismatch
     ? "Country geo spend exists, but it does not reconcile with canonical Google Ads campaign spend for this window."
-    : "There is no canonical Google Ads geo spend for this window yet, so country ROAS cannot be computed safely.";
+    : "There is no canonical Google Ads geo spend for this window yet, so country Period Revenue / Ad Spend cannot be computed safely.";
   const nextStep = isMismatch
     ? "Open Revenue Health and review the Google Ads Geo Sync totals."
     : "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.";
@@ -17877,7 +17911,7 @@ function renderCountrySpendUnreconciledState(spendTruth) {
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
-      <h3>Country ROAS is blocked</h3>
+      <h3>Country Period Revenue / Ad Spend is blocked</h3>
       <p>${cause}</p>
       ${totalsHtml}
       <div class="revenue-status-label">Current status</div>
@@ -17918,7 +17952,7 @@ function renderRoasCountryTable(rows) {
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across countries">Customers</th>
       <th>Won Revenue</th>
-      <th>ROAS</th>
+      <th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th>
       <th>Decision</th>
     </tr>
   `;
@@ -17952,7 +17986,7 @@ function renderRoasCountryTable(rows) {
       <td>${rowMetricHtml(r, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "customers", fmtCount, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "roas", fmtRoasMultiple, businessBlockerOpts())}</td>
+      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
     </tr>
     <tr class="country-drilldown-row" data-country-drilldown-idx="${i}" hidden>
@@ -17960,7 +17994,7 @@ function renderRoasCountryTable(rows) {
     </tr>`;
   }).join("");
 
-  // PR-ADS-123: same contained horizontal-scroll shell as ROAS by Campaign so
+  // PR-ADS-123: same contained horizontal-scroll shell as Campaign Revenue & Spend so
   // the Decision column stays fully visible on desktop.
   return `
     <div class="revenue-table-shell">
@@ -17974,7 +18008,7 @@ function renderRoasCountryTable(rows) {
   `;
 }
 
-// ── PR-ADS-132: ROAS by Country row drilldown (clients / deals behind revenue) ──
+// ── PR-ADS-132: Country Revenue & Spend row drilldown (clients / deals behind revenue) ──
 // Expand control toggles a per-country drawer that lazily fetches the closed-won
 // client/deal detail from the read-only country-detail endpoint. Details are
 // rendered exactly as the backend provides them — missing company/contact/deal
@@ -18115,7 +18149,7 @@ document.addEventListener("click", (e) => {
   renderRoasCountriesPage();
 });
 
-// PR-ADS-124: blocked ROAS by Country card CTAs. "Open Revenue Health" navigates;
+// PR-ADS-124: blocked Country Revenue & Spend card CTAs. "Open Revenue Health" navigates;
 // the admin-only run actions navigate to Revenue Health and kick the job there so
 // progress + reconciliation totals are visible. Country ROAS stays blocked until
 // geo spend reconciles — these buttons fix the recovery path, not the safety rule.
@@ -18197,7 +18231,9 @@ function renderUnitEconomicsPage() {
       <div class="kpi-card"><div class="kpi-card__label">Customers (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "customers", fmt, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Closed-won revenue (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "revenue_usd", fmtMoney, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Avg deal value</div><div class="kpi-card__value">${dash(business.avg_deal_value_usd, fmtMoney)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">CAC (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "cac", fmtMoney, businessBlockerOpts())}</div></div>
+      <div class="kpi-card" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}"><div class="kpi-card__label">${PERIOD_SPEND_PER_CUSTOMER_LABEL} (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</div></div>
+      <div class="kpi-card" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}"><div class="kpi-card__label">${PERIOD_RATIO_LABEL} (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">${CERTIFIED_RATIO_LABELS.cac}</div><div class="kpi-card__value">${rowMetricHtml(advertising, "cac", fmtMoney, businessBlockerOpts())}</div></div>
       <div class="kpi-card" title="${escapeHtml(reasonFor("ltv_to_cac"))}"><div class="kpi-card__label">LTV/CAC</div><div class="kpi-card__value">Unavailable</div></div>
     `;
   }
@@ -18230,7 +18266,7 @@ function renderUnitEconomicsPage() {
   if (tableBody) {
     const headerRow = `<tr>
       <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>Customers</th><th>Won Revenue</th>
-      <th>Avg Deal Value</th><th>CAC</th><th>ROAS</th>
+      <th>Avg Deal Value</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_SPEND_PER_CUSTOMER_LABEL}</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th>
     </tr>`;
     const rows = campaigns.map((r) => `<tr>
       <td>${escapeHtml(r.campaign || "")}</td>
@@ -18239,8 +18275,8 @@ function renderUnitEconomicsPage() {
       <td>${rowMetricHtml(r, "customers", fmt, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, businessBlockerOpts())}</td>
       <td>${r.avg_deal_value_usd === null || r.avg_deal_value_usd === undefined ? "Unavailable" : fmtMoney(r.avg_deal_value_usd)}</td>
-      <td>${rowMetricHtml(r, "cac", fmtMoney, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "roas", (v) => fmtNum(v) + "x", businessBlockerOpts())}</td>
+      <td>${rowMetricHtml(r, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</td>
+      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</td>
     </tr>`).join("");
     tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }
@@ -18536,8 +18572,8 @@ async function loadRevenueSnapshotHistory() {
       const dates = snapshots.map((snap) => escapeHtml(snap.snapshot_date || "—")).join(", ");
       container.innerHTML = `
         <div class="empty-state-block empty-state--info">
-          <p class="empty-state__title">Snapshot revenue, ROAS and verdicts: ${canonicalMetricHtml({ value: null, status: "withheld", reason: withheld.reason })}</p>
-          <p class="empty-state__body">These snapshots were computed from local data outside the canonical closed-won ledger, so their spend, revenue, ROAS, LTV/CAC and verdict counts are not published. Use <a href="#/roas-campaigns">ROAS by Campaign</a> for canonical figures.</p>
+          <p class="empty-state__title">Snapshot revenue, ratios and verdicts: ${canonicalMetricHtml({ value: null, status: "withheld", reason: withheld.reason })}</p>
+          <p class="empty-state__body">These snapshots were computed from local data outside the canonical closed-won ledger, so their spend, revenue, ratios, LTV/CAC and verdict counts are not published. Use <a href="#/roas-campaigns">Campaign Revenue & Spend</a> for canonical figures.</p>
           ${dates ? `<p class="empty-state__body">Snapshot dates on record: ${dates}</p>` : ""}
         </div>`;
       return;
@@ -18548,7 +18584,7 @@ async function loadRevenueSnapshotHistory() {
       container.innerHTML = `
         <div class="empty-state-block empty-state--info">
           <p class="empty-state__title">No revenue snapshots exist yet.</p>
-          <p class="empty-state__body"><strong>Next:</strong> Snapshots are generated daily by the ROAS snapshot scheduler. Check Data Runs for scheduler status.</p>
+          <p class="empty-state__body"><strong>Next:</strong> Snapshots are generated daily by the legacy snapshot scheduler. Check Data Runs for scheduler status.</p>
         </div>`;
       return;
     }

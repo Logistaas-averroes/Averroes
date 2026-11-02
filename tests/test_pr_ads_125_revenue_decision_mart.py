@@ -565,7 +565,7 @@ def test_canonical_output_shape(monkeypatch):
                 "campaign_spend_status", "country_spend_status"):
         assert key in mart["spend_truth"]
     for key in ("spend_usd", "leads", "sqls", "closed_won_deals", "customers",
-                "won_revenue_usd", "roas"):
+                "won_revenue_usd", "period_revenue_per_ad_spend", "roas"):
         assert key in mart["summary"]
     assert mart["google_ads_conversion_value_used"] is False
     assert isinstance(mart["rows"], list)
@@ -579,7 +579,14 @@ def test_canonical_output_shape(monkeypatch):
     assert mart["summary"]["customers"] is None
     assert mart["summary"]["customers_status"] in ("withheld", "unavailable")
     assert mart["summary"]["won_revenue_usd"] == 9000.0
-    assert mart["summary"]["roas"] == round(9000.0 / 13000.0, 2)
+    # PR-ADS-161E decision 1: the close-date ratio publishes under its explicit
+    # name; certified attribution ROAS is never published (not one acquisition
+    # cohort) and its metric names that reason.
+    assert mart["summary"]["period_revenue_per_ad_spend"] == round(9000.0 / 13000.0, 2)
+    assert mart["summary"]["roas"] is None
+    from analysis import closed_won_truth as cwt
+    assert mart["summary"]["metrics"]["roas"] == {
+        "value": None, "status": "unavailable", "reason": cwt.R_ROAS_NOT_CERTIFIED}
 
 
 # ── API endpoints (read-only, behind auth) ──────────────────────────────────

@@ -350,7 +350,9 @@ def test_reconcile_reports_incomplete_coverage(monkeypatch):
 
 def test_roas_page_still_blocks_on_incomplete_coverage():
     assert "spendCoverageIncomplete" in JS
-    assert "Spend coverage incomplete — ROAS unavailable" in JS
+    # PR-ADS-161E: the blocked ratio is period revenue / ad spend, never "ROAS".
+    assert "Spend coverage incomplete — Period Revenue / Ad Spend unavailable" in JS
+    assert "Spend coverage incomplete — ROAS unavailable" not in JS
 
 
 # ════════════ 8. local reads scoped by customer/account ════════════

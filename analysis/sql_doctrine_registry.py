@@ -332,7 +332,7 @@ CONSUMERS: list[dict] = [
        truth_status="counts None when unavailable or mismatch",
        headline=True, row=True, executive=True),
     _c("Revenue Decision Mart summary.sqls / row sqls",
-       "Shared top-line SQL count consumed by Dashboard Revenue, Campaigns, Countries, Deals, ROAS pages.",
+       "Shared top-line SQL count consumed by Dashboard Revenue, Campaigns, Countries, Deals, Campaign / Country Revenue & Spend pages.",
        endpoint="GET /api/revenue-performance (mart views)",
        service_function="services.revenue_decision_mart.build_revenue_decision_mart / _summary_block",
        repository_source="services.revenue_attribution_service._build_db_rows → db.revenue_repository.fetch_lead_quality",
@@ -344,7 +344,7 @@ CONSUMERS: list[dict] = [
                        "Cross-page parity asserts this count equal across five pages.",
        truth_status="withheld wholesale via lead_metrics_withheld (None, never 0)",
        headline=True, row=True, sorting=True, decision=True, executive=True, operational=True),
-    _c("Revenue attribution service (ROAS by Campaign / Country, verdicts)",
+    _c("Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)",
        "Row-level sqls and classify_verdict (watch/waste) on the legacy population; "
        "JSON fallback path imports analysis.core.QUALIFIED.",
        endpoint="GET /api/revenue-attribution, /api/reports/roas/*",
@@ -719,7 +719,7 @@ _GEO = "Geo Intelligence country summary (Countries page)"
 _OVW = "Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)"
 _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
-_RAS = "Revenue attribution service (ROAS by Campaign / Country, verdicts)"
+_RAS = "Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)"
 _SRC = "Revenue by Source (source_attribution_service)"
 _CHAN = "Dashboard Channels"
 _CAMP = "Dashboard Campaigns"

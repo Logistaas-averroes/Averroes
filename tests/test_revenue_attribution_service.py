@@ -30,8 +30,6 @@ import services.revenue_attribution_service as svc
 from services.revenue_attribution_service import (
     build_revenue_attribution,
     classify_verdict,
-    compute_cac,
-    compute_roas,
     confidence_from_tiers,
 )
 
@@ -217,7 +215,10 @@ def test_db_campaign_rows():
     assert gulf["sqls"] == 1
     assert gulf["closed_won_deals"] == 2
     assert gulf["won_revenue"] == 15000
-    assert gulf["roas"] == 15.0
+    # PR-ADS-161E decision 1: the close-date ratio publishes as period revenue /
+    # ad spend; certified attribution ROAS is never published (not one cohort).
+    assert gulf["period_revenue_per_ad_spend"] == 15.0
+    assert gulf["roas"] is None
     assert gulf["confidence"] == "high"   # gclid + campaign scope -> tier_1 dominant
     assert gulf["verdict"] == "winner"
 
@@ -370,16 +371,23 @@ def test_invalid_window_raises():
 # ── Pure helpers: null safety / confidence / verdict ─────────────────────────
 
 
-def test_compute_roas_null_safety():
-    assert compute_roas(1000, 0) is None
-    assert compute_roas(0, 0) is None
-    assert compute_roas(2000, 1000) == 2.0
-
-
-def test_compute_cac_null_safety():
-    assert compute_cac(1000, 0) is None
-    assert compute_cac(0, 5) is None
-    assert compute_cac(1000, 2) == 500.0
+def test_period_ratio_null_safety_and_no_roas_or_cac_helpers():
+    """PR-ADS-161E: the service's own ``compute_roas`` / ``compute_cac`` are
+    deleted (a helper named CAC invites a close-date ratio back under that
+    name). The same null-safety now holds on the only derivations."""
+    import services.revenue_attribution_service as ras
+    from analysis import closed_won_truth as cwt
+    assert not hasattr(ras, "compute_roas") and not hasattr(ras, "compute_cac")
+    rev = cwt.derive_period_revenue_per_ad_spend
+    per = cwt.derive_period_spend_per_customer_won
+    pub = lambda v: cwt.metric(v, cwt.PUBLISHED)  # noqa: E731
+    assert rev(pub(1000), 0)["value"] is None
+    assert rev(pub(0), 0)["value"] is None
+    assert rev(pub(2000), 1000)["value"] == 2.0
+    assert per(pub(0), 1000)["value"] is None
+    assert per(pub(5), 0)["value"] is None
+    assert per(pub(5), 0)["reason"] == cwt.R_NO_SPEND_IN_WINDOW
+    assert per(pub(2), 1000)["value"] == 500.0
 
 
 def test_no_infinity_or_nan_anywhere():

@@ -96,19 +96,19 @@ def _generate_confidence_message(overall: str) -> str:
     """Generate a human-readable confidence message."""
     messages = {
         "HIGH": (
-            "Most ROAS rows have exact GCLID attribution. "
+            "Most campaign revenue rows have exact GCLID attribution. "
             "Revenue data is high-confidence."
         ),
         "MEDIUM": (
-            "ROAS rows are mostly source-tag matched. "
+            "Campaign revenue rows are mostly source-tag matched. "
             "Revenue data is directional but not fully exact."
         ),
         "LOW": (
-            "Most ROAS rows are estimated. "
+            "Most campaign revenue rows are estimated. "
             "Use revenue pages directionally until GCLID matching is wired."
         ),
         "UNKNOWN": (
-            "No ROAS rows available to assess confidence."
+            "No campaign revenue rows available to assess confidence."
         ),
     }
     return messages.get(overall, messages["UNKNOWN"])

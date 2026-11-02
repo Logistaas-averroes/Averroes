@@ -1,8 +1,8 @@
 """
 Revenue Attribution Service (PR-ADS-107A)
 
-Shared, read-only data contract that powers both the ROAS by Campaign and the
-ROAS by Country pages from a single truth source. It resolves a business window
+Shared, read-only data contract that powers both the Campaign Revenue & Spend and the
+Country Revenue & Spend pages from a single truth source. It resolves a business window
 (see analysis/business_windows.py) and aggregates revenue-attribution metrics
 per campaign and per country.
 
@@ -31,10 +31,14 @@ Metrics per row:
   - spend         Google Ads API spend in the window
   - leads         attributed HubSpot paid-search contacts in the window
   - sqls          contacts with an existing SQL-qualified status (analysis.core)
-  - customers     distinct closed-won deals (company association not modelled)
-  - won_revenue   HubSpot closed-won amount
-  - roas          won_revenue / spend   (None if spend == 0)
-  - cac           spend / customers     (None if customers == 0)
+  - closed_won_deals   canonical won deals closed in the window
+  - customers     distinct proven HubSpot companies (never a deal count)
+  - won_revenue   HubSpot closed-won amount (a total, or None when withheld)
+  - period_revenue_per_ad_spend    revenue closed in the window / that
+                  window's spend — a non-cohort operational ratio
+  - period_spend_per_customer_won  that window's spend / customers
+  - roas / cac    always None: attribution ROAS and CAC need one acquisition
+                  cohort (PR-ADS-161E, docs/48 §4)
   - confidence    high | medium | low   (from attribution tier)
   - verdict       winner | watch | waste | learning
   - attribution_notes
@@ -55,6 +59,7 @@ import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from analysis import closed_won_truth as cwt  # PR-ADS-161E: explicit period-ratio names
 from analysis import revenue_scope
 from analysis.attribution_confidence import get_confidence_severity
 from analysis.attribution_matcher import attribute_deals
@@ -271,27 +276,6 @@ def _row_date(row: dict):
     return row.get("date") or row.get("source_date")
 
 
-def compute_roas(won_revenue: float, spend: float):
-    """ROAS = won_revenue / spend. None when spend is zero (never Infinity)."""
-    if not spend or spend <= 0:
-        return None
-    return round(won_revenue / spend, 2)
-
-
-def compute_cac(spend: float, customers: int):
-    """CAC = spend / customers.
-
-    None when customers is zero OR spend is zero/unavailable — a $0 CAC would
-    falsely imply free acquisition (e.g. countries where Google Ads spend is not
-    country-resolved). Never returns Infinity.
-    """
-    if not spend or spend <= 0:
-        return None
-    if not customers or customers <= 0:
-        return None
-    return round(spend / customers, 2)
-
-
 def confidence_from_tiers(tiers: list) -> str:
     """Reduce a list of attribution tiers to a confidence label.
 
@@ -317,7 +301,7 @@ def classify_verdict(
     sqls: int,
     customers: int,
     won_revenue: float,
-    roas,
+    period_ratio,
     *,
     min_spend: float = MIN_SPEND_FOR_VERDICT,
     healthy_roas: float = HEALTHY_ROAS,
@@ -327,8 +311,10 @@ def classify_verdict(
     Callers pass KNOWN outcomes only: a row whose deal count is withheld gets
     ``VERDICT_OUTCOME_WITHHELD`` instead (PR-ADS-161E).
 
-    winner   = revenue/customers exist and ROAS is healthy
-    watch    = SQLs (or some revenue) exist but customers/revenue/ROAS are weak
+    winner   = revenue/customers exist and period revenue / ad spend is
+               healthy (a non-cohort operational ratio, not ROAS —
+               PR-ADS-161E; the threshold keeps its config name)
+    watch    = SQLs (or some revenue) exist but customers/revenue/ratio are weak
     waste    = spend exists but no SQLs/customers/revenue
     learning = low spend or insufficient data
     """
@@ -340,7 +326,7 @@ def classify_verdict(
 
     if spend < min_spend and not has_revenue:
         return "learning"
-    if has_revenue and roas is not None and roas >= healthy_roas:
+    if has_revenue and period_ratio is not None and period_ratio >= healthy_roas:
         return "winner"
     if sqls > 0 or has_revenue:
         return "watch"
@@ -439,8 +425,10 @@ def _finalize_row(
         won_revenue = canon["won_revenue"]
         deals = canon["closed_won_deals"]
         customers = canon["customers"]
-        roas = canon["roas"]
-        cac = canon["cac"]
+        # PR-ADS-161E decision 1: the close-date ratio under its explicit
+        # name; certified ROAS / CAC are unavailable (no acquisition cohort).
+        period_ratio = canon[cwt.PERIOD_REVENUE_PER_AD_SPEND]
+        period_per_customer = canon[cwt.PERIOD_SPEND_PER_CUSTOMER_WON]
         metrics = canon["metrics"]
     else:
         # The local-JSON diagnostic path: its revenue is withheld wholesale by
@@ -448,10 +436,8 @@ def _finalize_row(
         won_revenue = round(bucket["won_revenue"], 2) if revenue_readable else None
         deals = bucket["closed_won_deals"] if revenue_readable else None
         customers = None
-        roas = (compute_roas(won_revenue, spend)
-                if (spend is not None and revenue_available and spend_trusted
-                    and won_revenue is not None) else None)
-        cac = None
+        period_ratio = None
+        period_per_customer = None
         metrics = None
 
     raw_confidence = confidence_from_tiers(bucket["tiers"])
@@ -464,7 +450,7 @@ def _finalize_row(
 
     has_revenue = (deals or 0) > 0 or (won_revenue or 0) > 0
     verdict = classify_verdict(spend, sqls_for_verdict, deals or 0,
-                               won_revenue or 0.0, roas)
+                               won_revenue or 0.0, period_ratio)
     if lead_metrics_withheld and not has_revenue:
         # Without trusted lead/SQL signal we cannot call a spend-only row "waste".
         verdict = "learning"
@@ -487,17 +473,18 @@ def _finalize_row(
         )
     if not revenue_available:
         notes.append(
-            "Revenue attribution not wired for this window — ROAS is unavailable, not zero."
+            "Revenue attribution not wired for this window — period revenue / ad spend is unavailable, not zero."
         )
     if spend_mapping_unavailable:
         notes.append(
             "Spend mapping unavailable — this campaign has no matching canonical "
-            "Google Ads spend campaign, so spend and ROAS are unavailable (never $0)."
+            "Google Ads spend campaign, so spend and period revenue / ad spend are unavailable (never $0)."
         )
     elif not spend_trusted:
         notes.append(
             "Spend coverage incomplete — canonical Google Ads spend is not fully "
-            "verified for this window, so ROAS is unavailable (not from a partial "
+            "verified for this window, so period revenue / ad spend is unavailable "
+            "(not from a partial "
             "or geo denominator)."
         )
     if spend_state == "verified_zero_spend":
@@ -521,8 +508,11 @@ def _finalize_row(
         "closed_won_deals": deals,
         "customers": customers,
         "won_revenue": won_revenue,
-        "roas": roas,
-        "cac": cac,
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: period_ratio,
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: period_per_customer,
+        # Certified ROAS / CAC: never published (no acquisition-cohort join).
+        "roas": None,
+        "cac": None,
         "metrics": metrics,
         "confidence": confidence,
         "verdict": verdict,
@@ -597,6 +587,8 @@ def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd) -> dict
         # No revenue basis for unattributed spend — ROAS is null (never a fake 0.0 an
         # API consumer could read as a real computed ROAS), matching the mart's
         # "no revenue → ROAS unavailable" doctrine. The UI renders it as an em-dash.
+        "period_revenue_per_ad_spend": None,
+        "period_spend_per_customer_won": None,
         "roas": None,
         "cac": None,
         "confidence": "n/a",
@@ -759,7 +751,6 @@ def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gcli
     )
     closed_won_deals = len(deals)
     won_revenue = round(sum(_deal_revenue(d) for d in deals), 2)
-    roas = compute_roas(won_revenue, spend)
     tiers = [d.get("attribution_confidence") for d in deals if d.get("attribution_confidence")]
     raw_confidence = confidence_from_tiers(tiers)
     confidence = "medium" if (legacy_gclid and raw_confidence == "high") else raw_confidence
@@ -771,7 +762,9 @@ def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gcli
         "closed_won_deals": closed_won_deals,
         "customers": None,
         "won_revenue": won_revenue,
-        "roas": roas,
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: None,
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: None,
+        "roas": None,
         "cac": None,
         "confidence": confidence,
     }
@@ -874,7 +867,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
     for key, bucket in buckets.items():
         # PR-ADS-153F: a COUNTRY bucket is never dropped. Blank, invalid and
         # unresolved geography used to be discarded here, so revenue that exists
-        # simply vanished from ROAS by Country while Dashboard Countries kept it
+        # simply vanished from Country Revenue & Spend while Dashboard Countries kept it
         # as a residual — the two pages then reported different totals for the
         # same window. Country keys are now always non-empty (a real `code:XX` or
         # the explicit residual), so the guard below only ever drops a blank
@@ -997,6 +990,8 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
             "customers": None, "won_revenue": None,
             "revenue_unavailable_deals": (len(revenue_rows) - len(known)
                                           if revenue_readable else None),
+            cwt.PERIOD_REVENUE_PER_AD_SPEND: None,
+            cwt.PERIOD_SPEND_PER_CUSTOMER_WON: None,
             "roas": None, "cac": None, "metrics": None,
             "confidence": confidence_from_tiers(tiers),
         }
@@ -1017,8 +1012,10 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
         "won_revenue": canon["won_revenue"],
         "revenue_unavailable_deals": (len(revenue_rows) - len(known)
                                       if revenue_readable else None),
-        "roas": canon["roas"],
-        "cac": canon["cac"],
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: canon[cwt.PERIOD_REVENUE_PER_AD_SPEND],
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: canon[cwt.PERIOD_SPEND_PER_CUSTOMER_WON],
+        "roas": None,
+        "cac": None,
         "metrics": canon["metrics"],
         "confidence": confidence_from_tiers(tiers),
     }
@@ -1365,7 +1362,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         revenue_rows = _apply_identity_map(revenue_rows, resolution_map, applied_identity_mappings)
 
     # PR-ADS-124: the COUNTRY spend SOURCE. When the canonical Google Ads geo
-    # table has rows, the ROAS by Country table is built from the SAME canonical
+    # table has rows, the Country Revenue & Spend table is built from the SAME canonical
     # source as the reconciliation total — never the legacy `geo` table. Each row
     # carries the country resolved from its criterion id (country_name / code) and
     # per-day-FX USD. A criterion that did not resolve to a country is dropped from
@@ -1616,8 +1613,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         )
     if not revenue_available:
         warnings.append(
-            "Revenue attribution is not connected for this window — ROAS is "
-            "unavailable (null), not zero."
+            "Revenue attribution is not connected for this window — period revenue "
+            "/ ad spend is unavailable (null), not zero."
         )
     if campaign_spend_status == "db_empty":
         warnings.append("No Google Ads spend rows in durable table 'geo' for this window.")
@@ -1629,7 +1626,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         if campaign_spend_coverage_reason == "failed_chunks":
             warnings.append(
                 "Campaign spend coverage incomplete: one or more Google Ads spend "
-                "backfill chunks FAILED for this window — ROAS is unavailable until "
+                "backfill chunks FAILED for this window — period revenue / ad spend is "
+                "unavailable until "
                 "they are re-run."
             )
         elif campaign_spend_coverage_status == "unknown":
@@ -1637,14 +1635,16 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             # established, so ROAS stays unavailable (never assumed complete).
             warnings.append(
                 "Campaign spend coverage could not be verified for this window: "
-                "there is no durable Google Ads spend coverage ledger — ROAS is "
+                "there is no durable Google Ads spend coverage ledger — period revenue "
+                "/ ad spend is "
                 "unavailable until the Google Ads spend backfill runs."
             )
         else:
             warnings.append(
                 "Campaign spend coverage incomplete: durable Google Ads spend for "
                 f"{resolved['start_date']} → {resolved['end_date']} has "
-                f"unverified dates ({campaign_spend_coverage_reason}) — ROAS is "
+                f"unverified dates ({campaign_spend_coverage_reason}) — period revenue "
+                "/ ad spend is "
                 "unavailable until the missing period is backfilled or verified as "
                 "zero spend."
             )
@@ -2009,7 +2009,8 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
 # Metrics that depend on the closed-won deal population, and are therefore
 # unavailable whenever revenue does not come from the canonical ledger.
 _REVENUE_DERIVED_KEYS = ("closed_won_deals", "customers", "won_revenue", "roas",
-                         "cac", "confidence")
+                         "cac", "period_revenue_per_ad_spend",
+                         "period_spend_per_customer_won", "confidence")
 
 
 def _withhold_json_revenue(contract: dict) -> dict:
@@ -2092,7 +2093,7 @@ def build_campaign_deal_details(window: str, campaign: str,
                                 now: datetime | None = None) -> dict:
     """Closed-won client/deal detail rows behind ONE canonical campaign (PR-ADS-130).
 
-    Read-only drilldown for the ROAS by Campaign drawer. Fetches closed-won deals
+    Read-only drilldown for the Campaign Revenue & Spend drawer. Fetches closed-won deals
     from the durable gclid_attribution table (windowed by deal_close_date), applies
     the SAME canonical identity map the ROAS rows use so a deal's raw campaign label
     groups onto its canonical campaign, then returns the deals for the requested
@@ -2194,7 +2195,7 @@ def build_country_deal_details(window: str, country: str,
                                now: datetime | None = None) -> dict:
     """Closed-won client/deal detail rows behind ONE country (PR-ADS-132).
 
-    Read-only validation drilldown for the ROAS by Country drawer. Fetches
+    Read-only validation drilldown for the Country Revenue & Spend drawer. Fetches
     closed-won deals from the durable gclid_attribution table (windowed by
     deal_close_date) for EXACTLY the requested country — matched by ISO code when
     available, else by exact normalized name (never fuzzy / `contains`, so
@@ -2210,7 +2211,7 @@ def build_country_deal_details(window: str, country: str,
     code = (country_code or "").strip().upper() or None
 
     # PR-ADS-153E-B: canonical ledger at `google_ads_source` scope — the same
-    # scope the ROAS by Country row aggregates. Country matching stays EXACT
+    # scope the Country Revenue & Spend row aggregates. Country matching stays EXACT
     # (ISO code when available, else exact normalized name); no fuzzy matching
     # is introduced, so "United Arab Emirates" still cannot leak into
     # "United Kingdom".

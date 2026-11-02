@@ -363,7 +363,7 @@ def _canonical(rows, *, fx_complete=True, total_spend=None, total_spend_usd=None
 _COV = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-23", "status": "verified"}]
 
 
-def test_saved_mapping_applies_to_roas(monkeypatch):
+def test_saved_mapping_applies_to_period_ratio(monkeypatch):
     build = _load_revattr()
     rows = [{"campaign_id": "9", "campaign_name": "Mexico, Chile, Colombia", "cost_micros": 5_000_000,
              "spend": 5.0, "spend_usd": 6.35, "fx_complete": True}]
@@ -380,7 +380,10 @@ def test_saved_mapping_applies_to_roas(monkeypatch):
     assert mc["spend_state"] == "mapped_manual"
     assert mc["won_revenue"] == 1270.0
     assert mc["spend"] == 6.35
-    assert mc["roas"] == round(1270.0 / 6.35, 2)
+    # PR-ADS-161E decision 1: the close-date ratio publishes as period revenue /
+    # ad spend; certified attribution ROAS is never published (not one cohort).
+    assert mc["period_revenue_per_ad_spend"] == round(1270.0 / 6.35, 2)
+    assert mc["roas"] is None
     # The original external label is exposed as an alias of the canonical campaign.
     assert mc["aliases"] == ["mexico,chile"]
     assert not any(c["campaign_name"] == "mexico,chile" for c in out["campaigns"])
@@ -575,7 +578,12 @@ def test_workbench_controls_present_in_ui():
     assert "Mark as Not Google Ads" in JS
     assert '"/api/campaign-mapping"' in JS
     assert '"/api/campaign-mapping/exclude"' in JS
-    assert "Excluded from Google Ads ROAS" in JS
+    # PR-ADS-161E: the exclusion names what it removes the label from — the
+    # Google Ads campaign revenue and spend — never "ROAS".
+    assert "Not Google Ads — excluded from Google Ads campaign revenue and spend." in JS
+    assert "excluded from Google Ads campaign revenue and spend.` }" in JS
+    assert "Excluded from Google Ads ROAS" not in JS
+    assert "excluded from Google Ads ROAS" not in JS
     # Unmatched labels still never imply $0.
     assert "Spend mapping unavailable" in JS
 

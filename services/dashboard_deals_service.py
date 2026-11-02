@@ -30,7 +30,8 @@ attribution model. It composes canonical read-only contracts:
 Truth rules (unchanged, never loosened):
   - HubSpot closed-won is revenue truth (USD). Open pipeline is NOT revenue; a
     closed-lost deal is NOT negative revenue; an opportunity is NOT a customer.
-  - No ROAS on this tab (spend / ROAS live on the spend pages).
+  - No spend ratio on this tab (spend and the period ratios live on the spend
+    pages; attribution ROAS / CAC are unavailable everywhere).
   - No fake $0 / 0.00x / 0%. A missing amount stays null; a rate whose denominator
     is null / zero / unsafe is null (Unavailable); a missing prior period yields
     "No comparison".
@@ -217,10 +218,12 @@ def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
         "sql_to_customer_rate_status": cwt.UNAVAILABLE,
         "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
         "sqls_not_closed_won": sqls_not_closed_won,
-        # This tab never computes or exposes ROAS / CAC (they belong to the
-        # spend pages), so the mart's metric block is republished without them.
+        # This tab never computes or exposes a spend ratio (period ratios
+        # belong to the spend pages; ROAS / CAC are unavailable everywhere), so
+        # the mart's metric block is republished without them.
         "metrics": {**{k: v for k, v in (summary.get("metrics") or {}).items()
-                       if k not in ("roas", "cac")},
+                       if k not in ("roas", "cac", cwt.PERIOD_REVENUE_PER_AD_SPEND,
+                                    cwt.PERIOD_SPEND_PER_CUSTOMER_WON)},
                     "sql_to_customer_rate": cwt.incompatible_rate(
                         cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE)},
     }
@@ -291,8 +294,8 @@ def _build_aging_buckets() -> list:
 # ── Source → pipeline (real closed-won; open pipeline Unavailable) ────────────
 
 def _row_metrics(metrics, revenue_connected: bool):
-    """A row's canonical deal/customer/revenue metrics, without ROAS or CAC —
-    this tab never publishes either. None when the population is unavailable."""
+    """A row's canonical deal/customer/revenue metrics, without any spend
+    ratio — this tab never publishes one. None when the population is unavailable."""
     if not revenue_connected or not metrics:
         return None
     return {k: metrics[k] for k in ("closed_won_deals", "customers", "revenue_usd")
