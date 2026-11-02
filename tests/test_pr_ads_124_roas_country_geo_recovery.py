@@ -361,7 +361,6 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
         monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
                             lambda s, e, *_a, **_k: {"available": True, "chunks": cov})
@@ -567,8 +566,15 @@ def test_blocked_country_card_has_recovery_cta():
     # Run actions are admin-gated; non-admin gets guidance.
     assert '_currentUser.role === "admin"' in fn
     assert "Ask an admin to run Google Ads Geo Sync from Revenue Health." in fn
-    # The unreconciled blocked card actually renders the CTA.
-    blocked = _fn("function renderCountrySpendUnreconciledState", span=3800)
+    # The unreconciled blocked card actually renders the CTA. PR-ADS-161E: the
+    # card's copy grew with the period-ratio rename ("Country Period Revenue /
+    # Ad Spend is blocked"), so scan the whole function body — up to the next
+    # top-level function — rather than a fixed character span.
+    start = JS.find("function renderCountrySpendUnreconciledState")
+    assert start != -1
+    end = JS.find("\nfunction ", start + 1)
+    assert end != -1
+    blocked = JS[start:end]
     assert "roasCountryCtaButtons()" in blocked
 
 

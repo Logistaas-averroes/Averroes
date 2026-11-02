@@ -792,33 +792,10 @@ def fetch_missing_event_date_leads() -> dict:
         return {"available": False, "rows": []}
 
 
-def revenue_integration_connected() -> bool:
-    """True when ANY closed-won attributed deal exists (integration is wired),
-    regardless of the selected business window.
-
-    Lets the contract distinguish a connected integration whose current window is
-    safely empty from an integration that was never wired. Read-only.
-    """
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return False
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM gclid_attribution
-                        WHERE deal_id IS NOT NULL
-                          AND deal_close_date IS NOT NULL
-                          AND (deal_stage = %s OR deal_stage_label ILIKE %s)
-                    )
-                    """,
-                    (WON_DEAL_STAGE_ID, _WON_LABEL_LIKE),
-                )
-                return bool(cur.fetchone()[0])
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("revenue_integration_connected failed: %s", exc)
-        return False
+# PR-ADS-161E: `revenue_integration_connected()` — an existence check over the
+# legacy `gclid_attribution` table — was removed. It gated canonical customers
+# and closed-won revenue on a table those figures no longer come from, and no
+# GCLID feature used it. Publication now follows the canonical verdict only.
 
 
 # ── Revenue by acquisition source (PR-ADS-117) ───────────────────────────────

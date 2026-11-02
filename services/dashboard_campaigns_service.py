@@ -10,9 +10,9 @@ Composition doctrine — this service computes NO new business math and adds NO
 new taxonomy. It composes canonical read-only contracts:
 
   - build_revenue_decision_mart(view="campaign")  -> the canonical per-campaign
-      rows (spend / SQLs / customers / won revenue / ROAS / mapping state) plus
+      rows (spend / SQLs / customers / won revenue / period ratio / mapping state) plus
       the shared spend-truth (native GBP + FX-gated USD) and readiness. This is
-      the ROAS-by-Campaign truth, re-presented — never re-computed.
+      the campaign revenue & spend truth, re-presented — never re-computed.
   - fetch_canonical_campaign_spend                -> per-campaign native (GBP)
       AND USD spend + FX completeness (the only place with a per-campaign
       native/USD split).
@@ -27,7 +27,9 @@ new taxonomy. It composes canonical read-only contracts:
 Truth rules (unchanged, never loosened):
   - Google Ads API = spend truth (native GBP). HubSpot closed-won = revenue truth
     (USD). Native GBP is never labelled USD. Reporting revenue is USD.
-  - ROAS is campaign-level only, only when spend + FX + revenue are safe, and is
+  - The spend ratio is ``period_revenue_per_ad_spend`` (PR-ADS-161E): revenue
+    CLOSED in the window ÷ the same window's spend. A non-cohort operational
+    ratio, never attribution ROAS; only when spend + FX + revenue are safe, and
     never derived from the Google Ads conversion value.
   - No fake $0 / 0.00x / 0%. A missing amount stays null; a total that needs
     completeness becomes Unavailable when any part is unknown; a missing prior
@@ -36,7 +38,7 @@ Truth rules (unchanged, never loosened):
     Review", never dropped, never forced onto a campaign.
   - Keywords / search terms are READ-ONLY evidence: no negative-keyword writes,
     no bid/budget actions. Keyword themes carry NO outcome attribution and NO
-    ROAS (the durable data has none). Search-term panels present the existing
+    spend ratio (the durable data has none). Search-term panels present the existing
     waste-analysis classification only.
   - Read-only. NO writes to Google Ads, HubSpot, budgets, bids, campaigns,
     keywords, negatives, or offline conversions.
@@ -44,6 +46,7 @@ Truth rules (unchanged, never loosened):
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import datetime, timezone
 
@@ -78,6 +81,10 @@ STATUS_SPEND_NO_PROOF = "Spend without SQL / customer proof"
 STATUS_ATTRIBUTION_MISSING = "Revenue attribution missing"
 STATUS_FX_UNAVAILABLE = "FX unavailable"
 STATUS_MAPPING_REVIEW = "Mapping needs review"
+# PR-ADS-161E: the campaign's closed-won deal count is withheld (a Google Ads
+# won deal on no campaign, an undated or conflicting won deal) or unreadable —
+# it is UNKNOWN, so the campaign is not judged on it.
+STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
 
 UNATTRIBUTED_LABEL = "Unattributed / Needs Review"
 
@@ -89,8 +96,9 @@ def _norm(label) -> str:
     return " ".join(str(label).replace("_", " ").strip().lower().split())
 
 
-def _roas(won, usd_spend):
-    """Campaign ROAS = won revenue / USD spend, only when both are safe.
+def _period_ratio(won, usd_spend):
+    """Campaign period revenue / ad spend = revenue closed in the window / the
+    same window's USD spend, only when both are safe. Not attribution ROAS.
 
     None when USD spend is unavailable/zero, revenue is unknown, OR revenue is a
     non-positive (zero) return — a spend-with-no-revenue campaign is conveyed by
@@ -189,18 +197,21 @@ def _group_deals_by_campaign(deals_rows: list, label_to_canonical: dict) -> tupl
     return deals_by_key, unknown_amount_keys
 
 
-def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
+def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, deals,
                      won_revenue, spend_state, amount_unknown) -> str:
     """Business status for a campaign row (never an engineering term)."""
+    if deals is None:
+        # Unknown is not zero: never "spend without proof" over a withheld count.
+        return STATUS_OUTCOME_WITHHELD
     has_spend = native_spend is not None and native_spend > 0
     unmapped = spend_state in (None, "unmapped") and not has_spend
-    if (customers or 0) > 0 and (won_revenue or 0) > 0:
+    if (deals or 0) > 0 and (won_revenue or 0) > 0:
         return STATUS_REVENUE_PROVEN
-    if amount_unknown and (customers or 0) > 0:
+    if amount_unknown and (deals or 0) > 0:
         # Customers exist but their revenue can't be totalled → attribution review.
         return STATUS_ATTRIBUTION_MISSING
-    if (sqls or 0) > 0 or (customers or 0) > 0:
-        # Demand (SQLs) and/or customers, but no proven closed-won revenue yet.
+    if (sqls or 0) > 0 or (deals or 0) > 0:
+        # Demand (SQLs) and/or won deals, but no proven closed-won revenue yet.
         return STATUS_SQL_PRODUCER
     if has_spend:
         # Spend exists but no SQL/customer proof. If the USD spend is missing only
@@ -220,7 +231,8 @@ _MAPPING_STATUS = {"matched": "mapped", "unavailable": "mapping_unavailable"}
 
 
 def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
-                         unknown_amount_keys: set, native_currency: str = "GBP") -> list:
+                         unknown_amount_keys: set, native_currency: str = "GBP",
+                         revenue_total_published: bool = True) -> list:
     """Merge mart campaign rows (outcomes + mapping) with the per-campaign native/
     USD spend split and the closed-won proof deals. Preserves revenue that maps to
     no campaign under an Unattributed / Needs Review row."""
@@ -239,11 +251,11 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
         # Won revenue: the mart's canonical per-campaign total, blanked to None if
         # any of this campaign's deals has an unknown amount (never a lowered $0).
         won = None if amount_unknown else _round2(m.get("won_revenue"))
-        row_roas = _roas(won, usd_spend)
+        row_ratio = _period_ratio(won, usd_spend)
 
         status = _campaign_status(
             native_spend=native_spend, usd_spend=usd_spend, fx_complete=fx_complete,
-            sqls=m.get("sqls"), customers=m.get("customers"), won_revenue=won,
+            sqls=m.get("sqls"), deals=m.get("closed_won_deals"), won_revenue=won,
             spend_state=m.get("spend_state"), amount_unknown=amount_unknown)
 
         rows.append({
@@ -254,24 +266,33 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "spend_usd": usd_spend,
             "fx_complete": fx_complete,
             "sqls": m.get("sqls"),
+            # PR-ADS-161E: closed-won DEALS, and this campaign's customers —
+            # distinct proven HubSpot companies (not additive across rows).
+            "closed_won_deals": m.get("closed_won_deals"),
             "customers": m.get("customers"),
+            "metrics": m.get("metrics"),
             "won_revenue_usd": won,
-            "roas": row_roas,
-            "roas_available": row_roas is not None,
+            "period_revenue_per_ad_spend": row_ratio,
+            "period_ratio_available": row_ratio is not None,
             "status": status,
             "spend_state": m.get("spend_state"),
             "attribution_status": _MAPPING_STATUS.get(m.get("spend_mapping"), "mapping_unavailable"),
-            "deals": deals_by_key.get(cid) or deals_by_key.get(key) or [],
+            # Withheld means absent: no proof list beside a withheld count.
+            "deals": (None if m.get("closed_won_deals") is None
+                      else deals_by_key.get(cid) or deals_by_key.get(key) or []),
             "target_page": "roas-campaigns",
         })
 
     # Preserve closed-won revenue that maps to no Google Ads campaign.
     unattributed_deals = deals_by_key.get(UNATTRIBUTED_LABEL) or []
     if unattributed_deals:
-        amount_unknown = UNATTRIBUTED_LABEL in unknown_amount_keys
-        customers = len(unattributed_deals)
+        # PR-ADS-161E: a subset of the window — its total is published only
+        # when the canonical verdict publishes the window's revenue.
+        amount_unknown = (UNATTRIBUTED_LABEL in unknown_amount_keys
+                          or not revenue_total_published)
+        deals = len(unattributed_deals)
         won = None if amount_unknown else _round2(
-            sum((d["amount_usd"] or 0.0) for d in unattributed_deals))
+            sum(d["amount_usd"] for d in unattributed_deals))
         rows.append({
             "campaign_id": None,
             "campaign_name": UNATTRIBUTED_LABEL,
@@ -280,10 +301,11 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "spend_usd": None,
             "fx_complete": False,
             "sqls": None,
-            "customers": customers,
+            "closed_won_deals": deals,
+            "customers": None,
             "won_revenue_usd": won,
-            "roas": None,
-            "roas_available": False,
+            "period_revenue_per_ad_spend": None,
+            "period_ratio_available": False,
             "status": STATUS_ATTRIBUTION_MISSING,
             "spend_state": None,
             "attribution_status": "unattributed",
@@ -296,18 +318,20 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
     rows.sort(key=lambda r: (
         r["campaign_name"] != UNATTRIBUTED_LABEL,
         r.get("won_revenue_usd") or 0.0,
-        r.get("customers") or 0,
+        r.get("closed_won_deals") or 0,
         r.get("spend_native") or 0.0,
     ), reverse=True)
     return rows
 
 
-def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
+def _build_kpis(campaign_rows: list, spend_truth: dict,
+                summary: dict | None = None) -> dict:
     """Hero KPIs derived from the campaign rows (so they reconcile with the
     leaderboard / bubble map) plus the canonical spend truth."""
     # KPIs are Google-Ads-scoped (exclude the Unattributed / Needs Review callout),
-    # so "Won Revenue" and ROAS reconcile with each other and with the canonical
-    # mart — the unattributed row is surfaced separately, never in the ROAS numerator.
+    # so "Won Revenue" and the period ratio reconcile with each other and with the
+    # canonical mart — the unattributed row is surfaced separately, never in the
+    # ratio's numerator.
     google_rows = [r for r in campaign_rows if r["campaign_name"] != UNATTRIBUTED_LABEL]
     campaigns_with_spend = sum(1 for r in google_rows
                                if (r.get("spend_native") or 0) > 0)
@@ -316,11 +340,12 @@ def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
     sqls_incomplete = any(r.get("sqls") is None for r in google_rows)
     total_sqls = None if sqls_incomplete else sum((r.get("sqls") or 0) for r in google_rows)
 
-    # Customers: Unavailable if any row withholds them (a disconnected revenue
-    # integration blanks them) — never a fabricated 0.
-    customers_incomplete = any(r.get("customers") is None for r in google_rows)
-    total_customers = (None if customers_incomplete
-                       else sum((r.get("customers") or 0) for r in google_rows))
+    # Won deals: Unavailable if any row withholds them — never a fabricated 0.
+    # Deals add up across campaigns; customers (companies) do not, so the
+    # page's customer figure is the canonical campaign-attributable metric.
+    deals_incomplete = any(r.get("closed_won_deals") is None for r in google_rows)
+    total_deals = (None if deals_incomplete
+                   else sum((r.get("closed_won_deals") or 0) for r in google_rows))
 
     # Revenue: Unavailable if ANY Google campaign's revenue is unknown (never a
     # partial sum implying completeness).
@@ -335,9 +360,18 @@ def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
         "verified_spend_native": {"amount": native, "currency": spend_truth.get("native_currency") or "GBP"},
         "verified_spend_usd": usd,
         "sqls": total_sqls,
-        "customers": total_customers,
+        "closed_won_deals": total_deals,
+        "customers": (summary or {}).get("attributed_customers"),
+        "customers_metric": (((summary or {}).get("metrics") or {})
+                             .get("attributed_customers")),
+        # PR-ADS-161E: the canonical verdicts the KPI cards render when a
+        # campaign-attributable total is not published.
+        "revenue_metric": (((summary or {}).get("metrics") or {})
+                           .get("attributed_revenue_usd")),
+        "deals_metric": (((summary or {}).get("metrics") or {})
+                         .get("attributed_closed_won_deals")),
         "won_revenue_usd": total_won,
-        "roas": _roas(total_won, usd),
+        "period_revenue_per_ad_spend": _period_ratio(total_won, usd),
     }
 
 
@@ -383,7 +417,7 @@ def _classify_keyword_theme(keyword) -> str:
 
 def _build_keyword_themes(snapshot: dict) -> dict:
     """Recent keyword spend/clicks grouped by theme. Explicitly NOT window-scoped
-    and carrying NO outcome attribution — SQLs / customers / revenue / ROAS are
+    and carrying NO outcome attribution — SQLs / customers / revenue / spend ratios are
     never fabricated for a keyword theme."""
     if not snapshot.get("available") or not (snapshot.get("rows") or []):
         return {"status": "unavailable", "run_date": snapshot.get("run_date"),
@@ -412,7 +446,7 @@ def _build_keyword_themes(snapshot: dict) -> dict:
             "sqls": None,
             "customers": None,
             "won_revenue_usd": None,
-            "roas": None,
+            "period_revenue_per_ad_spend": None,
             "status": "Recent spend / clicks — no outcome attribution",
         })
     themes.sort(key=lambda t: t.get("spend_usd") or 0.0, reverse=True)
@@ -466,6 +500,29 @@ def _build_search_term_signals(result: dict) -> dict:
     }
 
 
+
+# PR-ADS-161E: the reason a revenue total is unknown is the canonical one — an
+# unpriced deal, a deal on no campaign, an undated deal — never assumed.
+_REVENUE_REASON_TEXT = {
+    "closed_won_deals_missing_proven_usd_amount": "a closed-won deal has no proven USD amount",
+    "closed_won_deals_missing_amount": "a closed-won deal has no proven USD amount",
+    "google_ads_deals_not_placed_on_a_campaign": "a Google Ads won deal is on no campaign",
+    "campaign_identity_unavailable": "campaign identity is unavailable",
+    "won_deals_without_close_date": "a won deal has no close date",
+    "won_flag_and_stage_disagree": "HubSpot's won flag and won stage disagree",
+    "closed_won_deal_count_withheld": "the closed-won deal count is withheld",
+}
+
+
+def _revenue_unknown_text(kpis: dict, rows=()) -> str:
+    reasons = [((kpis.get("revenue_metric") or {}).get("reason"))]
+    reasons += [(((r.get("metrics") or {}).get("revenue_usd") or {}).get("reason"))
+                for r in rows or []]
+    reason = next((r for r in reasons if r), None)
+    if not reason:
+        return "closed-won revenue is withheld"
+    return _REVENUE_REASON_TEXT.get(reason, f"closed-won revenue is withheld ({reason})")
+
 def _fmt_usd_short(value) -> str:
     if value is None:
         return "Unavailable"
@@ -484,50 +541,78 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
                           search_signals: dict, spend_truth: dict) -> list:
     cards = []
     google_rows = [r for r in campaign_rows if r["campaign_name"] != UNATTRIBUTED_LABEL]
+    # PR-ADS-161E: rows whose deal count is withheld support no claim either way.
+    withheld = [r for r in google_rows if r.get("closed_won_deals") is None]
+    withheld_reason = next((((r.get("metrics") or {}).get("closed_won_deals") or {})
+                            .get("reason") for r in withheld
+                            if ((r.get("metrics") or {}).get("closed_won_deals") or {})
+                            .get("reason")), None)
 
     # Scale — the top revenue-proven campaign.
     proven = [r for r in google_rows if r["status"] == STATUS_REVENUE_PROVEN]
-    if proven:
+    if withheld and not proven:
+        cards.append({
+            "type": "scale", "title": "Scale",
+            "headline": "Campaign closed-won outcomes are withheld",
+            "body": (f"{len(withheld)} campaign{'s' if len(withheld) != 1 else ''}' "
+                     "closed-won deals are withheld in this window"
+                     + (f" ({withheld_reason})" if withheld_reason else "")
+                     + ", so no campaign is judged on revenue here."),
+            "reason": withheld_reason,
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+        })
+    elif proven:
         top = max(proven, key=lambda r: (r.get("won_revenue_usd") or 0.0,
-                                         r.get("customers") or 0))
+                                         r.get("closed_won_deals") or 0))
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": f"{top['campaign_name']} has revenue proof",
-            "body": (f"This campaign produced {top['customers']} customer"
-                     f"{'s' if top['customers'] != 1 else ''} and "
+            "body": (f"This campaign won {top['closed_won_deals']} deal"
+                     f"{'s' if top['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(top['won_revenue_usd'])} closed-won revenue with "
                      "verified Google Ads spend."),
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "No campaign has revenue proof yet",
             "body": "No Google Ads campaign has both verified spend and closed-won "
-                    "customers in this window.",
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+                    "deals in this window.",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
 
     # Watch — spend without customer proof.
     no_proof = [r for r in google_rows if r["status"] in
                 (STATUS_SPEND_NO_PROOF, STATUS_SQL_PRODUCER)
-                and (r.get("spend_native") or 0) > 0 and (r.get("customers") or 0) == 0]
+                and (r.get("spend_native") or 0) > 0 and r.get("closed_won_deals") == 0]
     if no_proof:
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": "Campaign spend without customer proof",
+            "headline": "Campaign spend without won-deal proof",
             "body": (f"{len(no_proof)} campaign{'s' if len(no_proof) != 1 else ''} spent "
-                     "verified Google Ads budget but produced no customers in this "
+                     "verified Google Ads budget but won no deals in this "
                      "window. Review SQL quality before scaling."),
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+        })
+    elif withheld:
+        cards.append({
+            "type": "watch", "title": "Watch",
+            "headline": "Unproven spend cannot be judged",
+            "body": ("Closed-won deals are withheld for "
+                     f"{len(withheld)} campaign{'s' if len(withheld) != 1 else ''}"
+                     + (f" ({withheld_reason})" if withheld_reason else "")
+                     + ", so spend without proof is not claimed."),
+            "reason": withheld_reason,
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
     else:
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No unproven spend",
-            "body": "Every spending campaign produced at least one customer, or has "
+            "body": "Every spending campaign won at least one deal, or has "
                     "no verified spend to judge.",
-            "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
         })
 
     # Investigate — waste search terms or unattributed revenue.
@@ -552,6 +637,16 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
                      "campaign attribution."),
             "target_page": "revenue-health", "target_label": "Open Revenue Health",
         })
+    elif withheld:
+        cards.append({
+            "type": "investigate", "title": "Investigate",
+            "headline": "Campaign attribution is withheld",
+            "body": ("Per-campaign closed-won outcomes are withheld this window"
+                     + (f" ({withheld_reason})" if withheld_reason else "")
+                     + ", so whether all revenue maps to a campaign is not claimed."),
+            "reason": withheld_reason,
+            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+        })
     else:
         cards.append({
             "type": "investigate", "title": "Investigate",
@@ -561,27 +656,28 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
             "target_page": "search-terms", "target_label": "Open Search Terms",
         })
 
-    # Unavailable — explain WHY ROAS / USD spend is withheld, ACCURATELY (ROAS is
+    # Unavailable — explain WHY the ratio / USD spend is withheld, ACCURATELY (it is
     # None either because FX/USD is incomplete, revenue is incomplete, or there is
     # simply no closed-won revenue yet — these read very differently).
     fx_ok = spend_truth.get("fx_status") == "verified"
     usd_present = kpis.get("verified_spend_usd") is not None
     revenue_known = kpis.get("won_revenue_usd") is not None
     if not fx_ok or not usd_present:
-        headline = "USD spend & ROAS unavailable"
-        body = ("USD spend and ROAS are withheld because FX coverage is incomplete — "
-                "native GBP spend is still shown, never a fabricated USD or ROAS.")
+        headline = "USD spend & period revenue / ad spend unavailable"
+        body = ("USD spend and period revenue / ad spend are withheld because FX "
+                "coverage is incomplete — native GBP spend is still shown, never a "
+                "fabricated USD figure or ratio.")
     elif not revenue_known:
-        headline = "ROAS unavailable"
-        body = ("ROAS is withheld because some closed-won revenue is incomplete (an "
-                "unknown deal amount) — never a lowered $0.")
-    elif kpis.get("roas") is None:
-        headline = "ROAS not yet meaningful"
+        headline = "Period revenue / ad spend unavailable"
+        body = (f"Period revenue / ad spend is withheld because {_revenue_unknown_text(kpis, campaign_rows)}"
+                " — never a lowered $0.")
+    elif kpis.get("period_revenue_per_ad_spend") is None:
+        headline = "Period revenue / ad spend not yet meaningful"
         body = ("There is no closed-won revenue yet to measure against this window's "
-                "verified spend, so ROAS is not shown — never a fabricated 0.00x.")
+                "verified spend, so no ratio is shown — never a fabricated 0.00x.")
     else:
         headline = "Keyword outcome attribution unavailable"
-        body = ("Spend, revenue and ROAS are verified for this window. Keyword-level "
+        body = ("Spend, revenue and period revenue / ad spend are verified for this window. Keyword-level "
                 "SQLs / customers / revenue have no durable attribution — keyword and "
                 "search-term panels are read-only evidence.")
     cards.append({
@@ -616,7 +712,7 @@ def _build_truth_status(spend_truth: dict, readiness: dict, campaign_rows: list,
     return {
         "spend": google_ads_spend,
         "fx": "ready" if fx == "verified" else ("partial" if fx == "incomplete" else "unavailable"),
-        "revenue": "ready" if readiness.get("revenue_integration_connected") else "blocked",
+        "revenue": "ready" if readiness.get("canonical_revenue_available") else "blocked",
         "campaign_attribution": "partial" if attribution_partial else "ready",
         # Client/deal proof comes from the closed-won deal ledger; when that is
         # down we cannot prove campaigns even if the mart revenue is canonical.
@@ -633,20 +729,25 @@ def _build_unavailable(kpis: dict, spend_truth: dict, keyword_themes: dict,
     if kpis.get("verified_spend_usd") is None:
         out.append({"metric": "verified_spend_usd",
                     "reason": "USD spend requires verified FX; native GBP spend is shown instead."})
-    if kpis.get("roas") is None:
-        # State the ACTUAL reason ROAS is None (aligned with the decision card):
+    if kpis.get("period_revenue_per_ad_spend") is None:
+        # State the ACTUAL reason the period ratio is None (aligned with the decision card):
         # FX/USD incomplete, revenue incomplete, or simply no closed-won revenue.
         fx_ok = spend_truth.get("fx_status") == "verified"
         usd_present = kpis.get("verified_spend_usd") is not None
         if not fx_ok or not usd_present:
-            roas_reason = ("Campaign ROAS requires verified FX / USD spend; native GBP "
-                           "spend is shown instead.")
+            ratio_reason = ("Period revenue / ad spend requires verified FX / USD "
+                            "spend; native GBP spend is shown instead.")
         elif kpis.get("won_revenue_usd") is None:
-            roas_reason = ("Campaign ROAS requires complete revenue — an unknown deal "
-                           "amount makes it incomplete.")
+            ratio_reason = ("Period revenue / ad spend requires published revenue — "
+                            f"{_revenue_unknown_text(kpis)}.")
         else:
-            roas_reason = "ROAS not yet meaningful; no closed-won revenue in this window."
-        out.append({"metric": "roas", "reason": roas_reason})
+            ratio_reason = ("Period revenue / ad spend not yet meaningful; no "
+                            "closed-won revenue in this window.")
+        out.append({"metric": "period_revenue_per_ad_spend", "reason": ratio_reason})
+    # Attribution ROAS is never published: not one acquisition cohort.
+    out.append({"metric": "roas",
+                "reason": ("Unavailable: attribution ROAS requires revenue and "
+                           "spend over one acquisition cohort.")})
     if not deal_proof_available:
         out.append({"metric": "deal_proof",
                     "reason": "Closed-won deal proof is unavailable — the deal ledger could "
@@ -656,7 +757,7 @@ def _build_unavailable(kpis: dict, spend_truth: dict, keyword_themes: dict,
                     "reason": "SQLs withheld — lead business event dates are unavailable."})
     # Keyword themes carry no outcome attribution — structurally unavailable.
     out.append({"metric": "keyword_outcome_attribution",
-                "reason": "Keyword-level SQLs / customers / revenue / ROAS have no durable attribution."})
+                "reason": "Keyword-level SQLs / customers / revenue / spend ratios have no durable attribution."})
     if keyword_themes.get("status") != "ready":
         out.append({"metric": "keyword_themes",
                     "reason": keyword_themes.get("reason") or "Keyword themes unavailable."})
@@ -702,20 +803,26 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
                 "reason": "Previous period unavailable."}
     ps = prev_mart.get("summary") or {}
     pst = prev_mart.get("spend_truth") or {}
-    connected = bool((prev_mart.get("readiness") or {}).get("revenue_integration_connected"))
+    connected = bool((prev_mart.get("readiness") or {}).get("canonical_revenue_available"))
     # The mart summary counts a null-amount deal as $0; if the previous window had
     # ANY unknown deal amount, its revenue total is not a trustworthy baseline —
     # withhold it (No comparison) rather than measuring against a lowered $0.
     prev_amount_unknown = (not prev_deals.get("available")) or any(
         d.get("deal_amount_usd") is None for d in (prev_deals.get("rows") or []))
     prev_rev = ps.get("won_revenue_usd") if (connected and not prev_amount_unknown) else None
-    prev_cust = ps.get("customers") if connected else None
+    # PR-ADS-161E: like for like. This page's KPIs are the campaign-attributable
+    # subset, so the previous period is that subset too — it used to compare
+    # against the previous ALL-SOURCE totals.
+    prev_rev = ps.get("attributed_won_revenue_usd") if prev_rev is not None else None
+    prev_cust = ps.get("attributed_customers") if connected else None
+    prev_deals = ps.get("attributed_closed_won_deals") if connected else None
     metrics = {
         "won_revenue_usd": _delta_metric(kpis.get("won_revenue_usd"), prev_rev),
+        "closed_won_deals": _delta_metric(kpis.get("closed_won_deals"), prev_deals),
         "customers": _delta_metric(kpis.get("customers"), prev_cust),
         "sqls": _delta_metric(kpis.get("sqls"), ps.get("sqls")),
         "verified_spend_usd": _delta_metric(kpis.get("verified_spend_usd"), pst.get("usd_spend")),
-        "roas": _delta_metric(kpis.get("roas"), ps.get("roas")),
+        "period_revenue_per_ad_spend": _delta_metric(kpis.get("period_revenue_per_ad_spend"), ps.get("period_revenue_per_ad_spend")),
     }
     return {
         "available": any(m["status"] == "ok" for m in metrics.values()),
@@ -723,6 +830,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_dashboard_campaigns(window: str = "current_quarter",
                               now: datetime | None = None) -> dict:
     """Build the Dashboard Campaigns & Keywords contract for one business window.
@@ -738,7 +846,7 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     mart_rows = mart.get("rows") or []
     spend_truth = mart.get("spend_truth") or {}
     readiness = mart.get("readiness") or {}
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
     native_currency = spend_truth.get("native_currency") or "GBP"
 
     start = _parse_iso_date(window_block.get("start_date") or resolved.get("start_date"))
@@ -772,8 +880,11 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     deals_by_key, unknown_amount_keys = _group_deals_by_campaign(
         deal_rows, label_to_canonical)
 
-    campaign_rows = _build_campaign_rows(mart_rows, spend_maps, deals_by_key,
-                                         unknown_amount_keys, native_currency)
+    campaign_rows = _build_campaign_rows(
+        mart_rows, spend_maps, deals_by_key, unknown_amount_keys, native_currency,
+        revenue_total_published=(
+            ((canonical.get("publication") or {}).get("revenue_usd") or {})
+            .get("status") == "published"))
 
     if not revenue_connected:
         # Closed-won customers AND revenue come from the revenue integration, so
@@ -781,12 +892,23 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         # survive). The mart returns a mart-level $0/0 here, which would otherwise
         # render as a VERIFIED zero. Never fabricate a $0 or a 0-customer proof.
         for c in campaign_rows:
+            c["closed_won_deals"] = None
             c["customers"] = None
             c["won_revenue_usd"] = None
-            c["roas"] = None
-            c["roas_available"] = False
+            c["period_revenue_per_ad_spend"] = None
+            c["period_ratio_available"] = False
 
-    kpis = _build_kpis(campaign_rows, spend_truth)
+    kpis = _build_kpis(campaign_rows, spend_truth,
+                       summary=(mart.get("summary") or {}) if revenue_connected else {})
+    # PR-ADS-161E: a page total is a subset of the window — when the window
+    # withholds a family, the sum of whatever rows exist (often none) is not a
+    # total. Unknown, never 0.
+    _pub = canonical.get("publication") or {}
+    if (_pub.get("closed_won_deals") or {}).get("status") != "published":
+        kpis["closed_won_deals"] = None
+    if (_pub.get("revenue_usd") or {}).get("status") != "published":
+        kpis["won_revenue_usd"] = None
+        kpis["period_revenue_per_ad_spend"] = None
     period_change = _build_period_change(window, ref_now, kpis)
     keyword_themes = _build_keyword_themes(repo.fetch_keyword_theme_snapshot())
     search_signals = _build_search_term_signals(repo.fetch_search_term_signals(start, end))
@@ -837,6 +959,12 @@ def build_dashboard_campaigns(window: str = "current_quarter",
          "violation_codes": ([] if kpis.get("won_revenue_usd") is not None
                              else _attributed_disclosure.get("violation_codes") or [])},
         # The COUNT is complete whatever the amounts are, so it keeps its own status.
+        {"metric": "campaign_attributed_closed_won_deals",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("closed_won_deals") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
         {"metric": "campaign_attributed_customers",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "campaign_attributable_revenue",

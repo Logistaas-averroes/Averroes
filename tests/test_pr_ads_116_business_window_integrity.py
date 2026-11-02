@@ -19,7 +19,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -116,11 +117,12 @@ def _spy_repo(monkeypatch):
         # window bounds are captured THERE. The canonical read is the one that
         # must share the selected window with spend and leads now.
         patch_canonical_ledger(monkeypatch, [])
-        import db.deal_ledger_repository as ledger_repo
-        monkeypatch.setattr(ledger_repo, "fetch_won_deals",
-                            cap("revenue", {"available": True, "rows": []}))
+        # PR-ADS-161E: the canonical truth windows the population, so the
+        # bounds are captured where membership is evaluated.
+        from tests.canonical_ledger_fixtures import capture_canonical_bounds
+        capture_canonical_bounds(monkeypatch, seen, "revenue")
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda *a, **k: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: False)
+        make_canonical_unavailable(monkeypatch)
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
     return seen

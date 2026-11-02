@@ -2,8 +2,12 @@
 
 **PR-ADS-161D**, customer identity added by **PR-ADS-161D2**. One read-only definition of closed-won deals, customers and
 closed-won revenue, per evidence and business window, with attribution,
-coverage, freshness and a publication verdict for every metric. Truth service
-and audit only: **no production page reads it yet** — that is PR-ADS-161E.
+coverage, freshness and a publication verdict for every metric. Since
+**PR-ADS-161E** every production page, route and service that publishes
+closed-won deals, customers, revenue, ROAS, CAC or SQL-to-customer conversion
+reads it through the reader contract in `canonical_revenue_service`
+(`load_won_deals` / `subset_metrics` / `reader_row`) — see
+`docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.
 
 | Module | Role |
 | --- | --- |
@@ -81,8 +85,49 @@ Its population is the same won population minus deals whose close lies after
 "now" (they have not closed); an undated won deal stays, because contact
 creation, not a close date, proves its membership.
 
-The two are reported side by side and never combined. Nothing here computes
-ROAS or CAC: a spend window divided by close-date deals is neither.
+The two are reported side by side and never combined. This service computes
+no ROAS or CAC: a window verdict carries no spend.
+
+**PR-ADS-161E doctrine (decision 1, final).** Attribution **ROAS and CAC are
+unavailable** on every surface. Closed-won outcomes are dated by close and
+spend by the day it was spent; in a long B2B sales cycle a deal closed this
+window was usually acquired by spend in an earlier one, so the two are not one
+acquisition cohort.
+
+* Certified ROAS stays `unavailable`
+  (`roas_requires_revenue_and_spend_in_one_acquisition_cohort`) until revenue
+  and spend use the same acquisition cohort and a compatible attribution scope.
+* Certified CAC stays `unavailable`
+  (`cac_requires_spend_and_customers_in_one_acquisition_cohort`) until spend
+  and distinct customers are joined through the same acquisition cohort and
+  attribution scope.
+* The close-date calculation is kept only as two **non-cohort operational
+  ratios**, under explicit names that cannot be read as attribution metrics:
+  * `period_revenue_per_ad_spend` — **Period Revenue / Ad Spend**: revenue
+    from deals closed in the window ÷ that window's Google Ads USD spend
+    (`cwt.derive_period_revenue_per_ad_spend`).
+  * `period_spend_per_customer_won` — **Spend per Customer Won This Period**:
+    that window's spend ÷ the distinct companies whose won deals closed in it
+    (`cwt.derive_period_spend_per_customer_won`). It counts repeat and
+    expansion companies and never divides by won deals.
+* Each carries `ratio_kind: non_cohort_operational_ratio`,
+  `cohort_basis: close_date_outcomes_over_same_window_spend` and the
+  disclosure "Non-cohort operational ratio. Closed-won outcomes may originate
+  from earlier advertising periods." The UI shows that disclosure beside the
+  value.
+* No API field named `roas` or `cac` (or `geo_roas`, `google_ads_roas`, …)
+  carries a figure. The cutover audit's check 18
+  (`no_period_ratio_named_roas_or_cac`) fails on one, and on any UI text that
+  calls a period ratio ROAS or CAC.
+* Both period ratios publish only when every input is published, and only at a
+  scope Google Ads spend can have produced.
+
+This supersedes the earlier PR-ADS-161E draft, which published these ratios
+under the names ROAS and CAC.
+* Both are unavailable when the numerator scope is not one Google Ads spend
+  can have produced. Only `google_ads_source` and `campaign_attributable`
+  qualify.
+* See `docs/48_*` §4.
 
 ### Dates
 
@@ -436,21 +481,24 @@ unavailable.
 
 ---
 
-## 10. Reader inventory (not migrated here)
+## 10. Reader inventory — migrated by PR-ADS-161E
 
-See the PR description for the full table. Three findings PR-ADS-161E must
-address:
+The four findings this PR recorded for PR-ADS-161E are closed:
 
-* **Won deals are called customers** across the Mart, the revenue attribution
-  and source attribution services, unit economics (whose CAC denominator is the
-  won-deal count) and the dashboards.
-* **A legacy table gates canonical revenue.** `revenue_integration_connected()`
-  is an existence check over `gclid_attribution`; dashboards blank canonical
-  customers and revenue on it.
-* **`sql_to_customer_rate`** divides all-source won deals by
-  campaign-attributable SQLs — two populations.
-* **Production's All Time drops undated won deals.** `load_won_deals("all_time")`
-  queries `deal_close_date < tomorrow`, which excludes every NULL close date;
-  this service counts them in All Time and withholds finite windows over them.
-  Its windows also end at tomorrow's UTC midnight, so a close later today is
-  admitted. The audit reports both per window.
+* **Won deals were called customers** across the Mart, revenue and source
+  attribution, unit economics (whose CAC divided by won deals) and the
+  dashboards. Every reader now publishes `closed_won_deals` and the canonical
+  `customers` (distinct proven companies) as two metrics. CAC divides by
+  customers.
+* **A legacy table gated canonical revenue.** `revenue_integration_connected()`
+  is deleted. Readiness reads the canonical verdict (`canonical_revenue_available`).
+* **`sql_to_customer_rate` mixed two populations.** It is unavailable, with
+  `sql_to_customer_rate_needs_one_acquisition_cohort_and_scope`.
+* **All Time dropped undated won deals and admitted closes later today.**
+  `load_won_deals` is now a reader of `window_view`. All Time holds the undated
+  deals, and a close later than now is in no window.
+
+The ROAS and CAC window verdicts are still `not_published`: a window carries no
+spend. Their reasons now say each is derived per scope by the reader contract.
+The full matrix, the deferred readers and the cutover audit are in
+`docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.

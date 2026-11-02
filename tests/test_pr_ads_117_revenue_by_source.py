@@ -123,7 +123,7 @@ def _verified_truth(usd_spend, native_spend=None):
         "usd_spend": usd_spend,
         "fx_status": "verified",
         "spend_coverage_status": "verified",
-        "roas_available": True,
+        "period_ratio_available": True,
         "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic and is not used as the source-level "
                           "Google Ads denominator.",
@@ -140,7 +140,7 @@ def _unavailable_truth():
         "usd_spend": None,
         "fx_status": "unavailable",
         "spend_coverage_status": "unavailable",
-        "roas_available": False,
+        "period_ratio_available": False,
         "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic and is not used as the source-level "
                           "Google Ads denominator.",
@@ -182,15 +182,11 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
         # PR-ADS-153E-B: won revenue is read from the canonical deal ledger, so
         # the window bounds are captured there.
         patch_canonical_ledger(monkeypatch, from_source_rows(revenue_rows or []))
-        import db.deal_ledger_repository as ledger_repo
-        _canonical_rows = from_source_rows(revenue_rows or [])
-
-        def cap_canonical(start=None, end=None):
-            if seen is not None:
-                seen["revenue"] = (start, end)
-            return {"available": True, "rows": [dict(r) for r in _canonical_rows]}
-
-        monkeypatch.setattr(ledger_repo, "fetch_won_deals", cap_canonical)
+        # PR-ADS-161E: the canonical truth windows the population, so the
+        # bounds are captured where membership is evaluated.
+        if seen is not None:
+            from tests.canonical_ledger_fixtures import capture_canonical_bounds
+            capture_canonical_bounds(monkeypatch, seen, "revenue")
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", cap_spend)
         monkeypatch.setattr(
             "services.revenue_spend_truth_service.build_google_ads_spend_truth", cap_truth)
@@ -205,7 +201,7 @@ def _group(out, key):
     return next(g for g in out["groups"] if g["group"] == key)
 
 
-def test_only_google_ads_has_spend_and_roas(monkeypatch):
+def test_only_google_ads_has_spend_and_period_ratio(monkeypatch):
     build = _load_build()
     _patch_sources(
         monkeypatch,
@@ -218,12 +214,18 @@ def test_only_google_ads_has_spend_and_roas(monkeypatch):
     )
     out = build("current_quarter", now=_at("2026-06-22"))
     g = _group(out, "google_ads")
-    assert g["spend"] == 500.0 and g["roas"] == 2.0 and g["has_spend"] is True
+    # PR-ADS-161E: the close-date ratio publishes as period revenue / ad spend;
+    # attribution ROAS is never published (not one acquisition cohort).
+    assert (g["spend"] == 500.0 and g["period_revenue_per_ad_spend"] == 2.0
+            and g["has_spend"] is True)
+    assert g["roas"] is None
     for other in ("other_paid", "organic", "offline", "unclassified"):
         og = _group(out, other)
         assert og["spend"] is None, f"{other} must never inherit spend"
+        assert og["period_revenue_per_ad_spend"] is None, \
+            f"{other} must never show a period revenue / ad spend ratio"
         assert og["roas"] is None, f"{other} must never show ROAS"
-        assert og["roas_status"] == "unavailable_no_spend_source"
+        assert og["period_ratio_status"] == "unavailable_no_spend_source"
 
 
 def test_paid_social_and_email_never_inherit_google_roas(monkeypatch):
@@ -239,6 +241,7 @@ def test_paid_social_and_email_never_inherit_google_roas(monkeypatch):
     out = build("current_quarter", now=_at("2026-06-22"))
     op = _group(out, "other_paid")
     assert op["spend"] is None and op["roas"] is None
+    assert op["period_revenue_per_ad_spend"] is None
     assert op["won_revenue"] == 999.0  # revenue still shown
 
 
@@ -253,13 +256,15 @@ def test_deal_counted_once_across_groups(monkeypatch):
         ],
     )
     out = build("all_time", now=_at("2026-06-22"))
-    total_customers = sum(g["customers"] for g in out["groups"])
+    # PR-ADS-161E: the groups partition DEALS (customers are companies and
+    # do not add up across groups).
+    total_deals = sum(g["closed_won_deals"] for g in out["groups"])
     total_revenue = sum(g["won_revenue"] for g in out["groups"])
-    assert total_customers == 3, "each deal counted exactly once"
+    assert total_deals == 3, "each deal counted exactly once"
     assert total_revenue == 600.0
     # Ambiguous + unclassified fold into the Needs-Review section.
     nr = _group(out, "unclassified")
-    assert nr["customers"] == 2 and nr["won_revenue"] == 500.0
+    assert nr["closed_won_deals"] == 2 and nr["won_revenue"] == 500.0
 
 
 def test_window_correct_same_bounds_all_sources(monkeypatch):
@@ -290,6 +295,7 @@ def test_no_fabricated_zero_spend_or_roas(monkeypatch):
     for g in out["groups"]:
         if not g["has_spend"]:
             assert g["spend"] is None and g["roas"] is None
+            assert g["period_revenue_per_ad_spend"] is None
 
 
 # ════════════════════════ backfill read-only doctrine ════════════════════════
@@ -336,15 +342,18 @@ def test_page_registered_and_revenue_page():
     assert 'id="revenue-by-source-range"' in HTML  # date-range chip (PR-116 contract)
 
 
-def test_page_sections_and_roas_only_for_google():
+def test_page_sections_and_period_ratio_only_for_google():
     # PR-ADS-133: the page renders a group → channel → platform hierarchy. Each
-    # group section has Spend + ROAS/Status columns; only Google Ads shows ROAS,
-    # every other source is revenue-only (never a fabricated ROAS).
+    # group section has Spend + ratio/Status columns; only Google Ads shows the
+    # ratio, every other source is revenue-only (never a fabricated ratio).
+    # PR-ADS-161E: the ratio is labelled period revenue / ad spend, never ROAS.
     fn_idx = JS.find("function renderSourceGroupSection")
-    body = JS[fn_idx:fn_idx + 1600]
-    assert ">Spend<" in body and ">ROAS / Status<" in body
+    body = JS[fn_idx:JS.find("\n}\n", fn_idx) + 3]
+    assert ">Spend<" in body and ">${PERIOD_RATIO_LABEL} / Status<" in body
+    assert ">ROAS / Status<" not in body
     assert ">Channel / Platform<" in body
-    status = JS[JS.find("function sourceStatusLabel"):JS.find("function sourceStatusLabel") + 900]
+    st_idx = JS.find("function sourceStatusLabel")
+    status = JS[st_idx:JS.find("\n}\n", st_idx) + 3]
     assert "Revenue-only — no connected spend source" in status
     # Health summary surfaces the four counts.
     health = JS[JS.find("function renderRevenueBySourceHealth"):JS.find("function renderRevenueBySourceHealth") + 700]

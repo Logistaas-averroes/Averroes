@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-191 — CRM Truth Exceptions workbench (October 2026)
+**Last updated:** PR-ADS-161E — Production readers migrated to canonical customer and closed-won truth (November 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -1442,3 +1442,162 @@ definition, no HubSpot or Google Ads call, no write.
 step and did-run list.
 
 Doctrine: `docs/47_CRM_TRUTH_EXCEPTIONS.md`.
+
+---
+
+## PR-ADS-161E — Production readers migrated to canonical customer and closed-won truth (November 2026)
+
+**Why.** PR-ADS-161D/161D2 built one certified definition of closed-won deals,
+customers and revenue, and PR-ADS-191 named the deals that block it. No
+production page read it. Pages still called won deals "customers", divided CAC
+by won deals, and gated canonical revenue on a legacy table's existence
+(`revenue_integration_connected()` over `gclid_attribution`). They also mixed
+two cohorts in `sql_to_customer_rate`. All Time dropped undated won deals and
+admitted closes later today.
+
+**Built.**
+* Reader contract in `services/canonical_revenue_service.py`:
+  * `load_won_deals` is now a reader of
+    `canonical_customer_revenue_service.window_view`. It releases the
+    population only when the canonical deal count publishes, and carries the
+    canonical verdicts.
+  * `subset_metrics` / `reader_row` produce a row's deals, customers, revenue
+    and the two period ratios through `analysis.closed_won_truth.subset_outcomes`,
+    `derive_period_revenue_per_ad_spend` and
+    `derive_period_spend_per_customer_won`. Certified ROAS and CAC are
+    always unavailable (decision 1, below).
+  * `one_snapshot` / `single_snapshot` give each page one READ ONLY universe.
+* Migrated:
+  * the Revenue Decision Mart, revenue attribution (Campaign / Country Revenue &
+    Spend, formerly "ROAS by Campaign / Country"),
+    Revenue by Source, campaign mapping review and Unit Economics;
+  * all six dashboard tabs and cross-page parity.
+  * Every one now publishes `closed_won_deals` and canonical `customers` as
+    two metrics, each with status and reason.
+* Removed: `db/revenue_repository.revenue_integration_connected()`. Readiness
+  reads `canonical_revenue_available` and `canonical_revenue_status`.
+* Retired:
+  * `sql_to_customer_rate`, `revenue_per_sql` and `lead_to_customer_rate` are
+    unavailable, with the reason (two cohorts).
+  * The Deals tab reads won-deal contacts from the canonical snapshot, not
+    `gclid_attribution.has_closed_won_deal`.
+* Withheld legacy routes: `/api/reports/roas/campaigns|countries`,
+  `/api/reports/roas/snapshots*`, and the GCLID readiness won-deal count
+  (`legacy_local_revenue_not_canonical`).
+* UI (`static/app.js`):
+  * `canonicalMetricHtml` / `rowMetricHtml` render the value, `0`,
+    "Withheld" + reason, or "Unavailable" + reason, never a dash;
+  * admin-only **View blockers** deep-links into the CRM Truth Exceptions
+    workbench with the window and family preselected;
+  * channel, campaign and country charts count won deals; customers are never
+    summed across rows.
+* Per-campaign placement republishes the canonical partition: the window is
+  evaluated with Campaign Evidence's resolver. Per-campaign deals, revenue,
+  customers and period ratios are withheld while a Google Ads won deal resolves to
+  no campaign (`google_ads_deals_not_placed_on_a_campaign`). The
+  campaign-attributable scope total is not gated.
+* Country residual: the Google Ads-source canonical total minus the country
+  rows. It used to subtract from the all-source total, which put non-Google
+  deals in the "no country" bucket.
+* Found by the new audit: the Mart's revenue metric carried the legacy reason
+  code. In a window withheld for an undated deal, it also said "unavailable"
+  where the canonical verdict is "withheld". It now republishes the canonical
+  status and reason whenever either side withholds.
+* `scripts/audit_customer_revenue_reader_cutover.py` — 18 checks, exit 0/1/2;
+  CRM findings alone never fail it. `INVENTORY` is the reader matrix.
+
+* **Truth review before push** (`averroes-truth-auditor`). It found 1 blocker
+  and 5 major findings, all reproduced by executed probes, and all fixed:
+  - **Blocker:** a withheld per-campaign deal count read as 0 became "waste"
+    verdicts and "no won deals" cards. Rows with a withheld count are now
+    `outcome_withheld` / "Closed-won outcome withheld" and are never judged.
+  - The placement gate re-derived "unplaced". It now republishes the canonical
+    partition, and the scope total is ungated.
+  - Recoverable withheld values:
+    - a proof-deal list stayed beside a withheld count;
+    - `summarize_deals` netted negative amounts;
+    - the GCLID readiness sibling counts re-added to the withheld total.
+  - The spend ratios were published at `all_source` scope.
+  - The audit's leak walk covered the Mart only, and it missed the Mailchimp
+    audit reader.
+  - Headline revenue said "Unavailable" with no reason.
+  - Minors fixed:
+    - wrong-reason cards ("unknown deal amount", "ledger could not be
+      read", "integration disconnected");
+    - an HTML sub-line rendered as escaped text;
+    - deal-count links carried no window;
+    - `reconciles: true` was reported without a money comparison.
+  - Regressions: tests 28–33.
+
+**Not changed.** The won predicate, customer identity, revenue proof, window
+definitions and the canonical verdicts are unchanged. **Changed on purpose, as
+directed by the owner in review:**
+* **Decision 1 (corrected).** Attribution ROAS and CAC are **unavailable**
+  everywhere: close-date outcomes and same-window spend are not one acquisition
+  cohort in a long B2B sales cycle. Reasons:
+  `roas_requires_revenue_and_spend_in_one_acquisition_cohort`,
+  `cac_requires_spend_and_customers_in_one_acquisition_cohort`.
+  The close-date calculation is kept as two non-cohort operational ratios:
+  * `period_revenue_per_ad_spend` — "Period Revenue / Ad Spend";
+  * `period_spend_per_customer_won` — "Spend per Customer Won This Period".
+
+  Each carries `ratio_kind: non_cohort_operational_ratio` and the disclosure
+  "Non-cohort operational ratio · Closed-won outcomes may originate from
+  earlier advertising periods", which the UI shows beside it. Renamed to match:
+  * every API row and KPI field (`roas`/`geo_roas`/`google_ads_roas` and
+    `cac` are null; `roas_available` (rows, `spend_truth` and the source
+    classification) is now `period_ratio_available`;
+    `roas_status`/`roas_reason` are now `period_ratio_status`/`period_ratio_reason`;
+    the Mart readiness `roas_ready` is now `period_ratio_ready`);
+  * every label, page title ("ROAS by Campaign/Country" are now "Campaign/Country
+    Revenue & Spend") and card.
+
+  Kept on purpose: route ids (`#/roas-campaigns`) and the source-health
+  booleans `campaign_roas_available`, `country_roas_available` and
+  `country_roas_unblockable`. They are not ratio values.
+  Audit check 18 (`no_period_ratio_named_roas_or_cac`) walks twelve page
+  payloads (the ten builders plus the Mart's source and country views). It fails
+  on any of these:
+  * a figure, digit-bearing string or numeric descendant under any `roas`/`cac`
+    key, in any case or camelCase, or a synonym;
+  * a row naming ROAS/CAC by value;
+  * any API string that calls something ROAS or CAC, outside the exact
+    certified-unavailable phrasings;
+  * a period ratio without its disclosure;
+  * UI text naming ROAS/CAC outside the exact certified labels, or a certified
+    label rendered beside a period value.
+
+  Tests 38–45 are its counterfactuals. The UI shipped at `64b2ce3` has 97
+  violations.
+  The truth review of this round found live diagnostics text ("carries
+  spend/ROAS", "Country ROAS is shown", "Geo ROAS is withheld") and lexical
+  bypasses of the first check 18; both are fixed. Zero spend now makes Spend per
+  Customer Won This Period unavailable, never "$0", and the dead
+  `compute_roas` / `compute_cac` helpers are deleted.
+  docs/46's 161D line ("neither") stands: no ROAS or CAC is published.
+* **PR review round 2 (Copilot, on `4f0f199`).** Two findings, both fixed:
+  * Unit Economics now republishes the canonical verdicts when the window
+    releases no population. It used to return `business`/`advertising: null`,
+    so the KPIs read a bare "Unavailable" with no reason and no View blockers.
+  * Cross-page parity now classifies every canonical customer-identity reason.
+    It used to report them as the catch-all `canonical_source_unavailable`. A
+    CRM finding is `customer_total_unpublishable_identity_unresolved`. Stale,
+    unobserved, unscanned or uningested evidence is
+    `customer_association_coverage_unproven`.
+  * Tests 46–47 cover both; each fails without its fix.
+* **Decision 2 (approved).** Per-campaign figures follow the canonical
+  placement verdict. Account and scope totals stay independent when their own
+  evidence is complete. A withheld campaign count is never zero, "waste" or
+  "no won deals".
+
+No HubSpot or Google Ads call, no write. Marketing SQLs stay on the
+acquisition cohort.
+
+**Deferred** (docs/48 §7): `/api/attribution/confidence-summary` (tier counts
+only), `/api/audit/revenue-truth` (admin shadow diagnostic), and the daily
+local snapshot job (its routes withhold).
+
+**Suite.** `tests/test_pr_ads_161e_reader_cutover.py`, in CI's PostgreSQL step
+and did-run list, with a counterfactual on base `028effc`.
+
+Doctrine: `docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.

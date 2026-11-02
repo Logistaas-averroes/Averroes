@@ -758,7 +758,7 @@ def test_15_blank_country_revenue_lands_in_the_explicit_residual(monkeypatch):
     assert len(residual) == 1
     assert residual[0]["country_key"] == country_identity.RESIDUAL_KEY
     assert residual[0]["country"] == country_identity.RESIDUAL_LABEL
-    assert residual[0]["customers"] == 1
+    assert residual[0]["closed_won_deals"] == 1
     assert residual[0]["won_revenue"] == 4000.0
     # It is reported as a residual, never scored as a market.
     assert residual[0]["verdict"] == "unattributed"

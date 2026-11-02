@@ -39,6 +39,17 @@ def _slice(marker, span=1600):
     return JS[i:i + span]
 
 
+def _fn(marker):
+    """The whole top-level app.js function starting at ``marker`` (to its
+    closing ``}`` at column 0) — robust to a body that grows (PR-ADS-161E's
+    longer period-ratio copy pushed the CTA past a fixed span)."""
+    i = JS.find(marker)
+    assert i != -1, f"{marker} not found in app.js"
+    j = JS.find("\n}\n", i)
+    assert j != -1, f"end of {marker} not found in app.js"
+    return JS[i:j + 3]
+
+
 # ── Fix #1 — deal-ledger outage is surfaced, never shown as empty ───────────
 
 def test_mart_deal_view_surfaces_ledger_status(monkeypatch):
@@ -120,7 +131,7 @@ def test_country_unavailable_uses_no_geo_wording(monkeypatch):
 def test_country_card_copy_branches_on_status():
     # PR-ADS-128: the card takes the whole spend_truth and renders cause-specific
     # copy (mismatch vs unavailable) plus status chips.
-    fn = _slice("function renderCountrySpendUnreconciledState", span=3800)
+    fn = _fn("function renderCountrySpendUnreconciledState")
     assert "function renderCountrySpendUnreconciledState(spendTruth)" in JS
     assert 'status === "mismatch"' in fn
     # Mismatch wording (geo exists but doesn't reconcile).

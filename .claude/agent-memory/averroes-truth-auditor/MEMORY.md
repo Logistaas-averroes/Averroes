@@ -443,3 +443,78 @@ Recurring patterns (durable):
 - CERTIFICATION_CONSUMERS now exempts a SERVICE (crm_truth_exceptions_service)
   that api/server.py imports: the 161D guard is transitive-blind; nothing limits
   who imports the workbench.
+
+## PR-ADS-161E first review (reader cutover; branch moved cb78482 -> 14d4cbf mid-review, 2026-11-01)
+- Reader contract (verified by reading): `load_won_deals` = reader of
+  `ccr.window_view`; it returns available False (status/reason canonical) whenever
+  the canonical DEAL count is withheld — so ANY undated won deal or won-flag/stage
+  conflict now makes every finite-window page's population unavailable (before
+  161E the legacy windowed query silently ignored them). `reader_row` /
+  `subset_outcomes` inherit the window verdict; `cwt.metric` nulls non-published
+  values. `one_snapshot` caches the universe in a ContextVar per page builder.
+- `window_view` runs evaluate_window with resolver None, so the canonical
+  `campaign_revenue` verdict never reaches pages. 161E re-derives "unplaced" as
+  scope-lattice google_ads_source minus campaign_attributable
+  (`campaign_placement_gate`) — a SECOND classifier that disagrees with
+  `cwt.attribution_bucket` (unmapped label = unplaced in canonical, placed in the
+  gate; ambiguous+GCLID+no campaign = ambiguous in canonical, unplaced in gate).
+  Probe: canonical campaign_revenue withheld while page published $29k/ROAS 3.62.
+- Unknown-as-zero pattern (executed): under the gate or a withheld window, every
+  consumer that does `closed_won_deals or 0` turns withheld into 0 — ROAS-by-Campaign
+  verdict `waste` for a campaign with a $9k won deal, Overview "No campaign has a
+  closed-won deal", Campaigns/Countries/Channels watch cards "won no deals",
+  bubble chart y=0. Grep `closed_won_deals") or 0` in services/dashboard_*.py.
+- Withheld values still recoverable (executed): campaign dashboard row `deals`
+  list (count+sum) while closed_won_deals/won_revenue withheld; unit economics
+  `advertising.won_deals` / `known_revenue_usd` beside withheld closed_won_deals;
+  negative amount -> canonical revenue withheld but `attribution_coverage.scopes.
+  all_source.revenue_usd` and `known_revenue_usd` = full total (summarize_deals
+  sums negatives; Overview renders "Known revenue from N priced deals").
+- `roas_scope_ok` is never passed False anywhere: unit economics scope=all_source
+  publishes ROAS and CAC over all-source revenue/companies vs Google Ads spend.
+- Audit `audit_customer_revenue_reader_cutover` exits 0 in both the gate and the
+  negative-amount scenarios: its leak walk covers ONLY the mart and only keys
+  customers/attributed_customers/google_ads_source_customers; READER_ENTRY_POINTS
+  miss direct SQL readers (`/api/mailchimp/audit` still publishes contacts with
+  won deals as "customers" and SUM(COALESCE(amount,0)) from deal_source_attribution).
+- docs/46 line ~89 (unchanged) says "a spend window divided by close-date deals is
+  neither [ROAS nor CAC]"; 161E publishes exactly that via derive_roas/derive_cac.
+- 161E test file: 27 tests, PG cases ran (python3.11); test_26 needs .git (passes
+  in repo, fails in a tar snapshot — environment, not a defect).
+- Full suite on a tar snapshot of cb78482+WIP: 8 failed / 5138 passed. Re-run at
+  14d4cbf: 154c parity PG and 158 doctrine now pass; STILL failing:
+  test_123::test_campaign_table_uses_revenue_table_scroll and
+  test_130::test_frontend_has_expandable_campaign_row — fixed-span source slices
+  (3000/3400 chars) that renderRoasCampaignTable outgrew (markers at 3044/3387).
+  Lesson: tar snapshots (no .git) make test_123:140 skip and 161E test_26 fail.
+
+## PR-ADS-161E decision-1 rename review (uncommitted diff on 64b2ce3, 2026-11-02)
+- CORRECTION of the first-review note above: `derive_roas`/`derive_cac` are
+  gone. Contract now: `cwt.derive_period_revenue_per_ad_spend` /
+  `derive_period_spend_per_customer_won` (metadata ratio_kind +
+  cohort_basis + disclosure); `cwt.certified_roas()/certified_cac()` are
+  UNCONDITIONALLY unavailable. `reader_row` emits `roas`/`cac` None. Window
+  verdict marks roas/cac `not_published` (a different status word).
+- Dashboards (campaigns/countries/channels) still compute their OWN raw-float
+  ratio (`_period_ratio`, `_google_period_ratio`; won<=0 -> None, unlike the
+  contract's published 0.0) — no ratio_kind/disclosure metadata, so audit
+  check 18's disclosure leg never applies to them.
+- Audit check 18 (`no_period_ratio_named_roas_or_cac`) is LEXICAL. Verified
+  misses (executed): nested dict under a roas key without status=published
+  (`period_change.metrics.roas.current` — the exact 64b2ce3 overview/campaigns
+  /countries shape); string figures; camelCase / synonym keys; ANY API-provided
+  text the UI renders (mart `diagnostics` "Only the Google Ads source carries
+  spend/ROAS", "Country ROAS is shown with ... residual"; GEO_GAP_MESSAGES
+  "Geo ROAS is withheld"); UI lines are exempted WHOLESALE if they contain
+  `LTV/CAC` or `const CERTIFIED_RATIO_LABELS =`; lowercase "Roas"; a period
+  ratio rendered under `CERTIFIED_RATIO_LABELS.roas`; `(^|\s)//` comment
+  stripper eats string text. Page walk = 10 builders (no mart country/source
+  view, no detail endpoints).
+- Kept booleans named roas: `campaign_roas_available`, `country_roas_available`,
+  `country_roas_unblockable`, AND `spend_truth.roas_available` (unit economics,
+  revenue-by-source) + analysis/source_classification `roas_available` — the
+  last two are not in the docs' "kept on purpose" list.
+- Real-code counterfactual technique that worked: `git archive <rev> | tar -x`
+  into scratch, copy the CURRENT audit script in, run its checks over the old
+  revision's page builders with that revision's own fixtures (t138
+  `_patch_durable` + t137 keyword/search patches build every page).

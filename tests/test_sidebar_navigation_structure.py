@@ -38,8 +38,10 @@ NEW_VISIBLE_LABELS = [
     "Data Runs",
     "System Status",
     "Admin Backfill",
-    "ROAS by Campaign",
-    "ROAS by Country",
+    # PR-ADS-161E: renamed from "ROAS by Campaign" / "ROAS by Country" — a
+    # close-date ratio is never called ROAS.
+    "Campaign Revenue &amp; Spend",
+    "Country Revenue &amp; Spend",
     "Unit Economics",
     "Churn Input",
 ]
@@ -88,6 +90,9 @@ def test_new_visible_labels_exist():
     """New renamed visible labels must appear in the HTML."""
     for label in NEW_VISIBLE_LABELS:
         assert label in HTML, f"Missing new visible label: {label}"
+    # PR-ADS-161E: the old ROAS page labels must not reappear.
+    for old in ("ROAS by Campaign", "ROAS by Country"):
+        assert old not in HTML, f"Old ROAS page label still visible: {old}"
 
 
 def test_admin_ids_still_exist():

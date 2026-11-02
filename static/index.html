@@ -153,19 +153,19 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="roas-campaigns" href="#" role="button" tabindex="0" aria-label="ROAS by Campaign">
+          <a class="nav-item" data-page="roas-campaigns" href="#" role="button" tabindex="0" aria-label="Campaign Revenue &amp; Spend">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             </span>
-            <span class="nav-item__label">ROAS by Campaign</span>
+            <span class="nav-item__label">Campaign Revenue &amp; Spend</span>
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="roas-countries" href="#" role="button" tabindex="0" aria-label="ROAS by Country">
+          <a class="nav-item" data-page="roas-countries" href="#" role="button" tabindex="0" aria-label="Country Revenue &amp; Spend">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             </span>
-            <span class="nav-item__label">ROAS by Country</span>
+            <span class="nav-item__label">Country Revenue &amp; Spend</span>
           </a>
         </li>
         <li>
@@ -430,7 +430,7 @@
         <div class="snapshot-history-section" id="snapshot-history-section">
           <header class="page-header" style="margin-top:var(--space-6)">
             <h2 class="page-title" style="font-size:1.25rem">Revenue Snapshot History</h2>
-            <p class="page-subtitle">Daily ROAS snapshots from the revenue truth pipeline. Read-only view of persisted snapshot records.</p>
+            <p class="page-subtitle">Legacy daily snapshot records. Read-only; their figures are withheld because they are not canonical.</p>
           </header>
           <div id="snapshot-history-container">
             <p class="empty-state" style="padding:var(--space-5)">Loading revenue snapshots…</p>
@@ -641,7 +641,7 @@
       <section id="page-revenue-by-source" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Revenue by Source</h1>
-          <p class="page-subtitle">Pipeline and closed-won revenue across Google Ads, Other Paid, Organic, Offline, and Unclassified sources. Only Google Ads has connected spend, so only Google Ads shows ROAS.</p>
+          <p class="page-subtitle">Pipeline and closed-won revenue across Google Ads, Other Paid, Organic, Offline, and Unclassified sources. Only Google Ads has connected spend, so only Google Ads shows Period Revenue / Ad Spend — a non-cohort operational ratio; closed-won outcomes may originate from earlier advertising periods.</p>
         </header>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
@@ -1028,10 +1028,10 @@
         </p>
       </section>
 
-      <!-- ROAS by Campaign -->
+      <!-- Campaign Revenue &amp; Spend -->
       <section id="page-roas-campaigns" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">ROAS by Campaign</h1>
+          <h1 class="page-title">Campaign Revenue &amp; Spend</h1>
           <p class="page-subtitle">Campaign-level Google Ads spend compared with HubSpot closed-won revenue.</p>
         </header>
         <div class="roas-window-controls">
@@ -1054,10 +1054,10 @@
         </div>
       </section>
 
-      <!-- ROAS by Country -->
+      <!-- Country Revenue &amp; Spend -->
       <section id="page-roas-countries" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">ROAS by Country</h1>
+          <h1 class="page-title">Country Revenue &amp; Spend</h1>
           <p class="page-subtitle">Country-level Google Ads spend compared with HubSpot closed-won revenue.</p>
         </header>
         <div class="roas-window-controls">
@@ -1112,7 +1112,7 @@
         </div>
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Unit economics reads local data only. No writes to Google Ads, HubSpot, or any external system.
+          Unit economics reads the canonical closed-won deal ledger and canonical Google Ads spend, read-only. No writes to Google Ads, HubSpot, or any external system.
         </p>
       </section>
 
@@ -1120,7 +1120,7 @@
       <section id="page-churn-input" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Churn Input</h1>
-          <p class="page-subtitle">Manual monthly churn rate configuration for LTV/ROAS calculations.</p>
+          <p class="page-subtitle">Manual monthly churn rate configuration for LTV calculations.</p>
         </header>
         <div id="page-explanation-churn-input" hidden></div>
         <div class="churn-input-notice" role="note">

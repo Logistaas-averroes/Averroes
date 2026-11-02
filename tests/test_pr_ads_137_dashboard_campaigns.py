@@ -38,7 +38,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -173,9 +174,12 @@ def _patch_durable(monkeypatch, *, canonical=None, deals=None, keyword_snapshot=
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl))
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    if not revenue_connected:
+        make_canonical_unavailable(monkeypatch)
     monkeypatch.setattr(repo, "fetch_keyword_theme_snapshot", lambda: dict(ks))
     monkeypatch.setattr(repo, "fetch_search_term_signals", lambda s, e: dict(ss))
     import db.writers as db_writers
@@ -287,9 +291,16 @@ def test_kpis_from_google_attributed_truth(monkeypatch):
     assert k["verified_spend_native"] == {"amount": 10000.0, "currency": "GBP"}
     assert k["verified_spend_usd"] == 13000.0
     assert k["sqls"] == 25  # 20 + 5
-    assert k["customers"] == 2  # Google-attributed only (Ghost Co unattributed excluded)
+    # PR-ADS-161E: two closed-won DEALS. Customers are the canonical
+    # campaign-attributable distinct companies; with no company evidence stored
+    # here they are withheld, never the deal count.
+    assert k["closed_won_deals"] == 2  # Google-attributed only (Ghost Co unattributed excluded)
+    assert k["customers"] is None
     assert k["won_revenue_usd"] == 29000.0  # Google-attributed only
-    assert k["roas"] == round(29000.0 / 13000.0, 2)  # 2.23 — reconciles with canonical mart
+    # PR-ADS-161E: the close-date ratio publishes only under its explicit name;
+    # attribution ROAS is never published.
+    assert k["period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)  # 2.23 — reconciles with canonical mart
+    assert k.get("roas") is None
 
 
 def test_kpis_reconcile_with_google_campaign_rows(monkeypatch):
@@ -297,7 +308,7 @@ def test_kpis_reconcile_with_google_campaign_rows(monkeypatch):
     k = out["kpis"]
     google = [c for c in out["campaigns"] if c["attribution_status"] != "unattributed"]
     assert k["sqls"] == sum(c["sqls"] for c in google)
-    assert k["customers"] == sum(c["customers"] for c in google)
+    assert k["closed_won_deals"] == sum(c["closed_won_deals"] for c in google)
     assert k["won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in google), 2)
 
 
@@ -309,68 +320,70 @@ def test_native_gbp_never_labelled_usd(monkeypatch):
         assert c["native_currency"] == "GBP"
 
 
-# ══════════════════ 3. Spend / FX / ROAS truth ══════════════════════════════
+# ══════════════════ 3. Spend / FX / period-ratio truth ══════════════════════════════
 
 
-def test_fx_incomplete_keeps_native_gbp_but_withholds_usd_and_roas(monkeypatch):
+def test_fx_incomplete_keeps_native_gbp_but_withholds_usd_and_period_ratio(monkeypatch):
     canon = dict(CANONICAL, fx_complete=False, fx_missing_days=5, total_spend_usd=None,
                  rows=[dict(r, spend_usd=None, fx_complete=False) for r in CANONICAL["rows"]])
     out = _campaigns(monkeypatch, canonical=canon)
     k = out["kpis"]
     assert k["verified_spend_native"]["amount"] == 10000.0  # native GBP still present
     assert k["verified_spend_usd"] is None  # USD Unavailable
-    assert k["roas"] is None  # ROAS Unavailable
+    assert k["period_revenue_per_ad_spend"] is None  # period ratio Unavailable
     g = _camp(out, "Global Competitors")
     assert g["spend_native"] == 6000.0 and g["spend_native"] != 0
     assert g["spend_usd"] is None
-    assert g["roas"] is None and g["roas_available"] is False
+    assert g["period_revenue_per_ad_spend"] is None and g["period_ratio_available"] is False
 
 
-def test_campaign_roas_only_when_spend_and_revenue_safe(monkeypatch):
+def test_campaign_period_ratio_only_when_spend_and_revenue_safe(monkeypatch):
     out = _campaigns(monkeypatch)
     g = _camp(out, "Global Competitors")
-    assert g["roas"] == round(29000.0 / 8000.0, 2) and g["roas_available"] is True
+    assert (g["period_revenue_per_ad_spend"] == round(29000.0 / 8000.0, 2)
+            and g["period_ratio_available"] is True)
+    assert g.get("roas") is None  # attribution ROAS is never published
     # A campaign with verified spend but ZERO revenue shows no misleading 0.00x —
     # its status conveys the outcome.
     brand = _camp(out, "Brand - UK")
-    assert brand["roas"] is None and brand["roas_available"] is False
+    assert brand["period_revenue_per_ad_spend"] is None and brand["period_ratio_available"] is False
     assert brand["status"] == "SQL producer"
 
 
-def test_no_roas_from_conversion_value(monkeypatch):
-    # ROAS is revenue/spend only; the service documents that the Google Ads
+def test_no_period_ratio_from_conversion_value(monkeypatch):
+    # The period ratio is revenue/spend only; the service documents that the Google Ads
     # conversion value is never used, and never reports it as used.
     assert "conversion value" in SERVICE.lower()
     out = _campaigns(monkeypatch)
     assert out["google_ads_conversion_value_used"] is False
-    assert out["kpis"]["roas"] == round(29000.0 / 13000.0, 2)  # revenue ÷ spend only
+    assert out["kpis"]["period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)  # revenue ÷ spend only
 
 
 # ══════════════════ 4. No fake $0 / preserve unattributed ════════════════════
 
 
-def test_null_amount_makes_campaign_revenue_and_roas_unavailable(monkeypatch):
+def test_null_amount_makes_campaign_revenue_and_period_ratio_unavailable(monkeypatch):
     # A Global Competitors deal with an unknown amount → that campaign's revenue
-    # (and ROAS) Unavailable, never a lowered $0. KPI revenue also Unavailable.
+    # (and period ratio) Unavailable, never a lowered $0. KPI revenue also Unavailable.
     deals = [dict(DEAL_ROWS[0], deal_amount_usd=None)] + DEAL_ROWS[1:]
     out = _campaigns(monkeypatch, deals=deals)
     g = _camp(out, "Global Competitors")
     assert g["won_revenue_usd"] is None and g["won_revenue_usd"] != 0
-    assert g["roas"] is None
+    assert g["period_revenue_per_ad_spend"] is None
     assert out["kpis"]["won_revenue_usd"] is None
-    assert out["kpis"]["roas"] is None
+    assert out["kpis"]["period_revenue_per_ad_spend"] is None
 
 
-def test_unattributed_revenue_preserved_and_excluded_from_roas(monkeypatch):
+def test_unattributed_revenue_preserved_and_excluded_from_period_ratio(monkeypatch):
     out = _campaigns(monkeypatch)
     unatt = _camp(out, "Unattributed / Needs Review")
     assert unatt is not None
     assert unatt["won_revenue_usd"] == 4000.0  # revenue kept, never dropped
     assert unatt["attribution_status"] == "unattributed"
-    assert unatt["spend_native"] is None and unatt["roas"] is None
-    # It is NOT counted in the Google-Ads ROAS numerator.
+    assert unatt["spend_native"] is None and unatt["period_revenue_per_ad_spend"] is None
+    # It is NOT counted in the Google-Ads period-ratio numerator.
     assert out["kpis"]["won_revenue_usd"] == 29000.0
-    assert out["kpis"]["roas"] == round(29000.0 / 13000.0, 2)
+    assert out["kpis"]["period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)
 
 
 def test_disconnected_integration_blanks_customers_and_revenue(monkeypatch):
@@ -380,12 +393,12 @@ def test_disconnected_integration_blanks_customers_and_revenue(monkeypatch):
     k = out["kpis"]
     assert k["customers"] is None
     assert k["won_revenue_usd"] is None
-    assert k["roas"] is None
+    assert k["period_revenue_per_ad_spend"] is None
     assert k["verified_spend_native"]["amount"] == 10000.0  # spend survives
     assert k["sqls"] == 25  # SQLs come from contacts and survive
     for c in out["campaigns"]:
         assert c["customers"] is None, f"{c['campaign_name']} customers must be None"
-        assert c["won_revenue_usd"] is None and c["roas"] is None
+        assert c["won_revenue_usd"] is None and c["period_revenue_per_ad_spend"] is None
     assert out["truth_status"]["revenue"] == "blocked"
 
 
@@ -439,7 +452,9 @@ def test_deal_ledger_unavailable_does_not_claim_no_deals(monkeypatch):
     assert out["kpis"]["customers"] is None
     # No deals to display, but the row must NOT be rendered as "no deals" — the
     # contract exposes deal_proof_available for the drawer to say Unavailable.
-    assert g["deals"] == []
+    # PR-ADS-161E: the proof list is absent (None, unknown), not an empty list
+    # that reads as "this campaign has no deals".
+    assert g["deals"] is None
 
 
 def test_drawer_handles_deal_proof_unavailable():
@@ -457,7 +472,7 @@ def test_deal_proof_chip_in_truth_footer():
 def test_mapping_unavailable_makes_campaign_attribution_partial():
     from services.dashboard_campaigns_service import _build_truth_status
     spend_truth = {"fx_status": "verified", "campaign_spend_status": "verified"}
-    readiness = {"revenue_integration_connected": True}
+    readiness = {"canonical_revenue_available": True}
     ready_sig = {"status": "ready"}
     # A mapping-unavailable campaign, NO unattributed row → still partial.
     rows = [{"campaign_name": "X", "attribution_status": "mapping_unavailable",
@@ -478,12 +493,17 @@ def test_search_clean_bucket_not_labeled_value():
     assert "Reviewed clean — not flagged waste" in block
 
 
-def test_unavailable_roas_reason_reflects_fx(monkeypatch):
+def test_unavailable_period_ratio_reason_reflects_fx(monkeypatch):
     canon = dict(CANONICAL, fx_complete=False, fx_missing_days=5, total_spend_usd=None,
                  rows=[dict(r, spend_usd=None, fx_complete=False) for r in CANONICAL["rows"]])
     out = _campaigns(monkeypatch, canonical=canon)
+    # PR-ADS-161E: the FX-conditional entry is the period ratio's; attribution
+    # ROAS has its own unconditional entry stating the cohort reason.
+    ratio_u = next(u for u in out["unavailable"]
+                   if u["metric"] == "period_revenue_per_ad_spend")
+    assert "FX" in ratio_u["reason"] or "USD" in ratio_u["reason"]
     roas_u = next(u for u in out["unavailable"] if u["metric"] == "roas")
-    assert "FX" in roas_u["reason"] or "USD" in roas_u["reason"]
+    assert "acquisition cohort" in roas_u["reason"]
 
 
 def test_attribution_status_preserves_mapping_distinction(monkeypatch):
@@ -513,7 +533,7 @@ def test_fmt_usd_short_none_is_unavailable():
 # ══════════════════ 5. Keyword themes + search terms (read-only, no attr) ════
 
 
-def test_keyword_themes_never_fake_outcomes_or_roas(monkeypatch):
+def test_keyword_themes_never_fake_outcomes_or_period_ratio(monkeypatch):
     out = _campaigns(monkeypatch)
     kt = out["keyword_themes"]
     assert kt["status"] == "ready"
@@ -523,7 +543,8 @@ def test_keyword_themes_never_fake_outcomes_or_roas(monkeypatch):
         assert t["sqls"] is None
         assert t["customers"] is None
         assert t["won_revenue_usd"] is None
-        assert t["roas"] is None
+        assert t["period_revenue_per_ad_spend"] is None
+        assert t.get("roas") is None
         assert t["spend_usd"] is not None  # spend/clicks evidence is real
 
 
@@ -545,6 +566,7 @@ def test_search_term_signals_bucketed_by_waste_state(monkeypatch):
     for bucket in ("value_terms", "waste_terms", "needs_review"):
         for t in s[bucket]:
             assert "won_revenue_usd" not in t and "roas" not in t and "customers" not in t
+            assert "period_revenue_per_ad_spend" not in t
 
 
 def test_decision_cards_shape_and_safety(monkeypatch):
@@ -646,8 +668,11 @@ def test_campaigns_tab_calls_its_endpoint():
 def test_campaigns_kpi_cards_render_five_metrics():
     fn = _slice(JS, "function renderCampKpiRow", 4000)
     for label in ("Verified Google Ads Spend", "SQLs from Google Ads", "Customers",
-                  "Won Revenue", "Google Ads ROAS"):
+                  "Won Revenue", "PERIOD_RATIO_LABEL"):
         assert label in fn
+    # PR-ADS-161E: the close-date ratio is never labelled ROAS.
+    assert "ROAS" not in fn
+    assert "PERIOD_RATIO_DISCLOSURE" in fn
     assert "dash-kpi-card" in fn
 
 
@@ -675,10 +700,14 @@ def test_native_gbp_rendered_never_dollar():
     assert "spend_native" in fn and "spend_usd" in fn
 
 
-def test_campaign_roas_cell_gated_on_availability():
-    fn = _slice(JS, "function campRoasCell", 500)
-    assert "roas_available" in fn
-    # A non-safe ROAS falls back to the status, never a fabricated multiple.
+def test_campaign_period_ratio_cell_gated_on_availability():
+    # PR-ADS-161E: the cell grew a disclosure title, so slice the whole
+    # function body rather than a fixed 500-char prefix.
+    start = JS.find("function campRoasCell")
+    assert start != -1, "function campRoasCell not found"
+    fn = JS[start:JS.find("\n}\n", start)]
+    assert "period_ratio_available" in fn
+    # A non-safe period ratio falls back to the status, never a fabricated multiple.
     assert "camp-status" in fn
 
 

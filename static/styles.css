@@ -6217,6 +6217,12 @@ body.is-revenue-page #monitoring-banner {
 }
 .dash-kpi-card--unavailable .dash-kpi-card__value { font-size: 18px; padding: 4px 0; }
 .dash-unavailable { color: var(--c-warning); font-weight: 600; }
+/* PR-ADS-161E: the canonical reason beside a withheld / unavailable metric,
+   and the admin-only link to the CRM Truth Exceptions workbench. */
+.metric-reason { display: block; font-size: 11px; font-weight: 400; line-height: 1.3;
+  color: var(--c-neutral); white-space: normal; }
+.metric-blockers-link { display: inline-block; font-size: 11px; font-weight: 600;
+  margin-top: 2px; text-decoration: underline; }
 
 .dash-spark { width: 110px; height: 30px; margin-left: auto; flex-shrink: 0; }
 

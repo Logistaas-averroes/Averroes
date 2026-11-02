@@ -48,6 +48,16 @@ def _slice(hay, marker, span=2600):
     return hay[i:i + span]
 
 
+def _js_fn(hay, marker):
+    """The whole top-level JS function starting at ``marker`` (to its closing
+    ``}`` at column 0) — robust to a body that grows, unlike a fixed span."""
+    i = hay.find(marker)
+    assert i != -1, f"{marker} not found"
+    j = hay.find("\n}\n", i)
+    assert j != -1, f"end of {marker} not found"
+    return hay[i:j + 3]
+
+
 def _repo_fn_body(name):
     i = REPO_SRC.find(f"def {name}")
     assert i != -1, f"{name} not found in revenue_repository.py"
@@ -102,14 +112,14 @@ def test_missing_or_unknown_is_unclassified_not_organic(primary):
 
 def test_only_google_paid_search_is_spend_connected():
     g = classify_source_taxonomy("Paid Search", "google")
-    assert g["spend_connected"] is True and g["roas_available"] is True
+    assert g["spend_connected"] is True and g["period_ratio_available"] is True
     for primary, detail in [("Paid Social", "LinkedIn"), ("Organic Social", "Meta"),
                             ("Organic Search", None), ("Email Marketing", "HubSpot"),
                             ("Offline Sources", "SalesNash"), ("Referrals", None),
                             ("Offline Sources", "Migration"), ("mystery", None)]:
         out = classify_source_taxonomy(primary, detail)
         assert out["spend_connected"] is False, f"{primary}/{detail} must not be spend-connected"
-        assert out["roas_available"] is False, f"{primary}/{detail} must not be ROAS-eligible"
+        assert out["period_ratio_available"] is False, f"{primary}/{detail} must not be period-ratio-eligible"
 
 
 def test_taxonomy_carries_labels_and_reason():
@@ -140,13 +150,13 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
         "state": "verified", "google_ads_spend_source": "canonical_campaign_daily_spend",
         "native_currency": "GBP", "native_spend": _total, "usd_spend": _total,
         "fx_status": "verified", "spend_coverage_status": "verified",
-        "roas_available": True, "geo_spend_used": False,
+        "period_ratio_available": True, "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic.",
     } if spend_rows else {
         "state": "source_unavailable", "google_ads_spend_source": "unavailable",
         "native_currency": "GBP", "native_spend": None, "usd_spend": None,
         "fx_status": "unavailable", "spend_coverage_status": "unavailable",
-        "roas_available": False, "geo_spend_used": False,
+        "period_ratio_available": False, "geo_spend_used": False,
         "geo_spend_note": "Geo spend is diagnostic.",
     })
     monkeypatch.setattr(truth_svc, "build_google_ads_spend_truth",
@@ -191,7 +201,7 @@ def test_nested_group_channel_platform_aggregation(monkeypatch):
     li = _platform(social, "linkedin")
     meta = _platform(social, "meta")
     # SQLs / customers / revenue aggregate per channel + platform.
-    assert social["leads"] == 2 and social["sqls"] == 1 and social["customers"] == 1
+    assert social["leads"] == 2 and social["sqls"] == 1 and social["closed_won_deals"] == 1
     assert social["won_revenue"] == 10000.0
     assert li["leads"] == 1 and li["sqls"] == 1 and li["won_revenue"] == 10000.0
     assert meta["leads"] == 1 and meta["sqls"] == 0 and meta["won_revenue"] == 0.0
@@ -217,12 +227,16 @@ def test_google_gets_spend_roas_others_never_inherit(monkeypatch):
     out = build_revenue_by_source("current_quarter", now=_at("2026-06-22"))
     g = _group(out, "google_ads")
     gp = _platform(_channel(g, "paid_search"), "google_ads")
-    assert gp["spend"] == 2500.0 and gp["roas"] == 2.0
-    assert gp["status"] == "ROAS available"
-    # Paid Social LinkedIn never inherits Google spend/ROAS.
+    # PR-ADS-161E: the close-date ratio publishes as period revenue / ad spend;
+    # attribution ROAS is never published (not one acquisition cohort).
+    assert gp["spend"] == 2500.0 and gp["period_revenue_per_ad_spend"] == 2.0
+    assert gp["roas"] is None
+    assert gp["status"] == "Period revenue / ad spend available"
+    # Paid Social LinkedIn never inherits Google spend / the period ratio.
     op = _group(out, "other_paid")
     li = _platform(_channel(op, "paid_social"), "linkedin")
-    assert li["spend"] is None and li["roas"] is None
+    assert li["spend"] is None and li["period_revenue_per_ad_spend"] is None
+    assert li["roas"] is None
     assert li["won_revenue"] == 2000.0
     assert li["status"] == "Revenue-only — no connected spend source"
 
@@ -246,15 +260,22 @@ def test_google_non_canonical_bucket_never_inherits_spend(monkeypatch):
     )
     out = build_revenue_by_source("current_quarter", now=_at("2026-06-22"))
     g = _group(out, "google_ads")
-    # Group ROAS uses the whole group revenue; the canonical bucket ROAS uses ONLY
-    # its own won revenue / spend (4000 / 2000 = 2.0), not the group's (5000/2000).
-    assert g["roas"] == round(5000.0 / 2000.0, 2)
+    # Group period ratio uses the whole group revenue; the canonical bucket ratio
+    # uses ONLY its own won revenue / spend (4000 / 2000 = 2.0), not the group's
+    # (5000/2000). Attribution ROAS is never published at any level (PR-ADS-161E).
+    assert g["period_revenue_per_ad_spend"] == round(5000.0 / 2000.0, 2)
+    assert g["roas"] is None
     canonical = _platform(_channel(g, "paid_search"), "google_ads")
-    assert canonical["spend"] == 2000.0 and canonical["roas"] == round(4000.0 / 2000.0, 2)
+    assert (canonical["spend"] == 2000.0
+            and canonical["period_revenue_per_ad_spend"] == round(4000.0 / 2000.0, 2))
+    assert canonical["roas"] is None
     unspecified_ch = _channel(g, "unspecified")
-    assert unspecified_ch["spend"] is None and unspecified_ch["roas"] is None
+    assert (unspecified_ch["spend"] is None
+            and unspecified_ch["period_revenue_per_ad_spend"] is None)
+    assert unspecified_ch["roas"] is None
     up = _platform(unspecified_ch, "unspecified")
-    assert up["spend"] is None and up["roas"] is None
+    assert up["spend"] is None and up["period_revenue_per_ad_spend"] is None
+    assert up["roas"] is None
     assert up["status"] == "Needs review — source missing or unsafe"
 
 
@@ -277,7 +298,7 @@ def test_google_spend_null_when_source_unavailable(monkeypatch):
         "state": "source_unavailable", "google_ads_spend_source": "unavailable",
         "native_currency": "GBP", "native_spend": None, "usd_spend": None,
         "fx_status": "unavailable", "spend_coverage_status": "unavailable",
-        "roas_available": False, "geo_spend_used": False, "geo_spend_note": "diagnostic"})
+        "period_ratio_available": False, "geo_spend_used": False, "geo_spend_note": "diagnostic"})
     import db.writers as w
     monkeypatch.setattr(w, "source_attribution_health_counts",
                         lambda: {"contacts_classified": 0, "deals_attributed": 0,
@@ -285,9 +306,11 @@ def test_google_spend_null_when_source_unavailable(monkeypatch):
     out = build_revenue_by_source("current_quarter", now=_at("2026-06-22"))
     g = _group(out, "google_ads")
     assert g["spend"] is None and g["roas"] is None   # never $0 / 0.00x
-    assert g["roas_status"] == "unavailable_no_spend_source"
+    assert g["period_revenue_per_ad_spend"] is None
+    assert g["period_ratio_status"] == "unavailable_no_spend_source"
     gp = _platform(_channel(g, "paid_search"), "google_ads")
     assert gp["spend"] is None and gp["roas"] is None
+    assert gp["period_revenue_per_ad_spend"] is None
 
 
 def test_offline_platform_status_is_migration(monkeypatch):
@@ -305,6 +328,7 @@ def test_offline_platform_status_is_migration(monkeypatch):
     pf = _platform(_channel(off, "imported_crm"), "offline_migration")
     assert pf["status"] == "Imported CRM records — no reliable source attribution"
     assert pf["spend"] is None and pf["roas"] is None
+    assert pf["period_revenue_per_ad_spend"] is None
 
 
 # ══════════════════════════ 3. Detail endpoint ══════════════════════════
@@ -456,10 +480,16 @@ def test_detail_endpoint_registered():
 
 def test_frontend_renders_hierarchy():
     section = _slice(JS, "function renderSourceGroupSection", span=2000)
+    # PR-ADS-161E: won DEALS and canonical customers (distinct companies) are
+    # two columns; "Customer Rate" divided won deals by acquisition-cohort
+    # leads — two populations — and is retired.
     for col in (">Channel / Platform<", ">Leads<", ">SQLs<", ">SQL Rate<",
-                ">Customers<", ">Customer Rate<", ">Won Revenue<", ">Spend<",
-                ">ROAS / Status<"):
+                ">Won Deals<", ">Customers<", ">Won Revenue<", ">Spend<",
+                ">${PERIOD_RATIO_LABEL} / Status<"):
         assert col in section, f"source table missing column {col}"
+    # PR-ADS-161E: the ratio column is the period ratio, never labelled ROAS.
+    assert ">ROAS / Status<" not in section
+    assert ">Customer Rate<" not in section
     # Channel + platform rows exist.
     assert "source-channel-row" in JS
     assert "source-platform-row" in JS
@@ -493,7 +523,7 @@ def test_drawer_renders_validation_columns():
 
 def test_frontend_no_fake_roas_for_non_google():
     # Non-Google platform/channel rows show the status text, never a ROAS number.
-    status = _slice(JS, "function sourceStatusLabel", span=900)
+    status = _js_fn(JS, "function sourceStatusLabel")
     assert "Revenue-only — no connected spend source" in status
     assert "Imported CRM records — no reliable source attribution" in status
     assert "Needs review — source missing or unsafe" in status

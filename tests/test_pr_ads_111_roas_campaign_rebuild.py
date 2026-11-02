@@ -31,8 +31,10 @@ def _campaign_region():
     """The ROAS-by-Campaign implementation block (state -> table renderer)."""
     start = JS.find("let roasCampaignFilter")
     assert start != -1, "roasCampaignFilter state not found"
-    end = JS.find("// ── ROAS by Country", start)
-    assert end != -1, "ROAS by Country marker not found"
+    # PR-ADS-161E: the country page is "Country Revenue & Spend" (a close-date
+    # ratio is never called ROAS).
+    end = JS.find("// ── Country Revenue & Spend", start)
+    assert end != -1, "Country Revenue & Spend marker not found"
     return JS[start:end]
 
 
@@ -58,9 +60,17 @@ def test_scope_campaign_only_no_country_rebuild():
 def test_campaign_summary_strip_exists():
     assert "function renderRoasCampaignSummary" in JS
     # span widened in PR-ADS-119: a native/USD currency block now precedes the strip.
-    fn = _fn("function renderRoasCampaignSummary", span=2400)
-    for label in ("Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS"):
+    fn = _fn("function renderRoasCampaignSummary", span=3600)
+    # PR-ADS-161E: closed-won deals and customers are two cells. The close-date
+    # ratios are shown under their explicit period names; certified CAC is shown
+    # under its cohort label (always Unavailable). Neither is labelled ROAS/CAC.
+    for label in ("Spend", "Leads", "SQLs", "Closed-Won Deals", "Customers",
+                  "Won Revenue", "${PERIOD_RATIO_LABEL}",
+                  "${PERIOD_SPEND_PER_CUSTOMER_LABEL}",
+                  "${CERTIFIED_RATIO_LABELS.cac}"):
         assert f">{label}<" in fn, f"summary strip missing {label}"
+    for old in (">ROAS<", ">CAC<"):
+        assert old not in fn, f"summary strip still labels a period ratio {old}"
     assert "revenue-summary-strip" in fn
 
 
@@ -88,8 +98,10 @@ def test_filter_chip_event_delegation_scoped_to_campaign():
 
 def test_sorting_is_business_value_first():
     fn = _fn("function sortRoasCampaignRows", span=400)
-    # The sort keys must appear in this exact priority order.
-    order = ["customers", "won_revenue", "sqls", "spend"]
+    # The sort keys must appear in this exact priority order. PR-ADS-161E: the
+    # outcome key is the won-DEAL count (a row's customers can be withheld and
+    # are not a deal count).
+    order = ["closed_won_deals", "won_revenue", "sqls", "spend"]
     positions = [fn.find(k) for k in order]
     assert all(p != -1 for p in positions), f"missing sort key: {positions}"
     assert positions == sorted(positions), "sort keys not in business-value order"
@@ -148,28 +160,37 @@ def test_no_diagnostics_clutter_in_campaign_renderer():
 
 def test_table_columns_are_correct():
     fn = _fn("function renderRoasCampaignTable", span=1600)
+    # PR-ADS-161E: the ratio column is the period ratio, never labelled ROAS.
     for col in ("Campaign", "Spend", "Leads", "SQLs", "Customers",
-                "Won Revenue", "ROAS", "Decision"):
+                "Won Revenue", "${PERIOD_RATIO_LABEL}", "Decision"):
         assert f">{col}<" in fn, f"table missing column {col}"
-    for forbidden in (">CAC<", ">Confidence<", ">Notes<"):
+    for forbidden in (">ROAS<", ">CAC<", ">Confidence<", ">Notes<",
+                      ">${PERIOD_SPEND_PER_CUSTOMER_LABEL}<",
+                      ">${CERTIFIED_RATIO_LABELS.cac}<"):
         assert forbidden not in fn, f"forbidden column present: {forbidden}"
 
 
-# ── ROAS rendered as a multiple (2.20x), not a percent ───────────────────────
+# ── Period ratio rendered as a multiple (2.20x), not a percent ───────────────
 
 
-def test_campaign_roas_uses_multiple_notation():
+def test_campaign_period_ratio_uses_multiple_notation():
     # Campaign-specific formatter renders a multiple and "Unavailable" when null.
-    assert "function fmtRoasMultiple" in JS
-    fn = _fn("function fmtRoasMultiple", span=300)
+    # PR-ADS-161E: renamed fmtRoasMultiple -> fmtPeriodRatio (never called ROAS).
+    assert "function fmtPeriodRatio" in JS
+    assert "function fmtRoasMultiple" not in JS
+    fn = _fn("function fmtPeriodRatio", span=300)
     assert '.toFixed(2) + "x"' in fn
     assert "Unavailable" in fn
     # Summary strip and campaign table use the multiple formatter, not fmtRoas.
-    summary = _fn("function renderRoasCampaignSummary", span=900)
-    assert "fmtRoasMultiple(s.roas)" in summary
+    # PR-ADS-161E: through the canonical adapter, with the multiple formatter —
+    # a withheld period ratio then names its reason instead of a bare "Unavailable".
+    summary = _fn("function renderRoasCampaignSummary", span=3600)
+    assert 'rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio' in summary
+    assert 'rowMetricHtml(s, "roas"' not in summary
     assert "fmtRoas(s.roas)" not in summary
-    table = _fn("function renderRoasCampaignTable", span=1600)
-    assert "fmtRoasMultiple(r.roas)" in table
+    table = _fn("function renderRoasCampaignTable", span=3600)
+    assert 'rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio' in table
+    assert 'rowMetricHtml(r, "roas"' not in table
     assert "fmtRoas(r.roas)" not in table
 
 
@@ -195,7 +216,9 @@ def test_campaign_header_and_business_window_preserved():
     m = re.search(r'id="page-roas-campaigns".*?</section>', HTML, re.DOTALL)
     assert m
     section = m.group(0)
-    assert "ROAS by Campaign" in section
+    # PR-ADS-161E: renamed from "ROAS by Campaign".
+    assert "Campaign Revenue &amp; Spend" in section
+    assert "ROAS by Campaign" not in section
     assert "Campaign-level Google Ads spend compared with HubSpot closed-won revenue." in section
     for win in ("current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"):
         assert f'value="{win}"' in section

@@ -56,7 +56,7 @@ Protected endpoints (require authenticated session):
   GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
   GET  /api/historical-intelligence — Read-only historical trend analysis over local data (requires auth).
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
-  GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
+  GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for the Campaign / Country Revenue & Spend pages (requires auth; PR-ADS-107A).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
   GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
   POST /api/revenue-recovery/run   — Admin-only Revenue Truth Recovery (local DB writes only; reads HubSpot read-only; PR-ADS-114).
@@ -7155,7 +7155,7 @@ async def get_revenue_attribution(
 ):
     """Shared revenue-attribution contract (PR-ADS-107A, durable in 108/109).
 
-    Single read-only truth source for the ROAS by Campaign and ROAS by Country
+    Single read-only truth source for the Campaign Revenue & Spend and Country Revenue & Spend
     pages. Uses business-revenue windows rather than ad-style day windows:
     current_quarter, last_quarter, last_6_months, ytd, all_time.
 
@@ -7167,7 +7167,9 @@ async def get_revenue_attribution(
     HubSpot contact_created_at (business event date) is available — run_date is
     the scheduler/sync date and must NOT be used as a business event date. When
     the lead date grain is unsafe, lead/SQL metrics are withheld. When revenue
-    attribution is not wired, ROAS is null (not zero). See the audit endpoint
+    attribution is not wired, period revenue / ad spend is null (not zero);
+    attribution ROAS and CAC are always unavailable (PR-ADS-161E: not one
+    acquisition cohort). See the audit endpoint
     GET /api/revenue-attribution/audit for the full truth diagnosis.
 
     Read-only — no writes to Google Ads, HubSpot, or any external system.
@@ -7194,7 +7196,7 @@ async def get_revenue_attribution_audit(
 
     Read-only. Explains exactly why a business window is SAFE or UNSAFE:
       - whether spend / leads / revenue filter by business event dates
-      - whether non-paid or pseudo-campaign rows contaminate the ROAS universe
+      - whether non-paid or pseudo-campaign rows contaminate the campaign revenue universe
       - whether Current Quarter / YTD / All Time actually differ
       - whether revenue attribution is wired
 
@@ -7265,8 +7267,8 @@ async def get_revenue_performance(
     disagreement: Campaign, Country, Source and Deals obey one brain.
 
     Doctrine is never loosened: canonical Google Ads campaign-daily spend is the
-    only ROAS denominator, HubSpot closed-won is revenue truth, no fake $0, no
-    ROAS on an unsafe denominator. Read-only — no Google Ads or HubSpot writes.
+    only spend denominator, HubSpot closed-won is revenue truth, no fake $0, no
+    ratio on an unsafe denominator. Read-only — no Google Ads or HubSpot writes.
     """
     from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
 
@@ -7289,10 +7291,10 @@ async def get_revenue_performance_campaign_detail(
 ):
     """Clients / deals behind ONE canonical campaign (PR-ADS-130).
 
-    Read-only lazy drilldown for the ROAS by Campaign row drawer. Returns the
+    Read-only lazy drilldown for the Campaign Revenue & Spend row drawer. Returns the
     closed-won deal detail rows (company / contact / deal record ids, amount,
     close date, attribution) for the requested canonical campaign, using the same
-    identity map the ROAS rows use. Never writes to Google Ads or HubSpot.
+    identity map the campaign revenue rows use. Never writes to Google Ads or HubSpot.
     """
     from services.revenue_attribution_service import build_campaign_deal_details  # noqa: PLC0415
 
@@ -7316,7 +7318,7 @@ async def get_revenue_performance_country_detail(
 ):
     """Clients / deals behind ONE country (PR-ADS-132).
 
-    Read-only lazy drilldown for the ROAS by Country row drawer. Returns the
+    Read-only lazy drilldown for the Country Revenue & Spend row drawer. Returns the
     closed-won deal detail rows (company / contact / deal record ids, amount,
     close date, campaign attribution) for the requested country, matched by ISO
     country_code when provided (safer) else by exact normalized name. Never
@@ -7371,7 +7373,7 @@ async def get_revenue_performance_audit(
 ):
     """Revenue Decision Mart audit (PR-ADS-125).
 
-    Read-only. Compares every current revenue page (ROAS by Campaign, ROAS by
+    Read-only. Compares every current revenue page (Campaign Revenue & Spend, Country Revenue & Spend, formerly ROAS by
     Country, Revenue by Source, Deals) against the canonical mart and reports,
     per page, the current value, the mart value, the difference, a pass/fail
     status, and — when they differ — exactly why (different source table, date
@@ -7404,7 +7406,7 @@ async def get_dashboard_overview(
     """Executive Overview command-center contract (PR-ADS-134).
 
     ONE read-only payload for the Dashboard → Overview page: canonical KPIs
-    (spend / closed-won revenue / SQLs / customers / ROAS availability),
+    (spend / closed-won revenue / SQLs / customers / period revenue / ad spend),
     previous-period movement, a spend-vs-revenue trend, the source mix, ranked
     top signals, and computed decision cards. Composes the canonical Revenue
     Decision Mart, Revenue by Source, and the closed-won deal ledger — never
@@ -7477,11 +7479,12 @@ async def get_dashboard_channels(
     truth) and Revenue by Source. It adds NO new taxonomy and NO new business
     math.
 
-    Only Google Ads / Paid Search is spend-connected and ROAS-eligible; Paid
+    Only Google Ads / Paid Search is spend-connected and ratio-eligible
+    (period revenue / ad spend, a non-cohort operational ratio); Paid
     Social, Organic, Email, Events, Referrals, Direct and Offline are
-    revenue/SQL/customer attribution only — spend and ROAS stay null with a "no
-    connected spend source" status, never a fabricated Meta/LinkedIn/Organic
-    spend or ROAS. HubSpot closed-won is the only revenue truth; the Google Ads
+    revenue/SQL/customer attribution only — spend and the ratio stay null with
+    a "no connected spend source" status, never a fabricated
+    Meta/LinkedIn/Organic spend or ratio. HubSpot closed-won is the only revenue truth; the Google Ads
     conversion value is never used.
 
     Uses business windows (current_quarter | last_quarter | last_6_months | ytd
@@ -7513,15 +7516,16 @@ async def get_dashboard_campaigns(
     campaigns and keyword/search-intent themes produce real business outcomes
     (SQLs / customers / closed-won revenue) and which spend without proof.
     Composes the canonical Revenue Decision Mart (view="campaign") for the
-    per-campaign spend/SQLs/customers/revenue/ROAS/mapping truth, the canonical
+    per-campaign spend/SQLs/customers/revenue/period-ratio/mapping truth, the canonical
     per-campaign native-GBP + FX-gated-USD spend, the closed-won deal ledger for
     drawer proof, and read-only keyword/search-term evidence. It adds NO new
     business math and NO new taxonomy.
 
     Google Ads API is spend truth (native GBP); HubSpot closed-won is revenue
-    truth (USD) — native GBP is never labelled USD. Campaign ROAS is shown only
-    when spend, FX and revenue are safe, never from the Google Ads conversion
-    value. Keyword themes carry NO outcome attribution and NO ROAS; search-term
+    truth (USD) — native GBP is never labelled USD. Campaign period revenue / ad
+    spend (a non-cohort operational ratio) is shown only when spend, FX and
+    revenue are safe, never from the Google Ads conversion
+    value. Keyword themes carry NO outcome attribution and NO ratio; search-term
     panels present the existing waste-analysis classification as read-only
     evidence. Revenue that maps to no campaign is preserved under "Unattributed /
     Needs Review", never dropped.
@@ -7556,18 +7560,18 @@ async def get_dashboard_countries(
     markets produce SQLs, customers and closed-won revenue, and where is Google
     Ads spend present without business proof. Composes the canonical Revenue
     Decision Mart (view="country") for the per-country spend/SQLs/customers/
-    revenue/ROAS/mapping truth plus the geo reconciliation status and residual,
+    revenue/period-ratio/mapping truth plus the geo reconciliation status and residual,
     the canonical per-country native-GBP + FX-gated-USD geo spend, and the
     closed-won deal ledger for drawer proof. It adds NO new business math and NO
     new attribution model.
 
     Google Ads API is spend truth (native GBP); HubSpot closed-won is revenue
-    truth (USD) — native GBP is never labelled USD. Geo ROAS is shown only when a
+    truth (USD) — native GBP is never labelled USD. Geo period revenue / ad spend is shown only when a
     country has real attributed spend, FX and revenue are safe, and geo
     reconciliation is unblockable, never from the Google Ads conversion value.
     The unattributed geo residual and closed-won revenue that maps to no country
     are preserved in an explicit "Unknown / Unattributed country" bucket — never
-    distributed across real countries, never mapped, never given a ROAS.
+    distributed across real countries, never mapped, never given a ratio.
 
     Uses business windows (current_quarter | last_quarter | last_6_months | ytd
     | all_time), not ad-style day windows. Unavailable metrics are null plus a
@@ -7604,7 +7608,7 @@ async def get_dashboard_deals(
 
     HubSpot closed-won is revenue truth (USD). Open pipeline is NOT revenue; a
     closed-lost deal is NOT negative revenue; an opportunity is NOT a customer. This
-    tab shows no ROAS. The durable HubSpot deal ledger stores CLOSED-WON deals only,
+    tab shows no spend ratio. The durable HubSpot deal ledger stores CLOSED-WON deals only,
     so open opportunities, closed-lost deals, opportunity aging, opportunity-created
     counts and the two opportunity-conversion rates are rendered "Unavailable" — never
     invented. Unavailable metrics are null plus a reason — never a fabricated $0 / 0%.
@@ -7916,7 +7920,7 @@ async def get_revenue_by_source(
     """Revenue by Acquisition Source (PR-ADS-117).
 
     Read-only. Pipeline + closed-won revenue across Google Ads, Other Paid,
-    Organic, Offline, and Unclassified. Only Google Ads carries spend/ROAS; every
+    Organic, Offline, and Unclassified. Only Google Ads carries spend and period revenue / ad spend; every
     other group is revenue-only. Leads/SQLs use contact_created_at; Won Revenue
     uses deal_close_date; both use the selected business window.
     """
@@ -8080,13 +8084,13 @@ async def get_google_ads_spend_reconcile_campaign(
 ):
     """Campaign-level Google Ads spend reconciliation drilldown (PR-ADS-122).
 
-    Proves a single ROAS campaign row's spend by comparing, for the same
+    Proves a single campaign revenue row's spend by comparing, for the same
     campaign and window: the LOCAL canonical DB total, a FRESH campaign-level
     Google Ads API total, and an optional ad-group-level status breakdown
     (enabled / paused / removed). Returns a daily breakdown plus the explicit
     variance, coverage status, rows counted, and verified date chunks.
 
-    Read-only — never writes to Google Ads and never changes the ROAS spend
+    Read-only — never writes to Google Ads and never changes the campaign spend
     source. Canonical spend stays the Google Ads campaign-level total unless this
     reconciliation proves it wrong.
     """
@@ -8216,7 +8220,7 @@ def api_spend_backfill_status(request: Request, job_id: Optional[str] = None) ->
 # ---------------------------------------------------------------------------
 # PR-ADS-124 — Google Ads Geo (country) Spend Sync + reconciliation.
 # Reads Google Ads read-only (geographic_view); writes ONLY the local canonical
-# geo table. NEVER writes to Google Ads and NEVER writes to HubSpot. Country ROAS
+# geo table. NEVER writes to Google Ads and NEVER writes to HubSpot. Country period revenue / ad spend
 # stays blocked until geo spend reconciles with canonical campaign spend.
 # ---------------------------------------------------------------------------
 
@@ -8330,8 +8334,8 @@ async def get_google_ads_geo_reconcile(
 
     Read-only. Compares canonical campaign-level spend vs canonical geo (country)
     spend, with the explicit variance, coverage + FX status, and whether Country
-    ROAS is unblockable. Powers the Revenue Health Geo Sync panel and the ROAS by
-    Country blocked card. Never fabricates a reconciliation when geo data is
+    period revenue / ad spend is unblockable. Powers the Revenue Health Geo Sync panel and the Country Revenue & Spend
+    blocked card. Never fabricates a reconciliation when geo data is
     absent (reported as no_geo_data, never £0).
     """
     from services.google_ads_geo_sync_service import build_geo_reconciliation  # noqa: PLC0415
@@ -8351,10 +8355,10 @@ async def get_google_ads_spend_coverage_audit(
 ):
     """Campaign spend-coverage audit for a window (PR-ADS-129).
 
-    Read-only. Proves WHY campaign ROAS is (un)available by classifying the
+    Read-only. Proves WHY campaign period revenue / ad spend is (un)available by classifying the
     durable coverage ledger: verified_zero_before_first_spend (complete),
     missing_chunks / not_backfilled / failed_chunks (incomplete). Powers the
-    Revenue Health spend-truth coverage note and the ROAS by Campaign diagnostic.
+    Revenue Health spend-truth coverage note and the Campaign Revenue & Spend diagnostic.
     """
     from services.google_ads_spend_service import build_campaign_spend_coverage_audit  # noqa: PLC0415
     try:
@@ -8378,7 +8382,7 @@ async def get_fx_coverage(
 ):
     """FX coverage for the canonical spend dates in a window (PR-ADS-119).
 
-    Read-only. A spend_date with no FX rate is reported missing — USD ROAS is
+    Read-only. A spend_date with no FX rate is reported missing — USD period revenue / ad spend is
     blocked until FX coverage is complete (never converted at a wrong rate).
     """
     from services.fx_service import build_fx_coverage, _window_bounds_safe  # noqa: PLC0415
@@ -8489,7 +8493,7 @@ def api_campaign_mapping_exclude(body: CampaignExcludeRequest, request: Request)
 
     For labels sourced from HubSpot/attribution that are not real Google Ads
     campaigns (offline/import/bad-UTM/CRM). The label is excluded from Google Ads
-    ROAS — it never shows as an unmapped row or a fabricated $0. Auditable
+    campaign revenue and spend — it never shows as an unmapped row or a fabricated $0. Auditable
     (approved_by/approved_at); never overwrites the raw Google Ads identity.
     """
     user = check_admin_or_token(request)
@@ -8502,6 +8506,74 @@ def api_campaign_mapping_exclude(body: CampaignExcludeRequest, request: Request)
         raise HTTPException(status_code=503, detail="campaign identity store unavailable")
     return {"status": "ok", "external_campaign_label": body.external_campaign_label,
             "match_method": "not_google_ads"}
+
+
+#: PR-ADS-161E. Readers that computed closed-won deals, customers, revenue,
+#: ROAS, CAC or verdicts from local JSON / Windsor instead of the canonical
+#: closed-won owner (docs/46, read through the reader contract, docs/48). They
+#: publish no figure: each is withheld with this reason, and the canonical
+#: replacement is named.
+LEGACY_REVENUE_WITHHELD_REASON = "legacy_local_revenue_not_canonical"
+_LEGACY_REVENUE_WITHHELD = {
+    "status": "withheld",
+    "reason": LEGACY_REVENUE_WITHHELD_REASON,
+    "revenue_status": {"status": "withheld",
+                       "reason": LEGACY_REVENUE_WITHHELD_REASON,
+                       "canonical_replacement": "/api/revenue-attribution"},
+}
+#: Snapshot fields that describe the snapshot itself, not an outcome.
+_LEGACY_SNAPSHOT_METADATA = ("id", "snapshot_id", "snapshot_date", "window",
+                             "generated_at", "created_at")
+
+
+#: Key fragments of a closed-won OUTCOME figure (a customer, won-deal or
+#: revenue count / sum / subset proof) in a legacy payload.
+_LEGACY_OUTCOME_KEY_PARTS = ("customer", "closed_won", "revenue")
+
+
+def _withhold_legacy_closed_won_outcomes(payload):
+    """PR-ADS-161E. A legacy payload with every closed-won outcome figure
+    removed, recursively: the Mailchimp attribution audit counts contacts with
+    won deals as "customers" and sums ``COALESCE(deal_amount_usd, 0)`` from the
+    legacy ``deal_source_attribution`` table — neither is the canonical
+    customer or revenue. Text (definitions, notes) is kept; numbers, booleans
+    and lists under an outcome key become None, and the payload says why.
+    """
+    def walk(value):
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                outcome = any(part in str(k).lower()
+                              for part in _LEGACY_OUTCOME_KEY_PARTS)
+                if outcome and not isinstance(v, (str, dict)):
+                    out[k] = None
+                else:
+                    out[k] = walk(v)
+            return out
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        return value
+    if not isinstance(payload, dict):
+        return payload
+    return {**walk(payload),
+            "closed_won_outcomes_status": {
+                "status": "withheld",
+                "reason": "legacy_deal_source_attribution_not_canonical",
+                "canonical_replacement": "/api/revenue-attribution"}}
+
+
+def _withhold_legacy_roas_snapshot(snapshot):
+    """A persisted ROAS snapshot with every outcome figure removed.
+
+    The snapshot's spend, revenue, ACV/LTV, deal counts, ROAS, LTV/CAC and
+    verdict counts were computed from local JSON by the retired chain. Withheld
+    means absent: only the metadata and the withholding status are returned.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    out = {k: snapshot[k] for k in _LEGACY_SNAPSHOT_METADATA if k in snapshot}
+    out.update(_LEGACY_REVENUE_WITHHELD)
+    return out
 
 
 @app.get("/api/reports/roas/campaigns")
@@ -8519,24 +8591,19 @@ async def get_roas_campaigns(
     Spend source: Google Ads API.
     Google Ads conversion value is NOT used.
     """
-    from analysis.roas_calculator import compute_all_campaign_roas
-
     window_days = _parse_window(window)
 
-    try:
-        campaigns = compute_all_campaign_roas(window_days=window_days)
-    except Exception as exc:
-        log.error("ROAS campaign computation failed: %s", exc)
-        raise HTTPException(status_code=500, detail="ROAS computation failed") from exc
-
+    # PR-ADS-161E: this report counted won deals as customers and summed
+    # revenue from local JSON, outside the canonical closed-won owner. It no
+    # longer computes anything: every figure is withheld with the reason, and
+    # the canonical replacement is named.
     return {
         "window": f"{window_days}d",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_truth": "hubspot_won_deals_plus_windsor_spend",
         "google_ads_conversion_value_used": False,
         "deprecated": True,
         "superseded_by": "/api/revenue-attribution",
-        "campaigns": campaigns,
+        **_LEGACY_REVENUE_WITHHELD,
     }
 
 
@@ -8551,25 +8618,16 @@ async def get_roas_countries(
     sources). Retained only for backward compatibility; no frontend path uses
     it. This is NOT competing truth — do not build new consumers on it.
     """
-    from analysis.roas_calculator import compute_all_country_roas
-
     window_days = _parse_window(window)
 
-    try:
-        countries = compute_all_country_roas(window_days=window_days)
-    except Exception as exc:
-        log.error("ROAS country computation failed: %s", exc)
-        raise HTTPException(status_code=500, detail="ROAS computation failed") from exc
-
+    # PR-ADS-161E: withheld — see get_roas_campaigns.
     return {
         "window": f"{window_days}d",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_truth": "hubspot_won_deals_plus_windsor_spend",
         "google_ads_conversion_value_used": False,
-        "country_level_estimate": True,
         "deprecated": True,
         "superseded_by": "/api/revenue-attribution",
-        "countries": countries,
+        **_LEGACY_REVENUE_WITHHELD,
     }
 
 
@@ -8640,9 +8698,9 @@ async def get_roas_snapshot_latest(
     if snapshot is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No ROAS snapshot found for window={window_days}d",
+            detail=f"No legacy snapshot found for window={window_days}d",
         )
-    return snapshot
+    return _withhold_legacy_roas_snapshot(snapshot)
 
 
 @app.get("/api/reports/roas/snapshots")
@@ -8664,7 +8722,8 @@ async def get_roas_snapshots(
         "window": f"{window_days}d",
         "limit": limit,
         "count": len(snapshots),
-        "snapshots": snapshots,
+        "snapshots": [_withhold_legacy_roas_snapshot(s) for s in snapshots],
+        **_LEGACY_REVENUE_WITHHELD,
     }
 
 
@@ -8693,7 +8752,23 @@ async def get_gclid_readiness(
         log.error("GCLID readiness audit failed: %s", exc)
         raise HTTPException(status_code=500, detail="GCLID readiness audit failed") from exc
 
-    return result
+    # PR-ADS-161E: the audit counts won deals in a local JSON file — not the
+    # canonical closed-won population — so that count is not published. The
+    # GCLID coverage figures stay: they measure joinability, not outcomes.
+    # Every deal count it reports is a slice of that same local population —
+    # direct + without GCLID re-adds to the won-deal count, and the three
+    # joinability tiers partition it — so all of them are withheld together
+    # (withheld means absent, not recoverable). Windsor-row coverage is an
+    # independent population and stays.
+    summary = dict(result.get("summary") or {})
+    for key in ("won_deals", "deals_with_direct_gclid", "deals_with_contact_gclid",
+                "deals_without_gclid", "tier_1_possible_matches",
+                "tier_2_source_tag_matches", "tier_3_estimated_required"):
+        summary[key] = None
+    summary["won_deals_status"] = {
+        "status": "withheld", "reason": LEGACY_REVENUE_WITHHELD_REASON,
+        "canonical_replacement": "/api/revenue-attribution"}
+    return {**result, "summary": summary}
 
 
 @app.get("/api/attribution/confidence-summary")
@@ -8703,7 +8778,7 @@ async def get_attribution_confidence_summary(
 ):
     """Attribution Confidence Summary (PR-ADS-082).
 
-    Returns confidence tier distribution across ROAS data.
+    Returns confidence tier distribution across legacy campaign revenue rows.
     Uses latest snapshot if available, otherwise computes live.
     Read-only — no writes to any external system.
     """
@@ -8878,8 +8953,9 @@ def api_mailchimp_audit(request: Request, max_campaigns: int = 10,
     hubspot_window_days = max(1, min(1825, int(hubspot_window_days)))
     try:
         from services.mailchimp_audit_service import run_audit  # noqa: PLC0415
-        return run_audit(max_campaigns=max_campaigns,
-                         hubspot_window_days=hubspot_window_days)
+        return _withhold_legacy_closed_won_outcomes(
+            run_audit(max_campaigns=max_campaigns,
+                      hubspot_window_days=hubspot_window_days))
     except Exception as exc:  # noqa: BLE001
         log.error("[api/mailchimp/audit] failed: %s", exc)
         return {"status": "failed", "detail": "attribution audit failed"}

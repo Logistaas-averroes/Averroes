@@ -5,7 +5,7 @@ PR-ADS-153F — THE canonical country identity contract.
 
 Before this module the product had three different country join rules:
 
-  * ROAS by Country grouped on a raw lowercased country string,
+  * Country Revenue & Spend grouped on a raw lowercased country string,
   * Dashboard Countries grouped ISO-code-first and fell back to a normalized
     name, and
   * the country drilldown matched by code and then by normalized name.

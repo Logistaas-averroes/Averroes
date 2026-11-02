@@ -38,6 +38,7 @@ is the whole point of the mart: one brain, one truth, four renderings.
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 # day, not UTC. See services/canonical_contract.resolve_canonical_window.
 from services.canonical_contract import resolve_canonical_window
 from services import canonical_contract
+from analysis import closed_won_truth as cwt
 from analysis import country_identity, revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -82,6 +84,23 @@ def _round2(value):
         return round(float(value), 2)
     except (TypeError, ValueError):
         return None
+
+
+def _with_canonical_reason(metric: dict, canonical: dict | None) -> dict:
+    """A metric the mart reads from the scope ladder, published only when the
+    CANONICAL verdict publishes it too (PR-ADS-161E).
+
+    When either side withholds, the canonical status and reason are the ones
+    published — one decision, one status and one reason code on every surface
+    (a window withheld for an undated won deal is "withheld", a CRM finding,
+    not "unavailable"). The legacy ``revenue_total_unavailable_reason`` field
+    keeps its own vocabulary.
+    """
+    if not canonical or not canonical.get("status"):
+        return metric
+    if canonical.get("status") != cwt.PUBLISHED:
+        return cwt.metric(None, canonical["status"], canonical.get("reason"))
+    return metric
 
 
 def _window_block(core: dict) -> dict:
@@ -307,14 +326,34 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
     # is None, so summary.spend_usd is None and ROAS (already gated upstream by
     # spend_trusted) stays None too. Native spend lives only in
     # spend_truth.native_spend.
+    # PR-ADS-161E: customers are the CANONICAL customer metric — distinct proven
+    # HubSpot companies behind the window's won deals — never the deal count,
+    # which is `closed_won_deals`. Withheld (None, with its reason) whenever any
+    # member deal's company is unresolved, stale or unobserved.
+    truth = core.get("closed_won_truth") or {}
+    canonical_metrics = truth.get("canonical_metrics") or {}
+    customers_metric = canonical_metrics.get("customers") or cwt.metric(
+        None, cwt.UNAVAILABLE,
+        truth.get("reason") or ladder.get("reason")
+        or canonical_revenue.REASON_LEDGER_UNREADABLE)
+    deals_value = all_source.get("won_deals") if ladder_available else None
+    revenue_value = (all_source.get("revenue_usd")
+                     if all_source_revenue_ok else None)
+    revenue_reason = (None if all_source_revenue_ok else (
+        all_source.get("revenue_total_unavailable_reason")
+        if ladder_available else ladder.get("reason")))
+    core_metrics = summary.get("metrics") or {}
     return {
         "spend_usd": spend_truth.get("usd_spend"),
         "leads": summary.get("leads"),
         "sqls": summary.get("sqls"),
         # Business totals — all_source. None (not 0) when the canonical ledger
         # could not be read or its coverage is unproven.
-        "customers": all_source.get("won_deals") if ladder_available else None,
-        "won_revenue_usd": all_source.get("revenue_usd") if all_source_revenue_ok else None,
+        "closed_won_deals": deals_value,
+        "customers": customers_metric.get("value"),
+        "customers_status": customers_metric.get("status"),
+        "customers_reason": customers_metric.get("reason"),
+        "won_revenue_usd": revenue_value,
         "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
         "revenue_available": ladder_available,
@@ -351,13 +390,64 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
         "failed_associations": (all_source.get("failed_associations")
                                 if ladder_available else None),
         # Advertising subset — the ROAS numerator and its scope. Same rule: a
-        # partial sum is not the subset's total either.
+        # partial sum is not the subset's total either. Customers here are the
+        # distinct companies of the campaign-attributable deals (not additive
+        # with any other subset).
+        "attributed_closed_won_deals": summary.get("closed_won_deals"),
         "attributed_customers": summary.get("customers"),
         "attributed_won_revenue_usd": (_round2(summary.get("won_revenue"))
-                                       if attributed_revenue_ok else None),
+                                       if attributed_revenue_ok
+                                       and summary.get("won_revenue") is not None
+                                       else None),
         "attributed_revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
-        "roas": summary.get("roas"),
+        # PR-ADS-161E decision 1: the close-date ratios under explicit names.
+        # Certified ROAS / CAC need one acquisition cohort and are never
+        # published: ``roas`` / ``cac`` stay None, their metrics unavailable.
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: summary.get(cwt.PERIOD_REVENUE_PER_AD_SPEND),
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: summary.get(cwt.PERIOD_SPEND_PER_CUSTOMER_WON),
+        "roas": None,
+        "cac": None,
+        # Every canonical value with its status and reason, so a page renders
+        # "Withheld — <reason>" rather than a blank or a zero.
+        "metrics": {
+            # The canonical verdict, so a withheld count says "withheld" (an
+            # undated or conflicting won deal) and an outage "unavailable".
+            "closed_won_deals": canonical_metrics.get("closed_won_deals") or cwt.metric(
+                deals_value,
+                cwt.PUBLISHED if deals_value is not None else cwt.UNAVAILABLE,
+                truth.get("reason") or ladder.get("reason")),
+            "customers": customers_metric,
+            "revenue_usd": _with_canonical_reason(cwt.metric(
+                revenue_value,
+                cwt.PUBLISHED if all_source_revenue_ok else (
+                    cwt.WITHHELD if ladder_available else cwt.UNAVAILABLE),
+                revenue_reason), canonical_metrics.get("revenue_usd")),
+            "attributed_closed_won_deals": core_metrics.get("closed_won_deals"),
+            "attributed_customers": core_metrics.get("customers"),
+            "attributed_revenue_usd": core_metrics.get("revenue_usd"),
+            cwt.PERIOD_REVENUE_PER_AD_SPEND: core_metrics.get(cwt.PERIOD_REVENUE_PER_AD_SPEND),
+            cwt.PERIOD_SPEND_PER_CUSTOMER_WON: core_metrics.get(cwt.PERIOD_SPEND_PER_CUSTOMER_WON),
+            "roas": cwt.certified_roas(),
+            "cac": cwt.certified_cac(),
+        },
+        # The Google Ads-source scope (Google Ads evidence, any campaign): the
+        # population the country rows partition. Deals add up; customers do not.
+        "google_ads_source_closed_won_deals": _scope_value(
+            truth, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE, "closed_won_deals"),
+        "google_ads_source_customers": _scope_value(
+            truth, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE, "customers"),
+        "google_ads_source_won_revenue_usd": _scope_value(
+            truth, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE, "revenue_usd"),
+        "cohort": "closed_won_close_date",
+        "customer_definition": "distinct proven HubSpot company ids",
+        "campaign_placement_gate": truth.get("campaign_placement_gate"),
     }
+
+
+def _scope_value(truth: dict, scope: str, metric: str):
+    """One canonical scope metric's VALUE (None unless published)."""
+    m = (((truth or {}).get("scope_metrics") or {}).get(scope) or {}).get(metric)
+    return (m or {}).get("value")
 
 
 def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
@@ -378,7 +468,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             "code": "fx_coverage",
             "message": (
                 "FX coverage is "
-                f"'{spend_truth['fx_status']}' — USD spend / ROAS are withheld "
+                f"'{spend_truth['fx_status']}' — USD spend and period revenue / ad spend are withheld "
                 "until every spend day has a daily FX rate."
             ),
         })
@@ -401,14 +491,14 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
                      "spend backfill for that period, or verify it was zero spend.")
         elif req_start and first_spend and first_spend > req_start:
             extra = (f" Durable spend rows start {first_spend}; verify "
-                     f"{req_start} → {first_spend} was zero spend to unblock ROAS.")
+                     f"{req_start} → {first_spend} was zero spend to unblock period revenue / ad spend.")
         else:
             extra = ""
         diags.append({
             "code": "campaign_spend_coverage",
             "message": (
                 "Canonical campaign spend coverage is "
-                f"'{spend_truth['campaign_spend_status']}' — ROAS is unavailable "
+                f"'{spend_truth['campaign_spend_status']}' — period revenue / ad spend is unavailable "
                 f"(never a fake $0) until coverage is complete.{extra}"
             ),
         })
@@ -417,7 +507,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             "code": "country_spend_reconciliation",
             "message": (
                 "Country (geo) spend does not reconcile with canonical campaign "
-                "spend within tolerance — Country ROAS is withheld."
+                "spend within tolerance — country period revenue / ad spend is withheld."
             ),
         })
     if spend_truth["country_spend_status"] == "reconciled_with_residual":
@@ -427,7 +517,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
         diags.append({
             "code": "country_spend_residual",
             "message": (
-                "Country ROAS is shown with an explicit "
+                "Country period revenue / ad spend is shown with an explicit "
                 f"'{country_identity.RESIDUAL_LABEL}' residual of {res_native} {cur}"
                 f"{'' if res_pct is None else f' ({res_pct}%)'} — Google Ads assigned "
                 "most spend to countries, and this shortfall is spend the geographic "
@@ -441,8 +531,9 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
         diags.append({
             "code": "source_spend_scope",
             "message": (
-                "Only the Google Ads source carries spend/ROAS; every other "
-                "source group is revenue-only (ROAS unavailable, never $0)."
+                "Only the Google Ads source carries spend and period revenue / ad "
+                "spend (a non-cohort operational ratio); every other source group "
+                "is revenue-only (no ratio, never $0)."
             ),
         })
     return diags
@@ -464,16 +555,15 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
         health.get("lead_date_grain_status") == "event_date"
         and health.get("lead_metrics_status") != "withheld"
     )
-    if health.get("revenue_integration_status"):
-        revenue_integration_connected = (
-            health.get("revenue_integration_status") == "connected"
-        )
-    else:  # backward-compatible fallback for older payloads
-        revenue_integration_connected = (
-            health.get("revenue_attribution_status") != "not_wired_or_no_closed_won"
-        )
+    # PR-ADS-161E: the canonical verdict decides. This used to read
+    # `revenue_integration_connected()`, an existence check over the legacy
+    # `gclid_attribution` table — a table the closed-won figures no longer come
+    # from — and blanked canonical customers and revenue on it. A missing or
+    # unrecognised status is not evidence of availability.
+    canonical_revenue_available = (
+        health.get("canonical_revenue_status") == "canonical_available")
 
-    revenue_decision_ready = bool(lead_metrics_ready and revenue_integration_connected)
+    revenue_decision_ready = bool(lead_metrics_ready and canonical_revenue_available)
     spend_decision_ready = spend_truth["campaign_spend_status"] == "verified" and \
         spend_truth["fx_status"] == "verified"
     # PR-ADS-131: country ROAS is decision-ready when the spend denominator is
@@ -487,13 +577,16 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
         "revenue_decision_ready": revenue_decision_ready,
         "spend_decision_ready": bool(spend_decision_ready),
         "country_decision_ready": country_decision_ready,
-        "roas_ready": (core.get("summary") or {}).get("roas") is not None,
+        # PR-ADS-161E: whether the period revenue / ad spend ratio is computable
+        # (certified ROAS never is — no acquisition-cohort join).
+        "period_ratio_ready": ((core.get("summary") or {})
+                               .get(cwt.PERIOD_REVENUE_PER_AD_SPEND) is not None),
         "lead_metrics_ready": bool(lead_metrics_ready),
-        "revenue_integration_connected": bool(revenue_integration_connected),
+        "canonical_revenue_available": bool(canonical_revenue_available),
         # Statuses the blocked-state renderer needs (presentation only).
         "lead_date_grain_status": health.get("lead_date_grain_status"),
         "lead_metrics_status": health.get("lead_metrics_status"),
-        "revenue_integration_status": health.get("revenue_integration_status"),
+        "canonical_revenue_status": health.get("canonical_revenue_status"),
         "revenue_attribution_status": health.get("revenue_attribution_status"),
         "missing_contact_created_at_count": health.get(
             "missing_contact_created_at_count", 0
@@ -544,6 +637,7 @@ def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> d
     return payload
 
 
+@_canonical_snapshot.single_snapshot
 def build_revenue_decision_mart(
     view: str = "campaign",
     window: str = "current_quarter",
@@ -580,7 +674,7 @@ def build_revenue_decision_mart(
     payload = _view_payload(view, window, core, now)
     diagnostics = _diagnostics(core, view, spend_truth)
 
-    # PR-ADS-152: the mart top-line (and ROAS by Campaign) is the
+    # PR-ADS-152: the mart top-line (and Campaign Revenue & Spend) is the
     # campaign-attributable SQL subset — campaign ROAS requires campaign identity.
     # Disclose that scope explicitly and reconcile against the canonical
     # population, so the top-line is never mistaken for every Google Ads-source SQL.
@@ -601,7 +695,7 @@ def build_revenue_decision_mart(
         "window": window_block,
         "spend_truth": spend_truth,
         # PR-ADS-153F §8: the shared country-truth disclosure, present on the
-        # country view so ROAS by Country and Dashboard Countries disclose the
+        # country view so Country Revenue & Spend and Dashboard Countries disclose the
         # SAME facts — sources, scope, exact UTC bounds, freshness, coverage,
         # reconciliation, residual, and whether the residual was accepted.
         "country_truth": (geo_gate.build_country_truth_disclosure(
@@ -655,12 +749,21 @@ def build_revenue_decision_mart(
                                   else canonical_contract.TRUTH_NOT_READY),
                  "unavailable_reason": summary.get("revenue_total_unavailable_reason"),
                  "violation_codes": summary.get("revenue_total_violation_codes")},
+                # PR-ADS-161E: deals and customers are two metrics. Customers
+                # are ready only when the canonical customer verdict publishes.
+                {"metric": "closed_won_deals",
+                 "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                 "scope": "all_source_business_revenue",
+                 "truth_status": (canonical_contract.TRUTH_READY
+                                  if summary.get("closed_won_deals") is not None
+                                  else canonical_contract.TRUTH_NOT_READY)},
                 {"metric": "customers",
                  "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
                  "scope": "all_source_business_revenue",
                  "truth_status": (canonical_contract.TRUTH_READY
-                                  if summary.get("revenue_available")
-                                  else canonical_contract.TRUTH_NOT_READY)},
+                                  if summary.get("customers_status") == cwt.PUBLISHED
+                                  else canonical_contract.TRUTH_NOT_READY),
+                 "unavailable_reason": summary.get("customers_reason")},
                 # The advertising SUBSET. Same authority, different population —
                 # so it carries its own scope and is never compared with the
                 # all-source pair above.
@@ -686,6 +789,13 @@ def build_revenue_decision_mart(
                      [] if summary.get("attributed_won_revenue_usd") is not None
                      else _attributed_disclosure.get("violation_codes") or [])},
                 # The COUNT is complete whatever the amounts are.
+                {"metric": "campaign_attributed_closed_won_deals",
+                 "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                 "scope": "campaign_attributable_revenue",
+                 "truth_status": (
+                     canonical_contract.TRUTH_READY
+                     if summary.get("attributed_closed_won_deals") is not None
+                     else canonical_contract.TRUTH_NOT_READY)},
                 {"metric": "campaign_attributed_customers",
                  "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
                  "scope": "campaign_attributable_revenue",
@@ -773,6 +883,7 @@ def _difference_reasons(page_key: str, spend_truth: dict, *, status: str) -> lis
     return reasons
 
 
+@_canonical_snapshot.single_snapshot
 def build_revenue_performance_audit(
     window: str, now: datetime | None = None
 ) -> dict:
@@ -827,8 +938,8 @@ def build_revenue_performance_audit(
 
     tolerance = 0.02  # mirrors SPEND_VARIANCE_TOLERANCE for reconciliation
     pages_spec = [
-        ("roas_by_campaign", "ROAS by Campaign", "spend", campaign_page_spend, mart_spend),
-        ("roas_by_country", "ROAS by Country", "spend", country_page_spend, mart_spend),
+        ("roas_by_campaign", "Campaign Revenue & Spend", "spend", campaign_page_spend, mart_spend),
+        ("roas_by_country", "Country Revenue & Spend", "spend", country_page_spend, mart_spend),
         ("revenue_by_source", "Revenue by Source", "spend", source_google_spend, mart_spend),
         ("deals", "Deals", "revenue", deals_revenue, mart_revenue),
     ]

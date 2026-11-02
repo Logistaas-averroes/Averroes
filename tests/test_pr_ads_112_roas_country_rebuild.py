@@ -108,7 +108,9 @@ def test_blocked_state_returns_before_summary_and_table():
 
 def test_country_blocked_copy():
     fn = _fn("function renderCountryRevenueBlockedState", span=1800)
-    assert "Country ROAS is not ready yet" in fn
+    # PR-ADS-161E: the page is "Country Revenue & Spend"; never called ROAS.
+    assert "Country revenue &amp; spend is not ready yet" in fn
+    assert "ROAS" not in fn
     assert "Country spend" in fn
     # PR-ADS-115: next action points at the real Lead Event-Date Reconciliation
     # workflow and the geo sync — never the nonexistent "HubSpot lead re-sync".
@@ -129,15 +131,20 @@ def test_summary_is_canonical_mart_summary():
     assert "roasRevenueSummary" not in body
 
 
-# ── 6. Summary and table use the multiple ROAS formatter ─────────────────────
+# ── 6. Summary and table use the multiple period-ratio formatter ─────────────
 
 
-def test_country_roas_uses_multiple_notation():
+def test_country_period_ratio_uses_multiple_notation():
+    # PR-ADS-161E: the close-date ratio is the period ratio, never ROAS. The
+    # totals strip goes through the canonical adapter (no verdict → dashValue:
+    # null → Unavailable; a withheld verdict names its reason); rows likewise.
     summary = _fn("function renderRoasCountrySummary", span=900)
-    assert "fmtRoasMultiple(s.roas)" in summary
+    assert 'rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio' in summary
+    assert "s.roas" not in summary
     assert "fmtRoas(s.roas)" not in summary
-    table = _fn("function renderRoasCountryTable", span=1600)
-    assert "fmtRoasMultiple(r.roas)" in table
+    table = _fn("function renderRoasCountryTable", span=3600)
+    assert 'rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio' in table
+    assert 'rowMetricHtml(r, "roas"' not in table
     assert "fmtRoas(r.roas)" not in table
 
 
@@ -146,7 +153,7 @@ def test_country_roas_uses_multiple_notation():
 
 def test_country_sort_is_business_value_first():
     fn = _fn("function sortRoasCountryRows", span=400)
-    order = ["customers", "won_revenue", "sqls", "spend"]
+    order = ["closed_won_deals", "won_revenue", "sqls", "spend"]   # PR-ADS-161E
     positions = [fn.find(k) for k in order]
     assert all(p != -1 for p in positions)
     assert positions == sorted(positions), "sort keys not in business-value order"
@@ -161,7 +168,7 @@ def test_safe_empty_state_differs_from_blocked():
     fn = _fn("function renderRoasCountrySafeEmptyState", span=600)
     assert "No country revenue found for this window" in fn
     assert "not ready" not in fn.lower()
-    assert "Country ROAS is not ready yet" not in fn
+    assert "Country revenue &amp; spend is not ready yet" not in fn
 
 
 # ── 9. unknown / blank country renders as Unmapped ───────────────────────────
@@ -204,7 +211,9 @@ def test_business_window_selector_unchanged():
     m = re.search(r'id="page-roas-countries".*?</section>', HTML, re.DOTALL)
     assert m
     section = m.group(0)
-    assert "ROAS by Country" in section
+    # PR-ADS-161E: renamed from "ROAS by Country".
+    assert "Country Revenue &amp; Spend" in section
+    assert "ROAS by Country" not in section
     for win in ("current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"):
         assert f'value="{win}"' in section
     for ad in ('value="7d"', 'value="14d"', 'value="30d"', 'value="60d"'):
@@ -217,5 +226,6 @@ def test_business_window_selector_unchanged():
 def test_country_table_columns_are_correct():
     fn = _fn("function renderRoasCountryTable", span=1600)
     for col in ("Country", "Spend", "Leads", "SQLs", "Customers",
-                "Won Revenue", "ROAS", "Decision"):
+                "Won Revenue", "${PERIOD_RATIO_LABEL}", "Decision"):
         assert f">{col}<" in fn, f"country table missing column {col}"
+    assert ">ROAS<" not in fn, "period ratio column must not be labelled ROAS"

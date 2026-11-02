@@ -221,7 +221,6 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
         repo, "fetch_campaign_identity",
         lambda cid=None: {"available": True, "mappings": []},
     )
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     # PR-ADS-153E-B: every revenue read in the mart now goes through the
     # canonical deal ledger, so ONE fixture drives the campaign rows, the deal
     # ledger and the source breakdown — which is exactly the property the mart
@@ -565,7 +564,8 @@ def test_canonical_output_shape(monkeypatch):
     for key in ("native_currency", "native_spend", "usd_spend", "fx_status",
                 "campaign_spend_status", "country_spend_status"):
         assert key in mart["spend_truth"]
-    for key in ("spend_usd", "leads", "sqls", "customers", "won_revenue_usd", "roas"):
+    for key in ("spend_usd", "leads", "sqls", "closed_won_deals", "customers",
+                "won_revenue_usd", "period_revenue_per_ad_spend", "roas"):
         assert key in mart["summary"]
     assert mart["google_ads_conversion_value_used"] is False
     assert isinstance(mart["rows"], list)
@@ -573,9 +573,20 @@ def test_canonical_output_shape(monkeypatch):
     # Leads/SQLs/customers are the shared business-window totals.
     assert mart["summary"]["leads"] == 5
     assert mart["summary"]["sqls"] == 2
-    assert mart["summary"]["customers"] == 1
+    # PR-ADS-161E: one closed-won DEAL; customers (distinct proven companies)
+    # are withheld here — no deal→company evidence is stored in this fixture.
+    assert mart["summary"]["closed_won_deals"] == 1
+    assert mart["summary"]["customers"] is None
+    assert mart["summary"]["customers_status"] in ("withheld", "unavailable")
     assert mart["summary"]["won_revenue_usd"] == 9000.0
-    assert mart["summary"]["roas"] == round(9000.0 / 13000.0, 2)
+    # PR-ADS-161E decision 1: the close-date ratio publishes under its explicit
+    # name; certified attribution ROAS is never published (not one acquisition
+    # cohort) and its metric names that reason.
+    assert mart["summary"]["period_revenue_per_ad_spend"] == round(9000.0 / 13000.0, 2)
+    assert mart["summary"]["roas"] is None
+    from analysis import closed_won_truth as cwt
+    assert mart["summary"]["metrics"]["roas"] == {
+        "value": None, "status": "unavailable", "reason": cwt.R_ROAS_NOT_CERTIFIED}
 
 
 # ── API endpoints (read-only, behind auth) ──────────────────────────────────

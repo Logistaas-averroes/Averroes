@@ -58,6 +58,8 @@ Read-only. No writes to HubSpot, Google Ads, Mailchimp or the database.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, time, timezone
 
 from analysis.deal_currency import (
@@ -233,32 +235,96 @@ def unavailable(reason, *, scope=DEFAULT_SCOPE, window=None, start=None,
     }
 
 
+# PR-ADS-161E — one coherent snapshot per page. Inside ``one_snapshot()`` every
+# closed-won read (``load_won_deals`` for any window, the truth service, the
+# exception workbench) is answered from ONE READ ONLY universe, so a page made
+# of several reads cannot disagree with itself mid-sync.
+_SNAPSHOT: ContextVar = ContextVar("canonical_closed_won_snapshot",
+                                   default=None)
+
+
+@contextmanager
+def one_snapshot():
+    """Read the closed-won universe once for everything inside the block.
+
+    Nested blocks share the outermost snapshot.
+    """
+    if _SNAPSHOT.get() is not None:
+        yield
+        return
+    token = _SNAPSHOT.set({})
+    try:
+        yield
+    finally:
+        _SNAPSHOT.reset(token)
+
+
+def snapshot_campaign_resolver(now=None) -> tuple:
+    """Campaign Evidence's resolver (``ccr.campaign_resolver``), built once per
+    snapshot and account day: it reads all-time canonical spend and the
+    approved identity mappings, which do not change inside one page."""
+    from services import canonical_customer_revenue_service as ccr
+
+    cache = _SNAPSHOT.get()
+    key = ("campaign_resolver", (now or datetime.now(timezone.utc)).date())
+    if cache is not None and key in cache:
+        return cache[key]
+    built = ccr.campaign_resolver(now)
+    if cache is not None:
+        cache[key] = built
+    return built
+
+
+def single_snapshot(fn):
+    """Decorate a page builder so all of its closed-won reads share ONE
+    snapshot (:func:`one_snapshot`)."""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        with one_snapshot():
+            return fn(*args, **kwargs)
+    return _wrapped
+
+
 def load_won_deals(window=None, *, start=None, end=None, now=None,
                    require_ready: bool = True) -> dict:
-    """Read the canonical won-deal population for one business window.
+    """The canonical won-deal population of one business window.
 
-    This is the single database read behind every migrated page. Callers pass
-    the result back into :func:`build_snapshot` for each scope they need, so a
-    page showing all-source revenue beside campaign-attributed revenue proves
-    the two came from ONE population — the subset relationship is a filter over
-    the same rows, not a second query that might disagree.
+    PR-ADS-161E: this is now a reader of THE closed-won truth
+    (``services.canonical_customer_revenue_service.window_view``), not a second
+    windowed query. The population, its window membership and every verdict
+    are the canonical ones:
+
+    * members are ``hs_is_closed_won IS TRUE`` deals with an exact close date
+      inside ``[start, end)`` and not after now — a close later today is in no
+      window yet; All Time also holds the undated won deals (the legacy query
+      ``deal_close_date < tomorrow`` dropped them and admitted closes later
+      today);
+    * the deal count is released only when the canonical verdict publishes it.
+      An undated won deal, or a won flag/stage disagreement, withholds a
+      finite window's count: the result is then ``available: False`` with the
+      canonical ``status`` and ``reason``, never a population missing a deal;
+    * ``publication`` carries the canonical verdict for deals, revenue and
+      customers, ``customers`` the canonical customer metric (distinct proven
+      HubSpot companies), and ``company_ids_by_deal`` the identity map
+      :func:`subset_metrics` needs to count customers in a subset.
+
+    Callers pass the result back into :func:`build_snapshot` / the scope
+    ladder / :func:`subset_metrics`, so a page's figures share one population.
 
     Args:
         window: a business-window key from ``analysis.business_windows``. When
             given it fully determines the bounds; ``start``/``end`` are ignored.
-        start/end: explicit bounds for callers that already resolved a window
-            (``end`` EXCLUSIVE). Used by the trend/series consumers.
+        start/end: explicit half-open bounds (``end`` EXCLUSIVE) for the
+            trend/series consumers; evaluated by the same canonical membership.
         now: reference time, for deterministic tests.
-        require_ready: enforce the coverage gate. Only the audit/diagnostic
-            paths may pass False, and they must say so in their output.
-
-    Returns ``{available, deals, readiness, ...}``. On any failure the result is
-    an ``unavailable`` block — the caller never receives a partial population it
-    could mistake for a complete one.
+        require_ready: retained for signature compatibility. The canonical
+            truth never releases a population whose coverage is unproven.
     """
-    from analysis.business_windows import is_valid_window, resolve_window, get_window_bounds
-    from db import deal_ledger_repository as ledger_repo
-    from services.revenue_reconciliation_service import check_sync_coverage
+    from analysis import closed_won_truth as cwt
+    from analysis.business_windows import is_valid_window, resolve_window
+    from services import canonical_customer_revenue_service as ccr
 
     resolved = None
     if window is not None:
@@ -266,54 +332,272 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
             return unavailable(REASON_UNKNOWN_WINDOW, window=window,
                                detail=f"unknown business window '{window}'")
         resolved = resolve_window(window, now=now)
-        start, end = get_window_bounds(window, now=now)
+        bounds = ccr.window_bounds(ccr.WINDOW_BUSINESS, window, now)
+        start, end = bounds["start"], bounds["end"]
+        view_args = {"window_type": ccr.WINDOW_BUSINESS, "window_key": window}
+    else:
+        # Normalize BEFORE anything else reads or reports the bounds, so the
+        # value membership is evaluated with is the value the response
+        # advertises.
+        start, end = _utc_bound(start), _utc_bound(end)
+        view_args = {"start": start, "end": end}
 
-    # Normalize BEFORE anything else reads or reports the bounds, so the value
-    # the ledger is queried with is the value the response advertises.
-    start, end = _utc_bound(start), _utc_bound(end)
+    universe = load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
+    sync_row = universe.get("sync_state")
+    as_of = _as_of(sync_row)
+    if not universe.get("available"):
+        return {**unavailable(REASON_LEDGER_UNREADABLE, window=window,
+                              start=start, end=end, resolved=resolved,
+                              as_of=as_of,
+                              detail=universe.get("reason")
+                              or universe.get("error")),
+                **_canonical_block(None, cwt.UNAVAILABLE,
+                                   REASON_LEDGER_UNREADABLE)}
 
-    sync_res = ledger_repo.fetch_sync_state()
-    as_of = _as_of(sync_res.get("row"))
-
-    # Coverage first: a readable ledger with unproven coverage is the exact
-    # failure 153E-A2 was built to catch — it answers every query happily while
-    # holding an unknown fraction of history.
-    findings = check_sync_coverage(sync_res)
-    if require_ready and findings:
-        codes = {f["code"] for f in findings}
-        return unavailable(
+    view = ccr.window_view(**view_args, now=now, universe=universe)
+    truth = view["truth"]
+    publication = truth.get("publication") or {}
+    findings = universe.get("coverage_findings") or []
+    if findings:
+        # Coverage first: a readable ledger with unproven coverage answers
+        # every query while holding an unknown fraction of history.
+        return {**unavailable(
             REASON_COVERAGE_NOT_PROVEN, window=window, start=start, end=end,
-            resolved=resolved, as_of=as_of, violation_codes=codes,
-            detail="; ".join(f["message"] for f in findings))
+            resolved=resolved, as_of=as_of,
+            violation_codes={f["code"] for f in findings},
+            detail="; ".join(f["message"] for f in findings)),
+            **_canonical_block(truth, cwt.UNAVAILABLE,
+                               REASON_COVERAGE_NOT_PROVEN)}
 
-    deals_res = ledger_repo.fetch_won_deals(start, end)
-    if not deals_res.get("available"):
-        return unavailable(REASON_LEDGER_UNREADABLE, window=window, start=start,
-                           end=end, resolved=resolved, as_of=as_of,
-                           detail=deals_res.get("reason"))
+    deal_pub = publication.get("closed_won_deals") or {}
+    if deal_pub.get("status") != cwt.PUBLISHED or view["members"] is None:
+        # The canonical deal count is withheld (an undated won deal, or a won
+        # flag/stage disagreement): no population is released, so no page can
+        # publish a count, a sum or a ratio over an incomplete one.
+        return {**unavailable(
+            deal_pub.get("reason") or REASON_LEDGER_UNREADABLE,
+            window=window, start=start, end=end, resolved=resolved,
+            as_of=as_of, detail=_withheld_detail(truth)),
+            **_canonical_block(truth, deal_pub.get("status")
+                               or cwt.UNAVAILABLE, deal_pub.get("reason"))}
 
-    states_res = ledger_repo.fetch_won_state_counts(start, end)
-
+    membership = truth.get("membership") or {}
     return {
         "available": True,
         "reason": None,
         "source": CANONICAL_SOURCE,
         **_window_block(window, start, end, resolved),
         "as_of": as_of,
-        "deals": deals_res.get("rows") or [],
-        "sync_state": sync_res.get("row"),
+        "deals": [dict(r) for r in view["members"]],
+        "sync_state": sync_row,
         "readiness": {
             "enforced": bool(require_ready),
-            "ok": not findings,
-            "violation_codes": sorted({f["code"] for f in findings}),
-            "violations": [f["message"] for f in findings],
+            "ok": True,
+            "violation_codes": [],
+            "violations": [],
         },
         # NULL, not 0: an unreadable state count must not render as "no deals
         # with an unknown won state".
-        "unknown_won_state_deals": (
-            (states_res.get("counts") or {}).get("unknown_won")
-            if states_res.get("available") else None),
+        "unknown_won_state_deals": membership.get("unknown_won_state_deals"),
+        "undated_won_deals_included": (membership.get("undated_won_deals")
+                                       if membership.get("undated_included")
+                                       else 0),
+        "company_ids_by_deal": view["company_ids_by_deal"],
+        **_canonical_block(truth, cwt.PUBLISHED, None),
         "legacy_fallback_used": False,
+    }
+
+
+def _withheld_detail(truth) -> str | None:
+    membership = (truth or {}).get("membership") or {}
+    parts = []
+    if membership.get("undated_won_deals"):
+        parts.append(f"{membership['undated_won_deals']} won deal(s) have no "
+                     "close date and could belong to this window")
+    conflicts = membership.get("won_definition_conflicts") or []
+    if conflicts:
+        parts.append(f"{len(conflicts)} deal(s) where HubSpot's won flag and "
+                     "the confirmed won stage disagree")
+    return "; ".join(parts) or None
+
+
+def _canonical_block(truth, status, reason) -> dict:
+    """The canonical verdict a reader carries beside its population.
+
+    Serializable: verdicts and the canonical customer metric only — never the
+    identity map or member ids of a withheld window.
+    """
+    from analysis import closed_won_truth as cwt
+
+    publication = (truth or {}).get("publication") or {
+        m: {"status": status, "reason": reason}
+        for m in ("closed_won_deals", "revenue_usd", "customers")}
+    outcomes = (truth or {}).get("outcomes") or {}
+    cust = publication.get("customers") or {}
+    rev = publication.get("revenue_usd") or {}
+    deals = publication.get("closed_won_deals") or {}
+    return {
+        "status": (deals.get("status") or status),
+        "publication": {k: publication.get(k) for k in
+                        ("closed_won_deals", "revenue_usd", "customers")},
+        "canonical_metrics": {
+            "closed_won_deals": cwt.metric(outcomes.get("closed_won_deals"),
+                                           deals.get("status") or status,
+                                           deals.get("reason") or reason),
+            "revenue_usd": cwt.metric(outcomes.get("revenue_usd"),
+                                      rev.get("status") or status,
+                                      rev.get("reason") or reason),
+            "customers": cwt.metric(outcomes.get("customers"),
+                                    cust.get("status") or status,
+                                    cust.get("reason") or reason,
+                                    dedup_key="hubspot_company_id"),
+        },
+        "canonical_window": (truth or {}).get("window"),
+        "cohort": "closed_won_close_date",
+        "campaign_placement": _campaign_placement(truth),
+    }
+
+
+def _campaign_placement(truth) -> dict | None:
+    """The canonical placement verdict for per-campaign figures.
+
+    Read from the window's own partition (``cwt.attribution_bucket`` under
+    Campaign Evidence's resolver): a Google Ads won deal that resolves to no
+    campaign — no label, an unmapped label, or no resolver at all — is in
+    ``google_ads_unplaced``. Nothing here classifies a deal.
+    """
+    from analysis import closed_won_truth as cwt
+
+    if not truth or not truth.get("available", True):
+        return None
+    part = ((truth.get("attribution") or {}).get("partition") or {}).get(
+        cwt.BUCKET_GOOGLE_ADS_UNPLACED) or {}
+    unplaced = part.get("deals")
+    if truth.get("campaign_resolver_available") is False:
+        return {"status": cwt.WITHHELD,
+                "reason": cwt.R_CAMPAIGN_IDENTITY_UNAVAILABLE,
+                "unplaced_google_ads_deals": unplaced}
+    if unplaced is None:
+        # Redacted with a withheld deal count: no per-campaign figure exists.
+        return {"status": cwt.WITHHELD, "reason": cwt.R_DEALS_WITHHELD,
+                "unplaced_google_ads_deals": None}
+    if unplaced > 0:
+        return {"status": cwt.WITHHELD, "reason": cwt.R_CAMPAIGN_UNPLACED,
+                "unplaced_google_ads_deals": unplaced}
+    return {"status": cwt.PUBLISHED, "reason": None,
+            "unplaced_google_ads_deals": 0}
+
+
+def subset_metrics(base: dict, rows) -> dict:
+    """Closed-won deals, revenue and customers for a subset of ``base``'s
+    population — a campaign, a country, a source group, a scope.
+
+    Delegates to ``analysis.closed_won_truth.subset_outcomes``: each metric
+    inherits the window's canonical verdict. When ``base`` released no
+    population every metric is unavailable with ``base``'s reason.
+    ``rows`` may be raw ledger rows or :func:`canonical_deal_rows` rows.
+    """
+    from analysis import closed_won_truth as cwt
+
+    if not base.get("available"):
+        reason = base.get("reason") or REASON_LEDGER_UNREADABLE
+        status = base.get("status") or cwt.UNAVAILABLE
+        if status == cwt.PUBLISHED:
+            status = cwt.UNAVAILABLE
+        return {m: cwt.metric(None, status, reason)
+                for m in cwt.SUBSET_METRICS}
+    by_id = {str(r.get("deal_id")): r for r in base.get("deals") or []}
+    members = [by_id.get(str(r.get("deal_id")), r) for r in rows or []]
+    return cwt.subset_outcomes(
+        members, publication=base.get("publication"),
+        company_ids_by_deal=base.get("company_ids_by_deal"))
+
+
+#: Reasons that mean the ledger could not be READ — an outage — as opposed to a
+#: readable ledger whose canonical population is not publishable (coverage
+#: unproven, an undated or conflicting won deal). Pages show the two differently.
+OUTAGE_REASONS = (REASON_LEDGER_UNREADABLE, REASON_SYNC_STATE_UNREADABLE,
+                  "database_unavailable")
+
+
+def is_ledger_outage(reason) -> bool:
+    """Is this unavailable-reason an outage rather than a withheld population?"""
+    return reason in OUTAGE_REASONS
+
+
+def campaign_placement_gate(base: dict) -> dict | None:
+    """Why per-campaign closed-won figures are withheld in this window, or None.
+
+    Republishes the canonical placement verdict (:func:`_campaign_placement`):
+    a Google Ads won deal that Campaign Evidence's resolver places on no
+    campaign could belong to ANY campaign, so every per-campaign deal count,
+    revenue, customer count, ROAS and CAC would be a lower bound published as a
+    total (``cwt.R_CAMPAIGN_UNPLACED``). Applies to per-campaign rows only: the
+    campaign-attributable SCOPE total, and the account-wide Google Ads figures,
+    are exact for their own scopes. Fails closed when the verdict is missing.
+    """
+    from analysis import closed_won_truth as cwt
+
+    if not base.get("available"):
+        return None
+    placement = base.get("campaign_placement")
+    if not placement or placement.get("status") not in cwt.PUBLICATION_STATUSES:
+        return {"status": cwt.WITHHELD,
+                "reason": cwt.R_CAMPAIGN_IDENTITY_UNAVAILABLE,
+                "unplaced_google_ads_deals": None}
+    if placement["status"] == cwt.PUBLISHED:
+        return None
+    return dict(placement)
+
+
+def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
+               period_ratio_scope_ok: bool = True, gate: dict | None = None) -> dict:
+    """The canonical closed-won fields of one page row (a campaign, a country,
+    a source group, a summary), from one population.
+
+    ``closed_won_deals`` is a deal count, ``customers`` distinct proven HubSpot
+    companies (never a deal count), ``won_revenue`` a total or None. ``gate``
+    (e.g. :func:`campaign_placement_gate`) withholds the row's deals, revenue
+    and customers for a reason the window carries.
+
+    Ratios (PR-ADS-161E, decision 1):
+
+    * ``roas`` / ``cac`` are ALWAYS None, their metrics ``unavailable``:
+      certified ROAS and CAC need spend and outcomes joined through one
+      acquisition cohort, which no canonical service supplies.
+    * ``period_revenue_per_ad_spend`` / ``period_spend_per_customer_won`` are
+      the close-date operational ratios, under explicit names, each carrying
+      ``ratio_kind: non_cohort_operational_ratio`` and its disclosure.
+
+    ``metrics`` holds every value with its status and reason.
+    """
+    from analysis import closed_won_truth as cwt
+
+    m = subset_metrics(base, rows)
+    if gate is not None:
+        m = {k: cwt.metric(None, gate["status"], gate["reason"],
+                           **({"dedup_key": "hubspot_company_id",
+                               "additive": False} if k == "customers" else {}))
+             for k in cwt.SUBSET_METRICS}
+    per_spend = cwt.derive_period_revenue_per_ad_spend(
+        m["revenue_usd"], spend_usd, spend_reason=spend_reason,
+        scope_compatible=period_ratio_scope_ok)
+    per_customer = cwt.derive_period_spend_per_customer_won(
+        m["customers"], spend_usd, spend_reason=spend_reason,
+        scope_compatible=period_ratio_scope_ok)
+    return {
+        "closed_won_deals": m["closed_won_deals"]["value"],
+        "customers": m["customers"]["value"],
+        "won_revenue": m["revenue_usd"]["value"],
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: per_spend["value"],
+        cwt.PERIOD_SPEND_PER_CUSTOMER_WON: per_customer["value"],
+        "roas": None,
+        "cac": None,
+        "metrics": {**m,
+                    cwt.PERIOD_REVENUE_PER_AD_SPEND: per_spend,
+                    cwt.PERIOD_SPEND_PER_CUSTOMER_WON: per_customer,
+                    "roas": cwt.certified_roas(),
+                    "cac": cwt.certified_cac()},
     }
 
 
@@ -349,15 +633,23 @@ def load_closed_won_universe(won_stage_id: str, *,
     from db import deal_ledger_repository as ledger_repo
     from services.revenue_reconciliation_service import check_sync_coverage
 
+    cache = _SNAPSHOT.get()
+    key = ("universe", str(won_stage_id))
+    if cache is not None and sql_windows is None and key in cache:
+        return cache[key]
     universe = ledger_repo.fetch_closed_won_universe(
         won_stage_id, sql_windows=sql_windows)
     if not universe.get("available"):
-        return {**universe, "coverage_findings": None,
-                "source": CANONICAL_SOURCE}
-    findings = check_sync_coverage(
-        {"available": True, "row": universe.get("sync_state")})
-    return {**universe, "coverage_findings": findings,
-            "source": CANONICAL_SOURCE}
+        out = {**universe, "coverage_findings": None,
+               "source": CANONICAL_SOURCE}
+    else:
+        findings = check_sync_coverage(
+            {"available": True, "row": universe.get("sync_state")})
+        out = {**universe, "coverage_findings": findings,
+               "source": CANONICAL_SOURCE}
+    if cache is not None and sql_windows is None:
+        cache[key] = out
+    return out
 
 
 def summarize_deals(deals, scope=DEFAULT_SCOPE) -> dict:
@@ -375,10 +667,14 @@ def summarize_deals(deals, scope=DEFAULT_SCOPE) -> dict:
     currency_unavailable = 0
     ambiguous = 0
     failed = 0
+    from analysis.closed_won_truth import revenue_is_proven
+
     for row in rows:
-        status = row.get("currency_status")
         value = row.get("revenue_usd")
-        if is_summable(status) and value is not None:
+        # PR-ADS-161E: the canonical rule — proven USD AND a valid amount. A
+        # negative amount is invalid evidence, not a refund to net off the
+        # total; it is counted as unproven exactly as the truth service does.
+        if revenue_is_proven(row):
             revenue += float(value)
             revenue_deals += 1
         else:
@@ -651,8 +947,12 @@ def canonical_deal_rows(base, scope=DEFAULT_SCOPE) -> list:
 
 
 def summable_revenue(row):
-    """This row's contribution to a USD total, or ``None`` when it has none."""
-    if is_summable(row.get("currency_status")) and row.get("revenue_usd") is not None:
+    """This row's contribution to a USD total, or ``None`` when it has none
+    (PR-ADS-161E: the canonical ``revenue_is_proven`` — a negative amount has
+    none)."""
+    from analysis.closed_won_truth import revenue_is_proven
+
+    if revenue_is_proven(row):
         return float(row["revenue_usd"])
     return None
 
@@ -807,7 +1107,40 @@ def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE, *,
 
     if summary is None:
         summary = summarize_deals(base.get("deals") or [], scope)
-    return _revenue_total_verdict(summary, scope)
+    verdict = _revenue_total_verdict(summary, scope)
+    if not verdict["publishable"]:
+        return verdict
+    # The scope's own rule publishes; the canonical window verdict may still
+    # withhold (a negative or invalid amount anywhere in the window).
+    canonical = _canonical_revenue_gate(base)
+    if canonical is not None:
+        return {**canonical,
+                "currency_unavailable_deals": summary.get(
+                    "currency_unavailable_deals")}
+    return verdict
+
+
+def _canonical_revenue_gate(base: dict) -> dict | None:
+    """PR-ADS-161E: the canonical revenue verdict governs every scope.
+
+    A scope's total is a subset of the window's. When the canonical truth
+    withholds the window's revenue (an unproven, negative or invalid amount on
+    any member) no scope publishes one either. ``None`` when the canonical
+    verdict publishes — the scope's own completeness rule then still applies.
+    """
+    from analysis import closed_won_truth as cwt
+
+    rev = (base.get("publication") or {}).get("revenue_usd")
+    if rev is None or rev.get("status") == cwt.PUBLISHED:
+        return None
+    return {
+        "publishable": False,
+        "reason": rev.get("reason") or REASON_REVENUE_INCOMPLETE,
+        "detail": ("the canonical closed-won truth withholds this window's "
+                   f"revenue ({rev.get('reason')}), so no scope's total "
+                   "within it is published"),
+        "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
+    }
 
 
 # ── PR-ADS-155 §5 — the fail-closed revenue disclosure ───────────────────────
@@ -854,8 +1187,9 @@ def revenue_disclosure(base: dict, scope=DEFAULT_SCOPE, *,
 
     if summary is None:
         summary = summarize_deals(base.get("deals") or [], scope)
-    return _disclosure_block(summary, _revenue_total_verdict(summary, scope),
-                             scope=scope, context=base)
+    return _disclosure_block(
+        summary, revenue_total_publishable(base, scope, summary=summary),
+        scope=scope, context=base)
 
 
 def disclosure_from_ladder(ladder: dict, scope=DEFAULT_SCOPE) -> dict:
@@ -1003,7 +1337,7 @@ def missing_amount_deals(base: dict, scope=DEFAULT_SCOPE) -> dict:
     deals = []
     for row in filter_deals(base.get("deals") or [], scope):
         status = row.get("currency_status") or CURRENCY_UNAVAILABLE
-        if is_summable(status) and row.get("revenue_usd") is not None:
+        if summable_revenue(row) is not None:
             continue
         deal_id = row.get("deal_id")
         has_amount = row.get("amount_raw") is not None

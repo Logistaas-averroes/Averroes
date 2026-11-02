@@ -207,7 +207,6 @@ def _patch_revattr(monkeypatch, *, canonical, geo_rows, coverage, revenue_rows):
         # ledger, so the same fixture rows are stubbed there.
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     except (ImportError, AttributeError) as exc:
@@ -271,7 +270,13 @@ def test_revenue_unchanged_by_spend_source(monkeypatch):
     out = build("current_quarter", now=_at("2026-06-22"))
     # Revenue truth is independent of the spend source.
     assert out["summary"]["won_revenue"] == 10000.0
-    assert out["summary"]["customers"] == 1
+    # PR-ADS-161E: the won-DEAL count. Customers are distinct proven companies;
+    # this ledger carries no company evidence, so they are withheld — None with
+    # the canonical reason, never the deal count and never 0.
+    assert out["summary"]["closed_won_deals"] == 1
+    assert out["summary"]["customers"] is None
+    cust = out["summary"]["metrics"]["customers"]
+    assert cust["status"] == "unavailable" and cust["reason"]
 
 
 # ════════════ correction 1: geo is never a ROAS denominator ════════════
@@ -562,11 +567,14 @@ def test_spend_truth_panel_and_gates_present():
     assert "function renderSpendTruth" in JS
     assert "/api/google-ads-spend-audit?window=" in JS
     assert "data-spend-backfill-action" in JS
-    # Campaign page ROAS gate on incomplete spend coverage.
+    # Campaign page period-ratio gate on incomplete spend coverage
+    # (PR-ADS-161E: the ratio is period revenue / ad spend, never "ROAS").
     assert "function spendCoverageIncomplete" in JS
-    assert "Spend coverage incomplete — ROAS unavailable" in JS
+    assert "Spend coverage incomplete — Period Revenue / Ad Spend unavailable" in JS
+    assert "Spend coverage incomplete — ROAS unavailable" not in JS
     # Country page reconciliation gate.
     assert "country_spend_reconciled === false" in JS
     # PR-ADS-128 reworded the country blocked card with cause-specific copy; the
-    # reconciliation gate still blocks the trusted ROAS table.
-    assert "Country ROAS is blocked" in JS
+    # reconciliation gate still blocks the trusted country ratio table.
+    assert "Country Period Revenue / Ad Spend is blocked" in JS
+    assert "Country ROAS is blocked" not in JS

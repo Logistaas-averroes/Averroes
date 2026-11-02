@@ -4,8 +4,11 @@ Revenue by Acquisition Source service (PR-ADS-117)
 Explains pipeline and closed-won revenue across Google Ads, Other Paid, Organic,
 Offline, and Unclassified / Needs Review — from one durable, auditable source of
 truth. Google Ads is the ONLY group with connected spend, so the ONLY group that
-may show ROAS; every other group is revenue-only (ROAS unavailable, never $0 /
-0.00x). Deal revenue is never split across sources, and each deal is counted once.
+may show a spend ratio; every other group is revenue-only (no ratio, never $0 /
+0.00x). PR-ADS-161E: that ratio is the non-cohort operational ratio
+``period_revenue_per_ad_spend`` (closed-won revenue CLOSED in the window ÷ the
+same window's Google Ads spend). Attribution ROAS is never published here: it
+needs revenue and spend over one acquisition cohort. Deal revenue is never split across sources, and each deal is counted once.
 
 Window doctrine (PR-ADS-116): Leads / SQLs use contact_created_at; Won Revenue
 uses deal_close_date; both use the selected business window.
@@ -13,6 +16,7 @@ uses deal_close_date; both use the selected business window.
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import date, datetime, timezone
 
@@ -26,6 +30,7 @@ from analysis.source_classification import (
     CH_PAID_SEARCH, PF_GOOGLE_ADS,
     classify_source, classify_source_taxonomy, attribute_deal,
 )
+from analysis import closed_won_truth as cwt
 from analysis import revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -38,9 +43,9 @@ SECTION_ORDER = [GROUP_GOOGLE_ADS, GROUP_OTHER_PAID, GROUP_ORGANIC,
                  GROUP_OFFLINE, GROUP_UNCLASSIFIED]
 
 # Per-platform status copy (PR-ADS-133). Only Google Ads is spend-connected /
-# ROAS-eligible; every other source is revenue-only. Offline and Unclassified get
-# their own honest labels — never a fabricated $0 / 0.00x ROAS.
-STATUS_ROAS_AVAILABLE = "ROAS available"
+# ratio-eligible; every other source is revenue-only. Offline and Unclassified get
+# their own honest labels — never a fabricated $0 / 0.00x ratio.
+STATUS_PERIOD_RATIO_AVAILABLE = "Period revenue / ad spend available"
 STATUS_REVENUE_ONLY = "Revenue-only — no connected spend source"
 STATUS_OFFLINE = "Imported CRM records — no reliable source attribution"
 STATUS_NEEDS_REVIEW = "Needs review — source missing or unsafe"
@@ -49,17 +54,36 @@ STATUS_NEEDS_REVIEW = "Needs review — source missing or unsafe"
 # the CANONICAL campaign-daily spend (same truth as the mart) instead of geo
 # spend, so the Google Ads row can be in one of four states — each with its own
 # label, never a fabricated $0 / 0.00x.
-STATUS_FX_WITHHELD = "FX unavailable — USD ROAS withheld"
+STATUS_FX_WITHHELD = "FX unavailable — USD period revenue / ad spend withheld"
 STATUS_COVERAGE_INCOMPLETE = "Canonical spend coverage incomplete"
 STATUS_GOOGLE_SPEND_UNAVAILABLE = "Google Ads spend source unavailable"
 STATUS_NO_SPEND_IN_WINDOW = "No Google Ads spend in this window"
+#: PR-ADS-161E: spend is ready but the period ratio is not published
+#: (revenue withheld — an unpriced deal, an undated deal …).
+STATUS_PERIOD_RATIO_WITHHELD = ("Period revenue / ad spend withheld — closed-won "
+                                "revenue is not published")
 
-# state -> (roas_status code, human status label) for the Google Ads group.
+
+def _period_ratio_publication(fields: dict, spend_status: str, spend_label):
+    """``(period_ratio_status, label, reason)`` — spend readiness is not
+    publication.
+
+    "Period revenue / ad spend available" is said only when THIS bucket's
+    ``period_revenue_per_ad_spend`` metric is published; otherwise its own
+    status and reason are carried."""
+    ratio = (((fields or {}).get("metrics") or {})
+             .get(cwt.PERIOD_REVENUE_PER_AD_SPEND) or {})
+    if spend_status == "available" and ratio.get("status") != "published":
+        return (ratio.get("status") or "unavailable", STATUS_PERIOD_RATIO_WITHHELD,
+                ratio.get("reason") or (ratio.get("blocked_by") or {}).get("reason"))
+    return spend_status, spend_label, ratio.get("reason")
+
+# state -> (period_ratio_status code, human status label) for the Google Ads group.
 _GOOGLE_STATE_STATUS = {
     revenue_spend_truth_service.STATE_VERIFIED:
-        ("available", STATUS_ROAS_AVAILABLE),
-    # Verified $0 spend: ROAS has no denominator, so it is honestly unavailable —
-    # never a "ROAS available" label next to an unavailable ROAS.
+        ("available", STATUS_PERIOD_RATIO_AVAILABLE),
+    # Verified $0 spend: the ratio has no denominator, so it is honestly
+    # unavailable — never an "available" label next to an unavailable ratio.
     revenue_spend_truth_service.STATE_VERIFIED_ZERO:
         ("unavailable_zero_spend", STATUS_NO_SPEND_IN_WINDOW),
     revenue_spend_truth_service.STATE_FX_INCOMPLETE:
@@ -82,13 +106,13 @@ def _platform_status(group: str, is_canonical: bool = False) -> str:
     """Status label for a channel/platform row.
 
     Only the CANONICAL Google Ads bucket (Paid Search → Google Ads) is
-    spend-connected / ROAS-eligible. A non-canonical bucket inside the Google
+    spend-connected / ratio-eligible. A non-canonical bucket inside the Google
     group (e.g. rows that fell into ``unspecified`` because their raw source was
-    missing) is NOT the spend-connected platform, so it must never claim ROAS —
+    missing) is NOT the spend-connected platform, so it must never claim a ratio —
     it gets a needs-review status instead.
     """
     if group in GROUPS_WITH_SPEND:
-        return STATUS_ROAS_AVAILABLE if is_canonical else STATUS_NEEDS_REVIEW
+        return STATUS_PERIOD_RATIO_AVAILABLE if is_canonical else STATUS_NEEDS_REVIEW
     if group == GROUP_OFFLINE:
         return STATUS_OFFLINE
     if group == GROUP_UNCLASSIFIED:
@@ -132,20 +156,6 @@ def _nullable_float(v):
         return None
 
 
-def _roas(won, spend):
-    """ROAS = won revenue / spend, or None when spend is missing/zero.
-
-    Never returns a fabricated 0.00x — a null spend (no connected source) yields a
-    null ROAS so the UI renders "Unavailable".
-    """
-    if spend is None or spend <= 0:
-        return None
-    # A WITHHELD revenue numerator (every deal in the bucket has an unproven
-    # currency) makes ROAS unknown, not 0.00x — `_safe_float(None)` used to turn
-    # it into a confident zero return.
-    if won is None:
-        return None
-    return round(_safe_float(won) / spend, 2)
 
 
 def _window_bounds(window: str, now):
@@ -153,19 +163,6 @@ def _window_bounds(window: str, now):
     start = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
     end = date.fromisoformat(resolved["end_date"])
     return resolved, start, end
-
-
-def _bucket_revenue(bucket: dict):
-    """A bucket's USD revenue, or ``None`` when NOTHING in it was proven.
-
-    A bucket holding three won deals whose currency could never be resolved has
-    an unknown total, not a $0 one. Returning 0.00 there would put a confident
-    zero next to a customer count of three — and, in the Google Ads group, feed a
-    0.00x ROAS built on a numerator we never had.
-    """
-    if not bucket.get("revenue_known_deals") and bucket.get("customers"):
-        return None
-    return round(bucket.get("won_revenue") or 0.0, 2)
 
 
 def _unavailable_revenue_by_source(resolved, canonical, spend_truth, now) -> dict:
@@ -204,69 +201,106 @@ def _section_bucket(acquisition_group: str) -> str:
     return GROUP_UNCLASSIFIED
 
 
+def _canonical_fields(canonical, bucket, spend, spend_reason=None) -> dict:
+    """PR-ADS-161E: one bucket's closed-won fields through the canonical reader
+    contract — deals, distinct-company customers, revenue total-or-None, and
+    the period ratio only when every input is published. Attribution ROAS and
+    CAC stay None (unavailable: not one acquisition cohort)."""
+    canon = canonical_revenue.reader_row(
+        canonical, bucket.get("deal_rows") or [], spend_usd=spend,
+        spend_reason=spend_reason)
+    return {
+        "closed_won_deals": canon["closed_won_deals"],
+        "customers": canon["customers"],
+        "won_revenue": canon["won_revenue"],
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: canon[cwt.PERIOD_REVENUE_PER_AD_SPEND],
+        "roas": None,
+        "metrics": {**canon["metrics"],
+                    # Leads are acquisition-cohort contacts; won deals and
+                    # customers are close-date outcomes. One is not a share of
+                    # the other.
+                    "lead_to_customer_rate": cwt.incompatible_rate(
+                        cwt.R_LEAD_TO_CUSTOMER_INCOMPATIBLE)},
+    }
+
+
 def _finalize_channels(group: str, channels: dict, group_spend,
-                       google_status_label: str | None = None) -> list:
+                       google_status_label: str | None = None,
+                       canonical: dict | None = None) -> list:
     """Shape the nested channel/platform dicts into sorted list rows (PR-ADS-133).
 
-    Only the Google Ads group carries spend/ROAS, and only on its canonical
-    Paid Search → Google Ads channel/platform. That bucket's ROAS is computed
-    from its OWN won revenue / spend (not the group ROAS), so a non-canonical
+    Only the Google Ads group carries spend and the period ratio, and only on
+    its canonical Paid Search → Google Ads channel/platform. That bucket's ratio
+    is computed from its OWN won revenue / spend (not the group's), so a non-canonical
     Google bucket never distorts it. Every other bucket — and any non-canonical
-    Google bucket — keeps spend/ROAS None (never a fabricated $0 / 0.00x) and
+    Google bucket — keeps spend and the ratio None (never a fabricated $0 / 0.00x) and
     gets an honest status label. When the Google spend source is unavailable
-    (group_spend is None), even the canonical bucket shows spend/ROAS None.
+    (group_spend is None), even the canonical bucket shows spend and ratio None.
 
     PR-ADS-140: ``google_status_label`` is the canonical Google Ads spend-truth
-    status (ROAS available / FX withheld / coverage incomplete / source
+    status (ratio available / FX withheld / coverage incomplete / source
     unavailable). It labels the canonical bucket so a withheld-USD state reads
-    honestly instead of always claiming "ROAS available".
+    honestly instead of always claiming the ratio is available.
     """
     has_spend = group in GROUPS_WITH_SPEND
     out = []
     for ch_key, ch in channels.items():
-        # Spend/ROAS attach ONLY to the canonical Paid Search channel — never to a
+        # Spend and the ratio attach ONLY to the canonical Paid Search channel — never to a
         # non-canonical bucket (e.g. an ``unspecified`` bucket from a raw-source
         # mismatch) that happens to sit inside the Google Ads group.
         canonical_channel = has_spend and ch_key == CH_PAID_SEARCH
-        ch_won = _bucket_revenue(ch)
+        ch_fields = _canonical_fields(canonical, ch,
+                                      group_spend if canonical_channel else None)
         platforms = []
         for pf_key, pf in ch["platforms"].items():
             canonical_platform = canonical_channel and pf_key == PF_GOOGLE_ADS
-            pf_won = _bucket_revenue(pf)
+            pf_fields = _canonical_fields(canonical, pf,
+                                          group_spend if canonical_platform else None)
             platforms.append({
                 "platform": pf_key,
                 "label": pf["label"],
                 "leads": pf["leads"],
                 "sqls": pf["sqls"],
-                "customers": pf["customers"],
-                "won_revenue": pf_won,
+                **pf_fields,
                 "revenue_unavailable_deals": pf.get("revenue_unavailable_deals", 0),
                 "revenue_complete": not pf.get("revenue_unavailable_deals"),
                 "spend": group_spend if canonical_platform else None,
-                # Bucket-level ROAS = this bucket's won revenue / spend.
-                "roas": _roas(pf_won, group_spend) if canonical_platform else None,
-                "status": ((google_status_label or STATUS_ROAS_AVAILABLE)
+                # Bucket-level period ratio = this bucket's won revenue / spend.
+                cwt.PERIOD_REVENUE_PER_AD_SPEND: (
+                    pf_fields[cwt.PERIOD_REVENUE_PER_AD_SPEND]
+                    if canonical_platform else None),
+                "status": ((_period_ratio_publication(
+                                pf_fields,
+                                "available"
+                                if google_status_label == STATUS_PERIOD_RATIO_AVAILABLE
+                                else "unavailable",
+                                google_status_label or STATUS_PERIOD_RATIO_AVAILABLE)[1])
                            if canonical_platform and google_status_label is not None
                            else _platform_status(group, is_canonical=canonical_platform)),
             })
-        platforms.sort(key=lambda p: (p["won_revenue"] or 0.0, p["leads"]), reverse=True)
+        platforms.sort(key=lambda p: (p["won_revenue"] or 0.0,
+                                      p["closed_won_deals"] or 0, p["leads"]),
+                       reverse=True)
         out.append({
             "channel": ch_key,
             "label": ch["label"],
             "leads": ch["leads"],
             "sqls": ch["sqls"],
-            "customers": ch["customers"],
-            "won_revenue": ch_won,
+            **ch_fields,
             "revenue_unavailable_deals": ch.get("revenue_unavailable_deals", 0),
             "revenue_complete": not ch.get("revenue_unavailable_deals"),
             "spend": group_spend if canonical_channel else None,
-            "roas": _roas(ch_won, group_spend) if canonical_channel else None,
+            cwt.PERIOD_REVENUE_PER_AD_SPEND: (
+                ch_fields[cwt.PERIOD_REVENUE_PER_AD_SPEND]
+                if canonical_channel else None),
             "platforms": platforms,
         })
-    out.sort(key=lambda c: (c["won_revenue"] or 0.0, c["leads"]), reverse=True)
+    out.sort(key=lambda c: (c["won_revenue"] or 0.0, c["closed_won_deals"] or 0,
+                            c["leads"]), reverse=True)
     return out
 
 
+@_canonical_snapshot.single_snapshot
 def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     """Build the Revenue by Source contract for a business window.
 
@@ -274,7 +308,7 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     each channel a ``platforms`` breakdown, derived at read time from the durable
     raw HubSpot source fields. Group totals stay authoritative (from
     acquisition_group) and every nested level sums back to them. Only Google Ads
-    is spend-connected / ROAS-eligible.
+    is spend-connected / ratio-eligible.
 
     Raises ValueError for an unsupported window.
     """
@@ -304,7 +338,8 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     canonical_totals = canonical_revenue.summarize_deals(
         canonical.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
 
-    buckets = {g: {"leads": 0, "sqls": 0, "customers": 0, "won_revenue": 0.0,
+    buckets = {g: {"leads": 0, "sqls": 0, "closed_won_deals": 0,
+                   "deal_rows": [], "won_revenue": 0.0,
                    "revenue_known_deals": 0, "revenue_unavailable_deals": 0}
                for g in SECTION_ORDER}
     # Nested channel → platform sub-buckets per group (PR-ADS-133). Group totals
@@ -315,12 +350,12 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     def _platform_bucket(section, primary_raw, detail_raw):
         ch, ch_label, pf, pf_label = _taxonomy_for_section(section, primary_raw, detail_raw)
         channel = nested[section].setdefault(
-            ch, {"label": ch_label, "leads": 0, "sqls": 0, "customers": 0,
-                 "won_revenue": 0.0, "revenue_known_deals": 0,
+            ch, {"label": ch_label, "leads": 0, "sqls": 0, "closed_won_deals": 0,
+                 "deal_rows": [], "won_revenue": 0.0, "revenue_known_deals": 0,
                  "revenue_unavailable_deals": 0, "platforms": {}})
         platform = channel["platforms"].setdefault(
-            pf, {"label": pf_label, "leads": 0, "sqls": 0, "customers": 0,
-                 "won_revenue": 0.0, "revenue_known_deals": 0,
+            pf, {"label": pf_label, "leads": 0, "sqls": 0, "closed_won_deals": 0,
+                 "deal_rows": [], "won_revenue": 0.0, "revenue_known_deals": 0,
                  "revenue_unavailable_deals": 0})
         return channel, platform
 
@@ -343,12 +378,13 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         # A deal whose currency could not be proven has an UNKNOWN value, not a
         # zero one. `_safe_float(None)` used to add 0.00 here, which silently
         # asserted the deal was worth nothing and made every bucket total —
-        # and the ROAS built on it — quietly wrong.
+        # and the ratio built on it — quietly wrong.
         amount = row.get("deal_amount_usd")
         channel, platform = _platform_bucket(
             g, row.get("source_primary_raw"), row.get("source_detail_raw"))
         for bucket in (buckets[g], channel, platform):
-            bucket["customers"] += 1
+            bucket["closed_won_deals"] += 1
+            bucket["deal_rows"].append(row)
             if amount is None:
                 bucket["revenue_unavailable_deals"] += 1
             else:
@@ -359,9 +395,9 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     # campaign-daily spend (PR-ADS-140). Its spend is the reporting USD spend, shown
     # ONLY when the denominator is FX-safe (verified). Every other state — FX
     # incomplete, coverage incomplete, no source — yields spend None (NOT a
-    # fabricated $0) so ROAS stays null and the UI renders an honest status.
+    # fabricated $0) so the ratio stays null and the UI renders an honest status.
     google_state = spend_truth.get("state")
-    google_roas_status, google_status_label = _GOOGLE_STATE_STATUS.get(
+    google_ratio_status, google_status_label = _GOOGLE_STATE_STATUS.get(
         google_state,
         ("unavailable_no_spend_source", STATUS_GOOGLE_SPEND_UNAVAILABLE))
     google_spend = (spend_truth.get("usd_spend")
@@ -372,24 +408,29 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     for g in SECTION_ORDER:
         b = buckets[g]
         has_spend = g in GROUPS_WITH_SPEND
-        won = _bucket_revenue(b)
         if has_spend:
             group_spend = google_spend
-            # ROAS = Google Ads won revenue / canonical USD spend, only with real
-            # (non-null) spend — never a $0 denominator, never a fabricated 0.00x.
-            roas = _roas(won, group_spend)
-            roas_status = google_roas_status
-            status_label = google_status_label
+            # Period ratio = Google Ads won revenue CLOSED in the window /
+            # canonical USD spend of the same window, only with real (non-null)
+            # spend and a published revenue total — never a $0 denominator,
+            # never a fabricated 0.00x, never a partial numerator. A non-cohort
+            # operational ratio, never attribution ROAS.
+            fields = _canonical_fields(canonical, b, group_spend)
+            ratio_status, status_label, ratio_reason = _period_ratio_publication(
+                fields, google_ratio_status, google_status_label)
             channels = _finalize_channels(g, nested[g], group_spend,
-                                          google_status_label=google_status_label)
+                                          google_status_label=google_status_label,
+                                          canonical=canonical)
         else:
             # Non-Google sources are revenue-only: no connected spend source, so
-            # spend/ROAS stay None (never $0 / 0.00x).
+            # spend and the ratio stay None (never $0 / 0.00x).
             group_spend = None
-            roas = None
-            roas_status = "unavailable_no_spend_source"
+            fields = _canonical_fields(canonical, b, None)
+            fields[cwt.PERIOD_REVENUE_PER_AD_SPEND] = None
+            ratio_status = "unavailable_no_spend_source"
             status_label = None
-            channels = _finalize_channels(g, nested[g], None)
+            ratio_reason = None
+            channels = _finalize_channels(g, nested[g], None, canonical=canonical)
         groups.append({
             "group": g,
             "label": GROUP_LABELS[g],
@@ -397,15 +438,16 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             "spend": group_spend,
             "leads": b["leads"],
             "sqls": b["sqls"],
-            "customers": b["customers"],
-            "won_revenue": won,
+            # PR-ADS-161E: deals, distinct-company customers, revenue total or
+            # None (a group with one unpriced deal publishes no partial sum).
+            **fields,
             # Deals in this group whose USD value could not be proven. They are
-            # counted as customers (the deal IS won) and excluded from revenue.
+            # counted as won deals and excluded from revenue.
             "revenue_unavailable_deals": b["revenue_unavailable_deals"],
             "revenue_complete": b["revenue_unavailable_deals"] == 0,
-            "roas": roas,
-            "roas_status": roas_status,
-            # PR-ADS-140: honest Google Ads spend-truth label (ROAS available / FX
+            "period_ratio_status": ratio_status,
+            "period_ratio_reason": ratio_reason,
+            # PR-ADS-140: honest Google Ads spend-truth label (ratio available / FX
             # withheld / coverage incomplete / source unavailable). None for
             # non-Google groups, which keep their revenue-only status.
             "spend_status_label": status_label,
@@ -460,9 +502,11 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     # classified rows look clean: an unclassified or ambiguous deal keeps its
     # bucket, and a deal whose currency was never proven is reported as an
     # uncovered AMOUNT rather than quietly counted as $0.
-    displayed_customers = sum(g["customers"] for g in groups)
-    displayed_revenue = round(
-        sum(g["won_revenue"] for g in groups if g["won_revenue"] is not None), 2)
+    # PR-ADS-161E: the groups partition the won DEALS, so deals add back up.
+    # Customers do not (one company can sit in two groups) and are not summed.
+    displayed_deals = sum(g["closed_won_deals"] or 0 for g in groups)
+    displayed_revenue = (None if any(g["won_revenue"] is None for g in groups)
+                         else round(sum(g["won_revenue"] for g in groups), 2))
     # PR-ADS-154C-F3-F1 §2: reconciliation compares what the buckets DISPLAY
     # against what the canonical population proves, so it wants the
     # diagnostic known-dollar sum — the same figure it always used, now
@@ -473,22 +517,31 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         "source": canonical_revenue.CANONICAL_SOURCE,
         "canonical_won_deals": canonical_totals["won_deals"],
         "canonical_revenue_usd": canonical_revenue_usd,
-        "displayed_customers": displayed_customers,
+        "displayed_closed_won_deals": displayed_deals,
         "displayed_revenue_usd": displayed_revenue,
-        "uncovered_deals": canonical_totals["won_deals"] - displayed_customers,
+        "uncovered_deals": canonical_totals["won_deals"] - displayed_deals,
         "uncovered_revenue_usd": (
             round(canonical_revenue_usd - displayed_revenue, 2)
-            if canonical_revenue_usd is not None else None),
+            if canonical_revenue_usd is not None
+            and displayed_revenue is not None else None),
         # Deals that ARE in a bucket but contribute no money, because their
         # currency could not be proven. They are the honest reason a bucket's
         # customer count can exceed the deals behind its revenue.
         "revenue_unavailable_deals": canonical_totals["currency_unavailable_deals"],
         "ambiguous_associations": canonical_totals["ambiguous_associations"],
         "failed_associations": canonical_totals["failed_associations"],
+        # PR-ADS-161E: the group revenues are canonical totals — withheld
+        # (None) whenever the window's revenue is — so the money side is
+        # compared only when it is published. The DEAL partition always is.
+        "revenue_comparable": displayed_revenue is not None,
+        "deals_reconcile": canonical_totals["won_deals"] == displayed_deals,
+        # Unknown (None) when the money side could not be compared — a claim
+        # of reconciliation needs both halves; False when either disagrees.
         "reconciles": (
-            canonical_totals["won_deals"] == displayed_customers
-            and canonical_revenue_usd is not None
-            and abs(canonical_revenue_usd - displayed_revenue) < 0.01),
+            False if canonical_totals["won_deals"] != displayed_deals
+            else None if displayed_revenue is None
+            else (canonical_revenue_usd is not None
+                  and abs(canonical_revenue_usd - displayed_revenue) < 0.01)),
     }
 
     return {
@@ -579,6 +632,7 @@ def _source_contact_row(r: dict, channel_label: str, platform_label: str) -> dic
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_source_platform_detail(window: str, source_group: str, source_channel: str,
                                  source_platform: str, now: datetime | None = None) -> dict:
     """Clients/deals + leads/SQLs behind ONE source platform (PR-ADS-133).

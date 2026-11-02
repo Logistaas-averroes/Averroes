@@ -10,10 +10,10 @@ attribution model, and NEVER redistributes the unattributed residual into real
 countries. It composes canonical read-only contracts:
 
   - build_revenue_decision_mart(view="country")   -> the canonical per-country
-      rows (spend / SQLs / customers / won revenue / ROAS / mapping state) plus
+      rows (spend / SQLs / customers / won revenue / period ratio / mapping state) plus
       the shared spend-truth (native GBP + FX-gated USD, geo reconciliation
       status, and the explicit residual bucket) and readiness. This is the
-      ROAS-by-Country truth, re-presented — never re-computed.
+      country revenue & spend truth, re-presented — never re-computed.
   - fetch_geo_daily_spend_by_country              -> per-country native (GBP)
       AND USD spend + per-country FX completeness, read directly from the
       canonical google_ads_geo_daily_spend table (the same source as the geo
@@ -26,7 +26,7 @@ countries. It composes canonical read-only contracts:
 Truth rules (unchanged, never loosened):
   - Google Ads API = spend truth (native GBP). HubSpot closed-won = revenue truth
     (USD). Native GBP is never labelled USD. Reporting revenue is USD.
-  - Geo ROAS is shown ONLY when a country has real country-attributed Google Ads
+  - Geo period revenue / ad spend is shown ONLY when a country has real country-attributed Google Ads
     spend, FX is complete, revenue is safe, and geo reconciliation is unblockable
     (verified or reconciled-with-residual) — never from the Google Ads conversion
     value, never for the residual.
@@ -36,13 +36,15 @@ Truth rules (unchanged, never loosened):
   - The unattributed geo residual (spend Google Ads' geographic view does not
     assign to a country) and closed-won revenue that maps to NO country are
     PRESERVED in an explicit residual bucket — never distributed across real
-    countries, never mapped, never given a ROAS, never a drawer.
+    countries, never mapped, never given a spend ratio, never a drawer.
   - Read-only. NO writes to Google Ads, HubSpot, budgets, bids, campaigns,
     keywords, negatives, or offline conversions.
 """
 
 from __future__ import annotations
 
+from analysis import closed_won_truth as cwt  # PR-ADS-161E
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import datetime, timezone
 
@@ -81,9 +83,20 @@ STATUS_SPEND_NO_PROOF = "Spend without customer proof"
 STATUS_FX_UNAVAILABLE = "FX unavailable"
 STATUS_GEO_REVIEW = "Geo attribution needs review"
 STATUS_NO_SPEND = "No spend in window"
+# PR-ADS-161E: the market's closed-won deal count is withheld or unreadable —
+# unknown, so the market is not judged on it.
+STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
+
+
+def _deal_proof_reason_text(reason) -> str:
+    """Why closed-won deal proof is absent: an outage, or a canonical
+    withholding (a CRM finding) — never the one dressed as the other."""
+    if canonical_revenue.is_ledger_outage(reason):
+        return "the closed-won deal ledger could not be read"
+    return f"closed-won deals are withheld for this window ({reason})"
 
 # The residual is NOT a country. PR-ADS-153F: the label now comes from the ONE
-# country identity contract, so the dashboard, the mart, ROAS by Country and the
+# country identity contract, so the dashboard, the mart, Country Revenue & Spend and the
 # drilldown cannot disagree about what the residual is called — the previous
 # copy of this string here was a second place the name could drift.
 RESIDUAL_LABEL = country_identity.RESIDUAL_LABEL
@@ -163,7 +176,7 @@ def _country_key(country_name, country_code) -> str | None:
     """Canonical join key for a country, via the ONE shared identity contract.
 
     PR-ADS-153F: this used to be ISO-code-first with a ``name:<normalized>``
-    fallback, while ROAS by Country keyed on a bare lowercased string and the
+    fallback, while Country Revenue & Spend keyed on a bare lowercased string and the
     drilldown used a third rule. Three key spaces meant the same window could
     produce different country rows on pages that claim to describe the same
     thing, so the rule now lives in ``analysis.country_identity`` and every
@@ -178,8 +191,8 @@ def _country_key(country_name, country_code) -> str | None:
     return identity.key if identity.is_country else None
 
 
-def _roas(won, usd_spend):
-    """Geo ROAS = won revenue / USD spend, only when both are safe.
+def _period_ratio(won, usd_spend):
+    """Geo period revenue / ad spend = won revenue / USD spend, only when both are safe.
 
     None when USD spend is unavailable/zero, revenue is unknown, OR revenue is a
     non-positive (zero) return — a spend-with-no-revenue country is conveyed by
@@ -291,7 +304,7 @@ def _deal_attribution(deal: dict, *, residual: bool) -> str:
 #: The country-attributed revenue population is unreadable because the revenue
 #: integration is not wired at all — distinct from "the ledger refused" and from
 #: "a deal in it has no amount". Three causes, three reasons.
-REASON_REVENUE_NOT_CONNECTED = "revenue_integration_not_connected"
+REASON_REVENUE_NOT_CONNECTED = "canonical_closed_won_population_unavailable"
 
 
 def _country_revenue_total_verdict(country_rows: list, *, deal_proof_available: bool,
@@ -413,6 +426,9 @@ _MAPPING_STATUS = {"matched": "mapped", "unavailable": "mapping_unavailable"}
 def _country_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
                     won_revenue, attribution_status) -> str:
     """Business status for a country row (never an engineering term)."""
+    if customers is None:
+        # ``customers`` is the row's won-DEAL count here; unknown is not zero.
+        return STATUS_OUTCOME_WITHHELD
     has_spend = native_spend is not None and native_spend > 0
     spend_unknown = native_spend is None  # geo source unavailable (not a measured 0)
     if (customers or 0) > 0 and (won_revenue or 0) > 0:
@@ -445,7 +461,7 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
     separately — this builds ONLY real countries, never the residual.
 
     When the revenue integration is disconnected, closed-won customers AND revenue
-    are unknown, so they (and ROAS) are blanked to None here — BEFORE the status is
+    are unknown, so they (and the period ratio) are blanked to None here — BEFORE the status is
     derived — so a row can never claim "Revenue proven" over Unavailable numbers.
     Spend / SQLs survive (independent of the revenue integration)."""
     rows = []
@@ -482,17 +498,17 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             customers = None
             won = None
         else:
-            customers = m.get("customers")
+            customers = m.get("closed_won_deals")
             # Won revenue: the mart's canonical per-country total, blanked to None
             # if any of this country's deals has an unknown amount (never a lowered $0).
             won = None if amount_unknown else _round2(m.get("won_revenue"))
 
         attribution_status = _MAPPING_STATUS.get(m.get("spend_mapping"), "mapping_unavailable")
-        # ROAS only when this country has real attributed spend, FX is complete,
+        # The period ratio only when this country has real attributed spend, FX is complete,
         # revenue is safe, AND geo reconciliation is unblockable for the account.
-        row_roas = None
+        row_ratio = None
         if country_roas_unblockable and (native_spend or 0) > 0:
-            row_roas = _roas(won, usd_spend)
+            row_ratio = _period_ratio(won, usd_spend)
 
         status = _country_status(
             native_spend=native_spend, usd_spend=usd_spend, fx_complete=fx_complete,
@@ -513,10 +529,14 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             "spend_usd": usd_spend,
             "fx_complete": fx_complete,
             "sqls": m.get("sqls"),
-            "customers": customers,
+            "closed_won_deals": customers,
+            # PR-ADS-161E: this market's customers — distinct proven HubSpot
+            # companies, not additive across markets.
+            "customers": m.get("customers") if revenue_connected else None,
+            "metrics": m.get("metrics") if revenue_connected else None,
             "won_revenue_usd": won,
-            "roas": row_roas,
-            "roas_available": row_roas is not None,
+            "period_revenue_per_ad_spend": row_ratio,
+            "period_ratio_available": row_ratio is not None,
             "status": status,
             "attribution_status": attribution_status,
             "top_campaign": m.get("top_campaign"),
@@ -528,7 +548,7 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
     # Real countries first: revenue, then customers, then spend.
     rows.sort(key=lambda r: (
         r.get("won_revenue_usd") or 0.0,
-        r.get("customers") or 0,
+        r.get("closed_won_deals") or 0,
         r.get("spend_native") or 0.0,
     ), reverse=True)
     return rows
@@ -560,7 +580,7 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
     unknown residual deal amount (which then withholds the residual revenue total,
     never a lowered $0). The geo-spend residual (spend the geographic view does not
     assign to a country) is carried from spend_truth (with the mart residual row as
-    a fallback). It is never mapped, never given a ROAS, never a drawer.
+    a fallback). It is never mapped, never given a spend ratio, never a drawer.
     """
     if not revenue_connected:
         # Customers AND revenue come from the revenue integration → unknown.
@@ -568,7 +588,12 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
         won = None
         sqls = None
     else:
-        gap = _residual_gap(summary.get("customers"), real_rows, "customers")
+        # PR-ADS-161E: the country rows partition the GOOGLE ADS-SOURCE deals,
+        # so the residual subtracts them from that scope's canonical total —
+        # never from the all-source total, which put every non-Google deal in
+        # a bucket labelled "could not be assigned to a country".
+        gap = _residual_gap(summary.get("google_ads_source_closed_won_deals"),
+                            real_rows, "closed_won_deals")
         customers = None if gap is None else int(round(gap))
         gap_sqls = _residual_gap(summary.get("sqls"), real_rows, "sqls")
         sqls = None if gap_sqls is None else int(round(gap_sqls))
@@ -578,7 +603,8 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
         if residual_amount_unknown:
             won = None
         else:
-            won = _round2(_residual_gap(summary.get("won_revenue_usd"), real_rows, "won_revenue_usd"))
+            won = _round2(_residual_gap(summary.get("google_ads_source_won_revenue_usd"),
+                                        real_rows, "won_revenue_usd"))
 
     native = spend_truth.get("country_residual_native")
     usd = spend_truth.get("country_residual_usd")
@@ -589,19 +615,19 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
     reason_bits = []
     if spend_truth.get("country_residual_reason"):
         reason_bits.append(spend_truth["country_residual_reason"])
-    reason_bits.append("Closed-won revenue or customers that could not be safely assigned "
+    reason_bits.append("Google Ads closed-won deals and revenue that could not be safely assigned "
                        "to a country — preserved separately, never spread across real countries.")
     return {
         "label": RESIDUAL_LABEL,
-        "customers": customers,
+        "closed_won_deals": customers,
         "won_revenue_usd": won,
         "sqls": sqls,
         "spend_native": native,
         "spend_usd": usd,
         "native_currency": spend_truth.get("native_currency") or "GBP",
         "reason": " ".join(reason_bits),
-        "roas": None,
-        "roas_available": False,
+        "period_revenue_per_ad_spend": None,
+        "period_ratio_available": False,
         "drawer_available": False,
     }
 
@@ -611,13 +637,16 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
                 revenue_connected: bool) -> dict:
     """Hero KPIs derived from the real country rows (so they reconcile with the
     leaderboard / map) plus the canonical spend truth. The residual is surfaced
-    separately, never in the ROAS numerator.
+    separately, never in the ratio numerator.
 
     ``geo_available`` / ``revenue_connected`` gate the totals so an EMPTY leaderboard
     (a source outage, where ``any([])`` would otherwise be False) never fabricates a
     $0 / 0-customer total presented as measured truth."""
     countries_with_spend = sum(1 for r in country_rows if (r.get("spend_native") or 0) > 0)
-    countries_with_customers = sum(1 for r in country_rows if (r.get("customers") or 0) > 0)
+    # Unknown when any market's deal count is withheld — never a lowered count.
+    countries_with_closed_won_deals = (
+        None if any(r.get("closed_won_deals") is None for r in country_rows)
+        else sum(1 for r in country_rows if r["closed_won_deals"] > 0))
 
     # Verified geo spend: summed native across real countries (excludes residual).
     # Unavailable if the geo source is down, or ANY country's spend is unknown
@@ -637,18 +666,18 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
     # Customers / revenue are Unavailable when the revenue integration is
     # disconnected (covers the empty-rows case, where per-row blanking has nothing
     # to blank) or when any contributing row withholds them.
-    customers_incomplete = (not revenue_connected) or any(r.get("customers") is None for r in country_rows)
-    total_customers = (None if customers_incomplete
-                       else sum((r.get("customers") or 0) for r in country_rows))
+    deals_incomplete = (not revenue_connected) or any(r.get("closed_won_deals") is None for r in country_rows)
+    total_closed_won_deals = (None if deals_incomplete
+                       else sum((r.get("closed_won_deals") or 0) for r in country_rows))
 
     revenue_incomplete = (not revenue_connected) or any(r.get("won_revenue_usd") is None for r in country_rows)
     total_won = (None if revenue_incomplete
                  else _round2(sum((r.get("won_revenue_usd") or 0.0) for r in country_rows)))
 
-    geo_roas = _roas(total_won, verified_usd) if country_roas_unblockable else None
+    geo_ratio = _period_ratio(total_won, verified_usd) if country_roas_unblockable else None
     return {
         "countries_with_spend": countries_with_spend,
-        "countries_with_customers": countries_with_customers,
+        "countries_with_closed_won_deals": countries_with_closed_won_deals,
         "verified_spend_native": {"amount": verified_native,
                                   "currency": spend_truth.get("native_currency") or "GBP"},
         "verified_spend_usd": verified_usd,
@@ -660,11 +689,11 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
         # the same trap the Overview closed with `sqls_scope` in PR-ADS-152.
         "sqls_scope": "country_attributed_sqls",
         "sqls_residual": residual.get("sqls"),
-        "customers": total_customers,
+        "closed_won_deals": total_closed_won_deals,
         "won_revenue_usd": total_won,
-        "geo_roas": geo_roas,
+        "geo_period_revenue_per_ad_spend": geo_ratio,
         "residual_revenue_usd": residual.get("won_revenue_usd"),
-        "residual_customers": residual.get("customers"),
+        "residual_closed_won_deals": residual.get("closed_won_deals"),
     }
 
 
@@ -678,7 +707,7 @@ def _build_regional_mix(country_rows: list, country_roas_unblockable: bool) -> l
             "spend_native": 0.0, "spend_native_incomplete": False,
             "spend_usd": 0.0, "spend_usd_incomplete": False,
             "sqls": 0, "sqls_incomplete": False,
-            "customers": 0, "customers_incomplete": False,
+            "closed_won_deals": 0, "deals_incomplete": False,
             "won_revenue_usd": 0.0, "revenue_incomplete": False,
         })
         b["countries"] += 1
@@ -694,10 +723,10 @@ def _build_regional_mix(country_rows: list, country_roas_unblockable: bool) -> l
             b["sqls_incomplete"] = True
         else:
             b["sqls"] += r["sqls"]
-        if r.get("customers") is None:
-            b["customers_incomplete"] = True
+        if r.get("closed_won_deals") is None:
+            b["deals_incomplete"] = True
         else:
-            b["customers"] += r["customers"]
+            b["closed_won_deals"] += r["closed_won_deals"]
         if r.get("won_revenue_usd") is None:
             b["revenue_incomplete"] = True
         else:
@@ -711,9 +740,9 @@ def _build_regional_mix(country_rows: list, country_roas_unblockable: bool) -> l
         native = None if b["spend_native_incomplete"] else _round2(b["spend_native"])
         usd = None if (b["spend_native_incomplete"] or b["spend_usd_incomplete"]) else _round2(b["spend_usd"])
         sqls = None if b["sqls_incomplete"] else b["sqls"]
-        customers = None if b["customers_incomplete"] else b["customers"]
+        customers = None if b["deals_incomplete"] else b["closed_won_deals"]
         won = None if b["revenue_incomplete"] else _round2(b["won_revenue_usd"])
-        roas = _roas(won, usd) if country_roas_unblockable else None
+        ratio = _period_ratio(won, usd) if country_roas_unblockable else None
         status = (STATUS_REVENUE_PROVEN if (customers or 0) > 0 and (won or 0) > 0
                   else (STATUS_CUSTOMER_PROVEN if (customers or 0) > 0
                         else (STATUS_SQL_PRODUCER if (sqls or 0) > 0
@@ -726,19 +755,42 @@ def _build_regional_mix(country_rows: list, country_roas_unblockable: bool) -> l
             "native_currency": country_rows[0].get("native_currency") if country_rows else "GBP",
             "spend_usd": usd,
             "sqls": sqls,
-            "customers": customers,
+            "closed_won_deals": customers,
             "won_revenue_usd": won,
-            "roas": roas,
-            "roas_available": roas is not None,
+            "period_revenue_per_ad_spend": ratio,
+            "period_ratio_available": ratio is not None,
             "status": status,
         })
     out.sort(key=lambda r: (
         r.get("won_revenue_usd") or 0.0,
-        r.get("customers") or 0,
+        r.get("closed_won_deals") or 0,
         r.get("spend_native") or 0.0,
     ), reverse=True)
     return out
 
+
+
+# PR-ADS-161E: the reason a revenue total is unknown is the canonical one — an
+# unpriced deal, a deal on no campaign, an undated deal — never assumed.
+_REVENUE_REASON_TEXT = {
+    "closed_won_deals_missing_proven_usd_amount": "a closed-won deal has no proven USD amount",
+    "closed_won_deals_missing_amount": "a closed-won deal has no proven USD amount",
+    "google_ads_deals_not_placed_on_a_campaign": "a Google Ads won deal is on no campaign",
+    "campaign_identity_unavailable": "campaign identity is unavailable",
+    "won_deals_without_close_date": "a won deal has no close date",
+    "won_flag_and_stage_disagree": "HubSpot's won flag and won stage disagree",
+    "closed_won_deal_count_withheld": "the closed-won deal count is withheld",
+}
+
+
+def _revenue_unknown_text(kpis: dict, rows=()) -> str:
+    reasons = [((kpis.get("revenue_metric") or {}).get("reason"))]
+    reasons += [(((r.get("metrics") or {}).get("revenue_usd") or {}).get("reason"))
+                for r in rows or []]
+    reason = next((r for r in reasons if r), None)
+    if not reason:
+        return "closed-won revenue is withheld"
+    return _REVENUE_REASON_TEXT.get(reason, f"closed-won revenue is withheld ({reason})")
 
 def _fmt_usd_short(value) -> str:
     if value is None:
@@ -755,65 +807,96 @@ def _fmt_usd_short(value) -> str:
 
 
 def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
-                          spend_truth: dict, deal_proof_available: bool) -> list:
+                          spend_truth: dict, deal_proof_available: bool,
+                          deal_proof_reason=None) -> list:
     cards = []
+    # PR-ADS-161E: markets whose deal count is withheld support no claim.
+    withheld = [r for r in country_rows if r.get("closed_won_deals") is None]
 
     # Scale — the top revenue-proven country.
     proven = [r for r in country_rows if r["status"] == STATUS_REVENUE_PROVEN]
-    if proven:
+    if withheld and not proven:
+        cards.append({
+            "type": "scale", "title": "Scale",
+            "headline": "Market closed-won outcomes are withheld",
+            "body": (f"Closed-won deals are withheld for {len(withheld)} "
+                     f"market{'s' if len(withheld) != 1 else ''} in this window, so "
+                     "no market is judged on revenue here."),
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+        })
+    elif proven:
         top = max(proven, key=lambda r: (r.get("won_revenue_usd") or 0.0,
-                                         r.get("customers") or 0))
+                                         r.get("closed_won_deals") or 0))
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": f"{top['country_name']} has revenue proof",
-            "body": (f"{top['country_name']} produced {top['customers']} customer"
-                     f"{'s' if top['customers'] != 1 else ''} and "
+            "body": (f"{top['country_name']} won {top['closed_won_deals']} deal"
+                     f"{'s' if top['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(top['won_revenue_usd'])} closed-won revenue this "
                      "window."),
-            "target_page": "roas-countries", "target_label": "Open ROAS by Country",
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "No country has revenue proof yet",
-            "body": "No market has both closed-won customers and proven revenue in "
+            "body": "No market has both closed-won deals and proven revenue in "
                     "this window.",
-            "target_page": "roas-countries", "target_label": "Open ROAS by Country",
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
         })
 
     # Watch — spend without customer proof.
     no_proof = [r for r in country_rows if r["status"] in
                 (STATUS_SPEND_NO_PROOF, STATUS_SQL_PRODUCER, STATUS_FX_UNAVAILABLE)
-                and (r.get("spend_native") or 0) > 0 and (r.get("customers") or 0) == 0]
+                and (r.get("spend_native") or 0) > 0 and r.get("closed_won_deals") == 0]
     if no_proof:
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": "Markets spending without customer proof",
+            "headline": "Markets spending without won-deal proof",
             "body": (f"{len(no_proof)} countr{'ies' if len(no_proof) != 1 else 'y'} spent "
-                     "Google Ads budget but produced no customers in this window. Review "
+                     "Google Ads budget but won no deals in this window. Review "
                      "before scaling."),
-            "target_page": "roas-countries", "target_label": "Open ROAS by Country",
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+        })
+    elif withheld:
+        cards.append({
+            "type": "watch", "title": "Watch",
+            "headline": "Unproven market spend cannot be judged",
+            "body": (f"Closed-won deals are withheld for {len(withheld)} "
+                     f"market{'s' if len(withheld) != 1 else ''}, so spend without "
+                     "proof is not claimed."),
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
         })
     else:
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No unproven market spend",
-            "body": "Every spending market produced at least one customer, or has no "
+            "body": "Every spending market won at least one deal, or has no "
                     "spend to judge.",
-            "target_page": "roas-countries", "target_label": "Open ROAS by Country",
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
         })
 
     # Investigate — geo attribution review, or revenue that maps to no country.
     geo_ok = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
     residual_rev = residual.get("won_revenue_usd")
-    residual_customers = residual.get("customers")
+    residual_customers = residual.get("closed_won_deals")
     if not geo_ok:
         cards.append({
             "type": "investigate", "title": "Investigate",
             "headline": "Geo attribution needs review",
             "body": ("Google Ads geographic spend does not reconcile with the canonical "
-                     "campaign spend for this window, so country ROAS is withheld. Native "
-                     "spend is still shown, never a fabricated USD or ROAS."),
+                     "campaign spend for this window, so country period revenue / ad spend is withheld. Native "
+                     "spend is still shown, never a fabricated USD figure or ratio."),
+            "target_page": "revenue-health", "target_label": "Open Revenue Health",
+        })
+    elif residual_customers is None or (residual_rev is None
+                                         and (residual_customers or 0) > 0):
+        cards.append({
+            "type": "investigate", "title": "Investigate",
+            "headline": "Unassigned closed-won outcome is withheld",
+            "body": ("The closed-won deals or revenue that no country holds are "
+                     "withheld this window, so whether all revenue maps to a "
+                     "country is not claimed."),
             "target_page": "revenue-health", "target_label": "Open Revenue Health",
         })
     elif (residual_customers or 0) > 0 or (residual_rev or 0) > 0:
@@ -831,33 +914,33 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "headline": "No geo attribution flags",
             "body": "Geo spend reconciles and all closed-won revenue maps to a country "
                     "this window.",
-            "target_page": "roas-countries", "target_label": "Open ROAS by Country",
+            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
         })
 
-    # Unavailable — explain WHY geo ROAS / USD spend is withheld, ACCURATELY.
+    # Unavailable — explain WHY geo period ratio / USD spend is withheld, ACCURATELY.
     fx_ok = spend_truth.get("fx_status") == "verified"
     usd_present = kpis.get("verified_spend_usd") is not None
     revenue_known = kpis.get("won_revenue_usd") is not None
     if not deal_proof_available:
         headline = "Deal proof unavailable"
-        body = ("The closed-won deal ledger could not be read, so country deal/client "
-                "proof is withheld. Country revenue may still be canonical from the mart.")
+        body = (f"Country deal/client proof is withheld: "
+                f"{_deal_proof_reason_text(deal_proof_reason)}.")
     elif not geo_ok:
-        headline = "Geo ROAS unavailable"
-        body = ("Country ROAS is withheld because Google Ads geographic spend does not "
-                "reconcile with the canonical campaign spend — never a fabricated ROAS.")
+        headline = "Geo period revenue / ad spend unavailable"
+        body = ("Country period revenue / ad spend is withheld because Google Ads geographic spend does not "
+                "reconcile with the canonical campaign spend — never a fabricated ratio.")
     elif not fx_ok or not usd_present:
-        headline = "USD spend & Geo ROAS unavailable"
-        body = ("USD spend and Geo ROAS are withheld because FX coverage is incomplete — "
-                "native GBP spend is still shown, never a fabricated USD or ROAS.")
+        headline = "USD spend & geo period revenue / ad spend unavailable"
+        body = ("USD spend and geo period revenue / ad spend are withheld because FX coverage is incomplete — "
+                "native GBP spend is still shown, never a fabricated USD figure or ratio.")
     elif not revenue_known:
-        headline = "Geo ROAS unavailable"
-        body = ("Geo ROAS is withheld because some closed-won revenue is incomplete (an "
-                "unknown deal amount) — never a lowered $0.")
-    elif kpis.get("geo_roas") is None:
-        headline = "Geo ROAS not yet meaningful"
+        headline = "Geo period revenue / ad spend unavailable"
+        body = (f"Geo period revenue / ad spend is withheld because {_revenue_unknown_text(kpis, country_rows)}"
+                " — never a lowered $0.")
+    elif kpis.get("geo_period_revenue_per_ad_spend") is None:
+        headline = "Geo period revenue / ad spend not yet meaningful"
         body = ("There is no country-attributed closed-won revenue yet to measure against "
-                "this window's verified spend, so Geo ROAS is not shown — never a "
+                "this window's verified spend, so Geo period revenue / ad spend is not shown — never a "
                 "fabricated 0.00x.")
     else:
         headline = "Country truth verified"
@@ -903,7 +986,7 @@ def _build_truth_status(spend_truth: dict, readiness: dict,
     return {
         "spend": spend,
         "fx": "ready" if fx == "verified" else ("partial" if fx == "incomplete" else "unavailable"),
-        "revenue": "ready" if readiness.get("revenue_integration_connected") else "blocked",
+        "revenue": "ready" if readiness.get("canonical_revenue_available") else "blocked",
         "geo_attribution": geo_attribution,
         "residual": residual,
         # Client/deal proof comes from the closed-won deal ledger; when that is
@@ -913,12 +996,12 @@ def _build_truth_status(spend_truth: dict, readiness: dict,
 
 
 def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
-                       deal_proof_available: bool) -> list:
+                       deal_proof_available: bool, deal_proof_reason=None) -> list:
     out = []
     if kpis.get("verified_spend_usd") is None:
         out.append({"metric": "verified_spend_usd",
                     "reason": "USD spend requires verified FX; native GBP spend is shown instead."})
-    if kpis.get("geo_roas") is None:
+    if kpis.get("geo_period_revenue_per_ad_spend") is None:
         geo_ok = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
         fx_ok = spend_truth.get("fx_status") == "verified"
         usd_present = kpis.get("verified_spend_usd") is not None
@@ -928,22 +1011,22 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
         # geo sync" would send two of them to fix the wrong thing.
         gap_reason = geo_gate.describe_geo_gap(spend_truth.get("country_gap_codes"))
         if not geo_ok:
-            roas_reason = gap_reason or (
-                "Geo ROAS requires Google Ads geographic spend that reconciles "
+            ratio_reason = gap_reason or (
+                "Geo period revenue / ad spend requires Google Ads geographic spend that reconciles "
                 "with the canonical campaign spend — it does not for this window.")
         elif not fx_ok or not usd_present:
-            roas_reason = ("Geo ROAS requires verified FX / USD spend; native GBP spend is "
+            ratio_reason = ("Geo period revenue / ad spend requires verified FX / USD spend; native GBP spend is "
                            "shown instead.")
         elif kpis.get("won_revenue_usd") is None:
-            roas_reason = ("Geo ROAS requires complete revenue — an unknown deal amount "
-                           "makes it incomplete.")
+            ratio_reason = ("Geo period revenue / ad spend requires published revenue — "
+                           f"{_revenue_unknown_text(kpis)}.")
         else:
-            roas_reason = "Geo ROAS not yet meaningful; no country-attributed closed-won revenue."
-        out.append({"metric": "geo_roas", "reason": roas_reason})
+            ratio_reason = "Geo period revenue / ad spend not yet meaningful; no country-attributed closed-won revenue."
+        out.append({"metric": "geo_period_revenue_per_ad_spend", "reason": ratio_reason})
     if not deal_proof_available:
         out.append({"metric": "deal_proof",
-                    "reason": "Closed-won deal proof is unavailable — the deal ledger could "
-                              "not be read. Country revenue may still be canonical from the mart."})
+                    "reason": ("Closed-won deal proof is absent — "
+                               f"{_deal_proof_reason_text(deal_proof_reason)}.")})
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
                     "reason": "SQLs withheld — lead business event dates are unavailable."})
@@ -952,9 +1035,9 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
     # has an unknown amount (customers still countable). Use the exact KPI field
     # name so a client can attach the reason to kpis.residual_revenue_usd.
     if kpis.get("residual_revenue_usd") is None:
-        if kpis.get("residual_customers") is None:
-            residual_reason = ("Revenue with no country is withheld — the revenue integration "
-                               "is disconnected.")
+        if kpis.get("residual_closed_won_deals") is None:
+            residual_reason = ("Revenue with no country is withheld — "
+                               f"{_revenue_unknown_text(kpis)}.")
         else:
             residual_reason = ("Residual revenue requires complete amounts — an unknown closed-won "
                                "deal amount with no country makes it incomplete (never a lowered $0).")
@@ -979,7 +1062,7 @@ def _assemble(window: str, now: datetime | None) -> dict:
     summary = mart.get("summary") or {}
     spend_truth = mart.get("spend_truth") or {}
     readiness = mart.get("readiness") or {}
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
     native_currency = spend_truth.get("native_currency") or "GBP"
     country_roas_unblockable = bool(spend_truth.get("country_roas_unblockable"))
 
@@ -1034,6 +1117,26 @@ def _assemble(window: str, now: datetime | None) -> dict:
                                residual_amount_unknown, revenue_connected)
     kpis = _build_kpis(country_rows, residual, spend_truth, country_roas_unblockable,
                        geo_available, revenue_connected)
+    # PR-ADS-161E: the window's canonical verdicts — a country total is a
+    # subset of the window, so when the window withholds it the card says why.
+    # Only a NON-published verdict travels: a published one has nothing to add.
+    _pub = canonical.get("publication") or {}
+    # A country total is a subset of the window: when the window withholds a
+    # family, the sum of the rows that exist is not a total — unknown, never 0.
+    if (_pub.get("closed_won_deals") or {}).get("status") != cwt.PUBLISHED:
+        for _k in ("closed_won_deals", "countries_with_closed_won_deals",
+                   "residual_closed_won_deals"):
+            kpis[_k] = None
+    if (_pub.get("revenue_usd") or {}).get("status") != cwt.PUBLISHED:
+        for _k in ("won_revenue_usd", "geo_period_revenue_per_ad_spend", "residual_revenue_usd"):
+            if _k in kpis:
+                kpis[_k] = None
+    for _key, _metric in (("revenue_metric", "revenue_usd"),
+                          ("deals_metric", "closed_won_deals")):
+        _st = (_pub.get(_metric) or {}).get("status") or cwt.UNAVAILABLE
+        kpis[_key] = (None if _st == cwt.PUBLISHED else cwt.metric(
+            None, _st, (_pub.get(_metric) or {}).get("reason")
+            or canonical.get("reason")))
 
     return {
         "window_block": window_block,
@@ -1044,6 +1147,7 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "kpis": kpis,
         "country_roas_unblockable": country_roas_unblockable,
         "deal_proof_available": deal_proof_available,
+        "deal_proof_reason": canonical.get("reason"),
         # PR-ADS-155-F1: the scoped verdict, so the contract builder states the
         # page's own truth rather than re-deriving it from a spend-side flag.
         "country_revenue_verdict": _country_revenue_verdict,
@@ -1065,7 +1169,7 @@ def _assemble(window: str, now: datetime | None) -> dict:
         # PR-ADS-153F §8: the shared disclosure block — sources, scope, exact UTC
         # window bounds, freshness, coverage, reconciliation, residual and
         # whether the residual was accepted. Built by the geo gate so this page
-        # and ROAS by Country disclose the SAME facts in the same shape.
+        # and Country Revenue & Spend disclose the SAME facts in the same shape.
         "country_truth": geo_gate.build_country_truth_disclosure(
             spend_truth, window_block,
             revenue_source=canonical_revenue.CANONICAL_SOURCE,
@@ -1094,10 +1198,10 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     pk = prev["kpis"]
     metrics = {
         "won_revenue_usd": _delta_metric(kpis.get("won_revenue_usd"), pk.get("won_revenue_usd")),
-        "customers": _delta_metric(kpis.get("customers"), pk.get("customers")),
+        "closed_won_deals": _delta_metric(kpis.get("closed_won_deals"), pk.get("closed_won_deals")),
         "sqls": _delta_metric(kpis.get("sqls"), pk.get("sqls")),
         "verified_spend_usd": _delta_metric(kpis.get("verified_spend_usd"), pk.get("verified_spend_usd")),
-        "geo_roas": _delta_metric(kpis.get("geo_roas"), pk.get("geo_roas")),
+        "geo_period_revenue_per_ad_spend": _delta_metric(kpis.get("geo_period_revenue_per_ad_spend"), pk.get("geo_period_revenue_per_ad_spend")),
     }
     return {
         "available": any(m["status"] == "ok" for m in metrics.values()),
@@ -1105,6 +1209,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_dashboard_countries(window: str = "current_quarter",
                               now: datetime | None = None) -> dict:
     """Build the Dashboard Countries & Geo Intelligence contract for one window.
@@ -1122,14 +1227,16 @@ def build_dashboard_countries(window: str = "current_quarter",
     residual = core["residual"]
     kpis = core["kpis"]
     deal_proof_available = core["deal_proof_available"]
-    _revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    _revenue_connected = bool(readiness.get("canonical_revenue_available"))
 
     period_change = _build_period_change(window, ref_now, kpis)
     regional_mix = _build_regional_mix(country_rows, core["country_roas_unblockable"])
+    deal_proof_reason = core.get("deal_proof_reason")
     decision_cards = _build_decision_cards(country_rows, residual, kpis, spend_truth,
-                                           deal_proof_available)
+                                           deal_proof_available, deal_proof_reason)
     truth_status = _build_truth_status(spend_truth, readiness, deal_proof_available)
-    unavailable = _build_unavailable(kpis, spend_truth, period_change, deal_proof_available)
+    unavailable = _build_unavailable(kpis, spend_truth, period_change, deal_proof_available,
+                                     deal_proof_reason)
 
     # PR-ADS-154C-F1: per-metric provenance. Country-attributed revenue is a
     # DISTINCT identity from all-source business revenue, and the scope declared
@@ -1176,7 +1283,7 @@ def build_dashboard_countries(window: str = "current_quarter",
         # be its own fabrication. It states a reason when withheld for the same
         # reason the total does: an absence nobody explains forces the audit back
         # to its generic catch-all for a blocker the page already knows.
-        {"metric": "country_attributed_customers",
+        {"metric": "country_attributed_closed_won_deals",
          "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
          "scope": "country_attributed_revenue",
          "truth_status": _country_revenue_status,

@@ -114,7 +114,10 @@ def test_monitoring_warning_suppressed_on_revenue_pages():
 def test_blocked_state_helpers_exist():
     assert "function isRevenueDecisionReady" in JS
     assert "function renderRevenueBlockedState" in JS
-    assert "Revenue ROAS is not ready yet" in JS
+    # PR-ADS-161E: the close-date ratio is never called ROAS; the blocked card
+    # names the page ("Campaign Revenue & Spend").
+    assert "Campaign revenue &amp; spend is not ready yet" in JS
+    assert "Revenue ROAS is not ready yet" not in JS
     # PR-ADS-115: the misleading "Run HubSpot lead re-sync" copy was replaced by a
     # real action — Lead Event-Date Reconciliation in Revenue Health.
     assert "Run HubSpot lead re-sync" not in JS
@@ -127,11 +130,15 @@ def test_blocked_decision_logic():
     fn = _fn("function isRevenueDecisionReady", span=400)
     assert 'lead_date_grain_status === "event_date"' in fn
     assert 'lead_metrics_status !== "withheld"' in fn
-    # PR-ADS-115: readiness now keys off the revenue INTEGRATION fact (connected),
+    # PR-ADS-115: readiness keys off whether the revenue source is available,
     # so a connected-but-empty window is a safe empty state, not a block.
-    assert "isRevenueIntegrationConnected(sh)" in fn
-    helper = _fn("function isRevenueIntegrationConnected", span=400)
-    assert 'revenue_integration_status === "connected"' in helper
+    # PR-ADS-161E: that fact is the CANONICAL closed-won verdict — the legacy
+    # gclid_attribution existence check (revenue_integration_status) is gone.
+    assert "isCanonicalRevenueAvailable(sh)" in fn
+    assert "isRevenueIntegrationConnected" not in JS
+    helper = _fn("function isCanonicalRevenueAvailable", span=400)
+    assert 'canonical_revenue_status === "canonical_available"' in helper
+    assert "revenue_integration_status" not in JS
 
 
 def test_blocked_state_returns_before_table_campaign():
@@ -160,7 +167,8 @@ def test_safe_empty_state_distinct_from_blocked():
     fn = _fn("function renderRevenueEmptyState", span=600)
     assert "No closed-won revenue found for this window" in fn
     assert "no HubSpot closed-won deals are attributed" in fn
-    assert "Revenue ROAS is not ready yet" not in fn
+    # PR-ADS-161E: the blocked heading is now "Campaign revenue & spend is not ready yet".
+    assert "Campaign revenue &amp; spend is not ready yet" not in fn
 
 
 def test_render_flow_blocked_then_empty_then_table():

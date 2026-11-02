@@ -139,7 +139,6 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, geo_rows=N
         # ledger, so the same fixture rows are stubbed there.
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     except (ImportError, AttributeError) as exc:
@@ -168,12 +167,16 @@ def test_missing_fx_coverage_blocks_roas(monkeypatch):
     sh = out["source_health"]
     assert sh["fx_coverage_status"] == "incomplete"
     assert sh["campaign_roas_available"] is False
+    # PR-ADS-161E: the close-date ratio is the period ratio (withheld here on FX);
+    # certified ROAS is never published.
+    assert out["summary"]["period_revenue_per_ad_spend"] is None
     assert out["summary"]["roas"] is None
     alpha = next(c for c in out["campaigns"] if c["campaign_name"] == "alpha")
+    assert alpha["period_revenue_per_ad_spend"] is None
     assert alpha["roas"] is None
 
 
-def test_complete_fx_yields_usd_roas(monkeypatch):
+def test_complete_fx_yields_usd_period_ratio(monkeypatch):
     build = _load_revattr()
     # £26,059.77 native → $34,493.36 USD reporting; revenue $34,000 USD.
     rows = [{"campaign_id": "1", "campaign_name": "alpha", "cost_micros": 26_059_770_000,
@@ -193,10 +196,13 @@ def test_complete_fx_yields_usd_roas(monkeypatch):
     assert sh["spend_usd_total"] == 34493.36
     assert sh["reporting_currency"] == "USD"
     assert sh["revenue_currency"] == "USD"
-    # ROAS computed from USD reporting spend: 34000 / 34493.36 ≈ 0.99.
+    # Period revenue / ad spend computed from USD reporting spend:
+    # 34000 / 34493.36 ≈ 0.99. PR-ADS-161E: published only under its explicit
+    # period name; certified (acquisition-cohort) ROAS stays None.
     alpha = next(c for c in out["campaigns"] if c["campaign_name"] == "alpha")
     assert alpha["spend"] == 34493.36
-    assert alpha["roas"] == round(34000.0 / 34493.36, 2)
+    assert alpha["period_revenue_per_ad_spend"] == round(34000.0 / 34493.36, 2)
+    assert alpha["roas"] is None
 
 
 # ════════════ 1. GBP spend never formatted as USD ════════════
@@ -287,6 +293,7 @@ def test_unmapped_campaign_never_zero_spend(monkeypatch):
     out = build("current_quarter", now=_at("2026-06-22"))
     beta = next(c for c in out["campaigns"] if c["campaign_name"] == "beta")
     assert beta["spend"] is None  # never 0.0
+    assert beta["period_revenue_per_ad_spend"] is None  # PR-ADS-161E
     assert beta["roas"] is None
     assert beta["spend_mapping"] == "unavailable"
 
@@ -387,7 +394,10 @@ def test_revenue_unchanged_across_fx_states(monkeypatch):
 
     # Revenue truth is identical regardless of FX coverage / currency.
     assert complete["summary"]["won_revenue"] == incomplete["summary"]["won_revenue"] == 34000.0
-    assert complete["summary"]["customers"] == incomplete["summary"]["customers"] == 1
+    # PR-ADS-161E: won DEALS; customers (companies) are withheld without
+    # company evidence — identically in both FX states.
+    assert complete["summary"]["closed_won_deals"] == incomplete["summary"]["closed_won_deals"] == 1
+    assert complete["summary"]["customers"] is None and incomplete["summary"]["customers"] is None
 
 
 # ════════════ approved mappings applied in the ROAS pipeline ════════════
@@ -421,7 +431,9 @@ def test_approved_mapping_applied_in_roas_pipeline(monkeypatch):
     assert row["spend"] == 6.5            # canonical USD reporting spend
     assert row["won_revenue"] == 1300.0   # mapped revenue
     assert row["spend_mapping"] == "matched"
-    assert row["roas"] == round(1300.0 / 6.5, 2)
+    # PR-ADS-161E: the close-date ratio is the period ratio; roas stays None.
+    assert row["period_revenue_per_ad_spend"] == round(1300.0 / 6.5, 2)
+    assert row["roas"] is None
     # No leftover unmapped "mexico,chile" row.
     assert not any(c["campaign_name"] == "mexico,chile" for c in out["campaigns"])
     # Original external label preserved in audit metadata.
@@ -450,6 +462,7 @@ def test_unapproved_mapping_not_applied(monkeypatch):
     out = build("current_quarter", now=_at("2026-06-22"))
     mc = next(c for c in out["campaigns"] if c["campaign_name"] == "mexico,chile")
     assert mc["spend"] is None and mc["roas"] is None
+    assert mc["period_revenue_per_ad_spend"] is None  # PR-ADS-161E
     assert mc["spend_mapping"] == "unavailable"
     assert out["source_health"]["applied_campaign_mappings"] == []
 

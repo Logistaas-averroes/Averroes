@@ -156,8 +156,88 @@ def from_source_rows(rows, *, default_close_date="2026-05-10T00:00:00+00:00") ->
     return out
 
 
+def fake_closed_won_universe(rows, *, available=True, reason=None,
+                             sync_state=None, sync_available=True,
+                             company_associations=None):
+    """The ``fetch_closed_won_universe`` a test ledger answers with.
+
+    PR-ADS-161E: ``load_won_deals`` reads the canonical closed-won universe, so
+    a stubbed ledger must answer that read with the SAME rows. Won rows are the
+    ``hs_is_closed_won IS TRUE`` ones; the won-definition cross-check rows are
+    every row flagged won or in the confirmed won stage. No company evidence is
+    stored unless a test supplies it, so customers stay withheld by default.
+    """
+    from analysis.closed_won_truth import CONFIRMED_WON_STAGE_ID  # noqa: PLC0415
+
+    state = READY_SYNC_STATE if sync_state is None else sync_state
+    rows = [dict(r) for r in (rows or [])]
+
+    def _universe(won_stage_id=CONFIRMED_WON_STAGE_ID, *, sql_windows=None):
+        if not available or not sync_available:
+            return {"available": False, "reason": reason or "db_unavailable",
+                    "won_rows": [], "won_definition_rows": [],
+                    "unknown_won_rows": [], "acquisition_contacts": [],
+                    "sync_state": None}
+        return {
+            "available": True,
+            "won_rows": [dict(r) for r in rows
+                         if r.get("hs_is_closed_won") is True],
+            "won_definition_rows": [
+                {"deal_id": r["deal_id"], "deal_name": r.get("deal_name"),
+                 "deal_stage_id": r.get("deal_stage_id"),
+                 "deal_stage_label": r.get("deal_stage_label"),
+                 "hs_is_closed_won": r.get("hs_is_closed_won"),
+                 "deal_close_date": r.get("deal_close_date")}
+                for r in rows if r.get("hs_is_closed_won") is True
+                or str(r.get("deal_stage_id") or "") == won_stage_id],
+            "unknown_won_rows": [
+                {"deal_id": r["deal_id"],
+                 "deal_close_date": r.get("deal_close_date")}
+                for r in rows if r.get("hs_is_closed_won") is None],
+            # The deal→contact association table, as the ledger rows record
+            # it: each won deal's primary contact (creation time not held).
+            "acquisition_contacts": [
+                {"deal_id": r["deal_id"],
+                 "contact_id": str(r["primary_contact_id"]),
+                 "contact_created_at": None, "funnel_row_present": False}
+                for r in rows if r.get("hs_is_closed_won") is True
+                and r.get("primary_contact_id") is not None],
+            "sync_state": dict(state) if state else None,
+            "company_associations": company_associations,
+        }
+    return _universe
+
+
+def label_resolver(unmapped=(), not_google_ads=()):
+    """A stand-in for Campaign Evidence's campaign resolver (PR-ADS-161E).
+
+    Production builds it from all-time canonical spend and the approved
+    identity mappings (``ccr.campaign_resolver``), which a stubbed ledger test
+    does not have. This one places every labelled deal on the campaign its
+    label names — the placement those suites always assumed — except labels
+    listed as ``unmapped`` (no spend campaign) or ``not_google_ads`` (approved
+    as not Google Ads), so a test can exercise either path explicitly.
+    """
+    unmapped = {str(x).strip().lower() for x in unmapped}
+    excluded = {str(x).strip().lower() for x in not_google_ads}
+
+    def resolve(label):
+        key = str(label or "").strip().lower()
+        if not key or key in unmapped:
+            return "unmapped", None
+        if key in excluded:
+            return "not_google_ads", None
+        return "google_ads", key
+    return resolve
+
+
+def _resolver_stub(resolver):
+    return lambda now=None: (resolver, "test label resolver")
+
+
 def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
-                           sync_state=None, sync_available=True):
+                           sync_state=None, sync_available=True,
+                           company_associations=None, resolver=None):
     """Stub the canonical deal ledger for a test.
 
     ``rows`` are canonical ledger rows (see :func:`ledger_row`). ``available``
@@ -187,7 +267,114 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
              "counts": {"unknown_won": 0, "not_won": 0, "deals_in_window": len(rows)}}
             if available else
             {"available": False, "counts": {}, "reason": "db_unavailable"}))
+    monkeypatch.setattr(
+        ledger_repo, "fetch_closed_won_universe",
+        fake_closed_won_universe(rows, available=available, reason=reason,
+                                 sync_state=sync_state,
+                                 sync_available=sync_available,
+                                 company_associations=company_associations))
+    import services.canonical_customer_revenue_service as ccr
+    monkeypatch.setattr(ccr, "campaign_resolver",
+                        _resolver_stub(resolver or label_resolver()))
     return rows
+
+
+def company_evidence(rows, *, companies=None, scan_started_at=None) -> dict:
+    """Proven, current deal→company evidence for every won row (PR-ADS-161E).
+
+    A successful full association scan, started at ``scan_started_at``, that
+    certified exactly the won deals, each observed successfully. ``companies``
+    maps ``deal_id`` → company ids; by default each deal belongs to its own
+    company (``co-<deal_id>``). Pass the same company for two deals to model
+    one customer with two won deals.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    # Default: the scan started now, so it is current for any test clock up to
+    # the configured maximum age (a scan "in the future" of a fixed test clock
+    # is not older than the threshold).
+    scan_started_at = scan_started_at or datetime.now(timezone.utc).isoformat()
+    won = [r for r in rows or [] if r.get("hs_is_closed_won") is True]
+    companies = companies or {}
+    observations, paths = [], []
+    for r in won:
+        deal = str(r["deal_id"])
+        cos = [str(c) for c in companies.get(deal, [f"co-{deal}"])]
+        observations.append({
+            "deal_id": deal, "last_attempt_status": "success",
+            "last_attempt_started_at": scan_started_at,
+            "last_success_started_at": scan_started_at,
+            "last_success_at": scan_started_at,
+            "success_company_count": len(set(cos)),
+            "success_path_count": len(cos),
+            "success_zero_companies": not cos,
+            "deal_lastmodified_at": None})
+        paths += [{"deal_id": deal, "company_id": c} for c in cos]
+    ids = sorted(str(r["deal_id"]) for r in won)
+    return {"available": True, "paths": paths, "observations": observations,
+            "sync_state": {
+                "last_run_status": "success", "last_run_complete": True,
+                "last_full_run_status": "success",
+                "last_full_run_complete": True,
+                "last_complete_scan_started_at": scan_started_at,
+                "last_complete_scan_finished_at": scan_started_at,
+                "last_complete_scan_deal_ids": ids,
+                "last_complete_scan_population": len(ids)}}
+
+
+#: A ledger whose historical bootstrap never completed: readable, but its
+#: coverage is unproven, so the canonical truth publishes nothing from it.
+UNPROVEN_SYNC_STATE = {**READY_SYNC_STATE, "bootstrap_status": "running",
+                       "bootstrap_completed_at": None}
+
+
+def make_canonical_unavailable(monkeypatch):
+    """Make the canonical closed-won population unavailable for this window.
+
+    PR-ADS-161E: pages used to blank closed-won figures on the legacy
+    ``revenue_integration_connected()`` check (a ``gclid_attribution`` existence
+    test). That gate is gone; the state it stood for — "closed-won figures are
+    not publishable here" — is now the CANONICAL population being unavailable.
+    The ledger stays readable (rows are still served), but its coverage is
+    unproven, which is the realistic way production reaches that state. Call it
+    AFTER :func:`patch_canonical_ledger`.
+    """
+    import db.deal_ledger_repository as ledger_repo  # noqa: PLC0415
+
+    real_universe = ledger_repo.fetch_closed_won_universe
+
+    def _universe(*a, **k):
+        u = real_universe(*a, **k)
+        return ({**u, "sync_state": dict(UNPROVEN_SYNC_STATE)}
+                if u.get("available") else u)
+
+    monkeypatch.setattr(ledger_repo, "fetch_closed_won_universe", _universe)
+    monkeypatch.setattr(ledger_repo, "fetch_sync_state", lambda: {
+        "available": True, "row": dict(UNPROVEN_SYNC_STATE)})
+
+
+def capture_canonical_bounds(monkeypatch, sink, key=None):
+    """Record the ``(start, end)`` each canonical window is evaluated with.
+
+    PR-ADS-161E: the won population is windowed by THE closed-won truth
+    (``analysis.closed_won_truth.evaluate_window``), not by a windowed ledger
+    query, so that is where a test proves which window a consumer asked for.
+    ``sink`` is a list (appended) or a dict (``sink[key]`` overwritten).
+    """
+    import analysis.closed_won_truth as cwt  # noqa: PLC0415
+
+    real = cwt.evaluate_window
+
+    def _spy(**kw):
+        bounds = (kw.get("start"), kw.get("end"))
+        if isinstance(sink, dict):
+            sink[key] = bounds
+        else:
+            sink.append(bounds)
+        return real(**kw)
+
+    monkeypatch.setattr(cwt, "evaluate_window", _spy)
+    return sink
 
 
 def canonical_ledger_patch(rows=(), *, available=True, reason=None,
@@ -221,11 +408,28 @@ def canonical_ledger_patch(rows=(), *, available=True, reason=None,
                 "counts": {"unknown_won": 0, "not_won": 0,
                            "deals_in_window": len(rows)}}
 
-    return patch.multiple("db.deal_ledger_repository",
-                          fetch_sync_state=_sync,
-                          fetch_won_deals=_deals,
-                          fetch_won_state_counts=_counts)
+    from contextlib import ExitStack, contextmanager  # noqa: PLC0415
+
+    @contextmanager
+    def _both():
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(
+                "db.deal_ledger_repository",
+                fetch_sync_state=_sync,
+                fetch_won_deals=_deals,
+                fetch_won_state_counts=_counts,
+                fetch_closed_won_universe=fake_closed_won_universe(
+                    rows, available=available, reason=reason,
+                    sync_state=sync_state, sync_available=sync_available)))
+            stack.enter_context(patch(
+                "services.canonical_customer_revenue_service.campaign_resolver",
+                _resolver_stub(label_resolver())))
+            yield
+    return _both()
 
 
 __all__ = ["READY_SYNC_STATE", "DEFAULT_CLOSE_DATE", "ledger_row", "from_legacy_deal_rows",
-           "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch"]
+           "from_source_rows", "patch_canonical_ledger", "canonical_ledger_patch",
+           "fake_closed_won_universe", "capture_canonical_bounds",
+           "UNPROVEN_SYNC_STATE", "make_canonical_unavailable",
+           "company_evidence", "label_resolver"]

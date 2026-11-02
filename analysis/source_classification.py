@@ -289,7 +289,7 @@ def classify_source_taxonomy(primary, detail_1=None, detail_2=None,
     backfill change outside this PR's scope. Until then the drawer surfaces
     ``source_drilldown_2`` as "Unavailable" rather than fabricating a value.
 
-    Only Google Ads / Paid Search returns spend_connected=True, roas_available=True.
+    Only Google Ads / Paid Search returns spend_connected=True, period_ratio_available=True.
     Every other source is revenue-only. Missing / unknown primary → Unclassified,
     never Organic.
     """
@@ -313,7 +313,7 @@ def classify_source_taxonomy(primary, detail_1=None, detail_2=None,
         "source_platform": platform,
         "source_platform_label": PLATFORM_LABELS[platform],
         "spend_connected": spend_connected,
-        "roas_available": spend_connected,
+        "period_ratio_available": spend_connected,
         "attribution_quality": _attribution_quality(group, platform),
         "classification_reason": reason,
     }

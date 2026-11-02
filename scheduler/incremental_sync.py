@@ -1500,7 +1500,7 @@ def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
         if fetched and written == 0:
             raise RuntimeError(
                 f"fetched {fetched} FX rate(s) and persisted none — "
-                "FX coverage stays incomplete, which correctly blocks USD ROAS")
+                "FX coverage stays incomplete, which correctly blocks USD period revenue / ad spend")
 
         db_writers.finish_sync_batch(
             batch_id=batch_id, status="success",

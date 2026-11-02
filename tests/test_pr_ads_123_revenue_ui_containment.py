@@ -32,7 +32,7 @@ def _fn(marker, span=1800):
 
 
 def test_campaign_table_uses_revenue_table_scroll():
-    fn = _fn("function renderRoasCampaignTable", span=3400)
+    fn = _fn("function renderRoasCampaignTable", span=4800)  # PR-ADS-161E: canonical cells
     assert "revenue-table-shell" in fn
     assert "revenue-table-scroll" in fn
     assert "revenue-decision-table" in fn

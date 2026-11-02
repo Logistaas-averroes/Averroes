@@ -204,9 +204,12 @@ def test_mart_exposes_verified_zero_coverage_complete(monkeypatch):
     st = mart["spend_truth"]
     assert st["campaign_spend_coverage_status"] == "complete"
     assert st["campaign_spend_coverage_reason"] == "verified_zero_before_first_spend"
-    # Coverage complete + FX complete → ROAS available.
+    # Coverage complete + FX complete → the period revenue / ad spend ratio is
+    # available. PR-ADS-161E: it is published only under its explicit period
+    # name; certified (acquisition-cohort) ROAS is never published.
     assert st["campaign_spend_status"] == "verified"
-    assert mart["summary"]["roas"] is not None
+    assert mart["summary"]["period_revenue_per_ad_spend"] is not None
+    assert mart["summary"]["roas"] is None
 
 
 def test_mart_blocks_roas_on_missing_chunks(monkeypatch):
@@ -220,6 +223,8 @@ def test_mart_blocks_roas_on_missing_chunks(monkeypatch):
     st = mart["spend_truth"]
     assert st["campaign_spend_coverage_status"] == "incomplete"
     assert st["campaign_spend_status"] != "verified"
+    # PR-ADS-161E: the close-date ratio is the period ratio; roas is always None.
+    assert mart["summary"]["period_revenue_per_ad_spend"] is None
     assert mart["summary"]["roas"] is None
     codes = {d["code"] for d in mart["diagnostics"]}
     assert "campaign_spend_coverage" in codes
@@ -239,7 +244,9 @@ def test_fx_complete_but_coverage_incomplete_blocks_for_coverage(monkeypatch):
     mart, _ = _mart("campaign", monkeypatch, canonical=canon, coverage=coverage)
     st = mart["spend_truth"]
     assert st["fx_status"] == "verified"        # FX is fine…
-    assert st["campaign_spend_status"] != "verified"  # …ROAS blocked on coverage
+    assert st["campaign_spend_status"] != "verified"  # …ratio blocked on coverage
+    # PR-ADS-161E: the close-date ratio is the period ratio; roas is always None.
+    assert mart["summary"]["period_revenue_per_ad_spend"] is None
     assert mart["summary"]["roas"] is None
     codes = {d["code"] for d in mart["diagnostics"]}
     assert "campaign_spend_coverage" in codes
@@ -380,7 +387,9 @@ def test_frontend_campaign_coverage_copy():
 # Test 9 — country blocked copy with totals
 def test_frontend_country_blocked_copy():
     fn = _slice("function renderCountrySpendUnreconciledState", span=3800)
-    assert "Country ROAS is blocked" in fn
+    # PR-ADS-161E: the close-date ratio is never called ROAS.
+    assert "Country Period Revenue / Ad Spend is blocked" in fn
+    assert "ROAS" not in fn
     assert "Campaign spend" in fn
     assert "Geo spend" in fn
     assert "Variance" in fn

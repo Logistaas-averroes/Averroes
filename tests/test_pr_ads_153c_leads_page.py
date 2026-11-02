@@ -441,7 +441,10 @@ def test_dashboard_keeps_revenue_customers_on_the_revenue_contract():
     outcomes = _APP_JS.split("function renderDashCommercialOutcomes(")[1].split(
         "\nfunction ")[0]
     assert "o.customers" in outcomes
-    assert "Closed-Won Customers" in outcomes
+    # PR-ADS-161E: closed-won deals and customers (distinct companies) are two
+    # cells; "Closed-Won Customers" was the deal count under a customer label.
+    assert "Closed-Won Deals" in outcomes and "Customers" in outcomes
+    assert "Closed-Won Customers" not in outcomes
     # The outcomes section draws no conversion chips into or out of itself.
     assert "dash-funnel__conv" not in outcomes
 

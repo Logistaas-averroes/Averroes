@@ -38,7 +38,8 @@ from services import canonical_contract as contract_mod  # noqa: E402
 from analysis import revenue_scope  # noqa: E402
 from services import canonical_revenue_service as canonical_revenue  # noqa: E402
 from services import cross_page_parity_service as parity  # noqa: E402
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    company_evidence,  # noqa: E402
     READY_SYNC_STATE, ledger_row, patch_canonical_ledger,
 )
 from tests.test_pr_ads_138_dashboard_countries import (  # noqa: E402
@@ -93,12 +94,18 @@ def _revenue_of(built: dict, consumers=None) -> dict:
 
 
 def _customers_of(built: dict) -> dict:
+    """The closed-won DEAL count each consumer publishes.
+
+    PR-ADS-161E: these tests are about the COUNT surviving a withheld revenue
+    total. That count is closed-won deals; "customers" is now the distinct
+    proven HubSpot companies, a separate metric with its own verdict.
+    """
     out = {}
     for name, entry in built.items():
         node = ((entry.get("payload") or {}).get("summary")
                 if name == "revenue_decision_mart"
                 else (entry.get("payload") or {}).get("kpis")) or {}
-        for key in ("customers", "total_customers", "closed_won_customers"):
+        for key in ("closed_won_deals", "total_closed_won_deals"):
             if key in node:
                 out[name] = node[key]
                 break
@@ -359,7 +366,7 @@ def test_f3_13_the_mart_no_longer_publishes_a_partial_known_dollar_sum(monkeypat
 
     summary = built["revenue_decision_mart"]["payload"]["summary"]
     assert summary["won_revenue_usd"] is None      # but is not the total
-    assert summary["customers"] == 4
+    assert summary["closed_won_deals"] == 4
     assert summary["revenue_available"] is True    # population readable
     assert summary["revenue_total_available"] is False
     assert (summary["revenue_total_unavailable_reason"]
@@ -375,7 +382,7 @@ def test_f3_14_the_attributed_subset_follows_the_same_rule(monkeypatch):
     summary = built["revenue_decision_mart"]["payload"]["summary"]
     assert summary["attributed_won_revenue_usd"] is None
     assert summary["attributed_revenue_total_available"] is False
-    assert summary["attributed_customers"] is not None
+    assert summary["attributed_closed_won_deals"] is not None
 
 
 def test_f3_15_an_unavailable_contract_cannot_carry_a_numeric_value(monkeypatch):
@@ -683,8 +690,11 @@ def _cli_both_formats(monkeypatch, capsys, label, *, rows=None, sync_state=None,
                                           "missing_contact_created_at_count": 0,
                                           "excluded_non_paid_count": 0,
                                           "excluded_pseudo_campaign_count": 0})
-    patch_canonical_ledger(monkeypatch, rows if rows is not None else [_deal(1)],
-                           sync_state=sync_state)
+    _rows = rows if rows is not None else [_deal(1)]
+    # PR-ADS-161E: "fully healthy" includes proven, current company identity
+    # for every won deal, so the canonical customer metric publishes.
+    patch_canonical_ledger(monkeypatch, _rows, sync_state=sync_state,
+                           company_associations=company_evidence(_rows))
     monkeypatch.setattr("db.connection.init_pool", lambda: None)
     # Capture the ORIGINAL builder, not whatever a previous scenario in this
     # same test patched in — chained mutations would attribute one
@@ -840,7 +850,7 @@ def test_f3f1_3_the_mart_reads_the_verdict_rather_than_re_deriving_it(monkeypatc
     assert summary["attributed_won_revenue_usd"] is None
     assert summary["revenue_total_available"] is False
     assert summary["revenue_total_unavailable_reason"] == "a_reason_only_the_ladder_knows"
-    assert summary["customers"] == 2          # the count is not governed by it
+    assert summary["closed_won_deals"] == 2   # the count is not governed by it
 
 
 #: Production modules that read `currency_unavailable_deals`, and what each does

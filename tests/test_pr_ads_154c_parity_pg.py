@@ -214,11 +214,13 @@ _READY_SYNC_SQL = """
 
 _DEAL_SQL = """
     INSERT INTO hubspot_deal_ledger
-        (deal_id, deal_name, deal_stage_label, hs_is_closed, hs_is_closed_won,
-         deal_close_date, amount_raw, deal_currency_code, revenue_usd,
-         currency_status, currency_reason, acquisition_group, attribution_status,
-         association_status)
-    VALUES (%s, %s, 'Deal Won / Payment Received', TRUE, TRUE,
+        (deal_id, deal_name, deal_stage_id, deal_stage_label, hs_is_closed,
+         hs_is_closed_won, deal_close_date, amount_raw, deal_currency_code,
+         revenue_usd, currency_status, currency_reason, acquisition_group,
+         attribution_status, association_status)
+    -- PR-ADS-161E: the stage id now matches the stage label. It was NULL, which
+    -- the canonical won-flag/stage cross-check correctly reads as a conflict.
+    VALUES (%s, %s, '326093516', 'Deal Won / Payment Received', TRUE, TRUE,
             '2026-06-14T00:00:00+00', %s, %s, %s, %s, %s,
             'unclassified', 'unclassified', 'resolved')
 """
@@ -290,7 +292,12 @@ def test_f3_pg_no_consumer_publishes_a_partial_total_over_all_time(pg):
     for name, entry in built.items():
         assert entry["error"] is None, f"{name}: {entry['error']}"
     mart = (built["revenue_decision_mart"]["payload"] or {}).get("summary") or {}
-    assert mart["customers"] == 3                 # complete whatever the amounts are
+    # PR-ADS-161E: the won-DEAL count is complete whatever the amounts are.
+    # Customers are distinct proven companies; this ledger stores no company
+    # evidence, so they are withheld — never the deal count.
+    assert mart["closed_won_deals"] == 3
+    assert mart["customers"] is None
+    assert mart["customers_status"] != "published"
     assert mart["won_revenue_usd"] is None        # unknown, not partial, not zero
     assert mart["revenue_available"] is True
     assert mart["revenue_total_available"] is False

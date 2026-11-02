@@ -39,6 +39,16 @@ def _slice(marker, span=1500):
     return JS[i:i + span]
 
 
+def _fn(marker):
+    """The whole top-level app.js function starting at ``marker`` (to its
+    closing ``}`` at column 0) — robust to a body that grows."""
+    i = JS.find(marker)
+    assert i != -1, f"{marker} not found in app.js"
+    j = JS.find("\n}\n", i)
+    assert j != -1, f"end of {marker} not found in app.js"
+    return JS[i:j + 3]
+
+
 # ── 1. ROAS by Campaign uses the mart ───────────────────────────────────────
 
 def test_campaign_page_uses_mart():
@@ -115,14 +125,22 @@ def test_all_revenue_pages_share_mart_renderers():
 
 def test_fx_incomplete_renders_unavailable_not_zero_in_ui():
     st = _slice("function renderMartSpendTruth", span=900)
-    # USD reporting + ROAS show "Unavailable" when null — never $0, never GBP-as-USD.
+    # USD reporting + the period ratio basis show "Unavailable" when null — never
+    # $0, never GBP-as-USD. (PR-ADS-161E: the ratio is period revenue / ad spend.)
     assert 'st.usd_spend == null ? "Unavailable"' in st
-    assert 'roas == null ? "Unavailable"' in st
+    assert 's.period_revenue_per_ad_spend == null ? "Unavailable"' in st
     # Native spend uses the native-currency formatter (never "$" on GBP).
     assert "fmtNativeMoney(st.native_spend, st.native_currency)" in st
-    strip = _slice("function renderMartSummaryStrip", span=900)
+    strip = _fn("function renderMartSummaryStrip")
     assert 's.spend_usd == null ? "Unavailable"' in strip
-    assert 's.roas == null ? "Unavailable"' in strip
+    # PR-ADS-161E: the period ratio through the mart's canonical metric — a null
+    # renders Withheld / Unavailable with the reason, never $0 or 0.00x. The
+    # certified ROAS renders through the same helper (always Unavailable).
+    assert 'martMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio)' in strip
+    assert 'martMetricHtml(s, "roas", fmtPeriodRatio)' in strip
+    helper = _slice("function martMetricHtml", span=600)
+    assert "canonicalMetricHtml(m, formatter" in helper
+    assert "dashValue(" in helper
 
 
 def test_fx_incomplete_backend_nulls_usd_and_roas(monkeypatch):
@@ -132,6 +150,7 @@ def test_fx_incomplete_backend_nulls_usd_and_roas(monkeypatch):
     mart = build_revenue_decision_mart(view="campaign", window=t125.WINDOW, now=t125.NOW)
     assert mart["spend_truth"]["usd_spend"] is None
     assert mart["summary"]["spend_usd"] is None
+    assert mart["summary"]["period_revenue_per_ad_spend"] is None
     assert mart["summary"]["roas"] is None
     assert mart["readiness"]["spend_decision_ready"] is False
     # Native spend is preserved only in spend_truth.native_spend.
@@ -147,8 +166,10 @@ def test_country_mismatch_blocks_trusted_table_in_ui():
     # PR-ADS-128: the card is given the whole spend_truth so its copy + status
     # chips match the cause.
     assert "renderCountrySpendUnreconciledState(st)" in body
-    card = _slice("function renderCountrySpendUnreconciledState", span=3800)
-    assert "Country ROAS is blocked" in card
+    card = _fn("function renderCountrySpendUnreconciledState")
+    # PR-ADS-161E: the country ratio is period revenue / ad spend, never ROAS.
+    assert "Country Period Revenue / Ad Spend is blocked" in card
+    assert "Country ROAS is blocked" not in card
     assert "does not reconcile" in card                 # mismatch wording
     assert "no canonical Google Ads geo spend" in card  # no-geo wording (distinct)
     # The mismatch guard returns before any trusted table render.

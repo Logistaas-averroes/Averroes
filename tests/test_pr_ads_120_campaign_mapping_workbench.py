@@ -266,7 +266,10 @@ def test_leads_sqls_customers_surfaced(monkeypatch):
     _patch_review(monkeypatch, canonical=canonical, revenue=revenue, leads=leads)
     review = idsvc.build_mapping_review("current_quarter", now=_at("2026-06-29T12:00:00"))
     row = {r["external_campaign_label"]: r for r in review["rows"]}["mexico,chile"]
-    assert row["customers"] == 2          # distinct deals
+    # PR-ADS-161E: two distinct closed-won DEALS; customers (companies) are
+    # withheld here — no deal→company evidence is stored in this fixture.
+    assert row["closed_won_deals"] == 2
+    assert row["customers"] is None
     assert row["leads"] == 2 and row["sqls"] == 1
     assert review["leads_available"] is True
 
@@ -341,7 +344,6 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, identity=N
     monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
-    monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
     monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
@@ -361,7 +363,7 @@ def _canonical(rows, *, fx_complete=True, total_spend=None, total_spend_usd=None
 _COV = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-23", "status": "verified"}]
 
 
-def test_saved_mapping_applies_to_roas(monkeypatch):
+def test_saved_mapping_applies_to_period_ratio(monkeypatch):
     build = _load_revattr()
     rows = [{"campaign_id": "9", "campaign_name": "Mexico, Chile, Colombia", "cost_micros": 5_000_000,
              "spend": 5.0, "spend_usd": 6.35, "fx_complete": True}]
@@ -378,7 +380,10 @@ def test_saved_mapping_applies_to_roas(monkeypatch):
     assert mc["spend_state"] == "mapped_manual"
     assert mc["won_revenue"] == 1270.0
     assert mc["spend"] == 6.35
-    assert mc["roas"] == round(1270.0 / 6.35, 2)
+    # PR-ADS-161E decision 1: the close-date ratio publishes as period revenue /
+    # ad spend; certified attribution ROAS is never published (not one cohort).
+    assert mc["period_revenue_per_ad_spend"] == round(1270.0 / 6.35, 2)
+    assert mc["roas"] is None
     # The original external label is exposed as an alias of the canonical campaign.
     assert mc["aliases"] == ["mexico,chile"]
     assert not any(c["campaign_name"] == "mexico,chile" for c in out["campaigns"])
@@ -573,7 +578,12 @@ def test_workbench_controls_present_in_ui():
     assert "Mark as Not Google Ads" in JS
     assert '"/api/campaign-mapping"' in JS
     assert '"/api/campaign-mapping/exclude"' in JS
-    assert "Excluded from Google Ads ROAS" in JS
+    # PR-ADS-161E: the exclusion names what it removes the label from — the
+    # Google Ads campaign revenue and spend — never "ROAS".
+    assert "Not Google Ads — excluded from Google Ads campaign revenue and spend." in JS
+    assert "excluded from Google Ads campaign revenue and spend.` }" in JS
+    assert "Excluded from Google Ads ROAS" not in JS
+    assert "excluded from Google Ads ROAS" not in JS
     # Unmatched labels still never imply $0.
     assert "Spend mapping unavailable" in JS
 

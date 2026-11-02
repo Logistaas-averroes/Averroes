@@ -25,8 +25,10 @@ ones every page already uses. What it adds is the layer those pages lack:
   ``not_published``, with a value of ``None`` — never ``0`` — whenever the
   status is not ``published``.
 
-Read-only: no HubSpot call, no Google Ads call, no write. It is consumed by no
-production page in PR-ADS-161D; PR-ADS-161E migrates readers onto it.
+Read-only: no HubSpot call, no Google Ads call, no write. Since PR-ADS-161E
+every production reader of closed-won deals, customers and closed-won revenue
+consumes it, through ``canonical_revenue_service.load_won_deals`` (which reads
+:func:`window_view`) and the reader contract in ``analysis.closed_won_truth``.
 """
 
 from __future__ import annotations
@@ -499,7 +501,7 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
             "customer_identity_source": COMPANY_ASSOCIATION_SOURCE,
             "customer_identity_gap": COMPANY_ASSOCIATION_GAP,
             "campaign_resolver": resolver_detail,
-            "consumed_by_production_pages": False}
+            "consumed_by_production_pages": True}
 
     if not universe.get("available"):
         freshness = {"signal": "canonical deal-ledger sync coverage",
@@ -519,36 +521,130 @@ def get_closed_won_truth(windows=None, *, now: datetime | None = None,
         # Absent is not "no findings" — fail closed.
         findings = [{"code": "coverage_verdict_missing",
                      "message": "the ledger coverage gate returned no verdict"}]
-    freshness = freshness_block(universe.get("sync_state"), findings, now)
-    contacts = _contacts_by_deal(universe.get("acquisition_contacts"))
+    prepared = _prepare(universe, findings, now)
+    out = []
+    for wtype, wkey in windows:
+        bounds = window_bounds(wtype, wkey, now)
+        out.append(_evaluate(prepared, bounds, now, resolver,
+                             _window_meta(wtype, wkey, bounds)))
+    return {**base, "available": True, "windows": out,
+            "freshness": prepared["freshness"],
+            "company_association_freshness": prepared["company_freshness"]}
+
+
+def _prepare(universe, findings, now) -> dict:
+    """Everything every window of one snapshot shares, computed once."""
     company = company_identity_inputs(universe.get("company_associations"))
     company_freshness = company_association_freshness(
         universe.get("company_associations"), now,
         # The current won population, from the SAME snapshot as the evidence.
         won_deal_ids=[str(r["deal_id"])
                       for r in universe.get("won_rows") or []])
-    scan = (company_freshness.get("scan_current") or {}).get("current") is True
-    out = []
-    for wtype, wkey in windows:
-        bounds = window_bounds(wtype, wkey, now)
-        result = cwt.evaluate_window(
-            won_rows=universe.get("won_rows") or [],
-            definition_rows=universe.get("won_definition_rows") or [],
-            contacts_by_deal=contacts, start=bounds["start"],
-            end=bounds["end"], is_all_time=bounds["is_all_time"], now=now,
-            coverage_findings=findings, resolve_label=resolver,
-            company_ids_by_deal=company["company_ids_by_deal"],
-            stale_company_evidence=company["stale"],
-            company_source_reason=company["reason"],
-            company_scan_current=scan,
-            unknown_won_rows=universe.get("unknown_won_rows"))
-        result["coverage"]["source_freshness"] = freshness
-        result["coverage"]["company_association_freshness"] = company_freshness
-        out.append({"available": True,
-                    "window": _window_meta(wtype, wkey, bounds),
-                    "definitions": DEFINITIONS, **result})
-    return {**base, "available": True, "windows": out, "freshness": freshness,
-            "company_association_freshness": company_freshness}
+    return {
+        "universe": universe, "findings": findings,
+        "freshness": freshness_block(universe.get("sync_state"), findings, now),
+        "contacts": _contacts_by_deal(universe.get("acquisition_contacts")),
+        "company": company, "company_freshness": company_freshness,
+        "scan": (company_freshness.get("scan_current") or {}).get(
+            "current") is True,
+    }
+
+
+def _evaluate(prepared, bounds, now, resolver, window_meta) -> dict:
+    universe = prepared["universe"]
+    company = prepared["company"]
+    result = cwt.evaluate_window(
+        won_rows=universe.get("won_rows") or [],
+        definition_rows=universe.get("won_definition_rows") or [],
+        contacts_by_deal=prepared["contacts"], start=bounds["start"],
+        end=bounds["end"], is_all_time=bounds["is_all_time"], now=now,
+        coverage_findings=prepared["findings"], resolve_label=resolver,
+        company_ids_by_deal=company["company_ids_by_deal"],
+        stale_company_evidence=company["stale"],
+        company_source_reason=company["reason"],
+        company_scan_current=prepared["scan"],
+        unknown_won_rows=universe.get("unknown_won_rows"))
+    result["coverage"]["source_freshness"] = prepared["freshness"]
+    result["coverage"]["company_association_freshness"] = \
+        prepared["company_freshness"]
+    return {"available": True, "window": window_meta,
+            "definitions": DEFINITIONS, **result}
+
+
+_NO_RESOLVER_GIVEN = object()
+
+
+def window_view(window_type: str | None = None, window_key: str | None = None,
+                *, start=None, end=None, now: datetime | None = None,
+                universe: dict | None = None,
+                resolver=_NO_RESOLVER_GIVEN) -> dict:
+    """PR-ADS-161E — ONE window's canonical truth, plus what a reader needs to
+    break it down without restating a rule.
+
+    The window is a named one (``window_type`` + ``window_key``) or explicit
+    half-open UTC bounds (``start`` None for All Time), evaluated by the same
+    :func:`cwt.evaluate_window` on the same snapshot. Returns::
+
+        {"truth":   the window, exactly as get_closed_won_truth reports it,
+         "members": the window's member ledger rows — None whenever the deal
+                    count is not published (withheld means absent),
+         "company_ids_by_deal": the identity map subset_outcomes needs,
+         "universe": the snapshot}
+
+    Campaign placement is the canonical one: the window is evaluated with
+    Campaign Evidence's own resolver (:func:`campaign_resolver`, built once per
+    snapshot by ``canonical_revenue_service.snapshot_campaign_resolver``), so
+    ``publication.campaign_revenue`` and the ``google_ads_unplaced`` partition
+    are the verdicts readers republish — never re-derived (PR-ADS-161E).
+    """
+    from services import canonical_revenue_service as crs  # noqa: PLC0415
+
+    now = now or _utcnow()
+    if now.tzinfo is None:  # a naive instant is UTC, as everywhere else here
+        now = now.replace(tzinfo=timezone.utc)
+    if universe is None:
+        universe = crs.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
+    if window_type is not None:
+        bounds = window_bounds(window_type, window_key, now)
+        meta = _window_meta(window_type, window_key, bounds)
+    else:
+        bounds = {"start": start, "end": end, "is_all_time": start is None,
+                  "start_date": start.date().isoformat() if start else None,
+                  "end_date": end.date().isoformat() if end else None,
+                  "label": "custom"}
+        meta = _window_meta("custom", None, bounds)
+    if not universe.get("available"):
+        truth = _unavailable_window(
+            window_type or "custom", window_key, bounds,
+            cwt.R_SOURCE_UNREADABLE,
+            "the canonical deal ledger could not be read",
+            {"signal": "canonical deal-ledger sync coverage",
+             "coverage_proven": None})
+        truth["window"] = meta
+        return {"truth": truth, "members": None, "company_ids_by_deal": None,
+                "universe": universe}
+    findings = universe.get("coverage_findings")
+    if findings is None:
+        findings = [{"code": "coverage_verdict_missing",
+                     "message": "the ledger coverage gate returned no verdict"}]
+    prepared = _prepare(universe, findings, now)
+    if bounds["end"] is None:
+        bounds = {**bounds, "end": now}
+    detail = None
+    if resolver is _NO_RESOLVER_GIVEN:
+        resolver, detail = crs.snapshot_campaign_resolver(now)
+    truth = _evaluate(prepared, bounds, now, resolver, meta)
+    truth["campaign_resolver_available"] = resolver is not None
+    truth["campaign_resolver"] = detail
+    ids = (truth.get("membership") or {}).get("deal_ids")
+    members = None
+    if ids is not None:
+        wanted = {str(d) for d in ids}
+        members = [r for r in universe.get("won_rows") or []
+                   if str(r.get("deal_id")) in wanted]
+    return {"truth": truth, "members": members,
+            "company_ids_by_deal": prepared["company"]["company_ids_by_deal"],
+            "universe": universe}
 
 
 def get_window_outcome(window_type: str, window_key: str, *,

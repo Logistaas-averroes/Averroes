@@ -30,7 +30,8 @@ attribution model. It composes canonical read-only contracts:
 Truth rules (unchanged, never loosened):
   - HubSpot closed-won is revenue truth (USD). Open pipeline is NOT revenue; a
     closed-lost deal is NOT negative revenue; an opportunity is NOT a customer.
-  - No ROAS on this tab (spend / ROAS live on the spend pages).
+  - No spend ratio on this tab (spend and the period ratios live on the spend
+    pages; attribution ROAS / CAC are unavailable everywhere).
   - No fake $0 / 0.00x / 0%. A missing amount stays null; a rate whose denominator
     is null / zero / unsafe is null (Unavailable); a missing prior period yields
     "No comparison".
@@ -42,6 +43,7 @@ Truth rules (unchanged, never loosened):
 
 from __future__ import annotations
 
+from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
 import logging
 from datetime import datetime, timezone
 
@@ -52,6 +54,7 @@ from datetime import datetime, timezone
 # quarter". Spend is denominated in the account day, so the account day wins.
 from services.canonical_contract import resolve_canonical_window
 from services import canonical_contract
+from analysis import closed_won_truth as cwt
 from analysis.source_classification import GROUP_LABELS
 from analysis import revenue_scope
 from db import revenue_repository as repo
@@ -80,6 +83,8 @@ STATUS_ATTR_REVIEW = "Attribution needs review"
 STATUS_STAGE_UNAVAILABLE = "Stage unavailable"
 STATUS_SQL_PRODUCER = "SQL producer"
 STATUS_NO_ACTIVITY = "No activity in window"
+# PR-ADS-161E: the row's closed-won deal count is withheld or unreadable.
+STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
 
 # The single, precise reason every open-pipeline / lost / aging field carries.
 OPEN_PIPELINE_REASON = (
@@ -169,6 +174,9 @@ def _build_deals(mart_rows: list, revenue_connected: bool, ledger_available: boo
 def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
                 amount_unknown: bool) -> dict:
     sqls = summary.get("sqls")
+    # PR-ADS-161E: closed-won DEALS and customers (distinct proven HubSpot
+    # companies) are two metrics. Customers carry the canonical status/reason.
+    deals = summary.get("closed_won_deals") if revenue_connected else None
     customers = summary.get("customers") if revenue_connected else None
     # PR-ADS-154C-F3-F1 §1. This used to re-derive completeness from the raw
     # ledger rows because "the mart coerces a null deal amount to $0" — which
@@ -191,7 +199,10 @@ def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
         "opportunities_created": None,
         "open_opportunities": None,
         "open_pipeline_usd": None,
+        "closed_won_deals": deals,
         "closed_won_customers": customers,
+        "closed_won_customers_status": summary.get("customers_status"),
+        "closed_won_customers_reason": summary.get("customers_reason"),
         "closed_won_revenue_usd": won,
         "closed_lost_deals": None,
         "lost_pipeline_usd": None,
@@ -199,10 +210,22 @@ def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
         "opportunity_to_customer_rate": None,
         "avg_days_to_close": None,
         "stalled_opportunities": None,
-        # Honest, durable extras: the full-funnel conversion we CAN prove, and the
-        # count of qualified SQLs with no closed-won deal yet.
-        "sql_to_customer_rate": _rate(customers, sqls),
+        # PR-ADS-161E: retired. It divided all-source won deals (close date) by
+        # campaign-attributable SQLs (contact creation) — two populations, two
+        # cohorts. No canonical service supplies both over one acquisition
+        # cohort and scope, so it is unavailable with the reason.
+        "sql_to_customer_rate": None,
+        "sql_to_customer_rate_status": cwt.UNAVAILABLE,
+        "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
         "sqls_not_closed_won": sqls_not_closed_won,
+        # This tab never computes or exposes a spend ratio (period ratios
+        # belong to the spend pages; ROAS / CAC are unavailable everywhere), so
+        # the mart's metric block is republished without them.
+        "metrics": {**{k: v for k, v in (summary.get("metrics") or {}).items()
+                       if k not in ("roas", "cac", cwt.PERIOD_REVENUE_PER_AD_SPEND,
+                                    cwt.PERIOD_SPEND_PER_CUSTOMER_WON)},
+                    "sql_to_customer_rate": cwt.incompatible_rate(
+                        cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE)},
     }
 
 
@@ -221,7 +244,7 @@ def _count_status(count, positive_status: str) -> str:
 
 def _build_funnel(kpis: dict) -> list:
     sqls = kpis.get("sqls")
-    customers = kpis.get("closed_won_customers")
+    deals = kpis.get("closed_won_deals")
     won = kpis.get("closed_won_revenue_usd")
     not_won = kpis.get("sqls_not_closed_won")
     return [
@@ -232,9 +255,12 @@ def _build_funnel(kpis: dict) -> list:
          "rate_from_previous": None, "status": STATUS_STAGE_UNAVAILABLE},
         {"stage": "Open Pipeline", "count": None, "amount_usd": None,
          "rate_from_previous": None, "status": STATUS_STAGE_UNAVAILABLE},
-        {"stage": "Closed Won", "count": customers, "amount_usd": won,
-         "rate_from_previous": _rate(customers, sqls),
-         "status": _count_status(customers, STATUS_REVENUE_PROVEN)},
+        # Closed-won DEALS by close date. No rate from SQLs: the SQLs above are
+        # an acquisition cohort, the deals a close-date one (PR-ADS-161E).
+        {"stage": "Closed Won", "count": deals, "amount_usd": won,
+         "rate_from_previous": None,
+         "rate_unavailable_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
+         "status": _count_status(deals, STATUS_REVENUE_PROVEN)},
         {"stage": "Closed Lost", "count": None, "amount_usd": None,
          "rate_from_previous": None, "status": STATUS_STAGE_UNAVAILABLE},
         {"stage": "SQLs Not Yet Closed-Won", "count": not_won,
@@ -246,7 +272,7 @@ def _build_funnel(kpis: dict) -> list:
 def _build_stage_mix(kpis: dict) -> list:
     """Only the closed-won stage is durably known; open/lost stages are Unavailable."""
     return [
-        {"stage": "Closed Won", "count": kpis.get("closed_won_customers"),
+        {"stage": "Closed Won", "count": kpis.get("closed_won_deals"),
          "amount_usd": kpis.get("closed_won_revenue_usd"),
          "avg_age_days": None, "oldest_age_days": None,
          "status": STATUS_REVENUE_PROVEN},
@@ -267,10 +293,23 @@ def _build_aging_buckets() -> list:
 
 # ── Source → pipeline (real closed-won; open pipeline Unavailable) ────────────
 
-def _source_status(sqls, customers, won) -> str:
-    # A closed-won customer IS revenue proof (even if that deal's exact amount is
-    # unavailable), so customers>0 → proven regardless of the won total.
-    if (customers or 0) > 0:
+def _row_metrics(metrics, revenue_connected: bool):
+    """A row's canonical deal/customer/revenue metrics, without any spend
+    ratio — this tab never publishes one. None when the population is unavailable."""
+    if not revenue_connected or not metrics:
+        return None
+    return {k: metrics[k] for k in ("closed_won_deals", "customers", "revenue_usd")
+            if k in metrics}
+
+
+def _source_status(sqls, deals, won) -> str:
+    # A closed-won deal IS revenue proof (even if that deal's exact amount is
+    # unavailable), so deals>0 → proven regardless of the won total.
+    if deals is None:
+        # Unknown is not zero (PR-ADS-161E): never "SQL producer" / "no
+        # activity" over a withheld deal count.
+        return STATUS_OUTCOME_WITHHELD
+    if deals > 0:
         return STATUS_REVENUE_PROVEN
     if (sqls or 0) > 0:
         return STATUS_SQL_PRODUCER
@@ -282,6 +321,7 @@ def _build_source_breakdown(by_source: dict, revenue_connected: bool,
     out = []
     for g in (by_source.get("groups") or []):
         sqls = g.get("sqls")
+        deals = g.get("closed_won_deals") if revenue_connected else None
         customers = g.get("customers") if revenue_connected else None
         # Withhold this group's revenue if it holds a null-amount closed-won deal
         # (the aggregator counts it as $0) — never a lowered / fabricated $0.
@@ -295,16 +335,21 @@ def _build_source_breakdown(by_source: dict, revenue_connected: bool,
             "sqls": sqls,
             "opportunities": None,           # not durable → Unavailable
             "open_pipeline_usd": None,       # not durable → Unavailable
+            "closed_won_deals": deals,
             "closed_won_customers": customers,
+            # PR-ADS-161E: the group's canonical {value, status, reason} for
+            # deals, customers and revenue — a withheld figure says why.
+            "metrics": _row_metrics(g.get("metrics"), revenue_connected),
             "closed_won_revenue_usd": won,
             "sql_to_opportunity_rate": None,
             "opportunity_to_customer_rate": None,
-            "sql_to_customer_rate": _rate(customers, sqls),
-            "status": _source_status(sqls, customers, won),
+            "sql_to_customer_rate": None,
+            "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
+            "status": _source_status(sqls, deals, won),
         })
     out.sort(key=lambda r: (
         r.get("closed_won_revenue_usd") or 0.0,
-        r.get("closed_won_customers") or 0,
+        r.get("closed_won_deals") or 0,
         r.get("sqls") or 0,
     ), reverse=True)
     return out
@@ -318,6 +363,7 @@ def _build_campaign_breakdown(mart_campaign_rows: list, revenue_connected: bool,
         if not name:
             continue
         sqls = m.get("sqls")
+        deals = m.get("closed_won_deals") if revenue_connected else None
         customers = m.get("customers") if revenue_connected else None
         # Withhold this campaign's revenue if it holds a null-amount closed-won deal
         # (the mart counts it as $0) — never a lowered / fabricated $0.
@@ -325,22 +371,25 @@ def _build_campaign_breakdown(mart_campaign_rows: list, revenue_connected: bool,
             won = None
         else:
             won = _round2(m.get("won_revenue"))
-        # Skip pure-noise rows with no SQLs and no customers.
-        if (sqls or 0) == 0 and (customers or 0) == 0 and (won or 0) == 0:
+        # Skip pure-noise rows with no SQLs and no won deals.
+        if (sqls or 0) == 0 and (deals or 0) == 0 and (won or 0) == 0:
             continue
         out.append({
             "campaign_name": name,
             "sqls": sqls,
             "opportunities": None,
             "open_pipeline_usd": None,
+            "closed_won_deals": deals,
             "closed_won_customers": customers,
+            "metrics": _row_metrics(m.get("metrics"), revenue_connected),
             "closed_won_revenue_usd": won,
-            "sql_to_customer_rate": _rate(customers, sqls),
-            "status": _source_status(sqls, customers, won),
+            "sql_to_customer_rate": None,
+            "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
+            "status": _source_status(sqls, deals, won),
         })
     out.sort(key=lambda r: (
         r.get("closed_won_revenue_usd") or 0.0,
-        r.get("closed_won_customers") or 0,
+        r.get("closed_won_deals") or 0,
         r.get("sqls") or 0,
     ), reverse=True)
     return out
@@ -378,6 +427,35 @@ SQL_NO_DEAL_REASON_SOURCE = (
 )
 
 
+SQL_NO_DEAL_REASON_LINK_UNPROVEN = (
+    "Per-SQL closed-won linkage is unavailable — a won deal's contact "
+    "association lookup did not succeed, so an SQL cannot be shown as not yet "
+    "closed-won."
+)
+
+
+def _canonical_won_contacts():
+    """PR-ADS-161E: every contact associated with a canonical won deal (any close
+    date), from the canonical closed-won snapshot — or None when that cannot be
+    proven complete. Replaces `has_closed_won_deal`, which the leads query read
+    from the legacy `gclid_attribution` table."""
+    universe = canonical_revenue.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
+    if not universe.get("available") or universe.get("coverage_findings"):
+        return None
+    # Every won deal's contact lookup must have SUCCEEDED (resolved, ambiguous
+    # or genuinely none); a failed or unrecognised status means a won deal's
+    # contacts are unknown, and an SQL could be one of them. Fail closed.
+    from analysis.deal_truth import (  # noqa: PLC0415
+        ASSOC_AMBIGUOUS, ASSOC_NONE, ASSOC_RESOLVED,
+    )
+    if any(r.get("association_status") not in (ASSOC_RESOLVED, ASSOC_AMBIGUOUS,
+                                               ASSOC_NONE)
+           for r in universe.get("won_rows") or []):
+        return None
+    return {str(c.get("contact_id")) for c in universe.get("acquisition_contacts") or []
+            if c.get("contact_id") is not None}
+
+
 def _build_sql_no_deal(sql_result: dict, ref_now: datetime,
                        revenue_connected: bool) -> tuple[list, int, bool, str | None]:
     """Per-SQL rows whose contact has NO closed-won deal yet. Returns (rows, total,
@@ -391,7 +469,11 @@ def _build_sql_no_deal(sql_result: dict, ref_now: datetime,
         return [], 0, False, SQL_NO_DEAL_REASON_DISCONNECTED
     if not sql_result.get("available"):
         return [], 0, False, SQL_NO_DEAL_REASON_SOURCE
-    pending = [r for r in (sql_result.get("rows") or []) if not r.get("has_closed_won_deal")]
+    won_contacts = _canonical_won_contacts()
+    if won_contacts is None:
+        return [], 0, False, SQL_NO_DEAL_REASON_LINK_UNPROVEN
+    pending = [r for r in (sql_result.get("rows") or [])
+               if str(r.get("contact_id")) not in won_contacts]
     total = len(pending)
     rows = []
     for r in pending[:_SQL_LIST_LIMIT]:
@@ -436,39 +518,57 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
     proven = [s for s in source_rows if (s.get("closed_won_revenue_usd") or 0) > 0]
     if proven:
         top = max(proven, key=lambda s: (s.get("closed_won_revenue_usd") or 0.0,
-                                         s.get("closed_won_customers") or 0))
+                                         s.get("closed_won_deals") or 0))
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": f"{top['source_detail']} produces the most closed-won revenue",
             "body": (f"{top['source_detail']} generated {_fmt_usd_short(top['closed_won_revenue_usd'])} "
-                     f"closed-won revenue from {top.get('closed_won_customers') or 0} customer"
-                     f"{'s' if (top.get('closed_won_customers') or 0) != 1 else ''} this window."),
+                     f"closed-won revenue from {top.get('closed_won_deals') or 0} won deal"
+                     f"{'s' if (top.get('closed_won_deals') or 0) != 1 else ''} this window."),
+            "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+        })
+    elif any(s.get("closed_won_deals") is None
+             or s.get("closed_won_revenue_usd") is None for s in source_rows):
+        cards.append({
+            "type": "scale", "title": "Scale",
+            "headline": "Source closed-won outcomes are withheld",
+            "body": ("Closed-won deals or revenue are withheld for this window, so no "
+                     "source is claimed to have produced none."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "No source has closed-won revenue yet",
-            "body": "No source produced closed-won customers in this window.",
+            "body": "No source produced closed-won deals in this window.",
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
 
     # Watch — a source with SQL volume but weak customer conversion.
-    weak = [s for s in source_rows if (s.get("sqls") or 0) >= 3 and (s.get("closed_won_customers") or 0) == 0]
+    weak = [s for s in source_rows if (s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") == 0]
     if weak:
         top = max(weak, key=lambda s: s.get("sqls") or 0)
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": f"{top['source_detail']} has SQL volume but no customers",
+            "headline": f"{top['source_detail']} has SQL volume but no won deals",
             "body": (f"{top['source_detail']} produced {top['sqls']} SQLs but no closed-won "
-                     "customers in this window. Review lead quality and sales follow-up."),
+                     "deals in this window. Review lead quality and sales follow-up."),
+            "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+        })
+    elif any((s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") is None
+             for s in source_rows):
+        cards.append({
+            "type": "watch", "title": "Watch",
+            "headline": "SQL conversion cannot be judged",
+            "body": ("Closed-won deals are withheld for sources with SQL volume, so "
+                     "unconverted SQL volume is not claimed."),
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
     else:
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No source with unconverted SQL volume",
-            "body": "Every source with meaningful SQL volume produced at least one customer, "
+            "body": "Every source with meaningful SQL volume produced at least one won deal, "
                     "or there is not enough SQL volume to judge.",
             "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
         })
@@ -507,14 +607,22 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
 # ── Truth status + unavailable ───────────────────────────────────────────────
 
 def _build_truth_status(readiness: dict, deals: list, revenue_connected: bool,
-                        ledger_available: bool, sql_no_deal_available: bool) -> dict:
+                        ledger_available: bool, sql_no_deal_available: bool,
+                        ledger_outage: bool | None = None) -> dict:
+    # An unreadable ledger is an OUTAGE ("unavailable"); a readable one whose
+    # canonical population is not publishable is "blocked" (PR-ADS-161E).
+    if ledger_outage is None:
+        ledger_outage = not ledger_available
     lead_ready = bool(readiness.get("lead_metrics_ready"))
     amounts_partial = any(d.get("amount_usd") is None for d in deals)
     attribution_partial = any(d.get("attribution_status") != "attributed" for d in deals)
     return {
         "sqls": "ready" if lead_ready else "partial",
+        # An unreadable ledger is an OUTAGE ("unavailable"), checked first: since
+        # PR-ADS-161E it also makes the canonical population unavailable, and
+        # "blocked" would hide the outage behind a gate.
         "deals": ("ready" if (revenue_connected and ledger_available)
-                  else ("blocked" if not revenue_connected else "unavailable")),
+                  else ("unavailable" if ledger_outage else "blocked")),
         # Stage data is structurally partial: only closed-won is durable.
         "stages": "partial",
         "amounts": "partial" if amounts_partial else "ready",
@@ -541,14 +649,14 @@ def _build_unavailable(kpis: dict, deals: list, revenue_connected: bool,
     ]
     if not revenue_connected:
         out.append({"metric": "closed_won_revenue_usd",
-                    "reason": "Closed-won customers and revenue are withheld — the revenue integration is disconnected."})
+                    "reason": "Closed-won deals, customers and revenue are withheld — the canonical closed-won population is unavailable for this window."})
     elif not ledger_available:
         out.append({"metric": "deals",
                     "reason": "The closed-won deal ledger could not be read; deal proof is unavailable this window."})
     elif amount_unknown:
         out.append({"metric": "closed_won_revenue_usd",
                     "reason": "Closed-won revenue is incomplete — a closed-won deal has an unknown amount, "
-                              "so the total is withheld (never a lowered $0). Customers are still counted."})
+                              "so the total is withheld (never a lowered $0). Won deals are still counted."})
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
                     "reason": "SQLs withheld — lead business event dates are unavailable."})
@@ -572,13 +680,14 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     try:
         prev = build_revenue_decision_mart(view="deal", window=prev_key, now=prev_now)
         ps = prev.get("summary") or {}
-        connected = bool((prev.get("readiness") or {}).get("revenue_integration_connected"))
+        connected = bool((prev.get("readiness") or {}).get("canonical_revenue_available"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Dashboard deals previous-period build failed: %s", exc)
         return {"available": False, "label": label, "note": note, "metrics": {},
                 "reason": "Previous period unavailable."}
     prev_sqls = ps.get("sqls")
     prev_customers = ps.get("customers") if connected else None
+    prev_deals = ps.get("closed_won_deals") if connected else None
     prev_won = _round2(ps.get("won_revenue_usd")) if connected else None
     metrics = {
         "sqls": _delta_metric(kpis.get("sqls"), prev_sqls),
@@ -586,12 +695,13 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
         "opportunities_created": _delta_metric(None, None),
         "open_opportunities": _delta_metric(None, None),
         "open_pipeline_usd": _delta_metric(None, None),
+        "closed_won_deals": _delta_metric(kpis.get("closed_won_deals"), prev_deals),
         "closed_won_customers": _delta_metric(kpis.get("closed_won_customers"), prev_customers),
         "closed_won_revenue_usd": _delta_metric(kpis.get("closed_won_revenue_usd"), prev_won),
         "sql_to_opportunity_rate": _delta_metric(None, None),
         "opportunity_to_customer_rate": _delta_metric(None, None),
-        "sql_to_customer_rate": _delta_metric(kpis.get("sql_to_customer_rate"),
-                                              _rate(prev_customers, prev_sqls)),
+        # Retired with the KPI (PR-ADS-161E): incompatible populations.
+        "sql_to_customer_rate": _delta_metric(None, None),
     }
     return {
         "available": any(m["status"] == "ok" for m in metrics.values()),
@@ -599,6 +709,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     }
 
 
+@_canonical_snapshot.single_snapshot
 def build_dashboard_deals(window: str = "current_quarter",
                           now: datetime | None = None) -> dict:
     """Build the Dashboard Deals & Pipeline Intelligence contract for one window.
@@ -613,7 +724,7 @@ def build_dashboard_deals(window: str = "current_quarter",
     window_block = mart.get("window") or {}
     summary = mart.get("summary") or {}
     readiness = mart.get("readiness") or {}
-    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    revenue_connected = bool(readiness.get("canonical_revenue_available"))
 
     start = _parse_iso_date(window_block.get("start_date"))
     end = _parse_iso_date(window_block.get("end_date"))
@@ -664,7 +775,9 @@ def build_dashboard_deals(window: str = "current_quarter",
     decision_cards = _build_decision_cards(kpis, source_breakdown, sql_no_deal_total,
                                            sql_no_deal_available)
     truth_status = _build_truth_status(readiness, deals, revenue_connected,
-                                       ledger_available, sql_no_deal_available)
+                                       ledger_available, sql_no_deal_available,
+                                       ledger_outage=canonical_revenue.is_ledger_outage(
+                                           canonical.get("reason")))
     unavailable = _build_unavailable(kpis, deals, revenue_connected, ledger_available,
                                      sql_no_deal_available, sql_no_deal_reason,
                                      amount_unknown, period_change)
@@ -690,11 +803,19 @@ def build_dashboard_deals(window: str = "current_quarter",
                           else canonical_contract.TRUTH_NOT_READY),
          "unavailable_reason": summary.get("revenue_total_unavailable_reason"),
          "violation_codes": summary.get("revenue_total_violation_codes")},
-        {"metric": "customers",
+        {"metric": "closed_won_deals",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "all_source_business_revenue",
          "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
                           else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if _revenue_ready
+                          and summary.get("customers_status") == "published"
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": summary.get("customers_reason")},
         {"metric": "campaign_attributable_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "campaign_attributable_sqls",

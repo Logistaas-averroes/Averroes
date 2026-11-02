@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.canonical_ledger_fixtures import (  # noqa: E402
+from tests.canonical_ledger_fixtures import (
+    make_canonical_unavailable,  # noqa: E402
     from_legacy_deal_rows, patch_canonical_ledger,
 )
 
@@ -229,7 +230,6 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
         repo, "fetch_campaign_identity",
         lambda cid=None: {"available": True, "mappings": []},
     )
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     # PR-ADS-153E-B: one canonical row set feeds the Overview KPIs, the trend
     # and every downstream breakdown — which is the property this suite exists to
     # check. A test overriding either legacy fixture drives that one ledger.
@@ -350,7 +350,10 @@ def test_kpis_come_from_canonical_safe_sources(monkeypatch):
     assert k["closed_won_revenue_usd"] == 9000.0
     assert out["google_ads_conversion_value_used"] is False
     assert out["source_truth"] == "revenue_decision_mart"
-    assert (k["leads"], k["sqls"], k["customers"]) == (5, 2, 1)
+    # PR-ADS-161E: one closed-won DEAL. Customers are distinct proven HubSpot
+    # companies; no deal→company evidence is stored here, so they are withheld.
+    assert (k["leads"], k["sqls"], k["closed_won_deals"]) == (5, 2, 1)
+    assert k["customers"] is None and k["customers_reason"]
     # PR-ADS-155-F2 §2. This case used to assert `sql_rate == 0.4` and
     # `customer_rate == 0.2` under the heading "honest rates". Neither was one.
     # `sql_rate` divided two INDEPENDENT window totals (contacts that became
@@ -376,6 +379,10 @@ def test_missing_fx_blocks_usd_spend_and_roas_never_zero(monkeypatch):
     # None, not a fabricated $0 / 0.00x.
     assert k["google_ads_spend_usd"] is None and k["google_ads_spend_usd"] != 0
     assert k["google_ads_roas"] is None and k["google_ads_roas"] != 0
+    # PR-ADS-161E: the close-date ratio is published only under its explicit
+    # name; missing FX withholds it too — None, never a fabricated 0.00x.
+    assert (k["google_ads_period_revenue_per_ad_spend"] is None
+            and k["google_ads_period_revenue_per_ad_spend"] != 0)
     # Native GBP stays visible and stays GBP.
     assert k["native_spend"]["amount"] == 10000.0
     assert k["native_spend"]["currency"] == "GBP"
@@ -383,6 +390,7 @@ def test_missing_fx_blocks_usd_spend_and_roas_never_zero(monkeypatch):
     metrics = {u["metric"] for u in out["unavailable"]}
     assert "google_ads_spend_usd" in metrics
     assert "google_ads_roas" in metrics
+    assert "google_ads_period_revenue_per_ad_spend" in metrics
     assert out["truth_status"]["fx"] != "ready"
 
 
@@ -391,19 +399,24 @@ def test_missing_spend_source_reports_unavailable(monkeypatch):
     k = out["kpis"]
     assert k["google_ads_spend_usd"] is None
     assert k["google_ads_roas"] is None
+    assert k["google_ads_period_revenue_per_ad_spend"] is None
     assert out["truth_status"]["spend"] != "ready"
 
 
-def test_non_google_sources_never_get_roas(monkeypatch):
+def test_non_google_sources_never_get_period_ratio(monkeypatch):
     out = _overview(monkeypatch)
     mix = {s["key"]: s for s in out["source_mix"]}
     assert set(mix) == {"google_ads", "other_paid", "organic", "offline", "unclassified"}
     for key, row in mix.items():
-        # Review fix: NO mix row carries ROAS — not even Google Ads. The
-        # source-page group ROAS is a geo-spend ratio ungated by coverage/FX
-        # safety and could contradict the hero ROAS on the same screen; the
-        # hero KPI is the only ROAS this page shows.
-        assert row["roas"] is None, f"{key} must never carry ROAS on the mix"
+        # Review fix: NO mix row carries a spend ratio — not even Google Ads.
+        # The source-page group ratio is a geo-spend ratio ungated by
+        # coverage/FX safety and could contradict the hero ratio on the same
+        # screen; the hero KPI is the only spend ratio this page shows.
+        # PR-ADS-161E: mix rows carry no ratio key at all (neither the retired
+        # `roas` nor `period_revenue_per_ad_spend`).
+        assert "roas" not in row, f"{key} must never carry ROAS on the mix"
+        assert "period_revenue_per_ad_spend" not in row, \
+            f"{key} must never carry a spend ratio on the mix"
         if key == "google_ads":
             assert row["spend_connected"] is True
             continue
@@ -430,7 +443,9 @@ def test_disconnected_revenue_integration_never_shows_fake_zero_revenue(monkeypa
     # mart's 0.0/0 aggregates over an unwired ledger are UNKNOWN, not real.
     import db.revenue_repository as repo
     _patch_durable(monkeypatch, won_rows=[], deal_rows=[], source_rev_rows=[])
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: False)
+    # PR-ADS-161E: "not connected" is now the canonical population being
+    # unavailable — the legacy gclid_attribution gate is gone.
+    make_canonical_unavailable(monkeypatch)
     from services.dashboard_overview_service import build_dashboard_overview
     out = build_dashboard_overview(WINDOW, now=NOW)
     k = out["kpis"]
@@ -438,6 +453,7 @@ def test_disconnected_revenue_integration_never_shows_fake_zero_revenue(monkeypa
     assert k["customers"] is None
     assert k["customer_rate"] is None
     assert k["google_ads_roas"] is None
+    assert k["google_ads_period_revenue_per_ad_spend"] is None
     # The trend never emits a flat $0 "ready" revenue series.
     assert out["trend"]["revenue_status"] == "unavailable"
     assert all(p["revenue_usd"] is None for p in out["trend"]["points"])
@@ -511,12 +527,14 @@ def test_all_time_has_no_previous_period(monkeypatch):
 
 def test_unavailable_previous_metric_is_no_comparison_not_zero(monkeypatch):
     # Coverage is verified for 2026 only, so the prior-YEAR ytd window has an
-    # untrusted spend denominator: prior ROAS is None -> no_comparison.
+    # untrusted spend denominator: prior period revenue / ad spend is None ->
+    # no_comparison. (PR-ADS-161E: the period_change key is the explicit name.)
     out = _overview(monkeypatch, window="ytd")
-    roas_delta = out["period_change"]["metrics"]["roas"]
-    assert roas_delta["status"] == "no_comparison"
-    assert roas_delta["delta_pct"] is None
-    assert roas_delta["delta_pct"] != 0
+    assert "roas" not in out["period_change"]["metrics"]
+    ratio_delta = out["period_change"]["metrics"]["period_revenue_per_ad_spend"]
+    assert ratio_delta["status"] == "no_comparison"
+    assert ratio_delta["delta_pct"] is None
+    assert ratio_delta["delta_pct"] != 0
 
 
 def test_zero_baseline_is_no_comparison_not_percent(monkeypatch):
@@ -549,7 +567,8 @@ def test_trend_spend_series_ready_only_when_denominator_safe(monkeypatch):
     # Bucket sums reconcile with the daily rows (2 x 6500 USD).
     assert sum(p["spend_usd"] or 0 for p in trend["points"]) == 13000.0
     assert sum(p["revenue_usd"] or 0 for p in trend["points"]) == 9000.0
-    assert sum(p["customers"] or 0 for p in trend["points"]) == 1
+    # PR-ADS-161E: the close-date series counts DEALS, under that name.
+    assert sum(p["closed_won_deals"] or 0 for p in trend["points"]) == 1
 
 
 def test_trend_spend_series_withheld_when_fx_incomplete(monkeypatch):
@@ -754,23 +773,27 @@ def test_dashboard_no_longer_uses_ad_windows():
 
 
 def test_kpi_cards_render_all_five_hero_metrics():
-    fn = _slice(JS, "function renderDashKpiRow", 4200)
+    fn = _slice(JS, "function renderDashKpiRow", 5200)
     for label in ("Google Ads Spend", "Closed-Won Revenue", "Customers",
-                  "SQLs", "Google Ads ROAS"):
+                  "SQLs", "PERIOD_RATIO_LABEL"):
         assert label in fn
+    # PR-ADS-161E: the close-date ratio is never labelled ROAS.
+    assert "ROAS" not in fn
+    assert "PERIOD_RATIO_DISCLOSURE" in fn
     # Native GBP line under spend, via the currency-correct formatter.
     assert "fmtCompactCurrency(native.amount, native.currency" in fn
-    # ROAS renders through the safe formatter only.
-    assert "fmtRoasMultiple" in fn
+    # The period ratio renders through the safe formatter only.
+    assert "fmtPeriodRatio" in fn
 
 
 def test_unavailable_renders_as_unavailable_never_blank():
     fn = _slice(JS, "function dashValue", 400)
     assert 'Unavailable' in fn
     assert "null" in fn and "undefined" in fn  # explicit guards
-    # fmtRoasMultiple(null) is the house "Unavailable" (pinned in PR-109 too).
-    roas_fn = _slice(JS, "function fmtRoasMultiple", 200)
-    assert '"Unavailable"' in roas_fn
+    # fmtPeriodRatio(null) is the house "Unavailable" (pinned in PR-109 too;
+    # renamed from fmtRoasMultiple in PR-ADS-161E).
+    ratio_fn = _slice(JS, "function fmtPeriodRatio", 200)
+    assert '"Unavailable"' in ratio_fn
 
 
 def test_no_undefined_or_null_leaks_in_dash_renderers():
@@ -795,6 +818,8 @@ def test_channel_mix_never_renders_roas():
     assert mix_start != -1 and mix_end > mix_start
     mix_block = JS[mix_start:mix_end]  # includes dashDonutSVG
     assert "fmtRoasMultiple" not in mix_block
+    assert "fmtPeriodRatio" not in mix_block
+    assert "period_revenue_per_ad_spend" not in mix_block
     assert "Needs review" in mix_block
     # Unknown revenue renders Unavailable, never an implied verified $0 ring.
     assert "revenueKnown" in mix_block
@@ -823,9 +848,17 @@ def test_funnel_conversion_never_fakes_zero():
     assert "dashValue(s.reached, fmtCount)" in cohort
 
     outcomes = _slice(JS, "function renderDashCommercialOutcomes", 3000)
-    for cell in ("Closed-Won Customers", "Total Closed-Won Revenue"):
+    # PR-ADS-161E: deals and customers are two cells; "Closed-Won Customers"
+    # was the won-DEAL count under a customer label.
+    for cell in ("Closed-Won Deals", "Customers", "Total Closed-Won Revenue"):
         assert cell in outcomes
-    assert "dashValue(o.total_revenue_usd, fmtMoney)" in outcomes
+    assert "Closed-Won Customers" not in outcomes
+    assert "canonicalMetricHtml(" in outcomes
+    # PR-ADS-161E: through the canonical adapter — a null total renders the
+    # canonical Withheld / Unavailable + reason (dashValue only as fallback).
+    assert "canonicalValueHtml(o.total_revenue_usd, (o.metrics || {}).revenue_usd, fmtMoney" in outcomes
+    helper = _slice(JS, "function canonicalValueHtml", 700)
+    assert "return dashValue(null)" in helper
 
 
 def test_signals_and_cards_link_to_evidence_pages():

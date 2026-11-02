@@ -48,6 +48,7 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import WINDOW_KEYS
+from analysis import closed_won_truth as cwt  # PR-ADS-161E
 from services import canonical_revenue_service as canonical_revenue
 from services.canonical_contract import (
     METRIC_TRUTH_KEY,
@@ -110,6 +111,13 @@ V_POPULATION_UNAVAILABLE = "revenue_population_unavailable"
 V_TOTAL_UNPUBLISHABLE = "revenue_total_unpublishable_missing_amount"
 #: The lifecycle funnel is readable but stage-entry evidence is incomplete.
 V_LIFECYCLE_PARTIAL = "lifecycle_coverage_partial"
+#: PR-ADS-161E. The deal population is available; the CUSTOMER total is unknown
+#: because a won deal in it has no company, or several — a CRM record to fix,
+#: named by the CRM Truth Exceptions workbench.
+V_CUSTOMER_IDENTITY_UNRESOLVED = "customer_total_unpublishable_identity_unresolved"
+#: PR-ADS-161E. The company-association evidence is missing, stale, or its full
+#: scan is not current — the association sync must run, no CRM record is wrong.
+V_CUSTOMER_ASSOCIATION_COVERAGE = "customer_association_coverage_unproven"
 
 #: Canonical unavailable-reasons → the class of problem they represent. The keys
 #: are `canonical_revenue_service`'s own constants, so a reason renamed there
@@ -133,10 +141,54 @@ _UNAVAILABLE_CLASSES = {
     # PR-ADS-155-F1: the revenue integration is not wired at all, so no scoped
     # revenue population exists to read. Classifiable, and emphatically not the
     # same as "we could not tell" — an operator connects the integration.
-    "revenue_integration_not_connected":
+    "canonical_closed_won_population_unavailable":
         ("population_unavailable", V_POPULATION_UNAVAILABLE,
          "the revenue integration is not connected, so no closed-won population "
          "is readable for this scope"),
+    # PR-ADS-161E: readers now republish the CANONICAL reason codes
+    # (analysis.closed_won_truth). Each is the same class of problem as its
+    # legacy twin above — one refusal, whichever vocabulary a page carries.
+    cwt.R_REVENUE_UNPROVEN:
+        ("total_unpublishable", V_TOTAL_UNPUBLISHABLE,
+         "the population IS available, but closed-won deals inside it have no "
+         "proven USD amount, so the total is unknown — resolved by pricing "
+         "those deals at source"),
+    cwt.R_UNDATED_WON_DEALS:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "a won deal has no close date, so this window's population is withheld"),
+    cwt.R_WON_DEFINITION_CONFLICT:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "HubSpot's won flag and won stage disagree for a deal in this window, "
+         "so its population is withheld"),
+    cwt.R_DEALS_WITHHELD:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "the closed-won deal count is withheld for this window"),
+    # PR-ADS-161E: the canonical customer-identity refusals. Each names who
+    # fixes it — a CRM record, the association sync, or an engineer.
+    cwt.R_CUSTOMER_IDENTITY:
+        ("customer_identity_unresolved", V_CUSTOMER_IDENTITY_UNRESOLVED,
+         "a won deal in this window has no HubSpot company, or several, so the "
+         "distinct-company total is unknown — resolved in HubSpot; the CRM Truth "
+         "Exceptions workbench names the deal"),
+    cwt.R_CUSTOMER_IDENTITY_STALE:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "a won deal's company evidence is stale — the association sync must "
+         "re-observe it"),
+    cwt.R_CUSTOMER_IDENTITY_UNAVAILABLE:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "a won deal's company was never successfully observed — the "
+         "association sync must observe it"),
+    cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "the latest full company-association scan is not current for the won "
+         "set — the association scan must run"),
+    cwt.R_CUSTOMER_IDENTITY_NOT_INGESTED:
+        ("customer_association_coverage", V_CUSTOMER_ASSOCIATION_COVERAGE,
+         "company associations have not been ingested — the association sync "
+         "must run"),
+    cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE:
+        ("database_unreadable", V_DB_UNREADABLE,
+         "the company-association tables could not be read"),
 }
 
 
@@ -267,19 +319,34 @@ METRIC_IDENTITIES = {
         ],
         "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
     },
+    # PR-ADS-161E: deals and customers are two identities. A closed-won DEAL is a
+    # HubSpot deal; a CUSTOMER is a distinct proven HubSpot company behind them.
+    "closed_won_deals": {
+        "label": "Closed-won deals, ALL sources",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "all_source_business_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
+        "consumers": [
+            ("dashboard/overview", "kpis.closed_won_deals"),
+            ("dashboard/revenue", "kpis.closed_won_deals"),
+            ("dashboard/channels", "kpis.total_closed_won_deals"),
+            ("dashboard/deals", "kpis.closed_won_deals"),
+            ("revenue_decision_mart", "summary.closed_won_deals"),
+        ],
+        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
+    },
     "customers": {
-        "label": "Closed-won customers, ALL sources",
+        "label": "Customers (distinct HubSpot companies), ALL sources",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "all_source_business_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
             ("dashboard/overview", "kpis.customers"),
             ("dashboard/revenue", "kpis.customers"),
-            ("dashboard/channels", "kpis.total_customers"),
+            ("dashboard/channels", "kpis.customers"),
             ("dashboard/deals", "kpis.closed_won_customers"),
             ("revenue_decision_mart", "summary.customers"),
         ],
-        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
     },
 
     # ── Campaign-ATTRIBUTABLE outcomes — a SUBSET, not the business total ────
@@ -293,8 +360,18 @@ METRIC_IDENTITIES = {
             ("revenue_decision_mart", "summary.attributed_won_revenue_usd"),
         ],
     },
+    "campaign_attributed_closed_won_deals": {
+        "label": "Closed-won deals attributable to a campaign",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "campaign_attributable_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
+        "consumers": [
+            ("dashboard/campaigns", "kpis.closed_won_deals"),
+            ("revenue_decision_mart", "summary.attributed_closed_won_deals"),
+        ],
+    },
     "campaign_attributed_customers": {
-        "label": "Closed-won customers attributable to a campaign",
+        "label": "Customers (distinct HubSpot companies) attributable to a campaign",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "campaign_attributable_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
@@ -316,13 +393,13 @@ METRIC_IDENTITIES = {
             ("dashboard/countries", "kpis.won_revenue_usd"),
         ],
     },
-    "country_attributed_customers": {
-        "label": "Closed-won customers attributed to a country",
+    "country_attributed_closed_won_deals": {
+        "label": "Closed-won deals attributed to a country",
         "canonical_source": SOURCE_CANONICAL_GEO,
         "scope": "country_attributed_revenue",
         "coverage_proof": PROOF_COUNTRY_REVENUE,
         "consumers": [
-            ("dashboard/countries", "kpis.customers"),
+            ("dashboard/countries", "kpis.closed_won_deals"),
         ],
     },
 

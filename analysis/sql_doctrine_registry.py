@@ -332,7 +332,7 @@ CONSUMERS: list[dict] = [
        truth_status="counts None when unavailable or mismatch",
        headline=True, row=True, executive=True),
     _c("Revenue Decision Mart summary.sqls / row sqls",
-       "Shared top-line SQL count consumed by Dashboard Revenue, Campaigns, Countries, Deals, ROAS pages.",
+       "Shared top-line SQL count consumed by Dashboard Revenue, Campaigns, Countries, Deals, Campaign / Country Revenue & Spend pages.",
        endpoint="GET /api/revenue-performance (mart views)",
        service_function="services.revenue_decision_mart.build_revenue_decision_mart / _summary_block",
        repository_source="services.revenue_attribution_service._build_db_rows → db.revenue_repository.fetch_lead_quality",
@@ -344,7 +344,7 @@ CONSUMERS: list[dict] = [
                        "Cross-page parity asserts this count equal across five pages.",
        truth_status="withheld wholesale via lead_metrics_withheld (None, never 0)",
        headline=True, row=True, sorting=True, decision=True, executive=True, operational=True),
-    _c("Revenue attribution service (ROAS by Campaign / Country, verdicts)",
+    _c("Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)",
        "Row-level sqls and classify_verdict (watch/waste) on the legacy population; "
        "JSON fallback path imports analysis.core.QUALIFIED.",
        endpoint="GET /api/revenue-attribution, /api/reports/roas/*",
@@ -719,7 +719,7 @@ _GEO = "Geo Intelligence country summary (Countries page)"
 _OVW = "Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)"
 _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
-_RAS = "Revenue attribution service (ROAS by Campaign / Country, verdicts)"
+_RAS = "Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)"
 _SRC = "Revenue by Source (source_attribution_service)"
 _CHAN = "Dashboard Channels"
 _CAMP = "Dashboard Campaigns"
@@ -746,6 +746,9 @@ _SQL_BOUNDARY = "PR-ADS-160 prospective SQL coverage boundary"
 _CLOSED_WON = ("PR-ADS-161D closed-won truth (acquisition-cohort membership by "
                "contact creation; reads no SQL)")
 _SQL_EVIDENCE = "PR-ADS-161C post-boundary SQL evidence forensics and repair"
+_READER_CUTOVER = ("PR-ADS-161E reader contract — SQL-to-customer, revenue-per-SQL "
+                   "and lead-to-customer rates are retired as unavailable; it "
+                   "reads and publishes no SQL")
 _SQL_PUBLICATION = ("PR-ADS-161A-1 canonical SQL publication contract "
                     "(the only production-facing publication verdict)")
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
@@ -1154,6 +1157,10 @@ RULES: list[dict] = [
     # snapshot rows, independently of the service, to certify it.
     _r("closedwon.audit", "scripts/audit_customer_closed_won_truth.py",
        CLS_DIAGNOSTIC, _CLOSED_WON, symbol=["_expected"]),
+    # PR-ADS-161E: the reader-cutover audit's structural check searches the
+    # code for a ratio over SQLs — it names SQLs to prove none is computed.
+    _r("readercut.audit", "scripts/audit_customer_revenue_reader_cutover.py",
+       CLS_DIAGNOSTIC, _READER_CUTOVER, symbol=["structural_checks"]),
 
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),
@@ -1320,6 +1327,12 @@ RULES: list[dict] = [
     _r("ui.historical", "static/app.js", CLS_LEGACY, _HI, symbol="_renderHistoricalTable"),
     _r("ui.gclid", "static/app.js", CLS_LEGACY, _GCLID, symbol="renderGclidAttributionTable"),
     _r("ui.report", "static/app.js", CLS_LEGACY, _REPORT, symbol="copyLatestReport"),
+    # PR-ADS-161E: the canonical reason labels (the CANONICAL_REASON_LABELS
+    # literal follows `dashValue`, so the scanner attributes it there) and the
+    # Deals tab's rate cell say an SQL-based rate is unavailable — they render
+    # no SQL figure.
+    _r("ui.canonical_metrics", "static/app.js", CLS_DIAGNOSTIC, _READER_CUTOVER,
+       symbol=["dashValue", "dealRateCell"]),
     _m("ui.index", "static/index.html", CLS_LEGACY, _GEO,
        ["confirmed_sqls_ref", "frontend_sqls_label", "sqls_field_ref"]),
 ]

@@ -132,8 +132,8 @@ def derive_google_ads_spend_truth(source_health: dict | None) -> dict:
         "fx_status": fx_status,
         "spend_coverage_status": spend_coverage_status,
         # ROAS is available ONLY with a positive USD denominator — a verified $0
-        # window has no ROAS (divide-by-zero), so roas_available is False there.
-        "roas_available": roas_available_raw and state == STATE_VERIFIED,
+        # window has no ratio (divide-by-zero), so period_ratio_available is False there.
+        "period_ratio_available": roas_available_raw and state == STATE_VERIFIED,
         # The geo/country table is never the source-level Google Ads denominator.
         "geo_spend_used": False,
         "geo_spend_note": GEO_SPEND_NOTE,

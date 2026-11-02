@@ -70,7 +70,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -100,6 +100,7 @@ jobs:
             tests/test_pr_ads_161d2_deal_company_associations.py \
             tests/test_pr_ads_161d2_f1_monotonic_atomic_certification.py \
             tests/test_pr_ads_191_crm_truth_exceptions.py \
+            tests/test_pr_ads_161e_reader_cutover.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -183,6 +184,12 @@ jobs:
                            # association store and sync service, and run its
                            # audit end to end, including the no-writes check.
                            "tests.test_pr_ads_191_crm_truth_exceptions",
+                           # PR-ADS-161E. Its PG cases drive the real ledger
+                           # writer, association sync, reader contract and
+                           # Revenue Decision Mart, and run the reader-cutover
+                           # audit end to end, including the no-writes check
+                           # and its counterfactuals.
+                           "tests.test_pr_ads_161e_reader_cutover",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

@@ -169,7 +169,6 @@ def _patch_business_total_stack(monkeypatch, rows=None, *, available=True):
                            POPULATION if rows is None else rows,
                            available=available)
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "UTC")
-    monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
                         lambda s, e: {"available": True, "rows": [], "table": "geo",
                                       "coverage_start": None, "coverage_end": None})
@@ -229,7 +228,7 @@ def test_2_business_total_consumers_agree_on_won_deals_and_revenue(monkeypatch):
     # withheld while d4's amount is unproven. The proven sum is still
     # reachable through the contract's `known_revenue_usd`, asserted above.
     assert deals["summary"]["won_revenue"] is None
-    assert mart["summary"]["customers"] == ALL_SOURCE_WON_DEALS
+    assert mart["summary"]["closed_won_deals"] == ALL_SOURCE_WON_DEALS
     recon = by_source["canonical_reconciliation"]
     assert recon["canonical_won_deals"] == ALL_SOURCE_WON_DEALS
     assert recon["canonical_revenue_usd"] == ALL_SOURCE_REVENUE
@@ -361,13 +360,10 @@ def test_9_window_bounds_are_identical_across_consumers(monkeypatch):
     from analysis.business_windows import get_window_bounds
 
     seen = []
-
-    def _capture(start=None, end=None):
-        seen.append((start, end))
-        return {"available": True, "rows": [dict(r) for r in POPULATION]}
-
     patch_canonical_ledger(monkeypatch, POPULATION)
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+    # PR-ADS-161E: membership is evaluated by the canonical truth.
+    from tests.canonical_ledger_fixtures import capture_canonical_bounds
+    capture_canonical_bounds(monkeypatch, seen)
 
     for window in ("current_quarter", "last_quarter", "ytd", "all_time"):
         seen.clear()
@@ -401,17 +397,24 @@ def test_10_revenue_by_source_reconciles_or_exposes_the_uncovered_bucket(monkeyp
     recon = out["canonical_reconciliation"]
 
     # Every canonical deal is in exactly one displayed bucket.
-    assert recon["displayed_customers"] == recon["canonical_won_deals"]
+    assert recon["displayed_closed_won_deals"] == recon["canonical_won_deals"]
     assert recon["uncovered_deals"] == 0
-    # The money that is NOT displayed is named, to the cent.
-    assert recon["uncovered_revenue_usd"] == 0.0
-    assert recon["reconciles"] is True
+    # PR-ADS-161E: d4's amount is unproven, so the canonical verdict withholds
+    # the window's revenue and every group's with it — no group shows the
+    # priced part. The money side is therefore not comparable (None, never a
+    # $0 gap); the deal partition still reconciles exactly.
+    assert recon["revenue_comparable"] is False
+    assert recon["uncovered_revenue_usd"] is None
+    assert recon["deals_reconcile"] is True
+    # Reconciliation needs both halves: with the money side not compared the
+    # overall claim is unknown, never "reconciles".
+    assert recon["reconciles"] is None
     # The deal whose currency could not be proven is reported, not discarded.
     assert recon["revenue_unavailable_deals"] == 1
     # Unclassified/ambiguous revenue keeps its own bucket rather than being
     # dropped to make the classified rows look clean.
     groups = {g["group"]: g for g in out["groups"]}
-    assert groups["unclassified"]["customers"] >= 1
+    assert groups["unclassified"]["closed_won_deals"] >= 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -561,13 +564,10 @@ def test_13c_channel_trend_bounds_are_explicit_utc_datetimes(monkeypatch):
     from services import dashboard_channels_service as channels
 
     seen = []
-
-    def _capture(start=None, end=None):
-        seen.append((start, end))
-        return {"available": True, "rows": []}
-
     patch_canonical_ledger(monkeypatch, [])
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+    # PR-ADS-161E: membership is evaluated by the canonical truth.
+    from tests.canonical_ledger_fixtures import capture_canonical_bounds
+    capture_canonical_bounds(monkeypatch, seen)
 
     channels._canonical_daily_revenue(date(2026, 4, 1), date(2026, 6, 30))
     (start, end), = seen
@@ -593,13 +593,10 @@ def test_13c2_the_contract_normalizes_bounds_so_no_consumer_can_recreate_it(monk
     import db.deal_ledger_repository as ledger_repo
 
     seen = []
-
-    def _capture(start=None, end=None):
-        seen.append((start, end))
-        return {"available": True, "rows": []}
-
     patch_canonical_ledger(monkeypatch, [])
-    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+    # PR-ADS-161E: membership is evaluated by the canonical truth.
+    from tests.canonical_ledger_fixtures import capture_canonical_bounds
+    capture_canonical_bounds(monkeypatch, seen)
 
     # Every shape a careless caller might use.
     for start, end in ((_date(2026, 4, 1), _date(2026, 7, 1)),
@@ -670,10 +667,23 @@ def test_14_google_ads_spend_still_comes_from_the_google_ads_canonical_path():
     src = (_ROOT / "services" / "canonical_revenue_service.py").read_text()
     tree = ast.parse(src)
     called = {
-        node.func.attr for node in ast.walk(tree)
+        (node.func.value.id if isinstance(node.func.value, ast.Name) else None,
+         node.func.attr)
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert not {c for c in called if "spend" in c}, called
+    # PR-ADS-161E: the period ratios (formerly ``cwt.derive_roas`` /
+    # ``cwt.derive_cac``, whose names did not mention spend) are pure arithmetic
+    # in analysis/closed_won_truth over a spend figure the CALLER passes in —
+    # they read no spend. Exactly those two ``cwt`` derivations are exempt;
+    # any other spend-named call (a spend read) still fails.
+    pure_period_ratio_derivations = {
+        ("cwt", "derive_period_revenue_per_ad_spend"),
+        ("cwt", "derive_period_spend_per_customer_won"),
+    }
+    assert pure_period_ratio_derivations <= called, called
+    spend_calls = {c for c in called if "spend" in c[1]}
+    assert not (spend_calls - pure_period_ratio_derivations), called
 
     # And the spend truth the pages use is still the Google Ads canonical one.
     unit_econ = (_ROOT / "services" / "canonical_unit_economics_service.py").read_text()
@@ -964,6 +974,17 @@ def _js_function(name, span=3000):
     return _JS[i:i + span]
 
 
+def _js_whole_function(name):
+    """The whole top-level app.js function starting at ``name`` (to its closing
+    ``}`` at column 0) — robust to a body that grows (PR-ADS-161E's explicit
+    period-ratio KPI cards pushed later code past a fixed span)."""
+    i = _JS.find(name)
+    assert i != -1, f"{name} not found in app.js"
+    j = _JS.find("\n}\n", i)
+    assert j != -1, f"end of {name} not found in app.js"
+    return _JS[i:j + 3]
+
+
 def test_18_unit_economics_uses_business_windows_not_the_rolling_60d_contract():
     select = re.search(r'<select[^>]*id="unit-economics-window"[^>]*>.*?</select>',
                        _HTML, re.S).group(0)
@@ -1006,7 +1027,7 @@ def test_18d_deal_rows_prefer_the_canonical_deal_name():
 
 
 def test_18e_unavailable_revenue_renders_unavailable_never_zero():
-    renderer = _js_function("function renderUnitEconomicsPage")
+    renderer = _js_whole_function("function renderUnitEconomicsPage")
     assert "Unavailable" in renderer
     assert "revenue_available" in renderer
     # No hard-coded zero standing in for a withheld figure.
@@ -1051,7 +1072,7 @@ def test_18g_no_frontend_revenue_path_implies_the_retired_windsor_lineage():
         assert retired not in loader, retired
 
     # Metrics the canonical ledger cannot support are shown as withheld.
-    renderer = _js_function("function renderUnitEconomicsPage")
+    renderer = _js_whole_function("function renderUnitEconomicsPage")
     if "LTV/CAC" in renderer:
         assert "Unavailable" in renderer
 
@@ -1066,7 +1087,9 @@ def test_unit_economics_page_uses_business_windows_and_renders_unavailable():
 
     loader = js[js.find("async function loadUnitEconomics"):][:600]
     assert "getRoasBusinessWindow()" in loader
-    renderer = js[js.find("function renderUnitEconomicsPage"):][:3000]
+    _start = js.find("function renderUnitEconomicsPage")
+    assert _start != -1
+    renderer = js[_start:js.find("\n}\n", _start) + 3]
     assert "Unavailable" in renderer
     assert "revenue_available" in renderer
 
