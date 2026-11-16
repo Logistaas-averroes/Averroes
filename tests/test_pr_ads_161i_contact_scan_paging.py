@@ -464,3 +464,41 @@ def test_16_a_failed_rewind_is_reported_not_silent(monkeypatch):
         now=datetime(2026, 11, 16, tzinfo=timezone.utc))
     assert result["status"] == "failed"
     assert result.get("watermark_rewind_failed") is True
+
+
+def test_17_a_block_of_unparseable_timestamps_stalls_rather_than_loops():
+    """Third review: 100+ contiguous rows whose lastmodifieddate cannot be
+    parsed cycled GTE → EQ walk → GT forever. The scan must stop instead."""
+    search = _HubSpotLikeSearch([BASE_MS + 1] * 150 + [BASE_MS + 10 + i
+                                                       for i in range(20)])
+    real = search.do_search
+    garbled = {f"c{i}" for i in range(150)}
+
+    def garbling(public_object_search_request=None):
+        resp = real(public_object_search_request)
+        for obj in resp.results:
+            d = obj.to_dict()
+            if d["id"] in garbled:
+                d["properties"]["lastmodifieddate"] = "not-a-date"
+        return resp
+    search.do_search = garbling
+    with pytest.raises(hp.HubSpotSearchStalledError):
+        for page_no, (_rows, _meta) in enumerate(
+                hp.iter_contacts_modified_since(0, client=_client(search))):
+            assert page_no < 200, "the scan looped instead of stalling"
+
+
+def test_18_an_empty_first_tie_walk_page_stalls_rather_than_skipping():
+    """Third review: an EQ query that matches nothing right after a full page
+    at that timestamp proves HubSpot did not honour it; resuming with GT would
+    skip the rest of the group."""
+    class _EqBlind(_HubSpotLikeSearch):
+        def do_search(self, public_object_search_request=None):
+            f = public_object_search_request["filterGroups"][0]["filters"]
+            if any(x["operator"] == "EQ" for x in f):
+                return _Resp([], None, 0)
+            return super().do_search(public_object_search_request)
+
+    search = _EqBlind([BASE_MS] * 250 + [BASE_MS + 1 + i for i in range(10)])
+    with pytest.raises(hp.HubSpotSearchStalledError):
+        _scan(search)

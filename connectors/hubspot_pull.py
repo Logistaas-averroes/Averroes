@@ -1462,6 +1462,7 @@ def iter_contacts_modified_since(
             return
 
         query_from_ms = watermark_ms
+        query_was_strict = strictly_after and tie_last_id is None
         if tie_last_id is not None:
             response = _search([
                 {"propertyName": "lastmodifieddate", "operator": "EQ",
@@ -1528,6 +1529,15 @@ def iter_contacts_modified_since(
         full = len(results) >= page_size
         if tie_last_id is not None:
             # Walking one tie group by id.
+            if tie_last_id == -1 and not results:
+                # Positive control: a full page at this timestamp was just
+                # read, so the walk's first page cannot be empty. If it is,
+                # HubSpot did not match the EQ filter and resuming with GT
+                # would skip the rest of the group.
+                raise HubSpotSearchStalledError(
+                    "HubSpot returned no contacts for lastmodifieddate EQ "
+                    f"{watermark_ms} right after a full page at it; the tie "
+                    "walk cannot be trusted. The scan is INCOMPLETE.")
             if not full:
                 # Group exhausted: resume strictly after its timestamp.
                 tie_last_id = None
@@ -1550,6 +1560,15 @@ def iter_contacts_modified_since(
                 source_total, len(unique_ids))
             return
 
+        if query_was_strict and not fresh and watermark_ms == query_from_ms:
+            # A full GT page that neither moved the watermark nor brought one
+            # new contact cannot be followed by anything but itself again
+            # (e.g. a block of contacts whose timestamp cannot be parsed).
+            # Stop instead of looping forever.
+            raise HubSpotSearchStalledError(
+                "HubSpot contact scan made no progress: a full page after "
+                f"lastmodifieddate={watermark_ms} moved neither the watermark "
+                "nor read a new contact. The scan is INCOMPLETE.")
         strictly_after = False
         if watermark_ms == query_from_ms:
             # A full page that never moved past its starting timestamp: every

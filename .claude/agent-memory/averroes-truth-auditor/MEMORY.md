@@ -590,3 +590,25 @@ Recurring patterns (durable):
   across the migration undoes it (lost update).
 - test_13 (the migration, PG) is in a module CI's PG did-run list does not name,
   so it can skip silently.
+
+## PR-ADS-161I third review (d54a81b)
+- SUPERSEDES the "STILL OPEN" tie-walk entry above. A tie group that fills a
+  page is now walked by `lastmodifieddate EQ T AND hs_object_id GT last`,
+  sorted by id, then the scan resumes with `GT T`. No offset is sent.
+- Executed with the PR's fake: 0 originals missing under live touch/create/
+  delete, shuffled ties (350 / 3000), tie-member changes mid-walk, a GT page
+  that is all one new timestamp (99/100/101/150/250), adjacent full groups, and
+  `since` inside a tie. 10a/10b fail on e6dcfb4's connector; 14/16 fail on its
+  service.
+- Hang: if 100 or more contiguous rows have an unparseable lastmodifieddate,
+  the scan loops range -> walk -> GT forever. It needs a pathological
+  timestamp: py3.11 fromisoformat parses HubSpot's variants.
+- No guard on the EQ walk: if the first EQ page comes back empty right after a
+  full page at T, the scan resumes GT T and skips the rest of the group.
+- Deploy: lifespan runs init_db (the migration) BEFORE start_scheduler, so
+  only the OLD process can be mid-sync when the migration runs. Old code puts
+  back `complete`. Its checkpoints also re-fill the watermark, and the next
+  bootstrap then resumes from November and completes over the gap (executed:
+  1 contact read). Disclosed in docs/09 with a SELECT check, but docs/09 item 6
+  claims the opposite.
+- `migrations.migration_id` is VARCHAR(50); keep new ids under that.

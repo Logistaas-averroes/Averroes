@@ -1835,8 +1835,9 @@ none of them could see it.
    withholds. No contact row is deleted.
 5. Run results now carry `source_total` and `unique_contacts_read`
    (`contacts_seen` counts re-reads).
-6. **An incremental never writes `bootstrap_status`**, so a run in flight across
-   the deploy cannot restore the withdrawn `complete`. A contact whose
+6. **An incremental never writes `bootstrap_status`**, so no run of the *new*
+   code can restore the withdrawn `complete`. A run of the *old* process that is
+   still syncing during the deploy can (see the residual risk below). A contact whose
    `lastmodifieddate` cannot be parsed is still read, and never moves the
    watermark. A rewind that fails to persist is logged and reported as
    `watermark_rewind_failed`.
@@ -1846,7 +1847,7 @@ whole read. It does page by offset over a live set, so a deal modified during it
 read could in principle shift a page; the deal population is small and
 reconciled by its own audits. This is noted, not fixed here.
 
-**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (19). Its fake HubSpot:
+**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (21). Its fake HubSpot:
 * honours the GTE / GT / EQ and `hs_object_id GT` filters;
 * sorts by the requested property;
 * reports `total`;
@@ -1870,9 +1871,19 @@ What the tests prove:
 * An *old* process still running a sync across the deploy could restore
   `complete` / a watermark after the migration.
 
-After deploy, confirm the state once:
-`SELECT bootstrap_status, last_modified_watermark FROM hubspot_contact_funnel_sync_state`.
+* Two scan-loop guards: a full GT page that makes no progress, and an empty
+  first id-walk page, both raise `HubSpotSearchStalledError`.
+
+**After deploy, confirm the state once, before the next scheduled sync:**
+`SELECT bootstrap_status, last_modified_watermark FROM hubspot_contact_funnel_sync_state WHERE scope = 'contacts'`.
 It should read `partial` / `NULL` until the rebuild runs, then `complete`.
+
+**If it reads anything else before the rebuild has run,** an old process
+re-asserted its state. Re-apply the withdrawal:
+`UPDATE hubspot_contact_funnel_sync_state SET bootstrap_status = 'partial',
+bootstrap_completed_at = NULL, last_modified_watermark = NULL WHERE scope = 'contacts'`.
+Then let the next scheduled run, or `POST /api/crm-funnel/sync?mode=bootstrap`,
+rebuild from the epoch.
 
 **After deploy.** Nothing to run by hand. The next scheduled sync (or
 `POST /api/crm-funnel/sync?mode=bootstrap`) rebuilds from the epoch. Check that
