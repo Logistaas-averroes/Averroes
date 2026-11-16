@@ -70,6 +70,18 @@ python -m pytest -q \
 `main` with `OSError: Missing required Google Ads env vars`, and CI routes them
 to a separate non-blocking job. Anything failing beyond them is yours.
 
+### Production certification (Render shell)
+
+One command runs the six production truth audits and prints one verdict
+(`0` CERTIFIED / `1` VIOLATION / `2` NOT CERTIFIED). A crashed audit never
+certifies:
+
+```bash
+python -m scripts.audit_platform_certification
+```
+
+A new production truth audit belongs in its `AUDITS` tuple.
+
 ### PostgreSQL tests
 
 PG-backed tests spin up a throwaway cluster. They **skip** unless all of:

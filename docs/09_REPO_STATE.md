@@ -1683,3 +1683,49 @@ figure.
 
 **Tests.** `tests/test_pr_ads_161f_deal_ledger_freshness.py`, 12 tests; all 12
 fail on `c0de299`.
+
+---
+
+## PR-ADS-161G — one-command platform certification
+
+**Why.** Six audits had to be run one by one in the Render shell, and their
+exit codes combined by eye. One command now runs them and gives one verdict:
+
+```bash
+python -m scripts.audit_platform_certification          # human-readable
+python -m scripts.audit_platform_certification --json   # machine-readable
+```
+
+**What it does.** It runs each existing audit unchanged, in its own
+subprocess, with `--json`, and combines the results. There is no new gate
+logic.
+
+| Exit | Verdict | Meaning |
+| --- | --- | --- |
+| 0 | CERTIFIED | all six exited 0 with a consistent report |
+| 1 | VIOLATION | at least one audit found a truth-contract violation |
+| 2 | NOT CERTIFIED | no violation, but at least one audit did not finish |
+
+**Fail closed.** An exit code alone is not enough evidence. Two audits let an
+unexpected exception escape, and Python reports that as exit 1, which would
+read as a violation. Any of these counts as `crashed`, and a crash never
+certifies:
+
+* an exception escaping the audit;
+* exit 0 with no readable JSON report;
+* an unknown exit code;
+* a timeout;
+* a report whose own `exit_code` disagrees with the process exit code.
+
+**CRM data to fix.** Below the verdict, the command repeats the won deals that
+keep figures withheld, from the CRM Truth Exceptions audit's own report. This
+is the list for sales. If that report could not be read, the count prints as
+`unknown`, never `0`. A CERTIFIED platform can still withhold figures: a
+withheld figure is a correct answer.
+
+**Tests.** `tests/test_pr_ads_161g_platform_certification.py` has 15 tests,
+20 cases with parametrisation. The last test runs the six real audits with no
+database and asserts that each prints a readable report and exits 2, not
+`crashed`.
+
+**Not changed.** Every audit, gate and verdict.
