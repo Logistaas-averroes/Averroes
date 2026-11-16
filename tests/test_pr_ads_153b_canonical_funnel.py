@@ -1111,6 +1111,9 @@ def test_real_iterator_raises_rather_than_returning_on_a_stalled_watermark():
         def __init__(self, results, after):
             self.results = results
             self.paging = type("P", (), {"next": type("N", (), {"after": after})()})()
+            # Real HubSpot reports the result-set size on every response
+            # (PR-ADS-161I reads it); more than the 10,000 cap here.
+            self.total = 20_000
 
     class _FakeSearch:
         """10,000 contacts that all share one lastmodifieddate.
@@ -1158,6 +1161,7 @@ def test_real_iterator_emits_a_completion_sentinel_at_the_true_end():
         def __init__(self, results):
             self.results = results
             self.paging = None
+            self.total = len(results)   # real HubSpot always reports it
 
     class _FakeSearch:
         def do_search(self, public_object_search_request=None):

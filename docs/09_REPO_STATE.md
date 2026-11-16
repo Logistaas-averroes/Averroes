@@ -1786,3 +1786,106 @@ It serves no page.
 real `get_closed_won_truth` over a stubbed ledger.
 
 **Not changed.** Every reader, gate, verdict and page.
+
+---
+
+## PR-ADS-161I — the contact scan read ~30% of HubSpot and called it complete
+
+**Found in production (2026-11-16).** HubSpot held **21,751** contacts and
+`hubspot_contact_funnel` held **6,389**. A full rebuild from the epoch reported
+`success` / `bootstrap_status = complete` after **2,000**. A raw search from the
+Render shell paged in order past 2,400. The connector's own iterator jumped from
+January 2025 to May 2026 by page 7 and emitted its completion sentinel at page
+20. Won deals with a contact never synced: **41 of 67 closed in 2025**.
+
+**Cause.** `iter_contacts_modified_since` re-sent its *advancing* watermark as
+the `lastmodifieddate GTE` filter on every page, but kept the paging offset.
+Each request was therefore the Nth page of a different, shrinking result set,
+skipped ahead further every page, and ran out of "next" early. This had been
+true since PR-ADS-153B. It hit the bootstrap and every incremental run with more
+than one page of changes. The tests' fake HubSpot ignored the filter value, so
+none of them could see it.
+
+**Fixed.**
+1. **Keyset paging, no offsets at all.** Every page is a new query,
+   `lastmodifieddate >= watermark`, and rows already read at the watermark
+   timestamp are de-duplicated. A group of contacts that shares ONE timestamp
+   and fills a page is walked by keyset on the contact id instead:
+   `lastmodifieddate EQ T AND hs_object_id GT last`, sorted by id. That query was
+   verified against live HubSpot, which returns tied rows in an arbitrary order.
+   After the group, the scan resumes with `lastmodifieddate GT T`. Any offset
+   over HubSpot's *live* result set skips an unread contact whenever an
+   already-read one is modified, merged or deleted mid-scan, and walking ties by
+   offset skips when HubSpot reorders them. Both cases were reproduced by the
+   truth audit: 29 and 99 contacts missing while still reporting complete.
+2. **A scan must prove it is whole.** It must meet HubSpot's own `total` from its
+   first response, within max(1%, 2) for contacts deleted before they were read.
+   Zero read against a non-empty set never passes, and a response without `total`
+   cannot prove anything. Otherwise `HubSpotSearchIncompleteError` is raised
+   instead of the completion sentinel.
+3. **An incomplete scan rewinds.** The per-page checkpoints had already moved the
+   watermark past the gap. The failure now resets it to where the run began (NULL
+   for an epoch scan). Without this, the next scheduled run resumed past the gap,
+   checked only the tail, and marked the bootstrap complete (truth-auditor
+   blocker).
+4. **The false `complete` is withdrawn once** (migration
+   `PR-ADS-161I-contact-funnel-rebuild-from-epoch`). It sets the state to
+   `partial` with no watermark, so **the next scheduled run rebuilds from the
+   epoch by itself**. Until then, every gate that needs a complete bootstrap
+   withholds. No contact row is deleted.
+5. Run results now carry `source_total` and `unique_contacts_read`
+   (`contacts_seen` counts re-reads).
+6. **An incremental never writes `bootstrap_status`**, so no run of the *new*
+   code can restore the withdrawn `complete`. A run of the *old* process that is
+   still syncing during the deploy can (see the residual risk below). A contact whose
+   `lastmodifieddate` cannot be parsed is still read, and never moves the
+   watermark. A rewind that fails to persist is logged and reported as
+   `watermark_rewind_failed`.
+
+**Not affected by this cause.** `pull_deals_for_ledger` keeps one filter for its
+whole read. It does page by offset over a live set, so a deal modified during its
+read could in principle shift a page; the deal population is small and
+reconciled by its own audits. This is noted, not fixed here.
+
+**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (21). Its fake HubSpot:
+* honours the GTE / GT / EQ and `hs_object_id GT` filters;
+* sorts by the requested property;
+* reports `total`;
+* can **change its data during the scan** and **reorder ties between requests**.
+
+What the tests prove:
+* Against `main`'s connector the fake yields 600 of 2,500 contacts and reports
+  complete.
+* 08 (data changing mid-scan) and 11 (two runs through the real service) fail on
+  this PR's first push.
+* 02, 09, 10, 10a (reshuffled ties) and 10b (a tie member modified mid-walk) fail
+  on its second push.
+* 13 runs the migration on a live PostgreSQL cluster, once only. The module is
+  in CI's PostgreSQL step, so it cannot be skipped silently.
+* Two fakes in `test_pr_ads_153b_canonical_funnel.py` now report `total`, as
+  HubSpot does; their assertions are unchanged.
+
+**Residual risks.**
+* A chain of `max_pages`-capped runs (API only) is checked per run, not per
+  bootstrap.
+* An *old* process still running a sync across the deploy could restore
+  `complete` / a watermark after the migration.
+
+* Two scan-loop guards: a full GT page that makes no progress, and an empty
+  first id-walk page, both raise `HubSpotSearchStalledError`.
+
+**After deploy, confirm the state once, before the next scheduled sync:**
+`SELECT bootstrap_status, last_modified_watermark FROM hubspot_contact_funnel_sync_state WHERE scope = 'contacts'`.
+It should read `partial` / `NULL` until the rebuild runs, then `complete`.
+
+**If it reads anything else before the rebuild has run,** an old process
+re-asserted its state. Re-apply the withdrawal:
+`UPDATE hubspot_contact_funnel_sync_state SET bootstrap_status = 'partial',
+bootstrap_completed_at = NULL, last_modified_watermark = NULL WHERE scope = 'contacts'`.
+Then let the next scheduled run, or `POST /api/crm-funnel/sync?mode=bootstrap`,
+rebuild from the epoch.
+
+**After deploy.** Nothing to run by hand. The next scheduled sync (or
+`POST /api/crm-funnel/sync?mode=bootstrap`) rebuilds from the epoch. Check that
+`unique_contacts_read` is close to HubSpot's total. Lead and SQL counts for
+older windows will rise: that is the correction.

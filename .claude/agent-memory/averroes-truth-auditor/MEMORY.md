@@ -540,3 +540,75 @@ Recurring patterns (durable):
 - `load_won_deals` reports an unreadable SYNC STATE as
   `canonical_ledger_unreadable`, not `canonical_sync_state_unreadable`. Both
   are outages.
+
+## PR-ADS-161I review (HEAD f38bbc6, 2026-11-16) — contact scan paging
+- Canonical contact scan: `connectors/hubspot_pull.iter_contacts_modified_since`,
+  only consumer `services/hubspot_contact_funnel_sync_service.run_contact_funnel_sync`
+  (callers: scheduler `_sync_contact_funnel` via `get_bootstrap_mode`, and
+  `POST /api/crm-funnel/sync`). `restart_from_epoch` is reachable from NO
+  production caller (shell only); `mode=bootstrap` RESUMES from the stored
+  watermark (the API docstring "scans the full portal from the epoch" is wrong).
+- HubSpot search `after` is an OFFSET into a LIVE result set. Freezing the
+  filter (161I) fixes the moving-filter skip, but offset paging still skips one
+  unread contact for every already-read contact that is modified / deleted /
+  merged mid-scan (it leaves its slot; later rows shift left). Executed with
+  the PR's own fake + mutation: 1 touch per page over 21,751 -> 210 missing,
+  sentinel complete. Concurrent creations mask shortfall entirely (read > total).
+  Re-anchor (new query from the key) is the only shift-immune step: keyset paging.
+- Per-page durable checkpoint advances `last_modified_watermark` BEFORE the
+  end-of-scan total check. HubSpotSearchIncompleteError -> run failed, bootstrap
+  partial, but the NEXT run resumes past the gap and completes (executed: 900/1000,
+  bootstrap complete on run 2; incremental failed then success next day, gap
+  permanent). Completeness is proven per RUN, never per bootstrap.
+- SDK model `CollectionResponseWithTotalSimplePublicObjectForwardPaging.total` is int.
+- `analysis/sql_coverage_freshness.assess` gates only on bootstrap_status /
+  incremental status: a stored `complete` over a partial table publishes.
+- Validation: 161I+153b+153b PG+daily incremental+160 = 339 passed, PG ran
+  (python3.11; `python` is 3.13 without deps in this container).
+
+## PR-ADS-161I re-review (code e6dcfb4; HEAD d882b72 adds only this memory file)
+- CORRECTION of the f38bbc6 entries above: the iterator is now KEYSET-paged
+  (every page `>= watermark` at offset 0; offset only inside a tie group >
+  page_size; stall when tie_offset+page_size > 10,000). The service now REWINDS
+  last_modified_watermark/latest_modified_at to the run's `since` (NULL for an
+  epoch scan) on HubSpotSearchIncompleteError. A one-time migration
+  `PR-ADS-161I-contact-funnel-rebuild-from-epoch` sets scope 'contacts' to
+  partial / watermark NULL / completed_at NULL. Probes 1-3 now: 0 missing.
+  test_08 fails on the offset connector; test_11/12 fail without the rewind.
+- STILL OPEN (executed): the tie-group walk is an offset over live data. With
+  stable tie order, modifying one already-read tie member per request lost 29
+  of a 3,000-contact tie group with `complete=True`. If HubSpot's tie order
+  differs between requests (not verified), a 350-contact group lost 99 silently,
+  and a 3,000-contact group raised every run (with the rewind, every run would
+  rescan from the epoch). Fix: inside a tie, page by keyset on `hs_object_id`.
+- Rows whose lastmodifieddate fails to parse (`_epoch_ms` -> 0) are now dropped
+  silently. Before, they were yielded. Only the count check covers them.
+- `update_contact_funnel_sync_state` writes NULLs as given (EXCLUDED.col), so the
+  rewind to NULL is real on PG. The failure-state write's return value is ignored.
+- An incremental run's final write puts back the `bootstrap_status` it read at
+  START, and per-page checkpoints re-fill the watermark. So a run in flight
+  across the migration undoes it (lost update).
+- test_13 (the migration, PG) is in a module CI's PG did-run list does not name,
+  so it can skip silently.
+
+## PR-ADS-161I third review (d54a81b)
+- SUPERSEDES the "STILL OPEN" tie-walk entry above. A tie group that fills a
+  page is now walked by `lastmodifieddate EQ T AND hs_object_id GT last`,
+  sorted by id, then the scan resumes with `GT T`. No offset is sent.
+- Executed with the PR's fake: 0 originals missing under live touch/create/
+  delete, shuffled ties (350 / 3000), tie-member changes mid-walk, a GT page
+  that is all one new timestamp (99/100/101/150/250), adjacent full groups, and
+  `since` inside a tie. 10a/10b fail on e6dcfb4's connector; 14/16 fail on its
+  service.
+- Hang: if 100 or more contiguous rows have an unparseable lastmodifieddate,
+  the scan loops range -> walk -> GT forever. It needs a pathological
+  timestamp: py3.11 fromisoformat parses HubSpot's variants.
+- No guard on the EQ walk: if the first EQ page comes back empty right after a
+  full page at T, the scan resumes GT T and skips the rest of the group.
+- Deploy: lifespan runs init_db (the migration) BEFORE start_scheduler, so
+  only the OLD process can be mid-sync when the migration runs. Old code puts
+  back `complete`. Its checkpoints also re-fill the watermark, and the next
+  bootstrap then resumes from November and completes over the gap (executed:
+  1 contact read). Disclosed in docs/09 with a SELECT check, but docs/09 item 6
+  claims the opposite.
+- `migrations.migration_id` is VARCHAR(50); keep new ids under that.

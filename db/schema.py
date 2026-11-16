@@ -2221,6 +2221,31 @@ BEGIN
     RAISE NOTICE 'idx_search_terms_unique_fact rebuilt with customer_id';
   END IF;
 END $$;
+
+-- PR-ADS-161I: the canonical contact store was built by a scan that skipped
+-- pages (it re-sent an advancing watermark as the filter while keeping the
+-- paging offset) and still recorded bootstrap_status = 'complete' — 6,389 of
+-- HubSpot's 21,751 contacts on 2026-11-16. Withdraw that claim ONCE: the state
+-- becomes 'partial' with no watermark, so the next scheduled run rebuilds from
+-- the epoch with the corrected connector, and every gate that requires a
+-- complete bootstrap withholds until it has. No contact row is deleted.
+DO $$
+BEGIN
+    INSERT INTO migrations (migration_id)
+    VALUES ('PR-ADS-161I-contact-funnel-rebuild-from-epoch')
+    ON CONFLICT (migration_id) DO NOTHING;
+
+    IF FOUND THEN
+        UPDATE hubspot_contact_funnel_sync_state
+           SET bootstrap_status = 'partial',
+               bootstrap_completed_at = NULL,
+               last_modified_watermark = NULL,
+               last_error = 'PR-ADS-161I: previous scan skipped pages; '
+                            'rebuilding from the epoch',
+               updated_at = NOW()
+         WHERE scope = 'contacts';
+    END IF;
+END $$;
 """
 
 
