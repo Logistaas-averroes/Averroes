@@ -364,9 +364,12 @@ last status success. `latest_successful_incremental_at` is reported only when
 that is proven. The newest deal row is never the signal, and a universe that
 carries no verdict at all is treated as unproven.
 
-**No staleness threshold is configured for the deal ledger** anywhere in the
-repository. Age is reported and not judged (`staleness_assessed: false`). An
-unproven coverage gate makes every metric `unavailable`.
+**Staleness (PR-ADS-161F).** A proven ledger publishes only while its last
+successful incremental is at most `deal_ledger.max_staleness_hours` old (36h,
+config/thresholds.yaml). Past that, or with no timestamp at all, every metric is
+`unavailable` with `canonical_ledger_stale`: a stopped scheduler never leaves the
+last figures looking current. An unproven coverage gate makes every metric
+`unavailable` with `canonical_coverage_not_proven`, whatever its age.
 
 ---
 

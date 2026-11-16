@@ -714,7 +714,8 @@ def _render(report: dict) -> None:
     print(f"    source freshness              coverage_proven="
           f"{fresh.get('coverage_proven')} last_ok_incremental="
           f"{fresh.get('latest_successful_incremental_at')} age_h="
-          f"{fresh.get('age_hours')} (threshold not configured)")
+          f"{fresh.get('age_hours')} (threshold {fresh.get('max_staleness_hours')}h; "
+          f"stale={fresh.get('stale')})")
     src = truth.get("customer_identity_source") or {}
     cfresh = truth.get("company_association_freshness") or {}
     print(f"    customer identity source      "

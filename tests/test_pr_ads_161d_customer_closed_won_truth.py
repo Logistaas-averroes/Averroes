@@ -34,7 +34,7 @@ import tests.conftest as conftest  # noqa: E402,F401  (import-order guard)
 import analysis.closed_won_truth as cwt  # noqa: E402
 import services.canonical_customer_revenue_service as svc  # noqa: E402
 from tests.canonical_ledger_fixtures import (  # noqa: E402
-    READY_SYNC_STATE, ledger_row,
+    READY_SYNC_STATE, fresh_sync_state, ledger_row,
 )
 from tests.test_pr_ads_153e_a_pg_integration import (  # noqa: E402,F401
     _have_postgres, pg,
@@ -59,7 +59,10 @@ def _definition_rows(rows):
 
 
 def _universe(rows, *, findings=None, contacts=None, definition_rows=None,
-              sync_state=READY_SYNC_STATE, unknown=()):
+              sync_state=None, unknown=()):
+    # A CURRENT ledger at this suite's NOW unless a test says otherwise
+    # (PR-ADS-161F: a stale one withholds every closed-won figure).
+    sync_state = fresh_sync_state(NOW) if sync_state is None else sync_state
     return {"available": True, "won_rows": rows,
             "won_definition_rows": (definition_rows if definition_rows
                                     is not None else _definition_rows(rows)),
@@ -587,13 +590,28 @@ def test_50_unproven_ledger_coverage_makes_every_metric_unavailable():
 
 
 def test_51_freshness_is_sync_coverage_never_the_newest_deal():
+    """Freshness is the last successful SYNC, never the newest deal's date —
+    and since PR-ADS-161F it is judged against the owner-set
+    ``deal_ledger.max_staleness_hours`` (36h). This test used to pin "age is
+    reported, not judged" with a June sync read in October; the same ledger
+    now withholds every closed-won figure, named."""
     rows = [ledger_row("1", deal_close_date="2026-10-07T11:00:00+00:00")]
-    fresh = _one(rows)["coverage"]["source_freshness"]
+    current = _one(rows)
+    fresh = current["coverage"]["source_freshness"]
     assert fresh["latest_successful_incremental_at"] == \
-        READY_SYNC_STATE["last_incremental_at"]
-    assert fresh["staleness_assessed"] is False
-    assert fresh["staleness_threshold_hours"] is None
-    assert fresh["age_hours"] > 24 * 100   # June → October, reported not judged
+        fresh_sync_state(NOW)["last_incremental_at"]
+    assert fresh["staleness_assessed"] is True
+    assert fresh["staleness_threshold_hours"] == 36.0
+    assert fresh["stale"] is False and fresh["age_hours"] == 3.0
+    assert current["publication"]["closed_won_deals"]["status"] == cwt.PUBLISHED
+    # The June ledger read in October: 107 days old, so nothing publishes.
+    june = _one(rows, sync_state=READY_SYNC_STATE)
+    fresh = june["coverage"]["source_freshness"]
+    assert fresh["stale"] is True and fresh["age_hours"] > 24 * 100
+    for m in ("closed_won_deals", "revenue_usd", "customers"):
+        assert june["publication"][m]["status"] == cwt.UNAVAILABLE, m
+        assert june["publication"][m]["reason"] == cwt.R_LEDGER_STALE, m
+        assert june["outcomes"][m] is None, m
 
 
 def test_52_an_unreadable_ledger_is_unavailable_everywhere_never_zero():

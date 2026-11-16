@@ -33,7 +33,7 @@ import tests.conftest as conftest  # noqa: E402,F401  (import-order guard)
 import analysis.closed_won_truth as cwt  # noqa: E402
 import connectors.hubspot_pull as hubspot  # noqa: E402
 import services.canonical_customer_revenue_service as svc  # noqa: E402
-from tests.canonical_ledger_fixtures import ledger_row  # noqa: E402
+from tests.canonical_ledger_fixtures import fresh_sync_state, ledger_row  # noqa: E402
 from tests.test_pr_ads_153e_a_pg_integration import (  # noqa: E402,F401
     _have_postgres, pg,
 )
@@ -235,6 +235,15 @@ def _path(company, category="HUBSPOT_DEFINED", type_id="5", label=None):
 def _t(minutes):
     return datetime(2026, 10, 7, 11, 0, tzinfo=timezone.utc) + \
         timedelta(minutes=minutes)
+
+
+def _deal_sync_at(when):
+    """Stamp the deal ledger's last successful incremental (PR-ADS-161F), so a
+    test that ages the ASSOCIATION scan keeps the deal sync itself current."""
+    from db.connection import get_conn
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE hubspot_deal_sync_state SET last_incremental_at = %s "
+                    "WHERE scope = 'deals'", (when,))
 
 
 def _q(sql, params=()):
@@ -690,6 +699,8 @@ def test_28_an_old_complete_scan_is_not_current(ledger, monkeypatch):
         "SELECT last_complete_scan_started_at AS f FROM "
         "hubspot_deal_company_sync_state")[0]["f"])
     max_age = svc.association_scan_max_age_hours()
+    # The deal sync stays current at both instants; only the scan ages.
+    _deal_sync_at(started + timedelta(hours=max_age))
     fresh = svc.get_closed_won_truth(
         [(BUSINESS, "all_time")], now=started + timedelta(hours=max_age - 1),
         resolver=None, resolver_detail="t")["windows"][0]
@@ -1105,7 +1116,9 @@ def _universe(rows, observations, paths):
                  "hs_is_closed_won": True, "deal_close_date": r["deal_close_date"]}
                 for r in rows],
             "unknown_won_rows": [], "acquisition_contacts": [],
-            "sync_state": {"bootstrap_status": "complete"},
+            # A proven, CURRENT deal ledger at this suite's NOW (PR-ADS-161F:
+            # a ledger with no successful-sync timestamp is not current).
+            "sync_state": fresh_sync_state(NOW),
             "coverage_findings": [],
             "company_associations": {"available": True, "paths": paths,
                                      "observations": observations,

@@ -2373,6 +2373,7 @@ const CANONICAL_REASON_LABELS = {
   no_customers_in_window: "no customers in this window",
   numerator_and_denominator_scopes_differ: "numerator and denominator are different populations",
   canonical_coverage_not_proven: "deal-ledger coverage is not proven",
+  canonical_ledger_stale: "the deal sync is overdue, so these figures may be out of date",
   canonical_ledger_unreadable: "the deal ledger could not be read",
   canonical_sync_state_unreadable: "the deal sync state could not be read",
   legacy_local_revenue_not_canonical: "computed from local data outside the canonical closed-won ledger",
@@ -3377,6 +3378,7 @@ function dashRevenueBlockLabel(o) {
     canonical_closed_won_population_unavailable: "the canonical closed-won population is unavailable",
     canonical_ledger_unreadable: "the canonical deal ledger could not be read",
     canonical_coverage_not_proven: "the canonical deal ledger's coverage is not proven",
+    canonical_ledger_stale: "the deal sync is overdue, so the canonical figures may be out of date",
     canonical_sync_state_unreadable: "the canonical ledger's sync state could not be read",
   };
   return labels[o.unavailable_reason] || "the canonical revenue contract withheld it";

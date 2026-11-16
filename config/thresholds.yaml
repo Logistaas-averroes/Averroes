@@ -117,6 +117,13 @@ ui:
       monthly: 35
     consecutive_failure_warning: 2
 
+deal_ledger:
+  # PR-ADS-161F — closed-won deals, customers and revenue publish only while
+  # the last SUCCESSFUL incremental deal sync is at most this many hours old.
+  # The sync runs daily; 36h tolerates one late run and catches a missed day.
+  # A stopped scheduler otherwise leaves the last figures looking current.
+  max_staleness_hours: 36
+
 customer_identity:
   association_scan_max_age_hours: 48
   # PR-ADS-161D2 — an exact customer total publishes only while the latest

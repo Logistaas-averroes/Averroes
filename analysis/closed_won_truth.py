@@ -155,6 +155,10 @@ PUBLICATION_STATUSES = (PUBLISHED, WITHHELD, UNAVAILABLE, NOT_PUBLISHED)
 
 R_SOURCE_UNREADABLE = "canonical_ledger_unreadable"
 R_COVERAGE_NOT_PROVEN = "canonical_coverage_not_proven"
+#: PR-ADS-161F. Coverage was proven, but the last successful deal sync is
+#: older than ``deal_ledger.max_staleness_hours``: a stopped scheduler must not
+#: present the last figures as current.
+R_LEDGER_STALE = "canonical_ledger_stale"
 R_WON_DEFINITION_CONFLICT = "won_flag_and_stage_disagree"
 R_UNDATED_WON_DEALS = "won_deals_without_close_date"
 R_REVENUE_UNPROVEN = "closed_won_deals_missing_proven_usd_amount"
@@ -461,6 +465,11 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
     """
     findings = list(coverage_findings or [])
     company_source = company_ids_by_deal is not None
+    # A staleness finding on an otherwise proven ledger says so by name; any
+    # other coverage finding keeps the coverage reason.
+    coverage_reason = (R_LEDGER_STALE if findings and all(
+        f.get("code") == R_LEDGER_STALE for f in findings)
+        else R_COVERAGE_NOT_PROVEN)
 
     # ── membership, by the canonical close date only ────────────────────────
     undated = [r for r in won_rows
@@ -566,7 +575,7 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
 
     # ── publication ─────────────────────────────────────────────────────────
     if findings:
-        deal_status, deal_reason = UNAVAILABLE, R_COVERAGE_NOT_PROVEN
+        deal_status, deal_reason = UNAVAILABLE, coverage_reason
     elif conflicts:
         deal_status, deal_reason = WITHHELD, R_WON_DEFINITION_CONFLICT
     elif undated and not is_all_time:
@@ -627,7 +636,7 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
         camp_status, camp_reason = PUBLISHED, None
 
     if findings:
-        acq_status, acq_reason = UNAVAILABLE, R_COVERAGE_NOT_PROVEN
+        acq_status, acq_reason = UNAVAILABLE, coverage_reason
     elif acq_conflicts:
         acq_status, acq_reason = WITHHELD, R_WON_DEFINITION_CONFLICT
     elif acq_unresolved or acq_ambiguous:

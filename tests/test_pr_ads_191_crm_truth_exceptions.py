@@ -246,6 +246,10 @@ def test_08_a_stale_scan_is_reported_and_never_reads_as_zero_findings(
     _deal(ledger, "2")
     _scan(monkeypatch, {"1": [901], "2": [902]})
     later = _now() + timedelta(hours=svc.association_scan_max_age_hours() + 1)
+    # Only the association scan ages; the deal sync stays current (PR-ADS-161F
+    # withholds a stale deal ledger under its own blocker, tested separately).
+    from tests.test_pr_ads_161d2_deal_company_associations import _deal_sync_at
+    _deal_sync_at(later - timedelta(hours=1))
     m = _model(later)
     assert m["status"] == cte.STATUS_SOURCE_STALE
     assert [b["code"] for b in m["dataset_blockers"]] == [

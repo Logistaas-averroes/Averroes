@@ -138,7 +138,14 @@ ON CONFLICT (scope) DO UPDATE SET
 def _sync_state(pg, *, bootstrap_status="complete",
                 started="2026-01-02T00:00:00+00:00",
                 completed="2026-01-02T06:00:00+00:00",
-                incremental="2026-06-22T03:00:00+00:00"):
+                incremental=None):
+    if incremental is None:
+        # A CURRENT ledger: the deal ledger publishes only while its last
+        # successful incremental is within deal_ledger.max_staleness_hours
+        # (PR-ADS-161F). A test of ordering passes its own timestamp.
+        from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+        incremental = (datetime.now(tz=timezone.utc)
+                       - timedelta(hours=3)).isoformat()
     with pg.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(_READY_SYNC, {

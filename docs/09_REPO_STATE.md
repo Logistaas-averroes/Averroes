@@ -1646,3 +1646,40 @@ and the period-ratio doctrine. One observation is still open and outside this
 PR: docs/48 §5 lists `company_associations_unreadable` in the
 `customer_identity` View-blockers family, while also saying outages get no link.
 The link still opens a dataset blocker in the workbench.
+
+## PR-ADS-161F — Deal-ledger freshness gate (November 2026)
+
+**Why.** The deal ledger's age was reported, not judged. If the daily HubSpot
+deal sync simply stopped, every page kept showing its last deals, customers and
+revenue as current. A sync that ran and failed already withheld; one that never
+ran did not.
+
+**Built.**
+* `deal_ledger.max_staleness_hours: 36` in config/thresholds.yaml (owner-set;
+  the sync is daily, so 36h tolerates one late run and catches a missed day). A
+  missing config file falls back to the same 36.
+* `canonical_customer_revenue_service.ledger_staleness` judges a PROVEN ledger.
+  Over 36h, or with no successful-sync timestamp, it adds a
+  `canonical_ledger_stale` finding. `closed_won_truth.evaluate_window` then makes
+  deals, revenue and customers `unavailable` with that reason. Every reader
+  inherits it through the one snapshot.
+* The CRM Truth Exceptions workbench shows a stale-ledger dataset blocker
+  instead of a blocker list that may name deals already fixed.
+* Parity routes it to the sync owner.
+* The UI reads "Unavailable — the deal sync is overdue", with no View blockers
+  link (no CRM record to fix).
+* `audit_customer_closed_won_truth` prints the threshold and the verdict.
+
+**Fixtures.** `READY_SYNC_STATE` stamps a fixed June sync, which reads as months
+stale to tests evaluated later. The default stubbed ledger is now current when
+read (`fresh_sync_state`). Suites that pin an evaluation date use
+`fresh_sync_state(NOW)`, and the PostgreSQL seeds use the database clock. Two
+tests that age the association scan by 47–49h now keep the deal sync current.
+That way they test the scan only.
+
+`test_161d_51` pinned the old rule ("age is reported, not judged"). It now
+asserts the new one: the same June ledger read in October withholds every
+figure.
+
+**Tests.** `tests/test_pr_ads_161f_deal_ledger_freshness.py`, 12 tests; all 12
+fail on `c0de299`.

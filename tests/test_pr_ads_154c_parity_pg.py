@@ -202,7 +202,7 @@ _READY_SYNC_SQL = """
         (scope, bootstrap_status, bootstrap_started_at, bootstrap_completed_at,
          last_incremental_at, last_status, last_error, last_sync_mode)
     VALUES ('deals', %s, '2026-01-02T00:00:00+00', '2026-01-02T06:00:00+00',
-            '2026-06-22T03:00:00+00', 'success', NULL, 'incremental')
+            now() - interval '3 hours', 'success', NULL, 'incremental')
     ON CONFLICT (scope) DO UPDATE SET
         bootstrap_status = EXCLUDED.bootstrap_status,
         bootstrap_started_at = EXCLUDED.bootstrap_started_at,
