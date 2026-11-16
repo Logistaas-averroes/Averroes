@@ -1786,3 +1786,62 @@ It serves no page.
 real `get_closed_won_truth` over a stubbed ledger.
 
 **Not changed.** Every reader, gate, verdict and page.
+
+---
+
+## PR-ADS-161I — the contact scan read ~30% of HubSpot and called it complete
+
+**Found in production (2026-11-16).** HubSpot held **21,751** contacts and
+`hubspot_contact_funnel` held **6,389**. A full rebuild from the epoch reported
+`success` / `bootstrap_status = complete` after **2,000**. A raw search from the
+Render shell paged past 2,400 in order. The connector's own iterator yielded
+pages that jumped from January 2025 to May 2026 by page 7, then emitted its
+completion sentinel at page 20.
+
+**Cause.** `iter_contacts_modified_since` re-sent its *advancing* watermark as
+the `lastmodifieddate GTE` filter on every page, but kept the paging offset
+(`after`). Each request was therefore the Nth page of a different, shrinking
+result set. It skipped further ahead on every page and ran out of "next" early.
+It was wrong since PR-ADS-153B.
+
+* **Who was hit.** Both the bootstrap and every incremental run with more than
+  one page of changes.
+* **Why tests missed it.** The tests' fake HubSpot ignored the filter value.
+
+**Fixed.**
+* **The filter value is frozen for one paged query** (`query_from_ms`). The
+  watermark moves the filter only when a new query starts, at the 10,000-result
+  re-anchor.
+* **A scan must prove it is whole.** HubSpot's `total` from the scan's first
+  response is the count to meet. `_assert_scan_complete` raises
+  `HubSpotSearchIncompleteError` instead of emitting the completion sentinel when
+  the unique contacts read fall short of that count by more than max(1%, 5). A
+  response with no `total` cannot prove completeness and raises too. The sync
+  service treats the raise as a failed run, so a bootstrap stays `partial`. The
+  sentinel now carries `source_total`.
+
+**Not affected.** `pull_deals_for_ledger` keeps one filter for its whole read,
+so deals, revenue and customers stand. The legacy contact pulls use fixed date
+filters.
+
+**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (8). Its fake honours
+the filter, pages by offset, reports `total` and refuses offsets past 10,000,
+as HubSpot does. Against `main`'s connector it yields **600 of 2,500 contacts
+and reports complete**; here it yields all 2,500, and all 12,345 across a
+re-anchor. Two fakes in `test_pr_ads_153b_canonical_funnel.py` now report
+`total`, as real HubSpot does; their assertions are unchanged.
+
+**Operator step after deploy (required).** The stored state says `complete` over
+a partial table, and the daily incremental resumes from a November watermark,
+so it will not backfill. Run one full rebuild:
+
+```bash
+python -c "
+from db.connection import ensure_database_ready
+ok, err = ensure_database_ready(); assert ok, err
+from services.hubspot_contact_funnel_sync_service import run_contact_funnel_sync, MODE_BOOTSTRAP
+print(run_contact_funnel_sync(mode=MODE_BOOTSTRAP, restart_from_epoch=True))"
+```
+
+Expect `contacts_seen` near HubSpot's total. Lead and SQL counts for older
+windows will rise: that is the correction.
