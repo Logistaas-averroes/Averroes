@@ -1729,3 +1729,60 @@ database and asserts that each prints a readable report and exits 2, not
 `crashed`.
 
 **Not changed.** Every audit, gate and verdict.
+
+---
+
+## PR-ADS-161H — attribution feasibility report (read-only, measure first)
+
+**Why.** Attribution ROAS and CAC are unavailable (docs/48 §4): close-date
+revenue over same-window spend is not one acquisition cohort in a long B2B
+cycle. Before building cohort attribution, we measure whether the data could
+support it:
+
+```bash
+python -m scripts.report_attribution_feasibility          # human-readable
+python -m scripts.report_attribution_feasibility --json
+```
+
+**What it measures.**
+
+1. **Campaign placement.** How many won Google Ads deals sit on ONE campaign
+   (`campaign_attributable`) and how many no campaign can claim
+   (`google_ads_unplaced`, with reasons). This is read from the canonical
+   truth's own attribution partition, using the production campaign resolver.
+   It is never recomputed.
+2. **Acquisition date.** How many won deals have every contact's creation time
+   on record. The report separates:
+   * a lookup that found no contact;
+   * a failed or missing association lookup ("unresolved");
+   * a contact whose creation time is missing.
+3. **Cycle length.** Days from a deal's first contact creation to its close:
+   p25, p50, p75 and p90, and the share of deals closing within 30, 90, 180 and
+   365 days. It is shown for all won deals and for Google Ads deals.
+   * A contact created after the close gives no cycle length. These deals are
+     counted separately, never treated as 0 days.
+   * When no deal can be measured, every percentile is `None`, never `0`.
+
+**What it does not do.** It sets no threshold and publishes nothing; whether
+the numbers justify building is the owner's call.
+
+* **Exit 0:** measured.
+* **Exit 2:** not measured. This happens when the ledger is unreadable, its
+  coverage is not proven (a missing verdict counts as unproven), or the truth
+  reports any window's population unavailable (for example, a stale ledger).
+
+**Registered as a diagnostic.** The guards caught the report as a new reader
+on its first run, which is their job. It is now named in three places, beside
+the audits it sits with:
+
+* `OWNERS` in `audit_customer_revenue_reader_cutover`;
+* `CERTIFICATION_CONSUMERS` in `audit_customer_closed_won_truth`;
+* the SQL doctrine registry (`closedwon.feasibility`, `CLS_DIAGNOSTIC`), for
+  its two `contact_created_at` reads.
+
+It serves no page.
+
+**Tests.** `tests/test_pr_ads_161h_attribution_feasibility.py` (11) drives the
+real `get_closed_won_truth` over a stubbed ledger.
+
+**Not changed.** Every reader, gate, verdict and page.

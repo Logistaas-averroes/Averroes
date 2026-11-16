@@ -1157,6 +1157,12 @@ RULES: list[dict] = [
     # snapshot rows, independently of the service, to certify it.
     _r("closedwon.audit", "scripts/audit_customer_closed_won_truth.py",
        CLS_DIAGNOSTIC, _CLOSED_WON, symbol=["_expected"]),
+    # PR-ADS-161H: the attribution feasibility report measures, from the same
+    # snapshot, whether contact creation times are held and the
+    # first-contact-to-close cycle. It publishes nothing and reads no SQL count.
+    _r("closedwon.feasibility", "scripts/report_attribution_feasibility.py",
+       CLS_DIAGNOSTIC, _CLOSED_WON,
+       symbol=["contact_evidence", "cycle_lengths.segment"]),
     # PR-ADS-161E: the reader-cutover audit's structural check searches the
     # code for a ratio over SQLs — it names SQLs to prove none is computed.
     _r("readercut.audit", "scripts/audit_customer_revenue_reader_cutover.py",

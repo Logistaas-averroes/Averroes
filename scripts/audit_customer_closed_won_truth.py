@@ -71,6 +71,10 @@ CERTIFICATION_CONSUMERS = (
     # membership block (``window_summary_republishes_no_total``).
     "services/crm_truth_exceptions_service.py",
     "scripts/audit_crm_truth_exceptions.py",
+    # PR-ADS-161H: the attribution feasibility report. A read-only shell
+    # diagnostic like the audits: it measures campaign placement, contact
+    # creation coverage and cycle length, and publishes nothing.
+    "scripts/report_attribution_feasibility.py",
     # PR-ADS-161E — the reader-cutover audit reads the truth service to prove
     # every reader republishes its verdicts; it publishes nothing.
     "scripts/audit_customer_revenue_reader_cutover.py",
