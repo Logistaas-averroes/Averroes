@@ -518,3 +518,25 @@ Recurring patterns (durable):
   into scratch, copy the CURRENT audit script in, run its checks over the old
   revision's page builders with that revision's own fixtures (t138
   `_patch_durable` + t137 keyword/search patches build every page).
+
+## PR-ADS-161E final review of b00defb (delta 4f0f199..b00defb)
+- No blocker/major/medium. Verified with the real producer: the UE early-return
+  path leaks no figure across 5 failure modes. Ledger/sync-state outage is
+  `unavailable`, with no View blockers link. CRM reasons are `withheld`, and
+  only admins get the link. Parity classes are reachable end to end through
+  `audit_window`. Tests 46/47 fail on 4f0f199 for the intended reason (47 once
+  its constants exist).
+- 4 minors, all closed in PR-ADS-161E-F1:
+  - the parity classifier ignored silent or unregistered consumers;
+  - the UE `business` (all_source) period ratios gave the wrong reasons
+    instead of `numerator_and_denominator_scopes_differ`;
+  - UE avg deal value, the verdict badge (raw code) and the empty table were
+    a bare "Unavailable";
+  - test 46 used a hand-built verdict and had no viewer or outage case.
+- Still open (pre-existing): docs/48 §5 puts `company_associations_unreadable`
+  in the `customer_identity` View-blockers family but says outages get no
+  link. app.js CRM_BLOCKER_FAMILY matches the table; its comment says the
+  opposite.
+- `load_won_deals` reports an unreadable SYNC STATE as
+  `canonical_ledger_unreadable`, not `canonical_sync_state_unreadable`. Both
+  are outages.

@@ -18224,13 +18224,27 @@ function renderUnitEconomicsPage() {
   const withheld = d.unavailable || [];
   const reasonFor = (metric) => (withheld.find((u) => u.metric === metric) || {}).reason || "";
 
+  // Average deal value = revenue ÷ won deals, so when it is null it is null for
+  // the reason of whichever input is not published — never a bare word.
+  const avgDealInput = (block) => {
+    const m = (block || {}).metrics || {};
+    const rev = m.revenue_usd || m.won_revenue_usd;
+    if (rev && rev.status && rev.status !== "published") return rev;
+    const deals = m.closed_won_deals;
+    if (deals && deals.status && deals.status !== "published") return deals;
+    return null;
+  };
+  // The window-level verdict when no population is released: the canonical
+  // deal-count metric carries its status ("withheld" for a CRM finding,
+  // "unavailable" for an outage) and reason.
+  const populationVerdict = (business.metrics || {}).closed_won_deals;
+
   if (kpiGrid) {
-    const dash = (v, fmtFn) => (v === null || v === undefined ? "Unavailable" : fmtFn(v));
     kpiGrid.innerHTML = `
       <div class="kpi-card"><div class="kpi-card__label">Closed-won deals (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "closed_won_deals", fmt, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Customers (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "customers", fmt, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Closed-won revenue (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "revenue_usd", fmtMoney, businessBlockerOpts())}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Avg deal value</div><div class="kpi-card__value">${dash(business.avg_deal_value_usd, fmtMoney)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Avg deal value</div><div class="kpi-card__value">${canonicalValueHtml(business.avg_deal_value_usd, avgDealInput(business), fmtMoney, businessBlockerOpts())}</div></div>
       <div class="kpi-card" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}"><div class="kpi-card__label">${PERIOD_SPEND_PER_CUSTOMER_LABEL} (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</div></div>
       <div class="kpi-card" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}"><div class="kpi-card__label">${PERIOD_RATIO_LABEL} (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">${CERTIFIED_RATIO_LABELS.cac}</div><div class="kpi-card__value">${rowMetricHtml(advertising, "cac", fmtMoney, businessBlockerOpts())}</div></div>
@@ -18240,12 +18254,14 @@ function renderUnitEconomicsPage() {
 
   if (verdictEl) {
     if (d.revenue_available === false) {
+      // Withheld (a CRM finding, with View blockers for admins) or Unavailable
+      // (an outage), with the canonical reason in words — never a raw code.
+      const verdictHtml = populationVerdict && populationVerdict.status
+        ? canonicalMetricHtml(populationVerdict, fmt, businessBlockerOpts())
+        : `<span class="badge badge--warn">Unavailable</span> ${escapeHtml(canonicalReasonLabel(d.revenue_unavailable_reason) || "reason not reported")}`;
       verdictEl.innerHTML = `
         <div class="unit-economics-verdict-card">
-          <span class="badge badge--warn">Unavailable</span>
-          <span class="unit-economics-verdict-explanation">${escapeHtml(
-            "Canonical revenue is unavailable (" + (d.revenue_unavailable_reason || "unknown") +
-            "). No legacy revenue source is used as a fallback.")}</span>
+          <span class="unit-economics-verdict-explanation">Closed-won population for this window: ${verdictHtml}. ${escapeHtml("No legacy revenue source is used as a fallback.")}</span>
         </div>`;
     } else {
       verdictEl.innerHTML = `
@@ -18259,7 +18275,13 @@ function renderUnitEconomicsPage() {
 
   const campaigns = d.by_campaign || d.campaigns || [];
   if (!campaigns.length) {
-    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No campaign-level economics data.</p>';
+    if (tableBody) {
+      // A withheld window has no campaign rows because nothing was released,
+      // not because no campaign exists — say which.
+      tableBody.innerHTML = d.revenue_available === false && populationVerdict && populationVerdict.status
+        ? `<p class="empty-state" style="padding:var(--space-5)">Campaign economics for this window: ${canonicalMetricHtml(populationVerdict, fmt, businessBlockerOpts())}</p>`
+        : '<p class="empty-state" style="padding:var(--space-5)">No campaign-level economics data.</p>';
+    }
     return;
   }
 
@@ -18274,7 +18296,7 @@ function renderUnitEconomicsPage() {
       <td>${rowMetricHtml(r, "closed_won_deals", fmt, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "customers", fmt, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, businessBlockerOpts())}</td>
-      <td>${r.avg_deal_value_usd === null || r.avg_deal_value_usd === undefined ? "Unavailable" : fmtMoney(r.avg_deal_value_usd)}</td>
+      <td>${canonicalValueHtml(r.avg_deal_value_usd, avgDealInput(r), fmtMoney, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</td>
       <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</td>
     </tr>`).join("");

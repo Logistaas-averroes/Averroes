@@ -1319,41 +1319,107 @@ def test_45_api_text_never_calls_the_period_ratio_roas(monkeypatch):
 
 # ── PR review round 2 (Copilot) ───────────────────────────────────────────────
 
+#: The pieces of static/app.js the Unit Economics page renders through.
+_UE_STRING_CONSTS = ("PERIOD_RATIO_LABEL", "PERIOD_SPEND_PER_CUSTOMER_LABEL",
+                     "PERIOD_RATIO_DISCLOSURE")
+_UE_CONSTS = ("CANONICAL_REASON_LABELS", "CANONICAL_BASIS_LABELS",
+              "CRM_BLOCKER_FAMILY", "ROW_METRIC_KEYS", "CERTIFIED_RATIO_LABELS")
+_UE_PIECES = ("escapeHtml", "fmt", "fmtMoney", "fmtPeriodRatio", "dashValue",
+              "canonicalReasonLabel", "crmBlockerFamily", "crmBlockersHref",
+              "canonicalBlockingReason", "canonicalMetricHtml", "rowMetricHtml",
+              "canonicalValueHtml", "renderUnitEconomicsPage")
+
+
+def _render_unit_economics(page: dict, *, role: str) -> dict:
+    """Run the REAL renderUnitEconomicsPage over ``page`` in node, against a
+    stub DOM; returns the KPI grid, verdict and table HTML."""
+    node = shutil.which("node")
+    assert node, "node is a CI dependency (node --check static/app.js)"
+    src = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    parts = [re.search(rf"const {c} =[\s\S]*?\";", src).group(0)
+             for c in _UE_STRING_CONSTS]
+    parts += [_js_extract(src, f"const {c} = ") for c in _UE_CONSTS]
+    parts += [_js_extract(src, f"function {f}(") for f in _UE_PIECES]
+    script = (
+        f"let _currentUser = {json.dumps({'role': role})};\n"
+        "const window = { location: { hash: '' } };\n"
+        "const _els = {};\n"
+        "const document = { getElementById: (id) => (_els[id] = _els[id] || { innerHTML: '' }) };\n"
+        "function businessBlockerOpts() { return { windowType: 'business', windowKey: 'ytd' }; }\n"
+        "function renderPageExplanation() {}\n"
+        + "\n".join(parts) + "\n"
+        f"let unitEconomicsData = {json.dumps(page)};\n"
+        "renderUnitEconomicsPage();\n"
+        "console.log(JSON.stringify({kpis: _els['unit-economics-kpis'].innerHTML,\n"
+        "  verdict: _els['unit-economics-verdict'].innerHTML,\n"
+        "  table: _els['unit-economics-table-body'].innerHTML}));\n")
+    res = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def _unit_economics_page(monkeypatch, rows, **ledger):
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    t137._patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, rows,
+                           company_associations=company_evidence(rows), **ledger)
+    from services.canonical_unit_economics_service import build_unit_economics
+    return build_unit_economics("ytd", scope="campaign_attributable", now=t137.NOW)
+
+
 def test_46_unit_economics_keeps_the_withheld_verdict_when_no_population_is_released(
         monkeypatch):
     """A window withheld for an undated won deal used to return
     ``business: None`` / ``advertising: None``, so every KPI read a bare
-    "Unavailable" with no reason and no View blockers link."""
+    "Unavailable" with no reason and no View blockers link. Driven through the
+    REAL canonical producer: one won deal in the ledger has no close date."""
     from tests import test_pr_ads_137_dashboard_campaigns as t137
     from tests.canonical_ledger_fixtures import from_legacy_deal_rows
-    t137._patch_durable(monkeypatch)
     rows = from_legacy_deal_rows(t137.DEAL_ROWS)
-    patch_canonical_ledger(monkeypatch, rows,
-                           company_associations=company_evidence(rows))
-    from services import canonical_unit_economics_service as ue
-    withheld = {"available": False, "status": cwt.WITHHELD,
-                "reason": cwt.R_UNDATED_WON_DEALS}
-    monkeypatch.setattr(ue.canonical_revenue, "load_won_deals",
-                        lambda *a, **k: dict(withheld))
-    page = ue.build_unit_economics("ytd", scope="campaign_attributable", now=t137.NOW)
+    rows[0] = dict(rows[0], deal_close_date=None)
+    page = _unit_economics_page(monkeypatch, rows)
     assert page["revenue_available"] is False
     for block in ("business", "advertising"):
         m = page[block]["metrics"]
         for key in ("closed_won_deals", "customers", "revenue_usd"):
-            assert m[key] == {"value": None, "status": cwt.WITHHELD,
-                              "reason": cwt.R_UNDATED_WON_DEALS}, (block, key)
-            assert page[block][key if key != "revenue_usd" else "revenue_usd"] is None
+            assert m[key]["status"] == cwt.WITHHELD, (block, key)
+            assert m[key]["value"] is None and page[block][key] is None
+        assert m["closed_won_deals"]["reason"] == cwt.R_UNDATED_WON_DEALS
     adv = page["advertising"]["metrics"]
     for key in cwt.PERIOD_RATIO_KEYS:
         assert adv[key]["status"] == cwt.WITHHELD and adv[key]["value"] is None
     assert adv["cac"]["status"] == cwt.UNAVAILABLE
     assert audit.ratio_name_violations(page) == []
-    # The UI renders the canonical word and reason, not a bare "Unavailable".
-    payload = json.loads(json.dumps(page["business"]))
-    out = _node({"customers": ["rowMetricHtml", [payload, "customers", "__fmt"]]},
-                role="admin")
-    assert "Withheld" in out["customers"] and "no close date" in out["customers"]
-    assert "View blockers" in out["customers"]
+    # Admin: the canonical word, the reason in words, and View blockers.
+    admin = _render_unit_economics(page, role="admin")
+    for part in ("kpis", "verdict", "table"):
+        assert "Withheld" in admin[part], part
+        assert "no close date" in admin[part], part
+        assert "View blockers" in admin[part], part
+    assert "won_deals_without_close_date" not in admin["verdict"]   # never a raw code
+    assert "No campaign-level economics data" not in admin["table"]
+    # Viewer: the same truth, no workbench link.
+    viewer = _render_unit_economics(page, role="viewer")
+    for part in ("kpis", "verdict", "table"):
+        assert "Withheld" in viewer[part] and "View blockers" not in viewer[part], part
+
+
+def test_46b_a_ledger_outage_on_unit_economics_reads_unavailable_with_no_link(
+        monkeypatch):
+    """An outage is not a CRM finding: "Unavailable" with the outage reason,
+    and no View blockers link even for an admin — there is no record to fix."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    page = _unit_economics_page(monkeypatch, from_legacy_deal_rows(t137.DEAL_ROWS),
+                                available=False)
+    assert page["revenue_available"] is False
+    m = page["business"]["metrics"]["closed_won_deals"]
+    assert m["status"] == cwt.UNAVAILABLE and m["value"] is None
+    admin = _render_unit_economics(page, role="admin")
+    for part in ("kpis", "verdict", "table"):
+        assert "Unavailable" in admin[part] and "View blockers" not in admin[part], part
+        assert "Withheld" not in admin[part], part
+    assert "could not be read" in admin["verdict"]
 
 
 def test_47_parity_classifies_every_canonical_customer_identity_refusal():
@@ -1378,3 +1444,68 @@ def test_47_parity_classifies_every_canonical_customer_identity_refusal():
     identity = {v for k, v in vars(cwt).items()
                 if k.startswith(("R_CUSTOMER_IDENTITY", "R_COMPANY_ASSOCIATIONS"))}
     assert identity <= set(cpp._UNAVAILABLE_CLASSES), identity - set(cpp._UNAVAILABLE_CLASSES)
+
+
+# ── Follow-up to PR-ADS-161E: the final review's minor findings ───────────────
+
+def test_48_parity_names_no_owner_unless_every_consumer_explains_the_absence():
+    """One consumer's registered reason is not the whole story when another
+    consumer is silent or gives a reason the audit cannot classify."""
+    from services import cross_page_parity_service as cpp
+    ok = [{"consumer": c, "unavailable_reason": cwt.R_CUSTOMER_IDENTITY}
+          for c in ("a", "b")]
+    assert cpp._classify_unavailable(ok, "customers")[1] == \
+        cpp.V_CUSTOMER_IDENTITY_UNRESOLVED
+    mixed = [{"consumer": "a", "unavailable_reason": cwt.R_CUSTOMER_IDENTITY},
+             {"consumer": "b", "unavailable_reason": None},
+             {"consumer": "c", "unavailable_reason": "some_unregistered_reason"}]
+    status, code, detail = cpp._classify_unavailable(mixed, "customers")
+    assert (status, code) == ("unavailable", cpp.V_SOURCE_UNAVAILABLE)
+    assert "b declared no reason" in detail
+    assert "some_unregistered_reason are not ones the audit can classify" in detail
+    for partial in (mixed[:2], [mixed[0], mixed[2]]):
+        assert cpp._classify_unavailable(partial, "customers")[1] == \
+            cpp.V_SOURCE_UNAVAILABLE, partial
+
+
+def test_49_the_all_source_business_block_never_promises_a_period_ratio(monkeypatch):
+    """Unit Economics' ``business`` block is all_source: Google Ads spend can
+    never have produced it, so its period ratios are a scope mismatch — on the
+    published path and on the withheld path alike."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    published = _unit_economics_page(monkeypatch, from_legacy_deal_rows(t137.DEAL_ROWS))
+    assert published["revenue_available"] is True
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    rows[0] = dict(rows[0], deal_close_date=None)
+    withheld = _unit_economics_page(monkeypatch, rows)
+    assert withheld["revenue_available"] is False
+    for page in (published, withheld):
+        for key in cwt.PERIOD_RATIO_KEYS:
+            m = page["business"]["metrics"][key]
+            assert m == {"value": None, "status": cwt.UNAVAILABLE,
+                         "reason": cwt.R_SCOPE_INCOMPATIBLE}, (key, m)
+
+
+def test_50_unit_economics_average_deal_value_names_its_blocking_input(monkeypatch):
+    """Average deal value is revenue ÷ won deals: when it is null it carries the
+    blocking input's verdict, never a bare "Unavailable"; when it publishes it
+    is the number."""
+    from tests import test_pr_ads_137_dashboard_campaigns as t137
+    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
+    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
+    rows[1] = dict(rows[1], amount_raw=None, revenue_usd=None,
+                   currency_status="unavailable", currency_reason="no_amount")
+    page = _unit_economics_page(monkeypatch, rows)
+    assert page["revenue_available"] is True
+    assert page["business"]["avg_deal_value_usd"] is None
+    assert page["business"]["metrics"]["revenue_usd"]["status"] == cwt.WITHHELD
+    html = _render_unit_economics(page, role="admin")["kpis"]
+    card = html[html.index("Avg deal value"):].split("</div></div>")[0]
+    assert "Withheld" in card and "proven USD amount" in card, card
+    # Control: priced deals publish the average as a number.
+    ok = _unit_economics_page(monkeypatch, from_legacy_deal_rows(t137.DEAL_ROWS))
+    assert ok["business"]["avg_deal_value_usd"] is not None
+    html = _render_unit_economics(ok, role="admin")["kpis"]
+    card = html[html.index("Avg deal value"):].split("</div></div>")[0]
+    assert "$" in card and "Unavailable" not in card and "Withheld" not in card, card
