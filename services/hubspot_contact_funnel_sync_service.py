@@ -292,19 +292,21 @@ def run_contact_funnel_sync(
         # It must never look like a successful incremental, and it must never
         # advance the proven-successful-incremental timestamp.
         failure_state = {
-            "bootstrap_status": (
-                BOOTSTRAP_PARTIAL if mode == MODE_BOOTSTRAP else
-                (state.get("bootstrap_status") or BOOTSTRAP_NOT_STARTED)
-            ),
             "last_error": error,
             "contacts_seen": contacts_seen,
             "pages_fetched": pages,
             "last_status": "failed",
             "last_sync_mode": mode,
         }
-        if mode != MODE_BOOTSTRAP:
+        if mode == MODE_BOOTSTRAP:
+            failure_state["bootstrap_status"] = BOOTSTRAP_PARTIAL
+        else:
+            # PR-ADS-161I: an incremental never owns bootstrap_status. Writing
+            # back the value it read at its start could restore a 'complete'
+            # that was withdrawn while it ran.
             failure_state["last_incremental_status"] = "failed"
-        if _is_incomplete_scan(exc):
+        incomplete = _is_incomplete_scan(exc)
+        if incomplete:
             # PR-ADS-161I: the per-page checkpoints of THIS run advanced the
             # watermark past a gap the scan has just proven exists. Resuming
             # from it would re-check only the tail and mark the bootstrap
@@ -315,10 +317,19 @@ def run_contact_funnel_sync(
             failure_state["latest_modified_at"] = failure_state[
                 "last_modified_watermark"]
             watermark = failure_state["last_modified_watermark"]
-        db_writers.update_contact_funnel_sync_state(SCOPE, **failure_state)
-        return _failed_result(mode, error, since, watermark,
-                              contacts_seen=contacts_seen,
-                              contacts_written=contacts_written, pages=pages)
+        state_ok = db_writers.update_contact_funnel_sync_state(
+            SCOPE, **failure_state)
+        result = _failed_result(mode, error, since, watermark,
+                                contacts_seen=contacts_seen,
+                                contacts_written=contacts_written, pages=pages)
+        if incomplete and not state_ok:
+            # The rewind did not persist: the stored watermark may still sit
+            # past the gap. Say so loudly; the next run cannot know.
+            log.error("[hubspot_contact_funnel] incomplete scan, and the "
+                      "watermark rewind FAILED to persist — rebuild from the "
+                      "epoch before trusting the contact store")
+            result["watermark_rewind_failed"] = True
+        return result
 
     # §4: a run may only be called complete when the iterator PROVED it reached
     # the end of the result set. A capped run, or one that stopped for any other
@@ -337,7 +348,6 @@ def run_contact_funnel_sync(
     # against a source whose incremental feed had died.
     run_status = "partial" if truncated else "success"
     state_update = {
-        "bootstrap_status": bootstrap_status,
         "last_modified_watermark": watermark,
         "latest_modified_at": watermark,
         "last_incremental_at": now,
@@ -348,8 +358,10 @@ def run_contact_funnel_sync(
         "last_status": run_status,
         "last_sync_mode": mode,
     }
-    if mode == MODE_BOOTSTRAP and bootstrap_status == BOOTSTRAP_COMPLETE:
-        state_update["bootstrap_completed_at"] = now
+    if mode == MODE_BOOTSTRAP:
+        state_update["bootstrap_status"] = bootstrap_status
+        if bootstrap_status == BOOTSTRAP_COMPLETE:
+            state_update["bootstrap_completed_at"] = now
     if mode != MODE_BOOTSTRAP:
         # The incremental's OWN outcome, in its own columns. A later bootstrap
         # never touches these, so evidence that the last required incremental

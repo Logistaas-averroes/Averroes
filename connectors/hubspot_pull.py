@@ -1351,6 +1351,17 @@ def _assert_scan_complete(source_total, unique_ids) -> None:
             "and must not be reported as complete")
 
 
+def _contact_id_number(cid: str):
+    """HubSpot contact ids are numeric strings; the id keyset needs the number.
+
+    Digits are extracted so a test fake's ``c123`` keys like ``123``; a
+    production id is all digits, so this is the id itself. None when there is
+    no digit at all — the keyset cannot walk it, and the caller stalls.
+    """
+    digits = "".join(ch for ch in str(cid or "") if ch.isdigit())
+    return int(digits) if digits else None
+
+
 def iter_contacts_modified_since(
     since,
     *,
@@ -1376,9 +1387,12 @@ def iter_contacts_modified_since(
     contact already read is modified, merged or deleted mid-scan — the row moves
     out of its slot and the next offset silently skips an unread contact. A
     keyset query cannot skip: every unread contact still has ``lastmodifieddate
-    >= watermark``. An offset is used ONLY to walk a group of contacts sharing
-    one timestamp that is larger than a page, and never past HubSpot's 10,000
-    cap.
+    >= watermark``. A group of contacts sharing ONE timestamp that fills a page
+    is walked by keyset on the contact id (``lastmodifieddate EQ T AND
+    hs_object_id GT last``, sorted by id; verified against live HubSpot), never
+    by offset: HubSpot's order among tied rows is arbitrary between queries and
+    a tied member modified mid-scan would shift an offset. After the group the
+    scan resumes with ``lastmodifieddate GT T``. No offset is ever sent.
 
     Yields ``(contacts, page_meta)`` where ``page_meta`` carries
     ``{watermark_ms, watermark_iso, total_yielded, page_index, reanchored,
@@ -1392,8 +1406,8 @@ def iter_contacts_modified_since(
     no sentinel.
 
     Raises ``HubSpotRetryableError`` on a non-rate-limit API failure,
-    ``HubSpotSearchStalledError`` when more than 10,000 contacts share one
-    ``lastmodifieddate`` (the tie group cannot be walked), and
+    ``HubSpotSearchStalledError`` when a query makes no progress (HubSpot did
+    not honour the keyset filter, or a contact id is not numeric), and
     ``HubSpotSearchIncompleteError`` when the scan ends short of HubSpot's own
     ``total`` — a partial read is NEVER reported as a complete one.
     NEVER writes to HubSpot.
@@ -1402,60 +1416,65 @@ def iter_contacts_modified_since(
     watermark_ms = _epoch_ms(since)
     total_yielded = 0
     page_index = 0
-    reanchored = 0          # keyset queries after the first
-    # Contact ids already emitted at the CURRENT watermark timestamp. Reset
-    # whenever the watermark advances; de-duplicates the tie rows every keyset
-    # query re-returns at its boundary.
+    reanchored = 0          # queries after the first
+    # Contact ids already emitted at the CURRENT watermark timestamp; reset
+    # whenever the watermark advances. De-duplicates tie rows a ``>=`` query
+    # re-returns at its boundary.
     seen_at_watermark: set[str] = set()
     # HubSpot's ``total`` for the scan's FIRST query: every contact modified
     # at/after ``since`` when the scan began. The bar the scan must meet.
     source_total = None
     unique_ids: set[str] = set()
-    # Offset INSIDE one tie group larger than a page; 0 otherwise.
-    tie_offset = 0
+    # True right after a whole tie group at ``watermark_ms`` has been walked:
+    # the next query is strictly greater, or it would return that group again.
+    strictly_after = False
+    tie_last_id = None      # not None while walking a tie group by id
+
+    def _search(filters, sort_prop):
+        while True:
+            try:
+                return client.crm.contacts.search_api.do_search(
+                    public_object_search_request={
+                        "filterGroups": [{"filters": filters}],
+                        "properties": CONTACT_FUNNEL_PROPERTIES,
+                        "sorts": [{"propertyName": sort_prop,
+                                   "direction": "ASCENDING"}],
+                        "limit": page_size,
+                        "after": None,
+                    }
+                )
+            except ApiException as exc:
+                if exc.status == 429:
+                    wait = INITIAL_BACKOFF_SECONDS * 2
+                    logger.warning(
+                        "HubSpot rate limited during contact-funnel sync — "
+                        "waiting %ds", wait)
+                    time.sleep(wait)
+                    continue
+                raise HubSpotRetryableError(
+                    f"HubSpot contact search failed (status={exc.status}): {exc}"
+                ) from exc
 
     while True:
         if max_pages is not None and page_index >= max_pages:
             # Capped run: deliberately NO completion sentinel. The caller
             # must treat this as truncated, never as a finished scan.
             return
-        if tie_offset + page_size > HUBSPOT_SEARCH_RESULT_CAP:
-            raise HubSpotSearchStalledError(
-                "HubSpot contact scan stalled: more than "
-                f"{HUBSPOT_SEARCH_RESULT_CAP} contacts share "
-                f"lastmodifieddate={watermark_ms}. The scan is INCOMPLETE and "
-                "must not be reported as complete.")
 
         query_from_ms = watermark_ms
-        try:
-            response = client.crm.contacts.search_api.do_search(
-                public_object_search_request={
-                    "filterGroups": [{"filters": [{
-                        "propertyName": "lastmodifieddate",
-                        "operator": "GTE",
-                        "value": str(query_from_ms),
-                    }]}],
-                    "properties": CONTACT_FUNNEL_PROPERTIES,
-                    "sorts": [{
-                        "propertyName": "lastmodifieddate",
-                        "direction": "ASCENDING",
-                    }],
-                    "limit": page_size,
-                    "after": str(tie_offset) if tie_offset else None,
-                }
-            )
-        except ApiException as exc:
-            if exc.status == 429:
-                wait = INITIAL_BACKOFF_SECONDS * 2
-                logger.warning(
-                    "HubSpot rate limited during contact-funnel sync — waiting %ds",
-                    wait,
-                )
-                time.sleep(wait)
-                continue
-            raise HubSpotRetryableError(
-                f"HubSpot contact search failed (status={exc.status}): {exc}"
-            ) from exc
+        if tie_last_id is not None:
+            response = _search([
+                {"propertyName": "lastmodifieddate", "operator": "EQ",
+                 "value": str(watermark_ms)},
+                {"propertyName": "hs_object_id", "operator": "GT",
+                 "value": str(tie_last_id)},
+            ], "hs_object_id")
+        else:
+            response = _search([
+                {"propertyName": "lastmodifieddate",
+                 "operator": "GT" if strictly_after else "GTE",
+                 "value": str(watermark_ms)},
+            ], "lastmodifieddate")
 
         if source_total is None:
             total = getattr(response, "total", None)
@@ -1470,12 +1489,19 @@ def iter_contacts_modified_since(
 
         results = [c.to_dict() for c in (response.results or [])]
         fresh = []
+        page_ids = []
         for contact in results:
             cid = str(contact.get("id") or "").strip()
+            page_ids.append(_contact_id_number(cid))
             modified = _epoch_ms(
                 (contact.get("properties") or {}).get("lastmodifieddate")
             )
-            if modified > watermark_ms:
+            if modified <= 0:
+                # Unparseable timestamp: still read the contact (it is in
+                # HubSpot's total), but it can never move the watermark.
+                if cid and cid not in unique_ids:
+                    fresh.append(contact)
+            elif modified > watermark_ms:
                 watermark_ms = modified
                 seen_at_watermark = {cid} if cid else set()
                 fresh.append(contact)
@@ -1499,18 +1525,36 @@ def iter_contacts_modified_since(
                 "complete": False,
             }
 
-        if len(results) < page_size:
-            # A short page from a keyset query is the end of the result set.
+        full = len(results) >= page_size
+        if tie_last_id is not None:
+            # Walking one tie group by id.
+            if not full:
+                # Group exhausted: resume strictly after its timestamp.
+                tie_last_id = None
+                strictly_after = True
+                continue
+            if None in page_ids or max(page_ids) <= tie_last_id:
+                raise HubSpotSearchStalledError(
+                    "HubSpot contact scan stalled walking the contacts that "
+                    f"share lastmodifieddate={watermark_ms}: the id keyset "
+                    "did not advance. The scan is INCOMPLETE and must not be "
+                    "reported as complete.")
+            tie_last_id = max(page_ids)
+            continue
+
+        if not full:
+            # A short page from a range query is the end of the result set.
             _assert_scan_complete(source_total, unique_ids)
             yield _completion_sentinel(
                 watermark_ms, total_yielded, page_index, reanchored,
                 source_total, len(unique_ids))
             return
 
-        # Full page. If the watermark moved, the next keyset query starts
-        # from it at offset 0. If it did not, every row so far sits in one
-        # tie group at the watermark: walk deeper into that group.
-        tie_offset = 0 if watermark_ms > query_from_ms else tie_offset + page_size
+        strictly_after = False
+        if watermark_ms == query_from_ms:
+            # A full page that never moved past its starting timestamp: every
+            # row shares it. Walk that tie group by contact id.
+            tie_last_id = -1
 
 
 def normalize_contact_funnel_row(contact: dict) -> dict | None:

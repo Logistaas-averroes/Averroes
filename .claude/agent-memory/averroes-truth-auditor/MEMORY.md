@@ -565,3 +565,28 @@ Recurring patterns (durable):
   incremental status: a stored `complete` over a partial table publishes.
 - Validation: 161I+153b+153b PG+daily incremental+160 = 339 passed, PG ran
   (python3.11; `python` is 3.13 without deps in this container).
+
+## PR-ADS-161I re-review (code e6dcfb4; HEAD d882b72 adds only this memory file)
+- CORRECTION of the f38bbc6 entries above: the iterator is now KEYSET-paged
+  (every page `>= watermark` at offset 0; offset only inside a tie group >
+  page_size; stall when tie_offset+page_size > 10,000). The service now REWINDS
+  last_modified_watermark/latest_modified_at to the run's `since` (NULL for an
+  epoch scan) on HubSpotSearchIncompleteError. A one-time migration
+  `PR-ADS-161I-contact-funnel-rebuild-from-epoch` sets scope 'contacts' to
+  partial / watermark NULL / completed_at NULL. Probes 1-3 now: 0 missing.
+  test_08 fails on the offset connector; test_11/12 fail without the rewind.
+- STILL OPEN (executed): the tie-group walk is an offset over live data. With
+  stable tie order, modifying one already-read tie member per request lost 29
+  of a 3,000-contact tie group with `complete=True`. If HubSpot's tie order
+  differs between requests (not verified), a 350-contact group lost 99 silently,
+  and a 3,000-contact group raised every run (with the rewind, every run would
+  rescan from the epoch). Fix: inside a tie, page by keyset on `hs_object_id`.
+- Rows whose lastmodifieddate fails to parse (`_epoch_ms` -> 0) are now dropped
+  silently. Before, they were yielded. Only the count check covers them.
+- `update_contact_funnel_sync_state` writes NULLs as given (EXCLUDED.col), so the
+  rewind to NULL is real on PG. The failure-state write's return value is ignored.
+- An incremental run's final write puts back the `bootstrap_status` it read at
+  START, and per-page checkpoints re-fill the watermark. So a run in flight
+  across the migration undoes it (lost update).
+- test_13 (the migration, PG) is in a module CI's PG did-run list does not name,
+  so it can skip silently.

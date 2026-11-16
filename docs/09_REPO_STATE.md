@@ -1807,14 +1807,17 @@ than one page of changes. The tests' fake HubSpot ignored the filter value, so
 none of them could see it.
 
 **Fixed.**
-1. **Keyset paging.** Every page is a new query,
-   `lastmodifieddate >= watermark`, from offset 0. Rows already read at the
-   watermark timestamp are de-duplicated. An offset is used only to walk a group
-   of contacts that share one timestamp and is larger than a page, and never past
-   the 10,000 cap. Merely freezing the filter (this PR's first push) is not
-   enough: an offset over HubSpot's *live* result set shifts whenever an
-   already-read contact is modified, merged or deleted mid-scan, and skips an
-   unread one.
+1. **Keyset paging, no offsets at all.** Every page is a new query,
+   `lastmodifieddate >= watermark`, and rows already read at the watermark
+   timestamp are de-duplicated. A group of contacts that shares ONE timestamp
+   and fills a page is walked by keyset on the contact id instead:
+   `lastmodifieddate EQ T AND hs_object_id GT last`, sorted by id. That query was
+   verified against live HubSpot, which returns tied rows in an arbitrary order.
+   After the group, the scan resumes with `lastmodifieddate GT T`. Any offset
+   over HubSpot's *live* result set skips an unread contact whenever an
+   already-read one is modified, merged or deleted mid-scan, and walking ties by
+   offset skips when HubSpot reorders them. Both cases were reproduced by the
+   truth audit: 29 and 99 contacts missing while still reporting complete.
 2. **A scan must prove it is whole.** It must meet HubSpot's own `total` from its
    first response, within max(1%, 2) for contacts deleted before they were read.
    Zero read against a non-empty set never passes, and a response without `total`
@@ -1832,21 +1835,44 @@ none of them could see it.
    withholds. No contact row is deleted.
 5. Run results now carry `source_total` and `unique_contacts_read`
    (`contacts_seen` counts re-reads).
+6. **An incremental never writes `bootstrap_status`**, so a run in flight across
+   the deploy cannot restore the withdrawn `complete`. A contact whose
+   `lastmodifieddate` cannot be parsed is still read, and never moves the
+   watermark. A rewind that fails to persist is logged and reported as
+   `watermark_rewind_failed`.
 
 **Not affected by this cause.** `pull_deals_for_ledger` keeps one filter for its
 whole read. It does page by offset over a live set, so a deal modified during its
 read could in principle shift a page; the deal population is small and
 reconciled by its own audits. This is noted, not fixed here.
 
-**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (13). Its fake honours
-the filter, pages by offset, reports `total`, refuses offsets past 10,000, and
-can **change its data during the scan**.
-* Against `main`'s connector it yields 600 of 2,500 contacts and reports complete.
-* The concurrent-change test (08) and the two-run test (11) fail on this PR's
-  first push and pass here.
-* Test 13 runs the migration on a live PostgreSQL cluster, and runs it once only.
+**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (19). Its fake HubSpot:
+* honours the GTE / GT / EQ and `hs_object_id GT` filters;
+* sorts by the requested property;
+* reports `total`;
+* can **change its data during the scan** and **reorder ties between requests**.
+
+What the tests prove:
+* Against `main`'s connector the fake yields 600 of 2,500 contacts and reports
+  complete.
+* 08 (data changing mid-scan) and 11 (two runs through the real service) fail on
+  this PR's first push.
+* 02, 09, 10, 10a (reshuffled ties) and 10b (a tie member modified mid-walk) fail
+  on its second push.
+* 13 runs the migration on a live PostgreSQL cluster, once only. The module is
+  in CI's PostgreSQL step, so it cannot be skipped silently.
 * Two fakes in `test_pr_ads_153b_canonical_funnel.py` now report `total`, as
   HubSpot does; their assertions are unchanged.
+
+**Residual risks.**
+* A chain of `max_pages`-capped runs (API only) is checked per run, not per
+  bootstrap.
+* An *old* process still running a sync across the deploy could restore
+  `complete` / a watermark after the migration.
+
+After deploy, confirm the state once:
+`SELECT bootstrap_status, last_modified_watermark FROM hubspot_contact_funnel_sync_state`.
+It should read `partial` / `NULL` until the rebuild runs, then `complete`.
 
 **After deploy.** Nothing to run by hand. The next scheduled sync (or
 `POST /api/crm-funnel/sync?mode=bootstrap`) rebuilds from the epoch. Check that

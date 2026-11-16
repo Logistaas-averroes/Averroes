@@ -49,41 +49,63 @@ class _Resp:
 
 
 class _HubSpotLikeSearch:
-    """Filter-honouring, offset-paged, sorted, 10k-capped — like HubSpot."""
+    """Behaves like HubSpot's contact search for the queries the scan sends.
+
+    Honours ``lastmodifieddate`` GTE / GT / EQ and ``hs_object_id`` GT filters,
+    sorts by the requested property, pages by ``after`` offset (and refuses to
+    page past 10,000), reports ``total``. Optionally changes its data before
+    every request (``mutate``) and returns tied rows in a different order on
+    every request (``shuffle_ties``), as HubSpot's order among ties is
+    arbitrary. ``hidden`` ids are counted in ``total`` but never returned.
+    """
 
     def __init__(self, modified_ms, *, report_total=True, hidden=(),
-                 mutate=None):
+                 mutate=None, shuffle_ties=False):
         self.rows = sorted(((ms, f"c{i}") for i, ms in enumerate(modified_ms)))
         self.report_total = report_total
-        # Counted in HubSpot's total but never returned: pages lost "for any
-        # reason", to prove the completeness guard independently of paging.
         self.hidden = set(hidden)
-        # Called before every request with this fake: lets a test modify,
-        # delete or create contacts WHILE the scan runs, as production does.
         self.mutate = mutate
+        self.shuffle_ties = shuffle_ties
+        self._rng = __import__("random").Random(161)
         self.calls = []
+
+    @staticmethod
+    def _num(cid):
+        return int("".join(ch for ch in cid if ch.isdigit()))
 
     def do_search(self, public_object_search_request=None):
         req = public_object_search_request or {}
-        f = req["filterGroups"][0]["filters"][0]
-        assert f["propertyName"] == "lastmodifieddate" and f["operator"] == "GTE"
-        floor = int(f["value"])
         if self.mutate:
             self.mutate(self)
-        self.rows.sort()
-        matching = [(ms, cid) for ms, cid in self.rows if ms >= floor]
-        total = len(matching)
-        matching = [(ms, cid) for ms, cid in matching if cid not in self.hidden]
+        rows = list(self.rows)
+        for f in req["filterGroups"][0]["filters"]:
+            prop, op, val = f["propertyName"], f["operator"], int(f["value"])
+            if prop == "lastmodifieddate":
+                keep = {"GTE": lambda ms: ms >= val, "GT": lambda ms: ms > val,
+                        "EQ": lambda ms: ms == val}[op]
+                rows = [r for r in rows if keep(r[0])]
+            elif prop == "hs_object_id":
+                assert op == "GT"
+                rows = [r for r in rows if self._num(r[1]) > val]
+            else:
+                raise AssertionError(f"unexpected filter {prop}")
+        sort = req["sorts"][0]["propertyName"]
+        if sort == "hs_object_id":
+            rows.sort(key=lambda r: self._num(r[1]))
+        else:
+            if self.shuffle_ties:
+                self._rng.shuffle(rows)
+            rows.sort(key=lambda r: r[0])          # stable: ties stay shuffled
+        total = len(rows)
+        rows = [r for r in rows if r[1] not in self.hidden]
         offset = int(req.get("after") or 0)
-        limit = int(req["limit"])
-        self.calls.append((floor, offset))
+        self.calls.append((req["filterGroups"][0]["filters"], offset))
         if offset >= hp.HUBSPOT_SEARCH_RESULT_CAP:
             raise AssertionError("HubSpot refuses to page past 10,000 results")
-        page = matching[offset:offset + limit]
+        limit = int(req["limit"])
+        page = rows[offset:offset + limit]
         nxt = offset + limit
-        # Like HubSpot: a next cursor is offered while results remain, even at
-        # the 10,000 boundary — requesting it is what fails (above).
-        after = str(nxt) if nxt < len(matching) else None
+        after = str(nxt) if nxt < len(rows) else None
         return _Resp([_Obj({"id": cid, "properties": {
             "lastmodifieddate": str(ms)}}) for ms, cid in page], after,
             total if self.report_total else None)
@@ -115,14 +137,13 @@ def test_01_a_full_scan_reads_every_contact_not_the_first_2000():
     assert metas[-1]["source_total"] == 2500
 
 
-def test_02_every_page_is_a_keyset_query_from_the_watermark():
-    """No offset over a live result set: with distinct timestamps every
-    request starts at offset 0 and the filter advances with the watermark."""
-    search = _HubSpotLikeSearch([BASE_MS + i for i in range(950)])
+def test_02_no_request_ever_pages_by_offset():
+    """Keyset only: every request has offset 0, so a result set that changes
+    between requests cannot shift what the next page returns."""
+    search = _HubSpotLikeSearch([BASE_MS + i for i in range(950)]
+                                + [BASE_MS + 5000] * 260)
     _scan(search)
-    assert {offset for _floor, offset in search.calls} == {0}
-    floors = [floor for floor, _offset in search.calls]
-    assert floors == sorted(floors) and len(set(floors)) == len(floors)
+    assert {offset for _filters, offset in search.calls} == {0}
 
 
 def test_03_a_scan_past_10000_reads_everything_without_hitting_the_cap():
@@ -205,17 +226,72 @@ def test_08_contacts_changed_during_the_scan_never_cause_a_skip():
     assert not missing, f"{len(missing)} contacts never read"
 
 
-def test_09_a_tie_group_larger_than_a_page_is_walked_not_skipped():
-    """Production has hundreds of contacts sharing one bulk-update second."""
+def test_09_a_tie_group_larger_than_a_page_is_walked_by_id():
+    """Production has contacts sharing one bulk-update millisecond."""
     ms = [BASE_MS] * 350 + [BASE_MS + 1000 + i for i in range(120)]
     search = _HubSpotLikeSearch(ms)
     ids, metas = _scan(search)
     assert len(set(ids)) == 470
     assert metas[-1]["complete"] is True
+    walked = [f for f, _o in search.calls
+              if any(x["propertyName"] == "hs_object_id" for x in f)]
+    assert walked, "the tie group was not walked by id"
 
 
-def test_10_more_than_10000_contacts_on_one_timestamp_stall_never_complete():
-    search = _HubSpotLikeSearch([BASE_MS] * (hp.HUBSPOT_SEARCH_RESULT_CAP + 50))
+def test_10_more_than_10000_contacts_on_one_timestamp_are_all_read():
+    """No offset means no 10,000 ceiling inside a tie group either."""
+    n = hp.HUBSPOT_SEARCH_RESULT_CAP + 50
+    search = _HubSpotLikeSearch([BASE_MS] * n + [BASE_MS + 1])
+    ids, metas = _scan(search)
+    assert len(set(ids)) == n + 1
+    assert metas[-1]["complete"] is True
+
+
+def test_10a_tie_order_differing_between_requests_skips_nothing():
+    """HubSpot's order among tied rows is arbitrary. Audit case [A]: a
+    350-row tie group reshuffled on every request lost 99 contacts under
+    offset walking and still reported complete."""
+    ms = ([BASE_MS + 7 * i for i in range(400)] + [BASE_MS + 9000] * 350
+          + [BASE_MS + 10_000 + i for i in range(300)])
+    search = _HubSpotLikeSearch(ms, shuffle_ties=True)
+    ids, metas = _scan(search)
+    assert len(set(ids)) == 1050
+    assert metas[-1]["complete"] is True
+
+
+def test_10b_a_tie_member_modified_mid_walk_skips_no_other_member():
+    """Audit case [B]: a 3,000-row tie group in which one already-read member
+    is modified before every request lost 29 contacts under offset walking,
+    inside the slack, reporting complete."""
+    n = 3000
+    read = set()
+
+    def mutate(fake):
+        done = [r for r in fake.rows if r[1] in read and r[0] == BASE_MS]
+        if done:
+            fake.rows.remove(done[0])
+            fake.rows.append((BASE_MS + 50_000 + len(read), done[0][1]))
+
+    search = _HubSpotLikeSearch([BASE_MS] * n + [BASE_MS + 1 + i
+                                                 for i in range(200)],
+                                mutate=mutate)
+    for rows, meta in hp.iter_contacts_modified_since(
+            0, client=_client(search)):
+        read.update(r["id"] for r in rows)
+    missing = {f"c{i}" for i in range(n + 200)} - read
+    assert not missing, f"{len(missing)} contacts never read"
+
+
+def test_10c_a_search_that_ignores_the_id_keyset_stalls_not_completes():
+    class _IgnoresId(_HubSpotLikeSearch):
+        def do_search(self, public_object_search_request=None):
+            req = dict(public_object_search_request)
+            fg = [{"filters": [f for f in req["filterGroups"][0]["filters"]
+                               if f["propertyName"] != "hs_object_id"]}]
+            req["filterGroups"] = fg
+            return super().do_search(req)
+
+    search = _IgnoresId([BASE_MS] * 250)
     with pytest.raises(hp.HubSpotSearchStalledError):
         _scan(search)
 
@@ -326,3 +402,65 @@ def test_13_the_migration_withdraws_the_false_complete_once(monkeypatch):
             connection._pool.closeall()
             connection._pool = None
         cluster.stop()
+
+
+def test_14_an_incremental_never_restores_a_withdrawn_complete(monkeypatch):
+    """Audit minor 1: an incremental wrote back the bootstrap_status it read
+    at its start, so one running across the migration restored 'complete'."""
+    sync, writers = _writers(monkeypatch)
+    start = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    writers.state.update(bootstrap_status=sync.BOOTSTRAP_COMPLETE,
+                         last_modified_watermark=start)
+    start_ms = int(start.timestamp() * 1000)
+    search = _HubSpotLikeSearch([start_ms + 60_000 + i for i in range(150)])
+
+    def withdrawing_iterator(since, max_pages=None):
+        for rows, meta in hp.iter_contacts_modified_since(
+                since, max_pages=max_pages, client=_client(search)):
+            # The deploy's migration lands while this run is mid-scan.
+            writers.state["bootstrap_status"] = sync.BOOTSTRAP_PARTIAL
+            yield rows, meta
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_INCREMENTAL, page_iterator=withdrawing_iterator,
+        overlap_minutes=0, now=datetime(2026, 11, 16, tzinfo=timezone.utc))
+    assert result["status"] == "success"
+    assert writers.state["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
+    assert all("bootstrap_status" not in u for u in writers.state_updates)
+
+
+def test_15_a_contact_with_an_unparseable_timestamp_is_still_read():
+    search = _HubSpotLikeSearch([BASE_MS + i for i in range(30)])
+    search.rows.append((BASE_MS + 5, "c999"))
+    real = search.do_search
+
+    def garbling(public_object_search_request=None):
+        resp = real(public_object_search_request)
+        for obj in resp.results:
+            if obj.to_dict()["id"] == "c999":
+                obj.to_dict()["properties"]["lastmodifieddate"] = "not-a-date"
+        return resp
+    search.do_search = garbling
+    ids, metas = _scan(search)
+    assert "c999" in ids and metas[-1]["complete"] is True
+
+
+def test_16_a_failed_rewind_is_reported_not_silent(monkeypatch):
+    sync, writers = _writers(monkeypatch)
+    search = _HubSpotLikeSearch([BASE_MS + 7 * i for i in range(300)],
+                                hidden={f"c{i}" for i in range(10, 40)})
+    real_update = writers.update_contact_funnel_sync_state
+
+    def failing_final_write(scope="contacts", **fields):
+        if fields.get("last_status") == "failed":
+            writers.state_updates.append(dict(fields))
+            return False
+        return real_update(scope, **fields)
+
+    writers.update_contact_funnel_sync_state = failing_final_write
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=_real_iterator(search),
+        restart_from_epoch=True,
+        now=datetime(2026, 11, 16, tzinfo=timezone.utc))
+    assert result["status"] == "failed"
+    assert result.get("watermark_rewind_failed") is True
