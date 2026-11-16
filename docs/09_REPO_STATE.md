@@ -1601,3 +1601,48 @@ local snapshot job (its routes withhold).
 and did-run list, with a counterfactual on base `028effc`.
 
 Doctrine: `docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md`.
+
+## PR-ADS-161E-F1 — Final review's minor findings closed (November 2026)
+
+**Why.** PR-ADS-161E merged at `b00defb` with no blocker, major or medium
+finding. The independent final review recorded four minors, left out so the
+merged head would not move; this PR closes them.
+
+**Fixed.**
+* **Parity names no owner unless every consumer explains the absence.**
+  `cross_page_parity_service._classify_unavailable` used to route a metric to a
+  specific owner when one consumer declared a registered reason, even if
+  another declared none or one the audit cannot classify. It now falls back to
+  `canonical_source_unavailable` and names who said what. Every real consumer
+  declares a reason (the PostgreSQL parity suites pass unchanged), so no
+  production outcome moves; only the mixed case stops guessing.
+* **Unit Economics' all-source `business` block** carried period ratios
+  "withheld" or "spend unavailable". Google Ads spend can never have produced an
+  all-source population, so both period ratios are now
+  `numerator_and_denominator_scopes_differ` (docs/48 §4) on the published and
+  the withheld path.
+* **Unit Economics no longer reads a bare "Unavailable".** Three spots did:
+  * average deal value (KPI and campaign rows) now carries the verdict of
+    whichever input blocks it, revenue or won deals;
+  * the window verdict shows the canonical word ("Withheld" for a CRM
+    finding, with View blockers for admins; "Unavailable" for an outage) and
+    the reason in words, never a raw code;
+  * a withheld window's campaign table says the economics are withheld, not
+    "No campaign-level economics data".
+
+  The PR-ADS-161E note that "the KPIs read Withheld with the reason" now holds
+  for every card.
+* **Test 46 runs through the real producer.** It now uses a ledger with an
+  undated won deal instead of a hand-built verdict. It renders the real
+  `renderUnitEconomicsPage` in node for an admin and a viewer. 46b adds the
+  outage case: "Unavailable", no View blockers link, even for an admin.
+
+**Tests.** 46 (rewritten), 46b, 48, 49 and 50 in
+`tests/test_pr_ads_161e_reader_cutover.py`; each fails on `53e5bc9` and passes
+here.
+
+**Not changed.** The audit check, the reader contract, the canonical verdicts
+and the period-ratio doctrine. One observation is still open and outside this
+PR: docs/48 §5 lists `company_associations_unreadable` in the
+`customer_identity` View-blockers family, while also saying outages get no link.
+The link still opens a dataset blocker in the workbench.

@@ -204,12 +204,31 @@ def _classify_unavailable(readings: list, metric_key: str):
     classes = {_UNAVAILABLE_CLASSES[r["unavailable_reason"]]
                for r in declared if r["unavailable_reason"] in _UNAVAILABLE_CLASSES}
     reasons = sorted({r["unavailable_reason"] for r in declared})
+    # A specific owner is named only when EVERY consumer explains its absence
+    # with a registered reason. One silent consumer, or one reason the audit
+    # does not know, means nobody can say the others' reason is the whole
+    # story — so the absence stays the catch-all, with who said what.
+    silent = sorted(str(r.get("consumer")) for r in readings
+                    if not r.get("unavailable_reason"))
+    unregistered = sorted({r["unavailable_reason"] for r in declared
+                           if r["unavailable_reason"] not in _UNAVAILABLE_CLASSES})
 
-    if len(classes) == 1:
+    if len(classes) == 1 and not silent and not unregistered:
         status, code, why = classes.pop()
         return status, code, (
             f"no consumer published {metric_key}: {why} "
             f"(declared reason: {', '.join(reasons)})")
+    if len(classes) == 1:
+        gaps = []
+        if silent:
+            gaps.append(f"consumer(s) {', '.join(silent)} declared no reason")
+        if unregistered:
+            gaps.append(f"reason(s) {', '.join(unregistered)} are not ones the "
+                        "audit can classify")
+        return ("unavailable", V_SOURCE_UNAVAILABLE,
+                f"no consumer published {metric_key}; some consumers declare "
+                f"{', '.join(sorted(set(reasons) - set(unregistered)))}, but "
+                f"{' and '.join(gaps)}, so no single owner can be named")
     if classes:
         # Consumers disagree about WHY. That is itself worth naming: they are
         # reading the same canonical contract and reached different refusals.

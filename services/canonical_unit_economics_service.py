@@ -136,7 +136,10 @@ def build_unit_economics(window: str = "current_quarter",
         # (and the admin View blockers link), never a bare "Unavailable".
         spend_reason = (None if spend_usd is not None else
                         f"google_ads_usd_spend_{spend_truth.get('state') or 'unavailable'}")
-        business_canon = canonical_revenue.reader_row(base, [])
+        # all_source: Google Ads spend cannot have produced it, so its period
+        # ratios are a scope mismatch, never "withheld until the CRM is fixed".
+        business_canon = canonical_revenue.reader_row(
+            base, [], period_ratio_scope_ok=False)
         advertising_canon = canonical_revenue.reader_row(
             base, [], spend_usd=spend_usd, spend_reason=spend_reason,
             period_ratio_scope_ok=scope in (revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
@@ -199,9 +202,12 @@ def build_unit_economics(window: str = "current_quarter",
     # proven HubSpot companies (never the won-deal count), revenue is a total
     # or None, and the period ratios are derived only when every input is
     # published. CAC and ROAS are never derived here (not one cohort).
+    # The business block is all_source: its period ratios are a scope mismatch
+    # (docs/48 §4), whatever the spend or revenue state.
     business_canon = canonical_revenue.reader_row(
         base, canonical_revenue.filter_deals(base.get("deals"),
-                                             revenue_scope.SCOPE_ALL_SOURCE))
+                                             revenue_scope.SCOPE_ALL_SOURCE),
+        period_ratio_scope_ok=False)
     business = {
         **{k: all_source[k] for k in _SCOPE_FIELDS},
         "closed_won_deals": business_canon["closed_won_deals"],
