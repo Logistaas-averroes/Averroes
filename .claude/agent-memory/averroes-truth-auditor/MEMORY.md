@@ -540,3 +540,28 @@ Recurring patterns (durable):
 - `load_won_deals` reports an unreadable SYNC STATE as
   `canonical_ledger_unreadable`, not `canonical_sync_state_unreadable`. Both
   are outages.
+
+## PR-ADS-161I review (HEAD f38bbc6, 2026-11-16) — contact scan paging
+- Canonical contact scan: `connectors/hubspot_pull.iter_contacts_modified_since`,
+  only consumer `services/hubspot_contact_funnel_sync_service.run_contact_funnel_sync`
+  (callers: scheduler `_sync_contact_funnel` via `get_bootstrap_mode`, and
+  `POST /api/crm-funnel/sync`). `restart_from_epoch` is reachable from NO
+  production caller (shell only); `mode=bootstrap` RESUMES from the stored
+  watermark (the API docstring "scans the full portal from the epoch" is wrong).
+- HubSpot search `after` is an OFFSET into a LIVE result set. Freezing the
+  filter (161I) fixes the moving-filter skip, but offset paging still skips one
+  unread contact for every already-read contact that is modified / deleted /
+  merged mid-scan (it leaves its slot; later rows shift left). Executed with
+  the PR's own fake + mutation: 1 touch per page over 21,751 -> 210 missing,
+  sentinel complete. Concurrent creations mask shortfall entirely (read > total).
+  Re-anchor (new query from the key) is the only shift-immune step: keyset paging.
+- Per-page durable checkpoint advances `last_modified_watermark` BEFORE the
+  end-of-scan total check. HubSpotSearchIncompleteError -> run failed, bootstrap
+  partial, but the NEXT run resumes past the gap and completes (executed: 900/1000,
+  bootstrap complete on run 2; incremental failed then success next day, gap
+  permanent). Completeness is proven per RUN, never per bootstrap.
+- SDK model `CollectionResponseWithTotalSimplePublicObjectForwardPaging.total` is int.
+- `analysis/sql_coverage_freshness.assess` gates only on bootstrap_status /
+  incremental status: a stored `complete` over a partial table publishes.
+- Validation: 161I+153b+153b PG+daily incremental+160 = 339 passed, PG ran
+  (python3.11; `python` is 3.13 without deps in this container).
