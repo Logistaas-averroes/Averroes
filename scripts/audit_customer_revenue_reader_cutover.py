@@ -318,6 +318,10 @@ OWNERS = (
     "scripts/audit_customer_closed_won_truth.py",
     "scripts/audit_deal_company_association_coverage.py",
     "scripts/audit_crm_truth_exceptions.py",
+    # PR-ADS-161H: a read-only shell diagnostic beside the audits. It reads
+    # the truth's attribution partition and the acquisition contacts to
+    # measure attribution feasibility; it serves no page and publishes nothing.
+    "scripts/report_attribution_feasibility.py",
     AUDIT_FILE,
 )
 #: Legacy modules no production route reads any more (the routes that did now
