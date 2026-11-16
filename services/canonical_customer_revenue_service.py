@@ -185,6 +185,47 @@ def _as_dt(value):
 _DEFAULT_ASSOCIATION_SCAN_MAX_AGE_HOURS = 48
 
 
+#: Fallback when config/thresholds.yaml cannot be read — the same number as
+#: the config, so a missing file does not loosen the gate (PR-ADS-161F).
+_DEFAULT_DEAL_LEDGER_MAX_STALENESS_HOURS = 36
+
+
+def deal_ledger_max_staleness_hours() -> float:
+    """``deal_ledger.max_staleness_hours`` from config/thresholds.yaml."""
+    try:
+        import yaml  # noqa: PLC0415
+
+        with open("config/thresholds.yaml", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        return float(cfg["deal_ledger"]["max_staleness_hours"])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("deal-ledger staleness threshold unavailable, using %s: %s",
+                  _DEFAULT_DEAL_LEDGER_MAX_STALENESS_HOURS, exc)
+        return float(_DEFAULT_DEAL_LEDGER_MAX_STALENESS_HOURS)
+
+
+def ledger_staleness(freshness: dict, max_hours: float | None = None) -> dict:
+    """Is a PROVEN ledger too old to publish? (PR-ADS-161F)
+
+    Judged only when coverage is proven — an unproven ledger already withholds
+    for its own reason. A proven ledger with no successful-sync timestamp is
+    stale: its age is unknown, and unknown is not current.
+    """
+    limit = deal_ledger_max_staleness_hours() if max_hours is None \
+        else float(max_hours)
+    if freshness.get("coverage_proven") is not True:
+        return {"max_staleness_hours": limit, "stale": None}
+    age = freshness.get("age_hours")
+    if age is None:
+        return {"max_staleness_hours": limit, "stale": True,
+                "stale_reason": "no successful incremental sync timestamp"}
+    if float(age) > limit:
+        return {"max_staleness_hours": limit, "stale": True,
+                "stale_reason": (f"the last successful deal sync is {age}h old, "
+                                 f"over the {limit:g}h limit")}
+    return {"max_staleness_hours": limit, "stale": False}
+
+
 def association_scan_max_age_hours() -> float:
     """``customer_identity.association_scan_max_age_hours`` from
     config/thresholds.yaml."""
@@ -393,9 +434,9 @@ def freshness_block(sync_state, findings, now: datetime) -> dict:
 
     ``latest_successful_incremental_at`` is reported only when the coverage
     gate proves the last run was a successful incremental; otherwise NULL, with
-    the gate's findings saying why. No staleness threshold is configured for
-    the deal ledger anywhere in the repository, so age is reported and NOT
-    judged: inventing a threshold here would be a truth rule hidden in a number.
+    the gate's findings saying why. Age is judged against the owner-set
+    ``deal_ledger.max_staleness_hours`` by :func:`ledger_staleness`
+    (PR-ADS-161F), never by a number hidden here.
     """
     state = sync_state or {}
     proven = findings == [] and bool(state)
@@ -427,11 +468,10 @@ def freshness_block(sync_state, findings, now: datetime) -> dict:
         "rows_fetched_prepared_written_rejected": None,
         "age_hours": (round((now - last_ok_dt).total_seconds() / 3600.0, 2)
                       if last_ok_dt else None),
-        "staleness_threshold_hours": None,
-        "staleness_assessed": False,
-        "staleness_note": ("no staleness threshold is configured for the "
-                           "canonical deal ledger; age is reported, not "
-                           "judged"),
+        # Judged by ledger_staleness against deal_ledger.max_staleness_hours
+        # (PR-ADS-161F); _prepare merges the verdict in.
+        "staleness_threshold_hours": deal_ledger_max_staleness_hours(),
+        "staleness_assessed": True,
     }
 
 
@@ -540,9 +580,18 @@ def _prepare(universe, findings, now) -> dict:
         # The current won population, from the SAME snapshot as the evidence.
         won_deal_ids=[str(r["deal_id"])
                       for r in universe.get("won_rows") or []])
+    freshness = freshness_block(universe.get("sync_state"), findings, now)
+    staleness = ledger_staleness(freshness)
+    freshness = {**freshness, **staleness}
+    if staleness["stale"]:
+        # A stopped scheduler: the population is readable but not current, so
+        # every closed-won figure withholds, named (cwt.R_LEDGER_STALE).
+        findings = list(findings) + [{
+            "code": cwt.R_LEDGER_STALE,
+            "message": staleness.get("stale_reason")}]
     return {
         "universe": universe, "findings": findings,
-        "freshness": freshness_block(universe.get("sync_state"), findings, now),
+        "freshness": freshness,
         "contacts": _contacts_by_deal(universe.get("acquisition_contacts")),
         "company": company, "company_freshness": company_freshness,
         "scan": (company_freshness.get("scan_current") or {}).get(

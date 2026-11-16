@@ -298,6 +298,12 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   ratio — nor ROAS/CAC prose in any API string.** Audit check 18
   (`no_period_ratio_named_roas_or_cac`) fails on any of these (`docs/48_*` §4).
 
+  **A stale deal ledger publishes nothing** (PR-ADS-161F). Past
+  `deal_ledger.max_staleness_hours` (36h) since the last successful incremental,
+  deals, customers and revenue are `unavailable` with `canonical_ledger_stale`.
+  Test fixtures that mean "a current ledger" use `fresh_sync_state(now)`, never
+  the fixed-date `READY_SYNC_STATE`.
+
   `revenue_integration_connected()` (an existence check over
   `gclid_attribution`) is deleted. Never gate canonical figures on a legacy
   table again.

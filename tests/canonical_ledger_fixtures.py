@@ -38,6 +38,20 @@ READY_SYNC_STATE = {
 }
 
 
+def fresh_sync_state(now=None, *, hours_ago: float = 3.0) -> dict:
+    """A ready deal-ledger sync state whose last successful incremental is
+    ``hours_ago`` before ``now`` (wall-clock UTC when omitted).
+
+    PR-ADS-161F: the deal ledger publishes only while that sync is within
+    ``deal_ledger.max_staleness_hours``. READY_SYNC_STATE's fixed June stamp
+    reads as months stale to any test evaluated later, so a test that means
+    "a healthy, current ledger" uses this instead.
+    """
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+    at = (now or datetime.now(tz=timezone.utc)) - timedelta(hours=hours_ago)
+    return dict(READY_SYNC_STATE, last_incremental_at=at.isoformat())
+
+
 def ledger_row(deal_id, **overrides) -> dict:
     """One canonical ledger row with every column a consumer may read.
 
@@ -169,10 +183,12 @@ def fake_closed_won_universe(rows, *, available=True, reason=None,
     """
     from analysis.closed_won_truth import CONFIRMED_WON_STAGE_ID  # noqa: PLC0415
 
-    state = READY_SYNC_STATE if sync_state is None else sync_state
     rows = [dict(r) for r in (rows or [])]
 
     def _universe(won_stage_id=CONFIRMED_WON_STAGE_ID, *, sql_windows=None):
+        # The default ledger is a CURRENT one, stamped when it is read
+        # (PR-ADS-161F); a test of staleness passes its own sync_state.
+        state = fresh_sync_state() if sync_state is None else sync_state
         if not available or not sync_available:
             return {"available": False, "reason": reason or "db_unavailable",
                     "won_rows": [], "won_definition_rows": [],
@@ -246,14 +262,16 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
     """
     import db.deal_ledger_repository as ledger_repo
 
-    state = READY_SYNC_STATE if sync_state is None else sync_state
     rows = list(rows or [])
 
-    monkeypatch.setattr(
-        ledger_repo, "fetch_sync_state",
-        lambda: ({"available": True, "row": dict(state) if state else None}
-                 if sync_available
-                 else {"available": False, "row": None, "reason": "db_unavailable"}))
+    def _sync_state():
+        if not sync_available:
+            return {"available": False, "row": None, "reason": "db_unavailable"}
+        # The default ledger is a CURRENT one, stamped when read (PR-ADS-161F).
+        state = fresh_sync_state() if sync_state is None else sync_state
+        return {"available": True, "row": dict(state) if state else None}
+
+    monkeypatch.setattr(ledger_repo, "fetch_sync_state", _sync_state)
     monkeypatch.setattr(
         ledger_repo, "fetch_won_deals",
         lambda start=None, end=None: (

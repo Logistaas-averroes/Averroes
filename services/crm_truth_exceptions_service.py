@@ -75,6 +75,7 @@ STATUSES = (STATUS_CERTIFIED_NO_FINDINGS, STATUS_CERTIFIED_WITH_FINDINGS,
 # ── Dataset-level blockers (no single record carries them) ──────────────────
 DATASET_LEDGER_UNREADABLE = cwt.R_SOURCE_UNREADABLE
 DATASET_COVERAGE_NOT_PROVEN = cwt.R_COVERAGE_NOT_PROVEN
+DATASET_LEDGER_STALE = cwt.R_LEDGER_STALE
 DATASET_COMPANY_EVIDENCE_UNREADABLE = cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE
 DATASET_SCAN_NOT_CURRENT = cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT
 
@@ -159,6 +160,9 @@ EXPLANATIONS = {
     DATASET_COVERAGE_NOT_PROVEN: (
         "The deal ledger's sync coverage is not proven, so the won population "
         "may be incomplete."),
+    DATASET_LEDGER_STALE: (
+        "The deal sync has not succeeded within the staleness limit, so the "
+        "won population (and any blocker drawn from it) may be out of date."),
     DATASET_COMPANY_EVIDENCE_UNREADABLE: (
         "The stored HubSpot company-association evidence could not be read."),
     DATASET_SCAN_NOT_CURRENT: (
@@ -279,6 +283,12 @@ def build_crm_truth_exceptions(*, now: datetime | None = None,
         # would present "these are the blockers" over an incomplete population.
         return _unavailable(now, DATASET_COVERAGE_NOT_PROVEN,
                             freshness.get("violation_codes"),
+                            freshness=freshness, scan=scan)
+    if freshness and freshness.get("stale") is not False:
+        # PR-ADS-161F: a stopped deal sync. A blocker list drawn from it may
+        # name deals already fixed in HubSpot, so none is presented.
+        return _unavailable(now, DATASET_LEDGER_STALE,
+                            [freshness.get("stale_reason")],
                             freshness=freshness, scan=scan)
 
     won_rows = universe.get("won_rows") or []

@@ -160,6 +160,10 @@ _UNAVAILABLE_CLASSES = {
         ("population_unavailable", V_POPULATION_UNAVAILABLE,
          "HubSpot's won flag and won stage disagree for a deal in this window, "
          "so its population is withheld"),
+    cwt.R_LEDGER_STALE:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "the deal sync has not succeeded within the staleness limit, so this "
+         "window's population is not current — restore the incremental sync"),
     cwt.R_DEALS_WITHHELD:
         ("population_unavailable", V_POPULATION_UNAVAILABLE,
          "the closed-won deal count is withheld for this window"),
