@@ -9360,8 +9360,10 @@ def api_crm_funnel_sync(
 ) -> dict[str, Any]:
     """Trigger the canonical contact sync (admin session or ADMIN_API_TOKEN).
 
-    ``mode=bootstrap`` scans the full portal from the epoch; ``incremental``
-    resumes from the durable modification watermark. Reads HubSpot read-only and
+    ``mode=bootstrap`` continues the historical bootstrap from its durable
+    watermark (from the epoch only when none is stored, or after an incomplete
+    scan rewound it — PR-ADS-161I); ``incremental`` resumes from the durable
+    modification watermark. Reads HubSpot read-only and
     writes ONLY the local canonical contact store — never to HubSpot.
     """
     check_admin_or_token(request)

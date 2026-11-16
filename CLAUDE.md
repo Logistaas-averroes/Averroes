@@ -335,14 +335,16 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   warning/error tallies and the empty-state chain. `_shortLabels` has a
   `|| "Unknown"` fallback that renders a correct summary beside a wrong label.
 
-- **A paged HubSpot search keeps ONE filter value** (PR-ADS-161I). `after` is an
-  offset into one result set. Never change a filter between pages of the same
-  query: re-sending an advancing watermark made the contact scan skip ahead on
-  every page and "complete" after 2,000 of 21,751 contacts. Move a watermark
-  filter only when starting a new query (the 10,000-result re-anchor), and end
-  a scan only when HubSpot's own `total` is met (`_assert_scan_complete`). A
-  fake HubSpot in a test must honour the filter and report `total`, or it
-  cannot see this class of bug.
+- **Never page a HubSpot search by offset over data that moves** (PR-ADS-161I).
+  The contact scan re-sent an advancing watermark as the filter while keeping
+  the offset, skipped ahead every page, and "completed" after 2,000 of 21,751
+  contacts. Even with a frozen filter, an offset over the live result set
+  skips a contact whenever an already-read one is modified mid-scan. Page by
+  keyset (each page a new `>= watermark` query, ties de-duplicated), end a scan
+  only when HubSpot's own `total` is met (`_assert_scan_complete`), and rewind
+  the watermark when a scan proves itself incomplete. A fake HubSpot in a test
+  must honour the filter, report `total` and change its data during the scan,
+  or it cannot see this class of bug.
 
 - **`now()` is transaction-start time.** For an instant stamped *after* a read
   inside the same transaction, use `clock_timestamp()`.

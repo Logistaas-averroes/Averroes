@@ -218,6 +218,8 @@ def run_contact_funnel_sync(
     rejected_no_identity = 0
     stage_events_written = 0
     scan_complete = False
+    source_total = None
+    unique_read = None
     watermark = _as_datetime(state.get("last_modified_watermark"))
     error: str | None = None
 
@@ -229,6 +231,8 @@ def run_contact_funnel_sync(
             # 10,000-result boundary, also stops iterating).
             if (meta or {}).get("complete"):
                 scan_complete = True
+                source_total = (meta or {}).get("source_total")
+                unique_read = (meta or {}).get("unique_read")
                 continue
 
             pages += 1
@@ -300,6 +304,17 @@ def run_contact_funnel_sync(
         }
         if mode != MODE_BOOTSTRAP:
             failure_state["last_incremental_status"] = "failed"
+        if _is_incomplete_scan(exc):
+            # PR-ADS-161I: the per-page checkpoints of THIS run advanced the
+            # watermark past a gap the scan has just proven exists. Resuming
+            # from it would re-check only the tail and mark the bootstrap
+            # complete over the gap. Rewind to where this run began (NULL for
+            # an epoch scan, so the next run restarts from the epoch).
+            failure_state["last_modified_watermark"] = (
+                None if since <= _EPOCH else since)
+            failure_state["latest_modified_at"] = failure_state[
+                "last_modified_watermark"]
+            watermark = failure_state["last_modified_watermark"]
         db_writers.update_contact_funnel_sync_state(SCOPE, **failure_state)
         return _failed_result(mode, error, since, watermark,
                               contacts_seen=contacts_seen,
@@ -393,6 +408,10 @@ def run_contact_funnel_sync(
         "pages": pages,
         "truncated": truncated,
         "scan_complete": scan_complete,
+        # PR-ADS-161I: HubSpot's own count at the scan's start, and the unique
+        # contacts this run actually read. `contacts_seen` counts re-reads.
+        "source_total": source_total,
+        "unique_contacts_read": unique_read,
         "bootstrap_status": bootstrap_status,
         "watermark": watermark.isoformat() if watermark else None,
     }
@@ -417,6 +436,17 @@ def _fail_batches(batch_id, events_batch_id, message: str) -> None:
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hubspot_contact_funnel] could not fail batch %s: %s",
                             bid, exc)
+
+
+def _is_incomplete_scan(exc) -> bool:
+    """The connector proved its scan ended short of HubSpot's own total."""
+    try:
+        from connectors.hubspot_pull import (  # noqa: PLC0415
+            HubSpotSearchIncompleteError,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(exc, HubSpotSearchIncompleteError)
 
 
 def _failed_result(mode, error, since, watermark, *, contacts_seen=0,

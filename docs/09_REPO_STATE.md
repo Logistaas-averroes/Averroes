@@ -1794,54 +1794,61 @@ real `get_closed_won_truth` over a stubbed ledger.
 **Found in production (2026-11-16).** HubSpot held **21,751** contacts and
 `hubspot_contact_funnel` held **6,389**. A full rebuild from the epoch reported
 `success` / `bootstrap_status = complete` after **2,000**. A raw search from the
-Render shell paged past 2,400 in order. The connector's own iterator yielded
-pages that jumped from January 2025 to May 2026 by page 7, then emitted its
-completion sentinel at page 20.
+Render shell paged in order past 2,400. The connector's own iterator jumped from
+January 2025 to May 2026 by page 7 and emitted its completion sentinel at page
+20. Won deals with a contact never synced: **41 of 67 closed in 2025**.
 
 **Cause.** `iter_contacts_modified_since` re-sent its *advancing* watermark as
-the `lastmodifieddate GTE` filter on every page, but kept the paging offset
-(`after`). Each request was therefore the Nth page of a different, shrinking
-result set. It skipped further ahead on every page and ran out of "next" early.
-It was wrong since PR-ADS-153B.
-
-* **Who was hit.** Both the bootstrap and every incremental run with more than
-  one page of changes.
-* **Why tests missed it.** The tests' fake HubSpot ignored the filter value.
+the `lastmodifieddate GTE` filter on every page, but kept the paging offset.
+Each request was therefore the Nth page of a different, shrinking result set,
+skipped ahead further every page, and ran out of "next" early. This had been
+true since PR-ADS-153B. It hit the bootstrap and every incremental run with more
+than one page of changes. The tests' fake HubSpot ignored the filter value, so
+none of them could see it.
 
 **Fixed.**
-* **The filter value is frozen for one paged query** (`query_from_ms`). The
-  watermark moves the filter only when a new query starts, at the 10,000-result
-  re-anchor.
-* **A scan must prove it is whole.** HubSpot's `total` from the scan's first
-  response is the count to meet. `_assert_scan_complete` raises
-  `HubSpotSearchIncompleteError` instead of emitting the completion sentinel when
-  the unique contacts read fall short of that count by more than max(1%, 5). A
-  response with no `total` cannot prove completeness and raises too. The sync
-  service treats the raise as a failed run, so a bootstrap stays `partial`. The
-  sentinel now carries `source_total`.
+1. **Keyset paging.** Every page is a new query,
+   `lastmodifieddate >= watermark`, from offset 0. Rows already read at the
+   watermark timestamp are de-duplicated. An offset is used only to walk a group
+   of contacts that share one timestamp and is larger than a page, and never past
+   the 10,000 cap. Merely freezing the filter (this PR's first push) is not
+   enough: an offset over HubSpot's *live* result set shifts whenever an
+   already-read contact is modified, merged or deleted mid-scan, and skips an
+   unread one.
+2. **A scan must prove it is whole.** It must meet HubSpot's own `total` from its
+   first response, within max(1%, 2) for contacts deleted before they were read.
+   Zero read against a non-empty set never passes, and a response without `total`
+   cannot prove anything. Otherwise `HubSpotSearchIncompleteError` is raised
+   instead of the completion sentinel.
+3. **An incomplete scan rewinds.** The per-page checkpoints had already moved the
+   watermark past the gap. The failure now resets it to where the run began (NULL
+   for an epoch scan). Without this, the next scheduled run resumed past the gap,
+   checked only the tail, and marked the bootstrap complete (truth-auditor
+   blocker).
+4. **The false `complete` is withdrawn once** (migration
+   `PR-ADS-161I-contact-funnel-rebuild-from-epoch`). It sets the state to
+   `partial` with no watermark, so **the next scheduled run rebuilds from the
+   epoch by itself**. Until then, every gate that needs a complete bootstrap
+   withholds. No contact row is deleted.
+5. Run results now carry `source_total` and `unique_contacts_read`
+   (`contacts_seen` counts re-reads).
 
-**Not affected.** `pull_deals_for_ledger` keeps one filter for its whole read,
-so deals, revenue and customers stand. The legacy contact pulls use fixed date
-filters.
+**Not affected by this cause.** `pull_deals_for_ledger` keeps one filter for its
+whole read. It does page by offset over a live set, so a deal modified during its
+read could in principle shift a page; the deal population is small and
+reconciled by its own audits. This is noted, not fixed here.
 
-**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (8). Its fake honours
-the filter, pages by offset, reports `total` and refuses offsets past 10,000,
-as HubSpot does. Against `main`'s connector it yields **600 of 2,500 contacts
-and reports complete**; here it yields all 2,500, and all 12,345 across a
-re-anchor. Two fakes in `test_pr_ads_153b_canonical_funnel.py` now report
-`total`, as real HubSpot does; their assertions are unchanged.
+**Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (13). Its fake honours
+the filter, pages by offset, reports `total`, refuses offsets past 10,000, and
+can **change its data during the scan**.
+* Against `main`'s connector it yields 600 of 2,500 contacts and reports complete.
+* The concurrent-change test (08) and the two-run test (11) fail on this PR's
+  first push and pass here.
+* Test 13 runs the migration on a live PostgreSQL cluster, and runs it once only.
+* Two fakes in `test_pr_ads_153b_canonical_funnel.py` now report `total`, as
+  HubSpot does; their assertions are unchanged.
 
-**Operator step after deploy (required).** The stored state says `complete` over
-a partial table, and the daily incremental resumes from a November watermark,
-so it will not backfill. Run one full rebuild:
-
-```bash
-python -c "
-from db.connection import ensure_database_ready
-ok, err = ensure_database_ready(); assert ok, err
-from services.hubspot_contact_funnel_sync_service import run_contact_funnel_sync, MODE_BOOTSTRAP
-print(run_contact_funnel_sync(mode=MODE_BOOTSTRAP, restart_from_epoch=True))"
-```
-
-Expect `contacts_seen` near HubSpot's total. Lead and SQL counts for older
-windows will rise: that is the correction.
+**After deploy.** Nothing to run by hand. The next scheduled sync (or
+`POST /api/crm-funnel/sync?mode=bootstrap`) rebuilds from the epoch. Check that
+`unique_contacts_read` is close to HubSpot's total. Lead and SQL counts for
+older windows will rise: that is the correction.
