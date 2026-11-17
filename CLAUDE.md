@@ -82,6 +82,13 @@ python -m scripts.audit_platform_certification
 
 A new production truth audit belongs in its `AUDITS` tuple.
 
+It also runs **daily inside the app** (PR-ADS-161J): the scheduler job
+`platform_certification` at 10:30 Asia/Amman (07:30 UTC), after the 09:00
+sync, records one row in `platform_certification_runs`. Read the latest
+verdict with `SELECT started_at, verdict, summary FROM
+platform_certification_runs ORDER BY started_at DESC LIMIT 1`. A run that
+cannot execute is recorded as NOT CERTIFIED, never skipped.
+
 ### PostgreSQL tests
 
 PG-backed tests spin up a throwaway cluster. They **skip** unless all of:

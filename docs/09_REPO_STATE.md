@@ -1889,3 +1889,36 @@ rebuild from the epoch.
 `POST /api/crm-funnel/sync?mode=bootstrap`) rebuilds from the epoch. Check that
 `unique_contacts_read` is close to HubSpot's total. Lead and SQL counts for
 older windows will rise: that is the correction.
+
+---
+
+## PR-ADS-161J — the platform certification runs daily inside the app
+
+**Why.** The certification (PR-ADS-161G) only ran when someone pasted a command
+into the Render shell.
+
+**What.** A new scheduler job, `platform_certification`, runs at **10:30
+Asia/Amman (07:30 UTC)**, 90 minutes after the 09:00 incremental sync, inside
+the existing web service. It costs nothing extra on Render.
+`services/platform_certification_service.run_and_record` calls
+`scripts.audit_platform_certification.run()` unchanged and writes one row to the
+new table `platform_certification_runs`:
+
+* started / finished;
+* exit code and verdict;
+* a compact summary: each audit's outcome, violations and unavailable reasons,
+  plus the CRM data to fix. The full audit reports are not stored.
+
+**Fail closed.** If the certification cannot run, or returns an exit code it
+does not recognise, the row records **NOT CERTIFIED** (exit 2) with the error.
+It is never a pass and never a missing row. A failed write is logged and
+returned as `recorded: false`. The scheduled wrapper never raises.
+
+**Read it.**
+`SELECT started_at, verdict, summary FROM platform_certification_runs ORDER BY started_at DESC LIMIT 1`.
+
+**Not changed.** No audit or gate. The job writes only to the local database.
+The audits it runs are read-only.
+
+**Tests.** `tests/test_pr_ads_161j_daily_certification.py` (10, including a
+live-PostgreSQL round trip). The module is added to CI's PostgreSQL step.
