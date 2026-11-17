@@ -2246,6 +2246,22 @@ BEGIN
          WHERE scope = 'contacts';
     END IF;
 END $$;
+
+-- PR-ADS-161J: the daily platform certification verdict, recorded by the
+-- in-app scheduler after the morning sync. One row per run; the summary keeps
+-- each audit's outcome and the CRM data to fix, never the full audit reports.
+CREATE TABLE IF NOT EXISTS platform_certification_runs (
+  id            SERIAL PRIMARY KEY,
+  started_at    TIMESTAMPTZ NOT NULL,
+  finished_at   TIMESTAMPTZ NOT NULL,
+  exit_code     INTEGER NOT NULL,          -- 0 certified / 1 violation / 2 not certified
+  verdict       TEXT NOT NULL,             -- CERTIFIED | VIOLATION | NOT CERTIFIED
+  run_reason    TEXT NOT NULL DEFAULT 'scheduled',
+  summary       JSONB NOT NULL,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_platform_certification_runs_started
+  ON platform_certification_runs(started_at DESC);
 """
 
 

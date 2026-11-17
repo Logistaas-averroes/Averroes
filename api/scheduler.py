@@ -46,7 +46,8 @@ _TZ = ZoneInfo("Asia/Amman")
 # get_scheduler_status() to avoid duplication that could cause drift.
 # ---------------------------------------------------------------------------
 
-JOB_IDS: tuple[str, str, str, str] = ("daily", "weekly", "monthly", "daily_incremental_sync")
+JOB_IDS: tuple[str, ...] = ("daily", "weekly", "monthly", "daily_incremental_sync",
+                            "platform_certification")
 
 _job_state: dict[str, bool] = {job_id: False for job_id in JOB_IDS}
 _run_lock = threading.Lock()
@@ -63,6 +64,8 @@ _SCHEDULE_DESCRIPTIONS: dict[str, str] = {
     "weekly": "Monday 07:00 Asia/Amman (04:00 UTC)",
     "monthly": "1st of month 08:00 Asia/Amman (05:00 UTC)",
     "daily_incremental_sync": "09:00 Asia/Amman (06:00 UTC)",
+    # PR-ADS-161J: after the incremental sync has had 90 minutes to finish.
+    "platform_certification": "10:30 Asia/Amman (07:30 UTC)",
 }
 
 
@@ -153,6 +156,33 @@ def _run_daily_incremental_sync_scheduled() -> None:
             _job_state["daily_incremental_sync"] = False
 
 
+def _run_platform_certification_scheduled() -> None:
+    """Scheduled wrapper for the daily platform certification (PR-ADS-161J).
+
+    Runs the six production truth audits through
+    ``scripts.audit_platform_certification`` and records ONE verdict row in
+    ``platform_certification_runs``. The service never raises and records
+    NOT CERTIFIED when the certification itself cannot run.
+    """
+    with _run_lock:
+        if _job_state["platform_certification"]:
+            log.warning("[scheduler/platform_certification] skipped — already running")
+            return
+        _job_state["platform_certification"] = True
+
+    log.info("[scheduler/platform_certification] started (scheduled)")
+    try:
+        from services.platform_certification_service import run_and_record  # noqa: PLC0415
+        result = run_and_record(run_reason="scheduled")
+        log.info("[scheduler/platform_certification] %s (exit %s, recorded=%s)",
+                 result["verdict"], result["exit_code"], result["recorded"])
+    except Exception as exc:  # noqa: BLE001
+        log.error("[scheduler/platform_certification] failed: %s", exc, exc_info=True)
+    finally:
+        with _run_lock:
+            _job_state["platform_certification"] = False
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle helpers — called by api/server.py lifespan handler.
 # ---------------------------------------------------------------------------
@@ -207,10 +237,21 @@ def start_scheduler() -> None:
         misfire_grace_time=3600,
     )
 
+    # Daily platform certification — 10:30 Asia/Amman, after the 09:00 sync.
+    _scheduler.add_job(
+        _run_platform_certification_scheduled,
+        trigger=CronTrigger(hour=10, minute=30, timezone=_TZ),
+        id="platform_certification",
+        name="Daily Platform Certification",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     _scheduler.start()
     log.info(
         "[scheduler] started — daily 06:00, weekly Mon 07:00, monthly 1st 08:00, "
-        "daily_incremental_sync 09:00 (Asia/Amman / UTC+3)"
+        "daily_incremental_sync 09:00, platform_certification 10:30 "
+        "(Asia/Amman / UTC+3)"
     )
 
 
