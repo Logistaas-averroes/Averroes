@@ -25,7 +25,6 @@ REQUIRED_ROUTES = [
     "scheduler",
     "health",
     "backfill",
-    "historical-intelligence",
 ]
 
 
@@ -362,7 +361,7 @@ class TestPageExplanationContainers:
             "dashboard", "action-queue", "reports", "campaigns",
             "geo", "keywords",
             "gclid-attribution",
-            "scheduler", "health", "backfill", "historical-intelligence",
+            "scheduler", "health", "backfill",
         ]
         for page in key_pages:
             assert f'id="page-explanation-{page}"' in self.html, (

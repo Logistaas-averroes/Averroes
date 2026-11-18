@@ -453,19 +453,6 @@ CONSUMERS: list[dict] = [
        migration_notes="Per-contact SQL rows (contact id + company) in the drawer.",
        truth_status="sqls_not_closed_won None when unavailable",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
-    _c("Historical Intelligence (/api/historical-intelligence)",
-       "30d-vs-30d confirmed_sqls and CPQL movement with improving/deteriorating verdicts.",
-       endpoint="GET /api/historical-intelligence",
-       service_function="analysis.historical_intelligence.compute_campaign_trends / _safe_cpql / _classify_overall_trend",
-       repository_source="analysis.historical_intelligence.load_campaign_trend_rows (campaigns snapshot)",
-       source_table=SNAPSHOT_TABLE, sql_definition="COALESCE(confirmed_sqls, 0) from campaigns",
-       date_field=SNAPSHOT_DATE, dedup_key="none", windows=["30d vs prior 30d"],
-       scope="other (snapshot)", classification=CLS_LEGACY,
-       code_location="analysis/historical_intelligence.py:_safe_cpql",
-       migration_notes="COALESCE(confirmed_sqls, 0) turns a missing value into a zero. "
-                       "The report block is never wired into the emailed report.",
-       truth_status="None-to-0 coercion in the loader",
-       row=True, cpql=True, decision=True, operational=True),
 
     # ── Action queue / operational ──────────────────────────────────────────
     _c("Action Queue — campaign items", "Queue inclusion/scoring on snapshot confirmed_sqls and FIX/CUT verdicts.",
@@ -549,8 +536,8 @@ CONSUMERS: list[dict] = [
        source_table=SNAPSHOT_TABLE, sql_definition="copies confirmed_sqls; cpql = spend / sqls",
        date_field=SNAPSHOT_DATE, dedup_key="none", windows=["snapshot"], scope="other",
        classification=CLS_LEGACY, code_location="db/writers.py:write_campaigns",
-       migration_notes="Feeds the action queue and historical intelligence "
-                       "(/api/summary and /api/dashboard/trends were retired in PR-ADS-162B).",
+       migration_notes="Feeds the action queue (/api/summary and /api/dashboard/trends "
+                       "were retired in PR-ADS-162B; historical intelligence in PR-ADS-162D).",
        truth_status="cpql None when sqls == 0", row=True, cpql=True),
     _c("leads snapshot writer (db.writers.write_leads / _map_status_category)",
        "Derives status_category from mql_status and stores contact_created_at from createdate.",
@@ -631,7 +618,7 @@ CONSUMERS: list[dict] = [
        source_table="n/a", sql_definition="metric identities", date_field="per identity", dedup_key="n/a",
        windows=BUSINESS, scope="per identity", classification=CLS_DIAGNOSTIC,
        code_location="services/cross_page_parity_service.py:METRIC_IDENTITIES",
-       migration_notes="Historical intelligence is not a registered identity.",
+       migration_notes="",
        truth_status="n/a"),
     _c("Campaign Evidence certification gate", "PR-ADS-157 read-only certification of the campaign page.",
        endpoint="python -m scripts.audit_campaign_evidence_certification",
@@ -726,7 +713,6 @@ _CAMP = "Dashboard Campaigns"
 _CTRY = "Dashboard Countries"
 _REV = "Dashboard Revenue"
 _DEALS = "Dashboard Deals"
-_HI = "Historical Intelligence (/api/historical-intelligence)"
 _AQC = "Action Queue — campaign items"
 _AQG = "Action Queue — geo items"
 _LEADS_API = "Lead Quality API (/api/leads)"
@@ -940,13 +926,6 @@ RULES: list[dict] = [
                "_build_period_change", "_build_source_breakdown", "_build_truth_status",
                "_build_unavailable", "_source_status", "build_dashboard_deals",
                "_build_sql_no_deal", "_sql_no_deal_status"]),
-    _m("hi.module", "analysis/historical_intelligence.py", CLS_LEGACY, _HI,
-       ["confirmed_sqls_ref", "cpql_ref"]),
-    _r("hi", "analysis/historical_intelligence.py", CLS_LEGACY, _HI,
-       symbol=["_aggregate_campaign_rows", "_aggregate_geo_rows", "_build_deteriorating_note",
-               "_build_movement", "_classify_cpql_direction", "_classify_overall_trend",
-               "_safe_cpql", "compute_campaign_trends", "compute_geo_trends",
-               "compute_quality_movement", "load_campaign_trend_rows"]),
 
     # ── scheduled outputs ───────────────────────────────────────────────────
     _m("report.core.module", "analysis/core.py", CLS_LEGACY, _REPORT, ["cpql_ref"]),
@@ -1328,7 +1307,6 @@ RULES: list[dict] = [
        symbol=["renderTermsFilters", "renderTermsTable", "wireTermsControls", "stDrawerSqlSection",
                "renderFlaggedFilters", "renderFlaggedKPIs", "renderFlaggedTab", "renderFlaggedTable",
                "openFlaggedDrawer"]),
-    _r("ui.historical", "static/app.js", CLS_LEGACY, _HI, symbol="_renderHistoricalTable"),
     _r("ui.gclid", "static/app.js", CLS_LEGACY, _GCLID, symbol="renderGclidAttributionTable"),
     _r("ui.report", "static/app.js", CLS_LEGACY, _REPORT, symbol="copyLatestReport"),
     # PR-ADS-161E: the canonical reason labels (the CANONICAL_REASON_LABELS
@@ -1397,19 +1375,6 @@ CPQL_CONSUMERS: list[dict] = [
         "unmatched_sqls_excluded": True,
         "denominator_incomplete_when_stage_dates_missing": "n/a (legacy); overall_cpql_scope = complete|mapped_only discloses unmatched/excluded SQLs",
         "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by summary.cohort_cpql_usd",
-    },
-    {
-        "consumer": "Historical Intelligence cpql movement",
-        "code_location": "analysis/historical_intelligence.py:_safe_cpql",
-        "spend_numerator_source": "campaigns.spend_usd snapshot rows, 30d vs prior 30d by run_date",
-        "currency_fx_contract": "snapshot column labelled USD; no FX contract",
-        "sql_denominator_definition": "COALESCE(confirmed_sqls, 0) from campaigns snapshot",
-        "sql_denominator_scope": "other (per campaign label)",
-        "sql_denominator_date_field": SNAPSHOT_DATE,
-        "numerator_denominator_same_window": True,
-        "unmatched_sqls_excluded": False,
-        "denominator_incomplete_when_stage_dates_missing": "n/a; missing value coerced to 0",
-        "publication": "published; drives improving/deteriorating verdicts",
     },
     {
         "consumer": "campaigns.cpql_usd snapshot column (weekly/monthly report table)",
@@ -1516,10 +1481,6 @@ DECISION_SURFACES: list[dict] = [
      "sql_definition": LEGACY_DEF, "scope": "campaign_attributable / country", "date_field": LEGACY_DATE,
      "kind": "verdict", "gated": "withheld count substituted by 0 (sqls_for_verdict)",
      "evidence_kind": "row evidence"},
-    {"surface": "Historical Intelligence improving/deteriorating (CPQL direction)",
-     "code_location": "analysis/historical_intelligence.py:_classify_overall_trend",
-     "sql_definition": "COALESCE(confirmed_sqls, 0) snapshot", "scope": "per campaign label",
-     "date_field": SNAPSHOT_DATE, "kind": "verdict", "gated": "none", "evidence_kind": "row evidence"},
 ]
 
 
@@ -1548,8 +1509,8 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
      "code_location": "api/server.py:api_leads_country_summary"},
     {"id": "doctrine.third_snapshot_population",
      "summary": "campaigns.confirmed_sqls (analysis/core.py) counts mql_status literals from a "
-                "JSON pull with no date, dedup or exclusions; the action queue and "
-                "historical intelligence read it.",
+                "JSON pull with no date, dedup or exclusions; the action queue "
+                "reads it.",
      "code_location": "analysis/core.py:run_lead_quality"},
     {"id": "scope.keyword_attributable_two_definitions",
      "summary": "platform_sql_attribution keyword scope is criterion-level (campaign_id + "

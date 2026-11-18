@@ -672,8 +672,9 @@ def test_36_a_window_with_an_unrecognised_status_counts_as_hidden():
 
 # ── the sidebar ───────────────────────────────────────────────────────────
 
+# PR-ADS-162D retired Churn Input; five technical pages remain.
 ADVANCED = {"scheduler", "gclid-attribution", "health", "revenue-health",
-            "backfill", "churn-input"}
+            "backfill"}
 
 
 def test_37_system_is_routable_admin_only_and_uses_the_clean_chrome():

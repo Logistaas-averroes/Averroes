@@ -22,7 +22,6 @@ REQUIRED_ROUTE_KEYS = [
         "roas-campaigns",
     "roas-countries",
     "unit-economics",
-    "churn-input",
     "scheduler",
     "health",
     "backfill",
@@ -43,7 +42,6 @@ NEW_VISIBLE_LABELS = [
     "Campaign Revenue &amp; Spend",
     "Country Revenue &amp; Spend",
     "Unit Economics",
-    "Churn Input",
 ]
 
 SIDEBAR_GROUPS = [
@@ -137,9 +135,11 @@ def test_unit_economics_page_exists():
     assert 'id="page-unit-economics"' in HTML
 
 
-def test_churn_input_page_exists():
-    """Churn Input page must have a container in Admin."""
-    assert 'id="page-churn-input"' in HTML
+def test_churn_input_page_is_retired():
+    """PR-ADS-162D: the Churn Input page stored a rate no current figure
+    read. The page and its sidebar entry are deleted, not hidden."""
+    assert 'id="page-churn-input"' not in HTML
+    assert 'data-page="churn-input"' not in HTML
 
 
 def test_search_terms_has_tabs():
@@ -169,14 +169,14 @@ def test_frontend_uses_api_reports_routes():
     """Frontend JS must use /api/-prefixed routes, not bare /reports/...
 
     PR-ADS-107A: the ROAS by Campaign / Country pages now consume the shared
-    /api/revenue-attribution endpoint (business windows). Unit economics and
-    churn-input continue to use their /api/ routes.
+    /api/revenue-attribution endpoint (business windows). Unit economics
+    continues to use its /api/ route. (Churn Input was retired in PR-ADS-162D.)
     """
     js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
     # ROAS pages use the shared revenue-attribution contract.
     assert "/api/revenue-attribution" in js
     assert "/api/reports/unit-economics" in js
-    assert "/api/admin/churn-input" in js
+    assert "/api/admin/churn-input" not in js
     # Must NOT use bare /reports/ routes for ROAS
     bare_roas = re.findall(r'["\']\/reports\/roas', js)
     assert not bare_roas, f"Found bare /reports/roas routes (should use /api/-prefixed): {bare_roas}"

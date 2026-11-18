@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source", "channels", "system"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "roas-campaigns", "roas-countries", "unit-economics", "revenue-health", "revenue-by-source", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -279,14 +279,6 @@ const PAGE_EXPLANATIONS = {
     emptyMeans: "No backfill run selected. Run a dry-run first to preview the ingestion plan.",
     nextAction: "Select a date range and run dry-run. Dry-run does not write to the database or modify Google Ads/HubSpot. Read-only."
   },
-  "historical-intelligence": {
-    title: "Historical Trends",
-    purpose: "Long-term historical intelligence — period-over-period comparisons and trend analysis.",
-    source: "Historical campaign, lead, and deal data.",
-    dependsOn: ["historical_intelligence"],
-    emptyMeans: "Not enough historical data for trend analysis, or the data has not been backfilled yet.",
-    nextAction: "Check Admin Backfill to verify historical data availability."
-  },
   "roas-campaigns": {
     title: "Campaign Revenue & Spend",
     purpose: "Revenue attribution by campaign over business windows — which campaigns produce SQLs, customers, and closed-won revenue.",
@@ -310,14 +302,6 @@ const PAGE_EXPLANATIONS = {
     dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
     emptyMeans: "Not enough closed-won volume to compute unit economics.",
     nextAction: "Ensure sufficient deal volume exists in the selected window."
-  },
-  "churn-input": {
-    title: "Churn Input",
-    purpose: "Admin page for manual monthly churn rate overrides used in LTV calculations.",
-    source: "Local YAML configuration.",
-    dependsOn: [],
-    emptyMeans: "Default churn rate is applied when no overrides are set.",
-    nextAction: "Add a monthly override if the default rate (3%) does not reflect reality."
   }
 };
 
@@ -423,8 +407,8 @@ const PAGE_HELP_CONTENT = {
     what: "Closed-won deals, customers, revenue and average deal value for the business, plus Period Revenue / Ad Spend and Spend per Customer Won This Period for the advertising scope. Those two are non-cohort operational ratios: closed-won outcomes may originate from earlier advertising periods. Acquisition-cohort cost and return ratios, LTV ratios and payback are shown as Unavailable with the reason.",
     source: "Canonical HubSpot deal ledger + canonical Google Ads spend.",
     howToUse: "Read the business totals first, then the advertising scope. Use the period ratios as operating signals, not as cohort economics.",
-    doNotAssume: "LTV calculations use the configured churn rate (default 3%). If actual churn differs, LTV will be inaccurate. Adjust via Churn Input page.",
-    checkNext: "Churn Input to verify/update churn rate, or Campaign Revenue & Spend for campaign-level detail."
+    doNotAssume: "Lifetime value and payback are not shown: recurring revenue per deal is not held in the canonical ledger. The period ratios compare this period's closed revenue with this period's spend; they are not a return on the spend that acquired those customers.",
+    checkNext: "Campaign Revenue & Spend for campaign-level detail."
   },
   scheduler: {
     what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for daily/weekly/monthly jobs.",
@@ -446,13 +430,6 @@ const PAGE_HELP_CONTENT = {
     howToUse: "Select a date range. Run dry-run first to preview what will be ingested. Then execute the actual backfill if the plan looks correct.",
     doNotAssume: "Backfill writes to the local database only. It does NOT modify Google Ads, HubSpot, or any external system. Dry-run is read-only.",
     checkNext: "System Status to verify post-backfill freshness, or the relevant data page to confirm new rows."
-  },
-  "churn-input": {
-    what: "Admin page for manual monthly churn rate overrides. Churn rate is used in LTV calculations.",
-    source: "Local YAML configuration file. Not synced from or written to any external system.",
-    howToUse: "Enter a month (YYYY-MM) and the observed monthly churn rate (0–1). The override applies to LTV calculations for that month onward.",
-    doNotAssume: "This updates local configuration ONLY. It does NOT write to HubSpot, Google Ads, or any external service. Changes affect future LTV calculations locally.",
-    checkNext: "Unit Economics to see updated LTV calculations, or Campaign Revenue & Spend to see how churn affects campaign verdicts."
   }
 };
 
@@ -481,11 +458,9 @@ const PAGE_DEPENDENCIES = {
   scheduler:               [],
   health:                  [],
   backfill:                [],
-  "historical-intelligence": [],
   "roas-campaigns":          ["hubspot/deals", "google_ads_api/campaigns"],
   "roas-countries":          ["hubspot/deals", "google_ads_api/geo"],
   "unit-economics":          ["hubspot/deals", "google_ads_api/campaigns"],
-  "churn-input":             [],
 };
 
 // ── Session state ──────────────────────────────────────────────────────────
@@ -594,11 +569,6 @@ let datasetFreshnessStatus = "idle"; // idle | loading | ok | empty | db_unavail
 // Per-dataset freshness cache — populated by loadDatasetFreshness() and used by
 // renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "google_ads_api/campaigns").
 let _datasetFreshnessByKey = {};
-
-// Historical Intelligence page state
-let hiRows = [];
-let hiSummary = null;
-let hiStatus = "idle"; // idle | loading | ok | empty | insufficient_data | db_unavailable | error
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -1244,9 +1214,6 @@ function showApp(user) {
   // Show/hide Historical Backfill nav item
   const backfillNav = document.getElementById("nav-backfill-item");
   if (backfillNav) backfillNav.hidden = user.role !== "admin";
-  // Show/hide Churn Input nav item
-  const churnInputNav = document.getElementById("nav-churn-input-item");
-  if (churnInputNav) churnInputNav.hidden = user.role !== "admin";
   // Show/hide Revenue Health nav item (admin-only — PR-ADS-113)
   const revenueHealthNav = document.getElementById("nav-revenue-health-item");
   if (revenueHealthNav) revenueHealthNav.hidden = user.role !== "admin";
@@ -1474,11 +1441,6 @@ function navigate(page, options) {
     navigate("dashboard", { updateHash: true, replace: true });
     return;
   }
-  // Role enforcement: churn-input page is admin-only
-  if (page === "churn-input" && (!_currentUser || _currentUser.role !== "admin")) {
-    navigate("dashboard", { updateHash: true, replace: true });
-    return;
-  }
   // Role enforcement: revenue-health page is admin-only (PR-ADS-113)
   if (page === "revenue-health" && (!_currentUser || _currentUser.role !== "admin")) {
     navigate("dashboard", { updateHash: true, replace: true });
@@ -1580,11 +1542,9 @@ function loadPage(page) {
     case "health":        loadHealth();        break;
     case "action-queue":  loadActionQueue();   break;
     case "backfill":      loadBackfillStatus(); break;
-    case "historical-intelligence": loadHistoricalIntelligence(); break;
     case "roas-campaigns":  loadRoasCampaigns();  break;
     case "roas-countries":  loadRoasCountries();  break;
     case "unit-economics":  loadUnitEconomics();  break;
-    case "churn-input":     loadChurnInput();     break;
     case "revenue-health":  loadRevenueHealth();  break;
     case "revenue-by-source": loadRevenueBySource(); break;
     case "channels":        loadChannels();        break;
@@ -2517,7 +2477,7 @@ function closedWonDealsSubText(value, metric) {
 
 // Admin-gated routes never render as live links for viewers — navigate() would
 // silently bounce them back to the dashboard, which reads as a broken link.
-const DASH_ADMIN_PAGES = ["revenue-health", "health", "backfill", "churn-input"];
+const DASH_ADMIN_PAGES = ["revenue-health", "health", "backfill"];
 
 function dashCanNavigate(page) {
   if (!DASH_ADMIN_PAGES.includes(page)) return true;
@@ -9541,7 +9501,7 @@ async function loadChannels() {
 // one the daily job stored; a verdict that is missing or old is "not checked",
 // never a pass. Every unknown state renders as a warning, never as healthy.
 
-const ADVANCED_ADMIN_PAGES = ["scheduler", "gclid-attribution", "health", "revenue-health", "backfill", "churn-input"];
+const ADVANCED_ADMIN_PAGES = ["scheduler", "gclid-attribution", "health", "revenue-health", "backfill"];
 
 // The System page is admin-only: navigate() sends anyone else to the Dashboard.
 function adminOnlyDenied(page) {
@@ -9769,7 +9729,6 @@ const SYSTEM_ADVANCED_LINKS = [
   ["health", "System Status", "Technical detail on every data pipeline, and the list of deals to fix."],
   ["gclid-attribution", "GCLID Attribution", "Click-level Google Ads tracking detail."],
   ["backfill", "Admin Backfill", "Re-import older history."],
-  ["churn-input", "Churn Input", "A stored churn rate. No current figure uses it."],
 ];
 
 function renderSystemOverview(data) {
@@ -13902,163 +13861,6 @@ function renderBackfillSummary(run) {
     })()}`;
 }
 
-// ── Historical Intelligence page ──────────────────────────────────────────
-
-const _HI_TREND_LABELS = {
-  improving:          "Improving",
-  deteriorating:      "Deteriorating",
-  stable:             "Stable",
-  insufficient_data:  "Insufficient Data",
-  new_activity:       "New Activity",
-  no_recent_activity: "No Recent Activity",
-};
-
-const _HI_TREND_CLASS = {
-  improving:          "badge--ok",
-  deteriorating:      "badge--error",
-  stable:             "badge--neutral",
-  insufficient_data:  "badge--neutral",
-  new_activity:       "badge--neutral",
-  no_recent_activity: "badge--neutral",
-};
-
-function _hiMovementArrow(dir) {
-  if (!dir) return "—";
-  if (dir === "up")    return "↑";
-  if (dir === "down")  return "↓";
-  if (dir === "stable") return "—";
-  if (dir === "better") return "improved";
-  if (dir === "worse")  return "worsened";
-  if (dir === "insufficient_data" || dir === "no_recent_activity" || dir === "new_activity") return "—";
-  return escapeHtml(dir);
-}
-
-async function loadHistoricalIntelligence() {
-  const bodyEl       = document.getElementById("hi-trend-body");
-  const kpiImproving = document.getElementById("hi-kpi-improving");
-  const kpiDeter     = document.getElementById("hi-kpi-deteriorating");
-  const kpiStable    = document.getElementById("hi-kpi-stable");
-  const kpiInsuf     = document.getElementById("hi-kpi-insufficient");
-
-  const entitySel  = document.getElementById("hi-entity-select");
-  const curSel     = document.getElementById("hi-current-days-select");
-  const prevSel    = document.getElementById("hi-previous-days-select");
-
-  const entity      = entitySel  ? entitySel.value  : "campaigns";
-  const currentDays = curSel     ? curSel.value      : "30";
-  const previousDays = prevSel   ? prevSel.value     : "30";
-
-  if (bodyEl) {
-    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)"><span class="spinner"></span> Loading historical intelligence…</p>`;
-  }
-  hiStatus = "loading";
-
-  const url = `/api/historical-intelligence?entity=${encodeURIComponent(entity)}&current_days=${encodeURIComponent(currentDays)}&previous_days=${encodeURIComponent(previousDays)}&limit=50`;
-
-  try {
-    const data = await fetchJSON(url);
-    hiStatus  = data.status || "ok";
-    hiRows    = data.rows   || [];
-    hiSummary = data.summary || null;
-
-    // KPI cards
-    const sum = hiSummary || {};
-    if (kpiImproving) kpiImproving.textContent = sum.improving     ?? "—";
-    if (kpiDeter)     kpiDeter.textContent     = sum.deteriorating ?? "—";
-    if (kpiStable)    kpiStable.textContent    = sum.stable        ?? "—";
-    if (kpiInsuf)     kpiInsuf.textContent     = sum.insufficient_data ?? "—";
-
-    _renderHistoricalTable(entity, data);
-
-  } catch (err) {
-    hiStatus = "error";
-    hiRows   = [];
-    hiSummary = null;
-    if (kpiImproving) kpiImproving.textContent = "—";
-    if (kpiDeter)     kpiDeter.textContent     = "—";
-    if (kpiStable)    kpiStable.textContent    = "—";
-    if (kpiInsuf)     kpiInsuf.textContent     = "—";
-    if (bodyEl) {
-      if (err && err.message === "HTTP 401") {
-        showLogin();
-        return;
-      }
-      const msg = err && err.message === "HTTP 403"
-        ? "Access denied."
-        : "Failed to load historical intelligence. Please try again.";
-      bodyEl.innerHTML = `<p class="empty-state run-feedback--error" style="padding:var(--space-5)">${escapeHtml(msg)}</p>`;
-    }
-  }
-}
-
-function _renderHistoricalTable(entity, data) {
-  const bodyEl = document.getElementById("hi-trend-body");
-  if (!bodyEl) return;
-
-  if (data && data.db_unavailable) {
-    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Historical Intelligence is unavailable because the local database is offline.</p>`;
-    return;
-  }
-
-  if (hiStatus === "insufficient_data" || !hiRows || hiRows.length === 0) {
-    const _fallback = "Insufficient historical data. At least two comparable periods are required before trend signals can be computed.";
-    const msg = (data && typeof data.message === "string" && data.message) ? data.message : _fallback;
-    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">${escapeHtml(msg)}</p>`;
-    return;
-  }
-
-  const isGeo = entity === "geo";
-
-  const headerCols = isGeo
-    ? ["Country", "Campaign", "Trend", "Spend Movement", "Human Review Note"]
-    : ["Campaign", "Trend", "Spend Movement", "SQL Movement", "Junk Rate Movement", "CPQL Movement", "Human Review Note"];
-
-  const headerHtml = headerCols.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-
-  const rowsHtml = hiRows.map((row) => {
-    const trendLabel = _HI_TREND_LABELS[row.trend_status] || escapeHtml(row.trend_status || "—");
-    const trendCls   = _HI_TREND_CLASS[row.trend_status]  || "badge--neutral";
-    const trendBadge = `<span class="badge ${trendCls}"><span class="dot"></span>${escapeHtml(trendLabel)}</span>`;
-
-    const mv  = row.movement || {};
-    const cur = row.current  || {};
-    const prev = row.previous || {};
-
-    const spendMove   = _hiMovementArrow(mv.spend);
-    const sqlMove     = _hiMovementArrow(mv.sqls);
-    const junkMove    = _hiMovementArrow(mv.junk_rate);
-    const cpqlMove    = _hiMovementArrow(mv.cpql);
-    const note        = escapeHtml(row.human_review_note || "—");
-
-    if (isGeo) {
-      return `<tr>
-        <td>${escapeHtml(row.country || "—")}</td>
-        <td>${escapeHtml(row.campaign_name || "—")}</td>
-        <td>${trendBadge}</td>
-        <td>${spendMove}</td>
-        <td class="hi-note">${note}</td>
-      </tr>`;
-    }
-    return `<tr>
-      <td>${escapeHtml(row.campaign_name || "—")}</td>
-      <td>${trendBadge}</td>
-      <td>${spendMove}</td>
-      <td>${sqlMove}</td>
-      <td>${junkMove}</td>
-      <td>${cpqlMove}</td>
-      <td class="hi-note">${note}</td>
-    </tr>`;
-  }).join("");
-
-  bodyEl.innerHTML = `
-    <div style="overflow-x:auto">
-      <table class="data-table">
-        <thead><tr>${headerHtml}</tr></thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-    </div>`;
-}
-
 // ── System Health page ─────────────────────────────────────────────────────
 
 // ── CRM Truth Exceptions workbench (PR-ADS-191, admin-only, read-only) ──────
@@ -16419,16 +16221,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   const backfillForm = document.getElementById("backfill-form");
   if (backfillForm) backfillForm.addEventListener("submit", runBackfillFromUI);
 
-  // Wire up historical intelligence controls
-  const hiRefreshBtn = document.getElementById("hi-refresh-btn");
-  if (hiRefreshBtn) hiRefreshBtn.addEventListener("click", loadHistoricalIntelligence);
-  const hiEntitySel   = document.getElementById("hi-entity-select");
-  const hiCurSel      = document.getElementById("hi-current-days-select");
-  const hiPrevSel     = document.getElementById("hi-previous-days-select");
-  if (hiEntitySel)  hiEntitySel.addEventListener("change", loadHistoricalIntelligence);
-  if (hiCurSel)     hiCurSel.addEventListener("change",    loadHistoricalIntelligence);
-  if (hiPrevSel)    hiPrevSel.addEventListener("change",   loadHistoricalIntelligence);
-
   // Search Terms tabs (PR-ADS-144) are rendered + wired by the page module.
 
   // Wire up Executive Overview controls (business windows — PR-ADS-134)
@@ -16532,9 +16324,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   // business key into `parseInt("current_quarter")` and silently reverted the page.
   if (ueWindow)  ueWindow.addEventListener("change", handleBusinessWindowSelectChange);
 
-  // Wire up Churn Input form
-  const churnForm = document.getElementById("churn-input-form");
-  if (churnForm) churnForm.addEventListener("submit", handleChurnInputSubmit);
 
   // Force-close help drawer on startup (PR-ADS-098: ensures clean state)
   closeHelpDrawer();
@@ -18691,114 +18480,6 @@ function renderUnitEconomicsPage() {
       <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</td>
     </tr>`).join("");
     tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
-  }
-}
-
-// ── Churn Input ───────────────────────────────────────────────────────────
-
-let churnInputData = null;
-
-async function loadChurnInput() {
-  const currentEl = document.getElementById("churn-input-current");
-  if (currentEl) currentEl.innerHTML = '<p class="empty-state">Loading churn configuration…</p>';
-
-  try {
-    const res = await fetch("/api/admin/churn-input", { credentials: "same-origin" });
-    if (!res.ok) {
-      if (currentEl) currentEl.innerHTML = '<p class="empty-state">Failed to load churn configuration. Admin access required.</p>';
-      return;
-    }
-    churnInputData = await res.json();
-    renderChurnInputPage();
-  } catch (err) {
-    console.error("[loadChurnInput]", err);
-    if (currentEl) currentEl.innerHTML = '<p class="empty-state">Error loading churn configuration.</p>';
-  }
-}
-
-function renderChurnInputPage() {
-  const currentEl = document.getElementById("churn-input-current");
-  if (!currentEl || !churnInputData) return;
-
-  const d = churnInputData;
-  const defaultChurn = d.default_monthly_churn || 0.03;
-  const monthlyOverrides = d.monthly || {};
-  const campaignOverrides = d.campaign_overrides || {};
-
-  let html = '<div class="churn-input-summary">';
-  html += `<div class="churn-input-section"><h3>Default Monthly Churn</h3><p class="churn-input-value">${(defaultChurn * 100).toFixed(1)}%</p></div>`;
-
-  html += '<div class="churn-input-section"><h3>Monthly Overrides</h3>';
-  const monthEntries = Object.entries(monthlyOverrides);
-  if (monthEntries.length) {
-    html += '<table class="data-table churn-table"><tr><th>Month</th><th>Rate</th></tr>';
-    monthEntries.sort((a, b) => b[0].localeCompare(a[0])).forEach(([month, rate]) => {
-      html += `<tr><td>${escapeHtml(month)}</td><td>${(rate * 100).toFixed(1)}%</td></tr>`;
-    });
-    html += '</table>';
-  } else {
-    html += '<p class="empty-state">No monthly overrides configured.</p>';
-  }
-  html += '</div>';
-
-  html += '<div class="churn-input-section"><h3>Campaign Overrides</h3>';
-  const campEntries = Object.entries(campaignOverrides);
-  if (campEntries.length) {
-    html += '<table class="data-table churn-table"><tr><th>Campaign</th><th>Rate</th></tr>';
-    campEntries.forEach(([campaign, rate]) => {
-      html += `<tr><td>${escapeHtml(campaign)}</td><td>${(rate * 100).toFixed(1)}%</td></tr>`;
-    });
-    html += '</table>';
-  } else {
-    html += '<p class="empty-state">No campaign overrides configured.</p>';
-  }
-  html += '</div></div>';
-
-  currentEl.innerHTML = html;
-}
-
-async function handleChurnInputSubmit(e) {
-  e.preventDefault();
-  const errorEl = document.getElementById("churn-input-error");
-  const successEl = document.getElementById("churn-input-success");
-  if (errorEl) { errorEl.hidden = true; errorEl.textContent = ""; }
-  if (successEl) { successEl.hidden = true; successEl.textContent = ""; }
-
-  const monthInput = document.getElementById("churn-month");
-  const rateInput = document.getElementById("churn-rate");
-  const month = (monthInput ? monthInput.value : "").trim();
-  const rate = rateInput ? parseFloat(rateInput.value) : NaN;
-
-  // Validate month format YYYY-MM
-  if (!/^\d{4}-\d{2}$/.test(month)) {
-    if (errorEl) { errorEl.textContent = "Month must be in YYYY-MM format (e.g. 2026-05)."; errorEl.hidden = false; }
-    return;
-  }
-  // Validate rate between 0 and 1
-  if (isNaN(rate) || rate < 0 || rate > 1) {
-    if (errorEl) { errorEl.textContent = "Churn rate must be a number between 0 and 1 (e.g. 0.03 for 3%)."; errorEl.hidden = false; }
-    return;
-  }
-
-  try {
-    const res = await fetch("/api/admin/churn-input", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ month, rate }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const msg = body.detail || body.error || `Server returned ${res.status}`;
-      if (errorEl) { errorEl.textContent = msg; errorEl.hidden = false; }
-      return;
-    }
-    if (successEl) { successEl.textContent = `Churn override saved: ${month} → ${(rate * 100).toFixed(1)}%`; successEl.hidden = false; }
-    // Reload config to show updated values
-    loadChurnInput();
-  } catch (err) {
-    console.error("[handleChurnInputSubmit]", err);
-    if (errorEl) { errorEl.textContent = "Network error. Please try again."; errorEl.hidden = false; }
   }
 }
 
