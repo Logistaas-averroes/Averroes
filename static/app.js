@@ -9514,11 +9514,9 @@ function renderChannelFunnel(data) {
 async function loadChannels() {
   const sel = document.getElementById("channels-window");
   const body = document.getElementById("channels-body");
-  const rangeEl = document.getElementById("channels-range");
   const window_ = (sel && sel.value) || "180d";
   const token = ++_channelsReqSeq;
   if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading channels…</p>';
-  if (rangeEl) rangeEl.textContent = "";
   try {
     const data = await fetchJSON(`/api/channel-funnel?window=${encodeURIComponent(window_)}`);
     if (token !== _channelsReqSeq) return;  // a newer request superseded this one
