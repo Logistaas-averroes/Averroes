@@ -19,10 +19,15 @@
 
 | Group | Purpose | Pages |
 |-------|---------|-------|
-| **Command Center** | Daily operator pages | Dashboard, Action Queue, Reports |
-| **Platform Evidence** | Raw ad platform data and analytics (active source: **Google Ads API** — see PR-ADS-105; Windsor is legacy) | Campaigns, Search Terms, Keywords, Countries |
-| **CRM & Revenue** | Canonical CRM funnel plus revenue-truth ROAS, deal attribution, unit economics | Leads, Deals, ROAS by Campaign, ROAS by Country, Revenue by Source, Unit Economics |
-| **Admin** | System operation, diagnostics, and configuration | System, and under "Advanced tools": Data Runs, System Status, Revenue Health, Admin Backfill, GCLID Attribution *(Churn Input retired in PR-ADS-162D)* |
+| **Overview** | Where to start | Dashboard, Channels |
+| **Google Ads** | Everything about that one ad platform (Google Ads API). Action Queue and Reports sit here because they are built on Google Ads data only | Campaigns, Search Terms, Keyword Evidence, Countries, Action Queue, Reports |
+| **Sales Results** | Leads, deals and revenue from HubSpot | Leads, Deals, Revenue by Source, Campaign Revenue & Spend, Country Revenue & Spend, Unit Economics |
+| **Admin** | System, with the technical pages folded under "Advanced tools" | System; Advanced tools: Data Runs, GCLID Attribution, System Status, Revenue Health, Admin Backfill |
+
+> PR-ADS-162F renamed the groups ("Command Center", "Platform Evidence" and
+> "CRM & Revenue" before it) and moved Channels, Action Queue and Reports.
+> Route keys are unchanged. The exact order is pinned by
+> `tests/test_pr_ads_162f_sidebar_groups.py`.
 
 ---
 

@@ -72,8 +72,8 @@
       </div>
 
       <ul class="sidebar__nav" role="list">
-        <!-- Command Center -->
-        <li class="sidebar__section-label" role="heading" aria-level="2">Command Center</li>
+        <!-- Overview (PR-ADS-162F) -->
+        <li class="sidebar__section-label" role="heading" aria-level="2">Overview</li>
         <li>
           <a class="nav-item" data-page="dashboard" href="#" role="button" tabindex="0" aria-label="Dashboard">
             <span class="nav-item__icon" aria-hidden="true">
@@ -83,24 +83,16 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="action-queue" href="#" role="button" tabindex="0" aria-label="Action Queue">
+          <a class="nav-item" data-page="channels" href="#" role="button" tabindex="0" aria-label="Channels — funnel by marketing channel">
             <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
             </span>
-            <span class="nav-item__label">Action Queue</span>
-          </a>
-        </li>
-        <li>
-          <a class="nav-item" data-page="reports" href="#" role="button" tabindex="0" aria-label="Reports">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-            </span>
-            <span class="nav-item__label">Reports</span>
+            <span class="nav-item__label">Channels</span>
           </a>
         </li>
 
-        <!-- Platform Evidence -->
-        <li class="sidebar__section-label" role="heading" aria-level="2">Platform Evidence</li>
+        <!-- Google Ads (PR-ADS-162F; was Platform Evidence) -->
+        <li class="sidebar__section-label" role="heading" aria-level="2">Google Ads</li>
         <li>
           <a class="nav-item" data-page="campaigns" href="#" role="button" tabindex="0" aria-label="Campaigns">
             <span class="nav-item__icon" aria-hidden="true">
@@ -133,17 +125,25 @@
             <span class="nav-item__label">Countries</span>
           </a>
         </li>
-
-        <!-- CRM & Revenue (PR-ADS-153C) -->
-        <li class="sidebar__section-label" role="heading" aria-level="2">CRM &amp; Revenue</li>
         <li>
-          <a class="nav-item" data-page="channels" href="#" role="button" tabindex="0" aria-label="Channels — funnel by marketing channel">
+          <a class="nav-item" data-page="action-queue" href="#" role="button" tabindex="0" aria-label="Action Queue">
             <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
             </span>
-            <span class="nav-item__label">Channels</span>
+            <span class="nav-item__label">Action Queue</span>
           </a>
         </li>
+        <li>
+          <a class="nav-item" data-page="reports" href="#" role="button" tabindex="0" aria-label="Reports">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            </span>
+            <span class="nav-item__label">Reports</span>
+          </a>
+        </li>
+
+        <!-- Sales Results (PR-ADS-162F; was CRM & Revenue) -->
+        <li class="sidebar__section-label" role="heading" aria-level="2">Sales Results</li>
         <li>
           <a class="nav-item" data-page="leads" href="#" role="button" tabindex="0" aria-label="Leads — HubSpot CRM funnel">
             <span class="nav-item__icon" aria-hidden="true">
@@ -158,6 +158,14 @@
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
             </span>
             <span class="nav-item__label">Deals</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="revenue-by-source" href="#" role="button" tabindex="0" aria-label="Revenue by Source">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            </span>
+            <span class="nav-item__label">Revenue by Source</span>
           </a>
         </li>
         <li>
@@ -177,14 +185,6 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="revenue-by-source" href="#" role="button" tabindex="0" aria-label="Revenue by Source">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-            </span>
-            <span class="nav-item__label">Revenue by Source</span>
-          </a>
-        </li>
-                <li>
           <a class="nav-item" data-page="unit-economics" href="#" role="button" tabindex="0" aria-label="Unit Economics">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>

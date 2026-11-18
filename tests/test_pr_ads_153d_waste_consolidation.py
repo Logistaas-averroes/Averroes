@@ -186,8 +186,11 @@ def test_ngrams_url_still_redirects_to_patterns():
 
 
 def test_search_terms_stays_under_platform_evidence():
-    section = _INDEX_HTML.split("<!-- Platform Evidence -->")[1]
-    section = section.split("<!-- CRM & Revenue")[0]
+    # PR-ADS-162F renamed the group "Platform Evidence" to "Google Ads" and
+    # "CRM & Revenue" to "Sales Results". The rule is unchanged: the four
+    # ad-platform evidence pages sit together, and the retired page is absent.
+    section = _INDEX_HTML.split("<!-- Google Ads (PR-ADS-162F")[1]
+    section = section.split("<!-- Sales Results (PR-ADS-162F")[0]
     assert 'data-page="search-terms"' in section
     assert 'data-page="campaigns"' in section
     assert 'data-page="keywords"' in section
@@ -199,7 +202,7 @@ def test_search_terms_stays_under_platform_evidence():
 def test_gclid_attribution_moves_to_admin():
     admin = _INDEX_HTML.split(">Admin</li>")[1]
     assert 'data-page="gclid-attribution"' in admin
-    crm = _INDEX_HTML.split("<!-- CRM & Revenue")[1].split("<!-- Admin -->")[0]
+    crm = _INDEX_HTML.split("<!-- Sales Results (PR-ADS-162F")[1].split("<!-- Admin -->")[0]
     assert 'data-page="gclid-attribution"' not in crm
 
 
