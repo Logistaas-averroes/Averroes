@@ -138,10 +138,13 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "blocks": [],
     },
+    # PR-ADS-163B: this is the legacy GCLID-contact deal snapshot. The Deals
+    # page reads the canonical deal ledger (`/api/dashboard/deals`) and no
+    # code reads the `deals` table, so this pipeline names no page.
     "deals": {
-        "label": "Deals",
+        "label": "Deals (legacy GCLID snapshot)",
         "source": "hubspot",
-        "page": "Deals",
+        "page": None,
         "depends_on": [],
         "blocks": [],
     },
@@ -251,7 +254,10 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "countries": ["canonical_geo", "canonical_spend"],
     "keywords": ["keyword_facts"],
     "leads": ["leads"],
-    "deals": ["deals"],
+    # PR-ADS-163B: "deals" removed. It mapped the Deals page to the legacy
+    # `deals` snapshot, which that page does not read: once the snapshot's row
+    # count could be read (0 rows since 2026-05-25), the page would have been
+    # reported "blocked" on the state of a table that feeds nothing on it.
     "gclid-attribution": ["gclid_attribution", "gclid_coverage_snapshots"],
     "opportunities": ["leads"],
     "health": ["all"],
@@ -265,7 +271,9 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
 CORE_DATASETS = frozenset([
     # PR-ADS-162H: "campaigns" (the legacy snapshot) removed — a core dataset
     # with no scheduled writer raised a permanent stale blocker.
-    "search_terms", "leads", "deals", "keywords", "keyword_facts", "geo",
+    # PR-ADS-163B: "deals" (the legacy GCLID snapshot) removed — no page or
+    # service reads it, so its state cannot be a critical blocker.
+    "search_terms", "leads", "keywords", "keyword_facts", "geo",
     # PR-ADS-153F: directly synced canonical Google Ads spend datasets.
     "canonical_spend", "canonical_geo",
 ])
@@ -943,6 +951,8 @@ def gather_dataset_window_counts(
     """
     from psycopg2 import sql as _psql  # noqa: PLC0415
 
+    from db.isolated_read import execute_isolated  # noqa: PLC0415
+
     window_days: dict[str, int] = {w: int(w.rstrip("d")) for w in windows}
 
     cur.execute(
@@ -989,7 +999,9 @@ def gather_dataset_window_counts(
                         _psql.Identifier(table_name),
                         _psql.Identifier(date_column),
                     )
-                    cur.execute(q, (ws,))
+                    # PR-ADS-163B: isolated — one unreadable count must not
+                    # fail every read after it on this transaction.
+                    execute_isolated(cur, q, (ws,))
                     r2 = cur.fetchone()
                     count = int(r2[0]) if r2 and r2[0] is not None else 0
                     diag["window_counts"][label] = count
@@ -1006,7 +1018,7 @@ def gather_dataset_window_counts(
                     _psql.Identifier(table_name),
                     _psql.Identifier(date_column),
                 )
-                cur.execute(q)
+                execute_isolated(cur, q)
                 r3 = cur.fetchone()
                 diag["missing_date_rows"] = (
                     int(r3[0]) if r3 and r3[0] is not None else 0

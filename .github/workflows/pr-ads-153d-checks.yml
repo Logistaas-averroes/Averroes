@@ -105,6 +105,7 @@ jobs:
             tests/test_pr_ads_161j_daily_certification.py \
             tests/test_pr_ads_162a_channel_funnel.py \
             tests/test_pr_ads_162c_system_page.py \
+            tests/test_pr_ads_163b_freshness_row_counts.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -194,6 +195,10 @@ jobs:
                            # audit end to end, including the no-writes check
                            # and its counterfactuals.
                            "tests.test_pr_ads_161e_reader_cutover",
+                           # PR-ADS-163B. EVERY case needs the database: the
+                           # defect is what a real transaction does after an
+                           # error, which no mock cursor reproduced.
+                           "tests.test_pr_ads_163b_freshness_row_counts",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

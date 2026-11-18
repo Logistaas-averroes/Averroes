@@ -2767,3 +2767,102 @@ does not: 564 stored, 557 in HubSpot. The 7 extra no longer exist in HubSpot —
 deleted or merged — and the sync, which reads modified contacts, never learns
 of a removal. 30 such contacts are stored today. Removing them is the next
 backend slice; until then "Contacts" on this page can run slightly high.
+
+## PR-ADS-163B — one unreadable row count must not blank the rest
+
+**Why.** The 162H review found `services/freshness_service.py` naming two
+columns that `db/schema.py` does not create. Read against production before
+this slice (2026-11-18):
+
+- `deals.close_date` and `gclid_attribution.matched_at` do not exist
+  (`information_schema.columns`).
+- Every request to `/api/datasets/freshness` logged
+  `row count query failed for dataset=deals … column "close_date" does not
+  exist`, then `current transaction is aborted, commands ignored until end of
+  transaction block` for `gclid_attribution`, `gclid_coverage_snapshots`,
+  `mailchimp_campaigns`, `mailchimp_reports`, `mailchimp_audiences`, and
+  finally for `latest sync_batch query`.
+
+So six datasets reported "row count unavailable", and **no** dataset had its
+latest sync batch read — the input that separates "the source returned zero
+rows" from "the window is empty". One wrong column name cost every read
+registered after it. The war room runs the same loop and failed the same way, without logging,
+and its run-history reads sit last on that transaction: all four "latest run"
+tiles were empty. `gather_dataset_window_counts` has the same loop. The
+Mailchimp status reads only its own three tables, so there the defect was
+latent — it would have needed one of those three entries to be wrong.
+
+The cause is general, not a typo. PostgreSQL aborts a transaction on its first
+error. A `try/except` around each query catches the exception and leaves the
+connection unusable for the next query. The readers were written as if each
+read were independent; on one cursor they are not.
+
+**Why no test saw it.** `tests/test_dataset_freshness_endpoint.py` drives the
+endpoint with a mock cursor whose failing table raises and whose next statement
+succeeds. A real transaction does not do that.
+
+**Changed.**
+
+| What | Detail |
+| --- | --- |
+| `db/isolated_read.py` (new) | `execute_isolated(cur, query, params)`: runs the statement inside a savepoint, rolls back to it on error, re-raises. A failure costs only the read that raised it; the caller still records that read as unknown |
+| Four readers | `/api/datasets/freshness`, `/api/system/status-war-room`, `system_status_service.gather_dataset_window_counts`, `mailchimp_status_service._dataset_freshness_map` use it for every row count, the latest-batch reads and the run-history reads. The war room now logs a failed read instead of dropping it |
+| `deals` registry entry | `date_column` `close_date` → `run_date` (the date a snapshot row is written under, as for the other run-snapshot tables). Its `page` is now `None` |
+| Page impact and core set | `PAGE_PIPELINE_IMPACT["deals"]` removed and `deals` dropped from `CORE_DATASETS`: both tied the Deals page to the legacy `deals` snapshot, which that page does not read. Without this, fixing the row count would have made the war room report the Deals page **blocked** on a table that feeds nothing on it |
+| `last_batch_row_count` in the war room | A dataset with no batch on record returned `0`; it returns `None` |
+| War room run tiles | A `partial` run had the same grey as "never ran"; it has its own warning style |
+| `gclid_attribution` registry entry | `date_column` `matched_at` → `created_at`: when a match was first recorded, and the date the GCLID Attribution page windows on. Not `updated_at` — every re-confirmation stamps that, so a run that only re-touched old rows would read "fresh with data" beside a page showing none |
+| War room "Incremental" tile | Read `run_type = 'incremental'`, a value no scheduler writes; the job persists `scheduler.incremental_sync.RUN_TYPE` (`daily_incremental_sync`). The tile was empty on every request while the job ran daily. It now reads the persisted run type and shows the recorded status, `partial` included |
+| Old mock cursor | Now models the abort: after a failed statement every later one fails until `ROLLBACK TO SAVEPOINT`. Its assertions are unchanged |
+| `_call_endpoint` in the same file | Imports `psycopg2.sql` and `api.server` before `patch.dict("sys.modules", …)`. The patch evicted modules first imported inside it; a re-imported `psycopg2.sql` made the next real-database test fail with `got Composed instead` |
+
+**Tests.** `tests/test_pr_ads_163b_freshness_row_counts.py` — 11 cases, every
+one on a real PostgreSQL cluster with the real schema, added to CI's PostgreSQL
+step and to its did-run list. The first 9 fail on `main`; the pre-fix run
+reproduces the production log line for line. Case 10 fails when the Deals page
+mapping is put back. Case 04 pins the `created_at` basis with a match that was
+recorded 200 days ago and re-confirmed today. Case 01 is the standing guard:
+every registered `(table, date_column)` must exist in the schema `init_db()`
+builds.
+
+**What production will show after this ships** (computed from today's rows,
+not yet observed):
+
+- `gclid/matches`: 213 rows first recorded in the 60-day window → "fresh with
+  data".
+- `gclid/coverage_snapshots` and the Mailchimp datasets: a real count instead
+  of "row count unavailable" (Mailchimp tables hold 0 rows).
+- `hubspot/deals`: **"empty success"**, shown on the two technical status
+  pages only. The war room's HubSpot source card will read "warning" for it.
+  That is true, and it is a finding, not a regression — see below. No page is
+  reported blocked by it.
+- Every dataset now has its latest batch read, for the first time.
+
+**Found, not fixed here.**
+
+1. **The legacy `deals` table is dead.** The
+   table has one writer (`db_writers.write_deals`) and no reader anywhere in
+   the code. Its newest row is 2026-05-25. Since 2026-05-26 the `hubspot/deals`
+   sync has recorded 179 daily and 6 monthly `success` batches with 0 rows
+   each, and no weekly batch has written a row either. `static/app.js` still lists `hubspot/deals` as a
+   dependency of the Dashboard, Deals, Campaign Revenue & Spend, Country
+   Revenue & Spend and Unit Economics pages, though every figure on them comes
+   from the canonical deal ledger (gated separately by
+   `canonical_ledger_stale`). Next slice: retire the legacy deal pull
+   (`pull_deals_with_gclid`, `write_deals`, its step in the daily,
+   incremental, weekly and monthly jobs and the backfill) together with its
+   registry entry and those dependency lists.
+2. **The daily incremental sync has ended `partial` every day since
+   2026-09-22** (60 runs), each time for `hubspot/sql_coverage_gaps`. The open
+   post-boundary incident count went from 334 to 1,401 on 2026-11-17, the day
+   the contact scan was rebuilt (PR-ADS-161I). The status is honest; a status
+   that never changes is also one nobody reads.
+3. The latest-batch read takes the newest batch of any status, so an abandoned
+   `running` batch can stand in for the latest finished one. That read never
+   succeeded in production before this slice, so this is reachable for the
+   first time.
+4. **Contacts deleted or merged in HubSpot stay in the funnel.** Checked
+   against HubSpot on 2026-11-18: 30 stored contacts no longer exist there (7
+   of the 564 created in October). The sync reads modified contacts and never
+   learns of a removal. Reached-SQL (70) and reached-Opportunity (46) for
+   October matched HubSpot exactly.

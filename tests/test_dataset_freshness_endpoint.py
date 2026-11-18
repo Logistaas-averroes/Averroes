@@ -24,7 +24,11 @@ def _make_mock_conn(
     batch_rows = batch_rows or []
     count_by_table = count_by_table or {}
     failing_tables = failing_tables or set()
-    state: dict[str, object] = {"mode": None, "fetchone": None}
+    # PR-ADS-163B: `aborted` models what a real transaction does after an
+    # error — every later statement fails until a ROLLBACK TO SAVEPOINT. The
+    # mock used to let the statement after a failed one succeed, which is how
+    # it missed one unreadable row count blanking every read after it.
+    state: dict[str, object] = {"mode": None, "fetchone": None, "aborted": False}
     executed: list[dict[str, object]] = []
 
     cur = MagicMock()
@@ -35,6 +39,17 @@ def _make_mock_conn(
         sql_text = " ".join(str(sql).split())
         sql_lc = sql_text.lower()
         executed.append({"sql": sql_text, "params": params, "kind": "other"})
+        if sql_lc.startswith("rollback to savepoint "):
+            executed[-1]["kind"] = "savepoint"
+            state["aborted"] = False
+            return
+        if state["aborted"]:
+            raise RuntimeError(
+                "current transaction is aborted, commands ignored until end "
+                "of transaction block")
+        if sql_lc.startswith("savepoint "):
+            executed[-1]["kind"] = "savepoint"
+            return
         if "from sync_state" in sql_lc:
             executed[-1]["kind"] = "sync_state"
             cur.description = [
@@ -60,6 +75,7 @@ def _make_mock_conn(
             executed[-1]["kind"] = "count"
             executed[-1]["table"] = table
             if table in failing_tables:
+                state["aborted"] = True
                 raise RuntimeError(f"simulated count failure: {table}")
             cur.description = [("count",)]
             state["mode"] = "count"
@@ -89,11 +105,17 @@ def _make_mock_conn(
 
 
 def _call_endpoint(*, conn, days: int):
+    # PR-ADS-163B: import BEFORE patching sys.modules. `patch.dict` restores
+    # the dict on exit and so evicts every module first imported inside it.
+    # An evicted `psycopg2.sql` is re-imported as a second module object, and
+    # the next real-database test to run a composed query then fails with
+    # "argument 1 must be a string or unicode object: got Composed instead".
+    import psycopg2.sql  # noqa: F401, PLC0415
+    from api.server import api_datasets_freshness  # noqa: PLC0415
+
     mock_db_conn = MagicMock()
     mock_db_conn.get_conn = MagicMock(return_value=conn)
     with patch.dict("sys.modules", {"db.connection": mock_db_conn}):
-        from api.server import api_datasets_freshness
-
         return api_datasets_freshness(user={"username": "test"}, days=days)
 
 
@@ -176,6 +198,11 @@ def test_row_count_query_failure_is_unknown_not_zero():
     assert matches["rows_in_window"] is None
     # PR-ADS-095: refined from UNKNOWN to UNKNOWN_ROW_COUNT for clarity
     assert matches["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT
+    # PR-ADS-163B: the failure costs only that read. A dataset registered
+    # AFTER the failing one still has its count.
+    snapshots = next(d for d in payload["datasets"]
+                     if d["dataset_key"] == "gclid/coverage_snapshots")
+    assert snapshots["rows_in_window"] == 0
 
 
 def test_configured_datasets_get_count_coverage_or_unknown():

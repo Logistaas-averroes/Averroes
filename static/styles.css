@@ -3890,6 +3890,8 @@ body.is-revenue-page #monitoring-banner {
 .war-room-run--ok { border-color: var(--green-500, #22c55e); }
 .war-room-run--error { border-color: var(--red-500, #ef4444); }
 .war-room-run--neutral { border-color: var(--border-light, #e5e7eb); }
+.war-room-run--warn { border-color: var(--c-warning, #b45309); }
+.war-room-run--warn .war-room-run__status { color: var(--c-warning, #b45309); }
 .war-room-run__label { font-size: 12px; font-weight: 600; color: var(--text-primary, #374151); }
 .war-room-run__status { font-size: 12px; font-weight: 700; margin-top: 2px; text-transform: capitalize; }
 .war-room-run--ok .war-room-run__status { color: var(--green-600, #16a34a); }

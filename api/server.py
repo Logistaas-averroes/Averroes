@@ -1863,6 +1863,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
     from psycopg2 import sql as _psql  # noqa: PLC0415
 
     from db.connection import get_conn  # noqa: PLC0415
+    from db.isolated_read import execute_isolated  # noqa: PLC0415
     row_counts: dict[str, int | None] = {}
     latest_batch_info: dict[tuple[str, str], dict] = {}
 
@@ -1925,7 +1926,9 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                         _psql.Identifier(date_column),
                     )
                     try:
-                        cur.execute(query, (window_start,))
+                        # PR-ADS-163B: isolated — an unreadable count must
+                        # not abort the transaction the later reads share.
+                        execute_isolated(cur, query, (window_start,))
                         result = cur.fetchone()
                         count = int(result[0]) if result and result[0] is not None else 0
                         _count_cache[cache_key] = count
@@ -1941,7 +1944,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                         )
 
                 try:
-                    cur.execute("""
+                    execute_isolated(cur, """
                         SELECT DISTINCT ON (source, dataset)
                             source, dataset, status, row_count
                         FROM sync_batches
@@ -5159,6 +5162,7 @@ def api_system_status_war_room(
         build_war_room_response,
     )
     from db.connection import get_conn  # noqa: PLC0415
+    from db.isolated_read import execute_isolated  # noqa: PLC0415
     from psycopg2 import sql as _psql  # noqa: PLC0415
 
     # ── Gather data from DB ────────────────────────────────────────────────
@@ -5234,19 +5238,23 @@ def api_system_status_war_room(
                             _psql.Identifier(table_name),
                             _psql.Identifier(date_column),
                         )
-                        cur.execute(query, (window_start,))
+                        # PR-ADS-163B: isolated — see execute_isolated.
+                        execute_isolated(cur, query, (window_start,))
                         result_row = cur.fetchone()
                         count = int(result_row[0]) if result_row and result_row[0] is not None else 0
                         _count_cache[cache_key] = count
                         row_counts[cfg_key] = count
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         _count_cache[cache_key] = None
                         row_counts[cfg_key] = None
+                        log.warning(
+                            "[api/status-war-room] row count query failed for "
+                            "dataset=%s table=%s: %s", cfg_key, table_name, exc)
 
                 # 3. Get latest batch info — one row per source (most recent by started_at)
                 latest_batch_by_source: dict[str, dict] = {}
                 try:
-                    cur.execute("""
+                    execute_isolated(cur, """
                         SELECT DISTINCT ON (source)
                             source, dataset, status, row_count
                         FROM sync_batches
@@ -5262,7 +5270,7 @@ def api_system_status_war_room(
                         }
                     # Also keep per-(source, dataset) map for canonical freshness computation
                     latest_batch_info: dict[tuple[str, str], dict] = {}
-                    cur.execute("""
+                    execute_isolated(cur, """
                         SELECT DISTINCT ON (source, dataset)
                             source, dataset, status, row_count
                         FROM sync_batches
@@ -5275,9 +5283,11 @@ def api_system_status_war_room(
                             "status": br["status"],
                             "row_count": br["row_count"],
                         }
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     latest_batch_info = {}
                     latest_batch_by_source = {}
+                    log.warning(
+                        "[api/status-war-room] latest sync_batch query failed: %s", exc)
 
                 # 4. Compute canonical freshness for each dataset
                 canonical_status_map: dict[str, str] = {}
@@ -5324,7 +5334,8 @@ def api_system_status_war_room(
                     dataset_details[cfg_key] = {
                         "rows_in_window": row_counts.get(cfg_key),
                         "latest_source_date": str(sync_row.get("last_source_date")) if sync_row.get("last_source_date") else None,
-                        "last_batch_row_count": batch_info.get("row_count", 0),
+                        # PR-ADS-163B: no batch on record is unknown, not 0.
+                        "last_batch_row_count": batch_info.get("row_count"),
                         "reason": verdict.get("reason", ""),
                         "next_action": verdict.get("next_action", ""),
                     }
@@ -5389,7 +5400,8 @@ def api_system_status_war_room(
                     dataset_details[cfg_key] = {
                         "rows_in_window": row_counts.get(cfg_key),
                         "latest_source_date": str(sync_row.get("last_source_date")) if sync_row.get("last_source_date") else None,
-                        "last_batch_row_count": batch_info.get("row_count", 0),
+                        # PR-ADS-163B: no batch on record is unknown, not 0.
+                        "last_batch_row_count": batch_info.get("row_count"),
                         "reason": verdict.get("reason", ""),
                         "next_action": verdict.get("next_action", ""),
                     }
@@ -5415,39 +5427,38 @@ def api_system_status_war_room(
                         "latest_batch_status": batch_status,
                     }
 
-                # 6. Scheduler runs
-                for run_type in ["daily", "weekly", "monthly"]:
+                # 6. Scheduler runs.
+                #
+                # PR-ADS-163B: the incremental sync was looked up as
+                # `run_type = 'incremental'`, a value no scheduler has ever
+                # written — it persists `scheduler.incremental_sync.RUN_TYPE`
+                # (`daily_incremental_sync`) — so its tile was empty on every
+                # request while the job ran daily. A cadence is not a run
+                # type: each tile is read by the run type its job persists.
+                from scheduler.incremental_sync import (  # noqa: PLC0415
+                    RUN_TYPE as _INCREMENTAL_RUN_TYPE,
+                )
+                for tile, run_type in (("daily", "daily"), ("weekly", "weekly"),
+                                       ("monthly", "monthly"),
+                                       ("incremental", _INCREMENTAL_RUN_TYPE)):
                     try:
-                        cur.execute(
+                        execute_isolated(
+                            cur,
                             "SELECT status, started_at, finished_at FROM runs "
                             "WHERE run_type = %s ORDER BY started_at DESC LIMIT 1",
                             (run_type,),
                         )
                         row = cur.fetchone()
                         if row:
-                            runs_data[run_type] = {
+                            runs_data[tile] = {
                                 "status": row[0],
                                 "started_at": row[1].isoformat() if row[1] else None,
                                 "finished_at": row[2].isoformat() if row[2] else None,
                             }
-                    except Exception:  # noqa: BLE001
-                        pass
-
-                # Incremental sync — check if run_type exists
-                try:
-                    cur.execute(
-                        "SELECT status, started_at, finished_at FROM runs "
-                        "WHERE run_type = 'incremental' ORDER BY started_at DESC LIMIT 1",
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        runs_data["incremental"] = {
-                            "status": row[0],
-                            "started_at": row[1].isoformat() if row[1] else None,
-                            "finished_at": row[2].isoformat() if row[2] else None,
-                        }
-                except Exception:  # noqa: BLE001
-                    pass
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "[api/status-war-room] latest %s run query failed: %s",
+                            run_type, exc)
 
     except Exception as exc:  # noqa: BLE001
         log.error("[api/status-war-room] database error: %s", exc, exc_info=True)
