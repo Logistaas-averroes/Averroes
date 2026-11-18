@@ -169,7 +169,7 @@ const PAGE_EXPLANATIONS = {
     title: "Dashboard",
     purpose: "Executive overview of spend, closed-won revenue, pipeline movement, and action signals for one business window.",
     source: "Canonical Revenue Decision Mart — Google Ads spend truth and HubSpot closed-won revenue truth.",
-    dependsOn: ["campaigns", "leads", "deals", "gclid_attribution"],
+    dependsOn: ["canonical_spend", "leads", "deals", "gclid_attribution"],
     emptyMeans: "No verified spend or closed-won revenue exists in the selected business window.",
     nextAction: "Open Revenue Health to check spend, FX, and revenue truth status."
   },
@@ -177,7 +177,7 @@ const PAGE_EXPLANATIONS = {
     title: "Campaign Evidence",
     purpose: "Selected-window campaign evidence — genuine window totals for spend, leads, SQLs, junk and CPQL, with a factual outcome status per campaign.",
     source: "Canonical Google Ads campaign spend (native GBP + FX-safe USD) reconciled with deduplicated HubSpot lead-quality outcomes for the selected window. All-time returns genuine cumulative totals, not a scheduler snapshot.",
-    dependsOn: ["campaigns", "leads"],
+    dependsOn: ["canonical_spend", "leads"],
     emptyMeans: "No canonical spend or HubSpot lead evidence exists for the selected window. Run the daily/weekly scheduler or check System Status.",
     nextAction: "Check System Status → Google Ads API / Campaigns."
   },
@@ -265,7 +265,7 @@ const PAGE_EXPLANATIONS = {
     title: "Campaign Revenue & Spend",
     purpose: "Revenue attribution by campaign over business windows — which campaigns produce SQLs, customers, and closed-won revenue.",
     source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
-    dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
+    dependsOn: ["hubspot/deals", "google_ads_api/canonical_spend"],
     emptyMeans: "No attributed revenue found for this business window. Spend may exist without a HubSpot closed-won match, or SQL/customer data may not be mapped to campaigns yet.",
     nextAction: "Check that HubSpot deals are synced and campaigns have Google Ads API spend data for the selected window."
   },
@@ -281,7 +281,7 @@ const PAGE_EXPLANATIONS = {
     title: "Unit Economics",
     purpose: "Executive SaaS economics — LTV/CAC, payback, and profitability verdicts.",
     source: "Revenue Truth Layer.",
-    dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
+    dependsOn: ["hubspot/deals", "google_ads_api/canonical_spend"],
     emptyMeans: "Not enough closed-won volume to compute unit economics.",
     nextAction: "Ensure sufficient deal volume exists in the selected window."
   }
@@ -411,7 +411,7 @@ const PAGE_HELP_CONTENT = {
 // use empty arrays — they have their own status mechanisms.
 
 const PAGE_DEPENDENCIES = {
-  dashboard:               ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
+  dashboard:               ["google_ads_api/canonical_spend", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
   campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
@@ -424,9 +424,9 @@ const PAGE_DEPENDENCIES = {
   scheduler:               [],
   health:                  [],
   backfill:                [],
-  "roas-campaigns":          ["hubspot/deals", "google_ads_api/campaigns"],
+  "roas-campaigns":          ["hubspot/deals", "google_ads_api/canonical_spend"],
   "roas-countries":          ["hubspot/deals", "google_ads_api/geo"],
-  "unit-economics":          ["hubspot/deals", "google_ads_api/campaigns"],
+  "unit-economics":          ["hubspot/deals", "google_ads_api/canonical_spend"],
 };
 
 // ── Session state ──────────────────────────────────────────────────────────
@@ -523,7 +523,7 @@ let datasetFreshnessRows = [];
 let datasetFreshnessStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // Per-dataset freshness cache — populated by loadDatasetFreshness() and used by
-// renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "google_ads_api/campaigns").
+// renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "google_ads_api/canonical_spend").
 let _datasetFreshnessByKey = {};
 
 // ── Utility helpers ────────────────────────────────────────────────────────
@@ -1721,7 +1721,7 @@ function _sourceDisplayName(source) {
 
 function _datasetDisplayName(key) {
   const labels = {
-    "google_ads_api/campaigns":    "Campaign data",
+    "google_ads_api/canonical_spend": "Campaign spend data",
     "google_ads_api/search_terms": "Search-term data",
     "google_ads_api/keyword_facts": "Keyword evidence data",
     "google_ads_api/keywords":     "Keyword data (legacy snapshot)",
@@ -13413,10 +13413,17 @@ async function triggerRun(jobType) {
     const data = await res.json().catch(() => ({}));
 
     if (res.ok && data.status === "success") {
-      const rp = data.result && data.result.report_path
-        ? ` Report: ${escapeHtml(data.result.report_path)}`
-        : "";
-      showSchedFeedback("success", `Run completed. Finished at ${escapeHtml(data.finished_at || "—")}.${rp}`);
+      showSchedFeedback("success", `Run completed. Finished at ${escapeHtml(data.finished_at || "—")}.`);
+    } else if (res.ok && data.status === "partial") {
+      // PR-ADS-162H: the weekly and monthly data refreshes report their own
+      // outcome. Partial is neither success nor failure: the run finished and
+      // at least one step did not land, so the steps are named.
+      // showSchedFeedback() assigns textContent, so the step names need no
+      // escaping here.
+      const steps = (data.result && Array.isArray(data.result.failed_steps))
+        ? data.result.failed_steps.join("; ") : "";
+      showSchedFeedback("warning",
+        `Run finished partially at ${data.finished_at || "—"}. Did not complete: ${steps || "steps not reported"}.`);
     } else if (res.status === 409) {
       showSchedFeedback("error", `${escapeHtml(jobType)} job is already running.`);
     } else if (res.status === 403) {
@@ -14140,7 +14147,7 @@ function datasetRelatedPage(source, dataset) {
     "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
     "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
     "google_ads_api/geo":          { page: "geo",           label: "Country Performance" },
-    "google_ads_api/campaigns":    { page: "campaigns",     label: "Campaigns"    },
+    "google_ads_api/canonical_spend": { page: "campaigns",  label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Leads" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },
     "gclid/matches":        { page: "gclid-attribution", label: "GCLID Attribution" },

@@ -31,9 +31,13 @@ _CONN_UNSET = object()
 # ─── Configuration ──────────────────────────────────────────────────────────
 
 # Tables to audit with their date column for time-range queries.
+#
+# PR-ADS-162H: the legacy `campaigns` snapshot table is no longer audited. Its
+# only scheduled writer was the campaign-truth step of the weekly / monthly
+# report, which is removed; auditing it against an 8-day threshold would report
+# a permanent STALE for a table nothing is meant to fill.
 TABLES: dict[str, str] = {
     "runs": "started_at",
-    "campaigns": "run_date",
     "leads": "run_date",
     "deals": "run_date",
     "keywords": "run_date",
@@ -48,7 +52,6 @@ TABLES: dict[str, str] = {
 # Keys use "source/dataset" to match sync_state UNIQUE(source, dataset).
 TABLE_TO_SYNC_DATASET_KEY: dict[str, str | None] = {
     "runs": None,
-    "campaigns": "windsor/campaigns",
     "leads": "hubspot/contacts",
     "deals": "hubspot/deals",
     "keywords": "windsor/keywords",
@@ -62,7 +65,6 @@ TABLE_TO_SYNC_DATASET_KEY: dict[str, str | None] = {
 # External source for each dataset (informational only).
 DATASET_SOURCE: dict[str, str] = {
     "runs": "internal",
-    "campaigns": "windsor+hubspot",
     "leads": "hubspot",
     "deals": "hubspot",
     "keywords": "windsor",
@@ -76,7 +78,6 @@ DATASET_SOURCE: dict[str, str] = {
 # Last sync type mapping (which scheduler populates this).
 DATASET_SYNC_TYPE: dict[str, str] = {
     "runs": "all",
-    "campaigns": "weekly/monthly/incremental",
     "leads": "weekly/daily/incremental",
     "deals": "weekly/incremental",
     "keywords": "weekly/incremental",
@@ -90,7 +91,6 @@ DATASET_SYNC_TYPE: dict[str, str] = {
 # Freshness thresholds in days — if latest date is older than this, it's stale.
 STALE_THRESHOLD_DAYS: dict[str, int] = {
     "runs": 2,
-    "campaigns": 8,
     "leads": 3,
     "deals": 8,
     "keywords": 8,

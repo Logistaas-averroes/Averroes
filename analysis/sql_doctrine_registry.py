@@ -494,35 +494,27 @@ CONSUMERS: list[dict] = [
        truth_status="raw", row=True, drawer=True, export=True),
 
     # ── Scheduled outputs ───────────────────────────────────────────────────
-    _c("Weekly / monthly report pipeline (analysis.core → rule_advisor → email)",
-       "Campaign truth confirmed_sqls, CPQL and FIX/HOLD/SCALE/CUT verdicts from a local "
-       "JSON contact pull, emailed via SendGrid.",
-       endpoint="APScheduler weekly/monthly; POST /run/weekly, /run/monthly",
-       service_function="analysis.core.run_lead_quality / run_campaign_truth / determine_verdict; analysis.rule_advisor.generate_deterministic_report",
-       repository_source="data/crm_contacts.json + outputs/*.json (files)", source_table="none (JSON)",
-       sql_definition="mql_status in ['CLOSED - Sales Qualified', 'CLOSED - Deal Created'] (QUALIFIED)",
-       date_field="none (grace_days affects junk only)", dedup_key="none",
-       windows=["30d spend pull; contacts undated"], scope="other (per campaign label)",
-       classification=CLS_LEGACY, code_location="analysis/core.py:determine_verdict",
-       migration_notes="Third doctrine, undeduplicated and undated. SCALE requires "
-                       "min_confirmed_sqls_30d; FIX on 0 SQLs with spend > 200. CPQL "
-                       "rendered in the emailed table. Nothing reconciles the email "
-                       "against any page.",
-       truth_status="missing JSON → prose, CPQL 'N/A' on 0 SQLs",
-       headline=True, row=True, cpql=True, export=True, decision=True, executive=True,
-       operational=True),
+    # PR-ADS-162H: the "Weekly / monthly report pipeline" consumer stood here.
+    # Its code is deleted (analysis.core.run_lead_quality / run_campaign_truth /
+    # determine_verdict, analysis/rule_advisor.py, scheduler/delivery.py): the
+    # third SQL definition — mql_status literals counted from an undated,
+    # undeduplicated JSON pull — is no longer computed or published anywhere.
     _c("campaigns snapshot writer (db.writers.write_campaigns)",
-       "Persists confirmed_sqls and cpql_usd from campaign truth on run_date.",
-       endpoint="scheduler.weekly / scheduler.monthly",
+       "Writes a row's confirmed_sqls and a cpql_usd derived from it to the legacy "
+       "campaigns snapshot table on run_date.",
+       endpoint="scripts.backfill_windsor (manual admin backfill only)",
        service_function="db.writers.write_campaigns", repository_source="INSERT INTO campaigns",
        source_table=SNAPSHOT_TABLE, sql_definition="copies confirmed_sqls; cpql = spend / sqls",
        date_field=SNAPSHOT_DATE, dedup_key="none", windows=["snapshot"], scope="other",
        classification=CLS_LEGACY, code_location="db/writers.py:write_campaigns",
-       migration_notes="No EVIDENCE reader remains (the action queue was deleted in "
-                       "PR-ADS-162G); the table is still a registered core freshness "
-                       "dataset (services/freshness_service.py, system status) "
-                       "(/api/summary and /api/dashboard/trends were retired in "
-                       "PR-ADS-162B; historical intelligence in PR-ADS-162D).",
+       migration_notes="No scheduled caller since PR-ADS-162H: the weekly and monthly "
+                       "jobs wrote this table from campaign truth, which is deleted with "
+                       "the report. The one remaining caller is the manual backfill, "
+                       "whose rows are platform spend rows that carry no confirmed_sqls, "
+                       "so it stores 0 SQLs and a NULL cpql. No page, endpoint or audit "
+                       "reads the table, and it is no longer a freshness dataset "
+                       "(services.freshness_service.RETIRED_DATASETS). The table is not "
+                       "dropped.",
        truth_status="cpql None when sqls == 0", row=True, cpql=True),
     _c("leads snapshot writer (db.writers.write_leads / _map_status_category)",
        "Derives status_category from mql_status and stores contact_created_at from createdate.",
@@ -640,12 +632,6 @@ CONSUMERS: list[dict] = [
        code_location="services/revenue_attribution_service.py:_build_from_json",
        migration_notes="Reachable only when the durable DB read fails; revenue withheld on that path.",
        truth_status="diagnostic fallback mode disclosed in source_health", confidence="confirmed"),
-    _c("Claude advisor report writer (ADVISOR_MODE=claude)", "Optional LLM report rendering the same JSON SQL fields.",
-       endpoint="ADVISOR_MODE=claude", service_function="analysis.advisor.generate_weekly_report",
-       repository_source="outputs/*.json", source_table="none (JSON)", sql_definition="lead_quality qualified field",
-       date_field="none", dedup_key="none", windows=["report"], scope="other", classification=CLS_INACTIVE,
-       code_location="analysis/advisor.py:generate_weekly_report",
-       migration_notes="Default mode is deterministic.", truth_status="n/a"),
 ]
 
 
@@ -702,7 +688,6 @@ _LEADS_API = "Lead Quality API (/api/leads)"
 _WORKBENCH = "Campaign identity workbench"
 _MAILCHIMP = "Mailchimp attribution audit"
 _GCLID = "GCLID attribution rows"
-_REPORT = "Weekly / monthly report pipeline (analysis.core → rule_advisor → email)"
 _WRITE_CAMP = "campaigns snapshot writer (db.writers.write_campaigns)"
 _WRITE_LEADS = "leads snapshot writer (db.writers.write_leads / _map_status_category)"
 _WRITE_CLASS = "Source classification cache writer"
@@ -729,7 +714,6 @@ _CERT = "Campaign Evidence certification gate"
 _STWASTE = "Search-term waste truth audit (CLI)"
 _GACONV = "Google Ads platform conversions (keyword / search-term / campaign snapshot / daily delta)"
 _JSONFALLBACK = "Legacy JSON revenue fallback (revenue_attribution_service._build_from_json)"
-_CLAUDE = "Claude advisor report writer (ADVISOR_MODE=claude)"
 _AUDIT = "PR-ADS-158 audit"
 
 # Pattern shorthands for <module> bindings.
@@ -911,15 +895,11 @@ RULES: list[dict] = [
                "_build_sql_no_deal", "_sql_no_deal_status"]),
 
     # ── scheduled outputs ───────────────────────────────────────────────────
-    _m("report.core.module", "analysis/core.py", CLS_LEGACY, _REPORT, ["cpql_ref"]),
-    _r("report.core", "analysis/core.py", CLS_LEGACY, _REPORT,
-       symbol=["determine_verdict", "run_campaign_truth", "run_lead_quality"]),
-    _m("report.rule_advisor.module", "analysis/rule_advisor.py", CLS_LEGACY, _REPORT, ["cpql_ref"]),
-    _r("report.rule_advisor", "analysis/rule_advisor.py", CLS_LEGACY, _REPORT,
-       symbol=["_build_campaign_truth_table", "_build_data_gaps",
-               "_build_historical_intelligence_block"]),
-    _r("report.advisor", "analysis/advisor.py", CLS_INACTIVE, _CLAUDE,
-       symbol=["generate_weekly_report", "generate_monthly_report", "_build_prompt"]),
+    # PR-ADS-162H: the report rules (report.core.module, report.core,
+    # report.rule_advisor.module, report.rule_advisor, report.advisor) are
+    # removed with the code they bound. analysis/core.py keeps waste detection
+    # and the QUALIFIED list, neither of which the scanner flags; anything
+    # written there that it does flag is unknown_requires_review.
     # scheduler/ has NO SQL occurrence at the audited commit and NO binding: a
     # new one there is unknown_requires_review by construction.
     _r("windsor", "connectors/windsor_pull.py", CLS_GOOGLE_ADS_CONVERSION, _GACONV,
@@ -1195,7 +1175,9 @@ RULES: list[dict] = [
                "api_search_term_evidence_flagged", "api_search_term_evidence_term"]),
     _r("api.revenue", "api/server.py", CLS_MIXED, _RAS, symbol="get_revenue_attribution"),
     _r("api.source", "api/server.py", CLS_MIXED, _SRC, symbol="get_revenue_by_source"),
-    _m("api.module", "api/server.py", CLS_LEGACY, _REPORT, ["sqls_field_ref"]),
+    # PR-ADS-162H: "api.module" bound a module-level `sqls` field reference in
+    # api/server.py to the report pipeline. The consumer is deleted and the rule
+    # matched no occurrence; a module-level one written there now is unknown.
     _r("api.crm_funnel", "api/server.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        symbol=["api_crm_funnel", "api_crm_funnel_contacts", "api_crm_funnel_operational_status",
                "api_crm_funnel_sync", "api_crm_funnel_coverage"]),
@@ -1366,17 +1348,24 @@ CPQL_CONSUMERS: list[dict] = [
         "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by summary.cohort_cpql_usd",
     },
     {
-        "consumer": "campaigns.cpql_usd snapshot column (weekly/monthly report table)",
-        "code_location": "analysis/core.py:run_campaign_truth",
-        "spend_numerator_source": "Google Ads 30d spend from the report pull",
+        # PR-ADS-162H: this was "(weekly/monthly report table)", computed by
+        # analysis.core.run_campaign_truth and published in the emailed report.
+        # The report and campaign truth are deleted. The column and its writer
+        # remain, so the entry stays and says what they do now.
+        "consumer": "campaigns.cpql_usd snapshot column (legacy table; no scheduled writer)",
+        "code_location": "db/writers.py:write_campaigns",
+        "spend_numerator_source": "the spend on the row handed to the writer",
         "currency_fx_contract": "none (labelled USD)",
-        "sql_denominator_definition": "mql_status in QUALIFIED from data/crm_contacts.json",
-        "sql_denominator_scope": "other (per campaign label, undated, undeduplicated)",
+        "sql_denominator_definition": "the row's confirmed_sqls, copied as given",
+        "sql_denominator_scope": "other (per campaign label)",
         "sql_denominator_date_field": "none",
         "numerator_denominator_same_window": False,
         "unmatched_sqls_excluded": False,
         "denominator_incomplete_when_stage_dates_missing": "n/a",
-        "publication": "published in the emailed report table; N/A on 0 SQLs",
+        "publication": "not published: no page, endpoint or report reads the column. "
+                       "Historical rows keep the value campaign truth wrote; the "
+                       "manual backfill, the only remaining caller, passes rows with "
+                       "no confirmed_sqls and stores NULL",
     },
     {
         "consumer": "Dashboard Revenue revenue_per_sql_usd (inverse-CPQL family)",
@@ -1427,15 +1416,10 @@ DECISION_SURFACES: list[dict] = [
      "code_location": "services/search_term_evidence_service.py:_flagged_priority",
      "sql_definition": LEGACY_DEF, "scope": "campaign_attributable / unit", "date_field": LEGACY_DATE,
      "kind": "filter+sort+priority", "gated": "never disabled", "evidence_kind": "row evidence"},
-    {"surface": "Campaign verdict FIX/HOLD/SCALE/CUT (weekly/monthly report)",
-     "code_location": "analysis/core.py:determine_verdict",
-     "sql_definition": "mql_status in QUALIFIED (JSON)", "scope": "per campaign label",
-     "date_field": "none", "kind": "verdict", "gated": "none",
-     "evidence_kind": "complete total claimed (undated, undeduplicated)"},
-    {"surface": "Weekly recommendations: Data Gaps '0 confirmed SQLs with spend'",
-     "code_location": "analysis/rule_advisor.py:_build_data_gaps",
-     "sql_definition": "campaign_truth confirmed_sqls (JSON)", "scope": "per campaign label",
-     "date_field": "none", "kind": "recommendation", "gated": "none", "evidence_kind": "row evidence"},
+    # PR-ADS-162H: two surfaces stood here — "Campaign verdict FIX/HOLD/SCALE/CUT
+    # (weekly/monthly report)" and "Weekly recommendations: Data Gaps". Both
+    # were decisions the report made from the JSON-pull SQL count; the report
+    # is no longer generated, so neither decision is made.
     {"surface": "Dashboard trends alert 'spend rose without SQLs' + severity",
      "code_location": "api/server.py:_build_trend_alerts",
      "sql_definition": SNAPSHOT_DEF, "scope": "per campaign label", "date_field": SNAPSHOT_DATE,
@@ -1488,11 +1472,12 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
                 "table by run_date; Campaign Evidence windows the same table by "
                 "contact_created_at under the same Evidence Window label.",
      "code_location": "api/server.py:api_leads_country_summary"},
-    {"id": "doctrine.third_snapshot_population",
-     "summary": "campaigns.confirmed_sqls (analysis/core.py) counts mql_status literals from a "
-                "JSON pull with no date, dedup or exclusions; the weekly/monthly "
-                "report publishes it.",
-     "code_location": "analysis/core.py:run_lead_quality"},
+    # PR-ADS-162H: "doctrine.third_snapshot_population" stood here —
+    # campaigns.confirmed_sqls counted mql_status literals from a JSON pull with
+    # no date, dedup or exclusions, and the weekly/monthly report published it.
+    # Its producer (analysis.core.run_lead_quality / run_campaign_truth) and its
+    # publisher (the report) are deleted, so no surface carries that population
+    # any more. Rows already in the `campaigns` table keep it; nothing reads them.
     {"id": "scope.keyword_attributable_two_definitions",
      "summary": "platform_sql_attribution keyword scope is criterion-level (campaign_id + "
                 "exact keyword, unique only); the lifecycle funnel keyword scope is "

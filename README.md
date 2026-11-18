@@ -42,7 +42,6 @@ cp .env.example .env
 ```
 
 Required variables:
-- `ANTHROPIC_API_KEY` — from console.anthropic.com
 - `HUBSPOT_API_KEY` — from HubSpot Settings > Integrations > API Key
 - `WINDSOR_API_KEY` — from Windsor.ai account settings
 - `GOOGLE_ADS_DEVELOPER_TOKEN` — from Google Ads API Center

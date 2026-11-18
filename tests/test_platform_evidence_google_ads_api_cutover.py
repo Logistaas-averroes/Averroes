@@ -37,7 +37,13 @@ SERVER_PY = (ROOT / "api" / "server.py").read_text(encoding="utf-8")
 PLATFORM_EVIDENCE_ROUTES = ["campaigns", "search-terms", "keywords", "geo"]
 
 # Google Ads API datasets that back the Platform Evidence pages.
-GOOGLE_ADS_DATASETS = ["campaigns", "search_terms", "keywords", "geo"]
+#
+# PR-ADS-162H: the first entry was "campaigns" — the legacy campaigns SNAPSHOT
+# dataset. It is retired: its only scheduled writer was the campaign-truth step
+# of the weekly / monthly report. The Campaigns page has read the canonical
+# daily-spend dataset since PR-ADS-143, so that is the dataset every rule
+# below is asserted for.
+GOOGLE_ADS_DATASETS = ["canonical_spend", "search_terms", "keywords", "geo"]
 
 
 # ── JS extraction helpers (no JS execution) ─────────────────────────────────
@@ -168,7 +174,7 @@ class TestSystemStatusLabels:
         assert SOURCE_DEFINITIONS["google_ads_api"]["label"] == "Google Ads API"
         datasets = set(SOURCE_DEFINITIONS["google_ads_api"]["datasets"])
         assert set(GOOGLE_ADS_DATASETS).issubset(datasets), (
-            "google_ads_api source must cover campaigns/search_terms/keywords/geo"
+            "google_ads_api source must cover canonical_spend/search_terms/keywords/geo"
         )
         # Windsor must not be the active ad-platform source key.
         assert "windsor" not in SOURCE_DEFINITIONS, (
@@ -239,7 +245,7 @@ class TestDatasetSourceMapping:
             "keywords snapshot"
         )
         # No platform-evidence page should still point at windsor/<dataset>.
-        for ds in GOOGLE_ADS_DATASETS:
+        for ds in [*GOOGLE_ADS_DATASETS, "campaigns"]:
             assert f"windsor/{ds}" not in block, (
                 f"PAGE_DATASET_MAP must not reference windsor/{ds} as active"
             )

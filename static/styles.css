@@ -1311,6 +1311,14 @@ a {
   border-left: 3px solid var(--c-warning);
 }
 
+/* PR-ADS-162H: a data refresh that finished with steps that did not land. */
+.run-feedback--warning {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border: 1px solid var(--c-warning-border);
+  border-left: 3px solid var(--c-warning);
+}
+
 /* ── Health checks ────────────────────────────────────────────────────────── */
 .health-grid {
   display: grid;

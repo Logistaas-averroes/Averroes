@@ -135,7 +135,7 @@ def validate_docs(failures: list) -> None:
 _STALE_REFERENCES = [
     (r"config/patterns\.yaml",          "config/patterns.yaml (removed; use config/junk_patterns.yaml)"),
     (r"config/logistaas_config\.yaml",  "config/logistaas_config.yaml (not yet created; use config/thresholds.yaml)"),
-    (r"doctrine\.advisor",              "doctrine.advisor (module removed; use analysis.advisor)"),
+    (r"doctrine\.advisor",              "doctrine.advisor (module removed)"),
     (r"data/ads_campaigns_7d\.json",    "data/ads_campaigns_7d.json (stale filename; current file is data/ads_campaigns.json)"),
 ]
 

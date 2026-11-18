@@ -85,12 +85,11 @@ _REQUIRED_ENV_VARS = [
     "AUTH_USERS_JSON",
 ]
 
+# PR-ADS-162H: ANTHROPIC_API_KEY, SENDGRID_API_KEY, REPORT_SENDER_EMAIL and
+# REPORT_RECIPIENT_EMAIL are no longer listed — the advisor report they served
+# is neither generated nor emailed.
 _OPTIONAL_ENV_VARS = [
-    ("ANTHROPIC_API_KEY", "optional — only required when ADVISOR_MODE=claude"),
     ("ADMIN_API_TOKEN",   "optional — for API-only manual run triggers"),
-    ("SENDGRID_API_KEY",  "optional — for report email delivery"),
-    ("REPORT_SENDER_EMAIL",    "optional — for report email delivery"),
-    ("REPORT_RECIPIENT_EMAIL", "optional — for report email delivery"),
 ]
 
 
@@ -263,7 +262,6 @@ _REQUIRED_SCHEDULER_FILES = [
     "scheduler/daily.py",
     "scheduler/weekly.py",
     "scheduler/monthly.py",
-    "scheduler/delivery.py",
     "scheduler/run_history.py",
 ]
 
@@ -275,8 +273,6 @@ _REQUIRED_CONNECTOR_FILES = [
 
 _REQUIRED_ANALYSIS_FILES = [
     "analysis/core.py",
-    "analysis/advisor.py",
-    "analysis/rule_advisor.py",
 ]
 
 _REQUIRED_API_FILES = [
@@ -310,24 +306,9 @@ def check_source_files(failures: list) -> None:
                 failures.append(f"file:{path}")
 
 
-def check_deterministic_advisor(failures: list) -> None:
-    _header("Deterministic Advisor  [analysis/rule_advisor.py]")
-    if os.path.isfile("analysis/rule_advisor.py"):
-        _pass("analysis/rule_advisor.py", "exists")
-    else:
-        _fail("analysis/rule_advisor.py", "deterministic advisor not found")
-        failures.append("file:analysis/rule_advisor.py")
-
-    advisor_mode = os.environ.get("ADVISOR_MODE", "deterministic").strip().lower()
-    if advisor_mode in ("deterministic", ""):
-        _pass("ADVISOR_MODE", "deterministic (no Claude API required)")
-    elif advisor_mode == "claude":
-        _warn("ADVISOR_MODE", "claude — ANTHROPIC_API_KEY is required")
-        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-            _fail("ANTHROPIC_API_KEY", "required when ADVISOR_MODE=claude")
-            failures.append("env:ANTHROPIC_API_KEY")
-    else:
-        _warn("ADVISOR_MODE", f"unknown value {advisor_mode!r} — will default to deterministic")
+# PR-ADS-162H: check_deterministic_advisor is removed with analysis/rule_advisor.py.
+# It failed the audit when the advisor module was missing, and the module is
+# deleted: the weekly / monthly jobs no longer produce a report.
 
 _FORBIDDEN_PHASE1_MODULES = [
     ("connectors/oct_uploader.py",    "OCT uploader — Phase 2, must not be active"),
@@ -397,7 +378,6 @@ def main() -> int:
     critical_failures: list = []
 
     check_env_vars(critical_failures)
-    check_deterministic_advisor(critical_failures)
     check_config_files(critical_failures)
     check_docs(critical_failures)
     check_makefile_targets(critical_failures)

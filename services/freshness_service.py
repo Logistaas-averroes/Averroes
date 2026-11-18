@@ -145,16 +145,42 @@ HAS_DATA_STATES = frozenset([
 
 # ── Dataset Configuration ───────────────────────────────────────────────────
 
+# ── Retired datasets ────────────────────────────────────────────────────────
+#: PR-ADS-162H — `(source, dataset)` keys that are no longer a live dataset,
+#: with the reason. A retired key has NO entry in DATASET_FRESHNESS_CONFIG, so
+#: no surface computes a freshness verdict for it.
+#:
+#: This exists because unregistering is not enough on its own:
+#: `/api/datasets/freshness` also lists every `sync_state` row it does not
+#: recognise, with a default 8-day threshold. Production holds a
+#: `(google_ads_api, campaigns)` row from past weekly and monthly runs, so
+#: without this the retired snapshot would keep appearing as a dataset and go
+#: "stale" a week after its last write — an alarm about a table nothing is
+#: supposed to fill. The endpoint reports these keys separately, as retired,
+#: and never as a dataset with a status.
+#:
+#: The `campaigns` TABLE is not dropped, and `db.writers.write_campaigns` is
+#: still reachable from the manual backfill (scripts/backfill_windsor.py).
+RETIRED_DATASETS: dict[tuple[str, str], str] = {
+    ("google_ads_api", "campaigns"): (
+        "Legacy campaigns snapshot. Its only scheduled writer was the "
+        "campaign-truth step of the weekly and monthly report, removed in "
+        "PR-ADS-162H. No page reads the table. The Campaigns page reads "
+        "google_ads_api/canonical_spend."
+    ),
+}
+
+
+def is_retired_dataset(source: str | None, dataset: str | None) -> bool:
+    """True when ``(source, dataset)`` names a retired dataset."""
+    return (source, dataset) in RETIRED_DATASETS
+
+
 DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
-    "campaigns": {
-        "table": "campaigns",
-        "date_column": "run_date",
-        "source": "google_ads_api",
-        "dataset": "campaigns",
-        "stale_threshold_days": 8,
-        "depends_on": [],
-        "page": "campaigns",
-    },
+    # PR-ADS-162H: the `campaigns` entry (the legacy `campaigns` snapshot table,
+    # keyed `google_ads_api/campaigns`) stood first here. It is retired — see
+    # RETIRED_DATASETS above.
+    #
     # PR-ADS-143: the Campaign Evidence page reads canonical daily spend (not the
     # `campaigns` snapshot), so its freshness tracks the real upstream table.
     #

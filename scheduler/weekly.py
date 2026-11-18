@@ -1,20 +1,36 @@
 """
-Weekly Report Scheduler
-Runs every Monday at 7am GMT via Render cron.
-Orchestrates: google_ads_source → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
+Weekly data refresh
+Runs every Monday at 07:00 Asia/Amman (04:00 UTC) from the in-app scheduler.
+Orchestrates: google_ads_source → hubspot_pull → durable writes → waste
+detection → flag history → GCLID match.
 No business logic lives here. This module only sequences the steps.
 
-Report generation uses the deterministic advisor by default (ADVISOR_MODE=deterministic).
-Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
+PR-ADS-162H: this job no longer produces a report. It used to end by building
+the advisor report (lead quality → campaign truth → n-grams → markdown) and
+emailing it; the Reports page that displayed it was deleted in PR-ADS-162G and
+nobody received the email. What is left is every step a live page still reads:
+the legacy leads / deals / geo / keywords snapshots, durable keyword facts, the
+canonical search-term sync, the waste annotations and their flag history, and
+the GCLID match with its coverage snapshot.
+
+The function keeps its name (`run_weekly_report`) because the scheduler, the
+manual run endpoint and the `weekly` run type are all keyed on it. It returns
+the run outcome, not a report path: `success` when every step landed,
+`partial` when the run finished and at least one step did not. A run that
+cannot continue still raises, and is recorded `failed`.
 """
 
 import logging
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from scheduler.delivery import deliver_report
 from scheduler.run_history import start_run, finish_run
-from scheduler.sync_utils import max_source_date, persistence_succeeded
+from scheduler.sync_utils import (
+    max_source_date,
+    note_step_failure,
+    persistence_succeeded,
+    run_outcome,
+)
 import db.writers as db_writers
 
 log = logging.getLogger(__name__)
@@ -23,13 +39,15 @@ load_dotenv()
 
 def run_weekly_report():
     print(f"\n{'='*60}")
-    print(f"LOGISTAAS WEEKLY REPORT — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"LOGISTAAS WEEKLY DATA REFRESH — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
 
     run_record = start_run("weekly")
-    delivery_attempted = False
-    delivery_ok = None
     run_id = None
+    # PR-ADS-162H: every kept step that does not land is recorded here, and the
+    # run ends `partial` if this is not empty. Before, a write that persisted
+    # nothing was logged and the run still ended `success`.
+    step_failures: list = []
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
@@ -42,7 +60,7 @@ def run_weekly_report():
         # actually persisted, so the snapshot and the database describe the same
         # observation by construction rather than by coincidence.
         print(
-            "Step 1/6: Pulling Google Ads data via direct Google Ads API "
+            "Step 1/4: Pulling Google Ads data via direct Google Ads API "
             "(campaigns/keywords/geo=30d; search_terms=60d, pulled once by the "
             "canonical service below)..."
         )
@@ -61,7 +79,7 @@ def run_weekly_report():
         print(f"  Google Ads API pull complete — {len(campaigns)} campaign rows")
 
         # Step 2: Pull HubSpot CRM data (30-day window)
-        print("Step 2/6: Pulling HubSpot CRM data (30 days)...")
+        print("Step 2/4: Pulling HubSpot CRM data (30 days)...")
         from connectors.hubspot_pull import (
             pull_paid_search_contacts,
             pull_deals_with_gclid,
@@ -100,6 +118,10 @@ def run_weekly_report():
                             f"write_leads returned 0 for {len(contacts or [])} fetched contacts"
                         ),
                     )
+                if not persistence_succeeded(contacts, contacts_written):
+                    note_step_failure(
+                        step_failures, "write_leads",
+                        f"wrote {contacts_written} of {len(contacts or [])} fetched contacts")
 
                 # Track HubSpot deals weekly sync (freshness watermark)
                 deals_batch_id = db_writers.start_sync_batch(
@@ -122,11 +144,22 @@ def run_weekly_report():
                             f"write_deals returned 0 for {len(deals or [])} fetched deals"
                         ),
                     )
+                if not persistence_succeeded(deals, deals_written):
+                    note_step_failure(
+                        step_failures, "write_deals",
+                        f"wrote {deals_written} of {len(deals or [])} fetched deals")
             else:
                 log.error("[weekly] DB write after Step 2: write_run returned no run_id")
+                # No run row means no child row can be written: leads, deals,
+                # geo and keywords are all skipped below. Said once, here.
+                note_step_failure(
+                    step_failures, "write_run",
+                    "no run row was created — the leads, deals, geo and keyword "
+                    "snapshots were not written and keyword facts were not synced")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 2 failed: %s", db_exc)
             run_id = None
+            note_step_failure(step_failures, "write_leads / write_deals", db_exc)
 
         # Write geo rows to database
         try:
@@ -152,8 +185,13 @@ def run_weekly_report():
                             f"write_geo returned 0 for {len(geos or [])} fetched rows"
                         ),
                     )
+                if not persistence_succeeded(geos, geo_count):
+                    note_step_failure(
+                        step_failures, "write_geo",
+                        f"wrote {geo_count} of {len(geos or [])} fetched rows")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write geo failed: %s", db_exc)
+            note_step_failure(step_failures, "write_geo", db_exc)
 
         # Write keyword rows to database
         try:
@@ -179,6 +217,10 @@ def run_weekly_report():
                             f"write_keywords returned 0 for {len(keywords or [])} fetched rows"
                         ),
                     )
+                if not persistence_succeeded(keywords, kw_count):
+                    note_step_failure(
+                        step_failures, "write_keywords",
+                        f"wrote {kw_count} of {len(keywords or [])} fetched rows")
 
                 # PR-ADS-146A: durable keyword facts via the ONE shared sync path
                 # (the same sync_keyword_daily_facts used by daily / weekly /
@@ -189,8 +231,14 @@ def run_weekly_report():
                 kdf = sync_keyword_daily_facts(
                     run_date - timedelta(days=29), run_date, "weekly", run_id=run_id)
                 log.info("[weekly] Durable keyword facts: %s", kdf)
+                if not (kdf or {}).get("ok"):
+                    note_step_failure(
+                        step_failures, "sync_keyword_daily_facts",
+                        (kdf or {}).get("error") or "the sync did not report ok")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write keywords failed: %s", db_exc)
+            note_step_failure(
+                step_failures, "write_keywords / sync_keyword_daily_facts", db_exc)
 
         # Write search term rows to database
         #
@@ -208,8 +256,8 @@ def run_weekly_report():
         # PR-ADS-156-F1 §6: this is the ONLY search-term pull in the weekly run.
         # `include_rows=True` returns the rows that were persisted, and they are
         # adopted only when the sync reports ok — everything downstream (the
-        # JSON snapshot, waste detection, the n-gram findings in the report)
-        # then describes rows that are genuinely in the database. Analysis over
+        # JSON snapshot the GCLID match reads, and waste detection) then
+        # describes rows that are genuinely in the database. Analysis over
         # transient rows is analysis nobody can audit afterwards.
         search_terms = []
         search_terms_available = False
@@ -230,8 +278,12 @@ def run_weekly_report():
                     "[weekly] Canonical search-term sync failed (%s) — "
                     "search-term analysis is unavailable for this run",
                     st.get("error"))
+                note_step_failure(
+                    step_failures, "sync_recent_search_terms",
+                    st.get("error") or "the sync did not report ok")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write search terms failed: %s", db_exc)
+            note_step_failure(step_failures, "sync_recent_search_terms", db_exc)
 
         # The local JSON snapshot is written from the SAME rows, and only when
         # they were persisted. Overwriting last week's snapshot with an empty
@@ -254,7 +306,7 @@ def run_weekly_report():
         # findings under this run's timestamp. Protecting the file from being
         # destroyed and then reusing it as current evidence is the same untruth
         # from the other side.
-        print("Step 3/6: Running waste detection...")
+        print("Step 3/4: Running waste detection...")
         from analysis.core import run_waste_detection
         waste_output = run_waste_detection(
             search_terms,
@@ -285,6 +337,10 @@ def run_weekly_report():
                         error_message="canonical search-term evidence unavailable "
                                       "— no waste analysis was performed for this "
                                       "interval")
+                note_step_failure(
+                    step_failures, "run_waste_detection / write_waste_terms",
+                    "canonical search-term evidence unavailable — no waste "
+                    "analysis was performed for this interval")
             else:
                 if run_id is not None and waste_output:
                     db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
@@ -294,6 +350,7 @@ def run_weekly_report():
                         row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 3 failed: %s", db_exc)
+            note_step_failure(step_failures, "write_waste_terms", db_exc)
             if waste_batch_id:
                 db_writers.finish_sync_batch(
                     batch_id=waste_batch_id, status="failed",
@@ -304,7 +361,7 @@ def run_weekly_report():
         # this run's classification. History is derived from that population
         # rather than from waste_terms directly, because waste_terms has no
         # campaign_id — identities built from a raw campaign name would never
-        # match the ones Search Terms and the Action Queue compute.
+        # match the ones the Search Terms page computes.
         #
         # Local database only. No Google Ads, HubSpot or Mailchimp call, and no
         # human review decision is ever modified by an observation.
@@ -316,52 +373,25 @@ def run_weekly_report():
             if not history.get("available"):
                 log.warning("[weekly] flag history not recorded: %s",
                             history.get("reason"))
+                note_step_failure(
+                    step_failures, "record_flag_history",
+                    history.get("reason") or "flag history unavailable")
             else:
                 log.info("[weekly] recorded flag history for %d term(s)",
                          history.get("written", 0))
         except Exception as hist_exc:  # noqa: BLE001
-            # Never fail the weekly run over an audit-trail write.
+            # Never FAIL the weekly run over an audit-trail write — but a run
+            # that did not record it did not finish, and says so (`partial`).
             log.error("[weekly] flag history step failed: %s", hist_exc)
+            note_step_failure(step_failures, "record_flag_history", hist_exc)
 
-        # Step 4: Lead quality analysis
-        print("Step 4/6: Running lead quality analysis...")
-        from analysis.core import run_lead_quality
-        run_lead_quality()
-
-        # Step 5: Campaign truth table
-        print("Step 5/6: Building campaign truth table...")
-        from analysis.core import run_campaign_truth
-        campaign_truth = run_campaign_truth()
-
-        # Write campaigns to database (with freshness tracking)
-        try:
-            if run_id is not None and campaign_truth:
-                campaign_rows = campaign_truth.get("campaigns", [])
-                campaigns_batch_id = db_writers.start_sync_batch(
-                    source="google_ads_api",
-                    dataset="campaigns",
-                    sync_type="weekly",
-                    date_from=run_date - timedelta(days=30),
-                    date_to=run_date,
-                    run_id=run_id,
-                )
-                campaigns_written = db_writers.write_campaigns(run_id, campaign_rows)
-                if campaigns_batch_id:
-                    campaigns_persisted = persistence_succeeded(campaign_rows, campaigns_written)
-                    db_writers.finish_sync_batch(
-                        batch_id=campaigns_batch_id,
-                        status="success" if campaigns_persisted else "failed",
-                        row_count=campaigns_written,
-                        last_source_date=run_date,
-                        error_message=None if campaigns_persisted else (
-                            f"write_campaigns returned 0 for {len(campaign_rows)} truth-table rows"
-                        ),
-                    )
-        except Exception as db_exc:  # noqa: BLE001
-            log.error("[weekly] DB write after Step 5 failed: %s", db_exc)
-
-        # Step 5b: GCLID match + DB persistence
-        print("Step 5b/6: Running GCLID match and persisting attribution...")
+        # Step 4: GCLID match + DB persistence
+        #
+        # PR-ADS-162H: the lead-quality and campaign-truth steps that stood here
+        # are gone, with the `campaigns` snapshot write they fed. They built
+        # `outputs/lead_quality.json` and `outputs/campaign_truth.json` for the
+        # report and nothing else read either file.
+        print("Step 4/4: Running GCLID match and persisting attribution...")
         try:
             from connectors.gclid_match import run_gclid_match, save_output as gclid_save
             from datetime import date as _date
@@ -426,6 +456,10 @@ def run_weekly_report():
                         error_message=(None if cov_written else
                                        "gclid coverage snapshot wrote 0 rows"),
                     )
+                if not cov_written:
+                    note_step_failure(
+                        step_failures, "write_gclid_coverage_snapshot",
+                        "gclid coverage snapshot wrote 0 rows")
 
                 if gclid_batch_id:
                     db_writers.finish_sync_batch(
@@ -443,51 +477,51 @@ def run_weekly_report():
                         error_message=str(gclid_exc)[:1000],
                     )
                 log.warning("[weekly] GCLID attribution persistence failed: %s", gclid_exc)
+                note_step_failure(
+                    step_failures, "run_gclid_match / write_gclid_attribution",
+                    gclid_exc)
         except Exception as gclid_import_exc:  # noqa: BLE001
             log.warning("[weekly] GCLID match step failed: %s", gclid_import_exc)
+            note_step_failure(step_failures, "run_gclid_match", gclid_import_exc)
 
-        # Step 6: Generate weekly report via advisor (deterministic by default)
-        print("Step 6/6: Generating weekly report (deterministic advisor)...")
-        from analysis.advisor import generate_weekly_report
-        from analysis.rule_advisor import compute_ngram_findings
-        # PR-ADS-156-F1 §6: n-grams over the PERSISTED rows, or not at all.
-        # `None` reaches the report as "unavailable"; an empty list would reach
-        # it as "no wasteful n-grams this week", which is a different claim and
-        # one this run has no evidence for.
-        ngram_findings = (compute_ngram_findings(search_terms)
-                          if search_terms_available else None)
-        if not search_terms_available:
-            log.warning("[weekly] n-gram findings omitted — the canonical "
-                        "search-term sync did not persist rows this run")
-        report_path = generate_weekly_report(ngram_data=ngram_findings)
+        # PR-ADS-162H: no report is generated and nothing is emailed. The run
+        # record keeps its three report columns (no schema change) and writes
+        # them as "nothing was produced, nothing was sent": report_path NULL,
+        # delivery_attempted FALSE, delivery_success NULL.
+        status, failed_step, error_message = run_outcome(step_failures)
 
         print(f"\n{'='*60}")
-        print(f"Weekly report complete — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
-        if report_path:
-            print(f"Report saved: {report_path}")
-            delivery_attempted = True
-            delivery_ok = deliver_report(report_path)
+        print(f"Weekly data refresh {status} — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+        for failure in step_failures:
+            print(f"  did not land: {failure['step']} — {failure['detail']}")
         print(f"{'='*60}\n")
 
         finish_run(
             run_record,
-            status="success",
-            report_path=report_path,
-            delivery_attempted=delivery_attempted,
-            delivery_success=delivery_ok,
+            status=status,
+            report_path=None,
+            delivery_attempted=False,
+            delivery_success=None,
+            failed_step=failed_step,
+            error_message=error_message,
         )
         try:
             db_writers.update_run(run_id, run_record)
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] update_run failed: %s", db_exc)
-        return report_path
+        return {
+            "run_type": "weekly",
+            "status": status,
+            "failed_steps": [f["step"] for f in step_failures],
+        }
 
     except Exception as exc:
         finish_run(
             run_record,
             status="failed",
-            delivery_attempted=delivery_attempted,
-            delivery_success=delivery_ok,
+            report_path=None,
+            delivery_attempted=False,
+            delivery_success=None,
             failed_step=getattr(exc, "_step", None),
             error_message=str(exc),
         )

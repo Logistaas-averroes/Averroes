@@ -182,7 +182,7 @@ def test_blocked_by_dependency_is_a_blocked_summary_count():
 def test_source_rollup_warning_when_only_degraded():
     """Windsor with Campaigns degraded (sync failed but rows exist) is warning."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "keywords": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "geo": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
@@ -197,7 +197,7 @@ def test_source_rollup_warning_when_only_degraded():
 
 def test_source_rollup_error_when_failed_no_data_child():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FAILED_NO_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FAILED_NO_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "keywords": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
@@ -205,12 +205,15 @@ def test_source_rollup_error_when_failed_no_data_child():
     sources = compute_source_health(statuses)
     google_ads = next(s for s in sources if s["source"] == "google_ads_api")
     assert google_ads["status"] == "error"
-    assert "campaigns" in google_ads["next_action"].lower()
+    # PR-ADS-162H: the failing child was the legacy `campaigns` snapshot, which
+    # is no longer a dataset. The same rule is asserted on the dataset the
+    # Campaigns page reads: the action names the dataset that failed.
+    assert "canonical spend" in google_ads["next_action"].lower()
 
 
 def test_source_rollup_ok_when_all_fresh():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FRESH_WITH_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "keywords": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
@@ -238,7 +241,7 @@ def test_page_status_helper_for_each_state():
 
 def test_campaigns_degraded_not_blocked_when_failed_with_rows():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "leads": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "waste_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
@@ -249,7 +252,7 @@ def test_campaigns_degraded_not_blocked_when_failed_with_rows():
 
 def test_dashboard_not_blocked_when_campaigns_has_usable_rows():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "leads": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "waste_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
@@ -297,20 +300,20 @@ def test_gclid_attribution_not_blocked_when_only_coverage_not_run():
 
 def test_degraded_dataset_is_a_warning_not_error_blocker():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
     }
     blockers = compute_critical_blockers(statuses)
-    degraded = next((b for b in blockers if b["id"] == "campaigns_degraded"), None)
+    degraded = next((b for b in blockers if b["id"] == "canonical_spend_degraded"), None)
     assert degraded is not None
     assert degraded["severity"] == "warning"
 
 
 def test_failed_no_data_creates_error_blocker():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FAILED_NO_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FAILED_NO_DATA,
     }
     blockers = compute_critical_blockers(statuses)
-    failed = next((b for b in blockers if b["id"] == "campaigns_failed"), None)
+    failed = next((b for b in blockers if b["id"] == "canonical_spend_failed"), None)
     assert failed is not None
     assert failed["severity"] == "error"
 
@@ -331,7 +334,7 @@ def test_derivable_dataset_creates_warning_blocker():
 def test_overall_status_warning_when_degraded_but_no_failure():
     """Mirrors the production dump: Campaigns/Keywords/Geo degraded, search_terms fresh."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "keywords": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "geo": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
@@ -344,7 +347,7 @@ def test_overall_status_warning_when_degraded_but_no_failure():
 
 def test_overall_status_error_when_core_dataset_failed_no_data():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FAILED_NO_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FAILED_NO_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "leads": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
@@ -357,12 +360,12 @@ def test_overall_status_error_when_core_dataset_failed_no_data():
 
 def test_pipelines_expose_page_status():
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "waste_terms": CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE,
     }
     pipes = compute_pipelines(statuses)
     by_key = {p["key"]: p for p in pipes}
-    assert by_key["campaigns"]["page_status"] == PAGE_STATUS_DEGRADED
+    assert by_key["canonical_spend"]["page_status"] == PAGE_STATUS_DEGRADED
     assert by_key["waste_terms"]["page_status"] == PAGE_STATUS_ACTION_NEEDED
 
 
@@ -398,7 +401,7 @@ def test_scheduler_no_diagnostic_when_runs_present():
 
 def test_summary_counts_degraded_counted_as_warning():
     counts = compute_summary_counts({
-        "campaigns": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
         "leads": CanonicalFreshnessStatus.FAILED_NO_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     })

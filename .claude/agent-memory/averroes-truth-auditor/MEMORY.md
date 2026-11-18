@@ -656,3 +656,70 @@ Recurring patterns (durable):
   exempts `Name(id="target_page")` passes a local variable of that name.
 - Scratch worktrees via `git worktree add --detach` outside the reviewed tree
   worked for mutation runs; PG tests ran (python3.11).
+
+## PR-ADS-162H review (commit dc7b5ab on e587493, 2026-11-18) — report generation removed
+
+Verified by execution on a throwaway PG cluster (real jobs, real db.writers,
+connectors stubbed) unless marked "read".
+
+- Weekly / monthly jobs (`scheduler/weekly.py`, `scheduler/monthly.py`) now end
+  `success` / `partial` / `failed` via `scheduler/sync_utils.note_step_failure`
+  + `run_outcome`, and RETURN `{run_type, status, failed_steps}`. `partial`
+  reaches the `runs` row, JSONL, `/api/runs`, `/runs/latest`, monitoring
+  (yellow, `last_success_at` not advanced) and both POST endpoints unchanged.
+- The `runs` row is inserted by `write_run` only AFTER the HubSpot pull (step
+  2), with the pessimistic `failed` and `finished_at` NULL. Consequences
+  (pre-existing, still true):
+  - a Google Ads or HubSpot pull that raises leaves NO `runs` row, so the
+    failure is in the JSONL and the POST body only. Monitoring reads JSONL
+    only when the DB is down or `runs` is empty;
+  - an OOM-killed run stays `failed` + `finished_at` NULL, which
+    `static/app.js::normalizeRunStatus` renders as "running";
+  - if the leads/deals block raises, the job sets `run_id = None`: the row
+    stays `failed`/unfinished while the job returns `partial`, and geo,
+    keywords and keyword facts are skipped without being named.
+- `connectors/hubspot_pull.pull_paid_search_contacts` SWALLOWS a non-429
+  `ApiException` (logs, `break`) and returns what it has, `[]` on page one.
+  A 401 therefore ends the monthly run `success`: `hubspot/contacts` batch
+  success with today's watermark, `data/crm_contacts.json` overwritten with
+  `[]`, a 0-of-0 coverage snapshot stored. `pull_deals_with_gclid` swallows
+  per-contact failures the same way. The Google Ads pulls raise.
+- With the DB down the weekly job ends `partial` with nothing landed. The
+  monthly job ends `failed` only because `data/ads_search_terms.json` is
+  absent on a fresh disk (`REQUIRED_DATA_FILES`).
+- `start_sync_batch` returning 0 or `finish_sync_batch` returning False on the
+  seven inline batches is not noted: the run ends `success` with no freshness
+  stamp. `write_waste_terms` returns None and never raises (disclosed).
+- Writers return `len(rows)` or 0, so `persistence_succeeded` means "0 of N",
+  not "fewer than N". No false partial found on a quiet account (empty
+  search terms, no flagged terms, 0 deals): both jobs returned `success`.
+- **Pre-existing, reproduced at e587493 too:** `DATASET_FRESHNESS_CONFIG`
+  names `deals.close_date` and `gclid_attribution.matched_at`; neither column
+  exists in `db/schema.py`. The failed COUNT aborts the war-room transaction,
+  every later statement is swallowed, and `/api/system/status-war-room`
+  returns `scheduler.latest_* = None` ("no scheduler run records") plus
+  `rows_in_window = None` for every dataset after `deals`. Fake-cursor tests
+  cannot see it. Not verified against production's actual schema.
+- War room also queries `run_type = 'incremental'` (read); production writes
+  `daily_incremental_sync`.
+- The legacy `deals` table has NO production reader (only `write_deals`), and
+  no `/api/deals` exists. Legacy `campaigns` likewise (only schema cleanup
+  DELETEs). `scripts/backfill_windsor.py` pulls from `connectors.windsor_pull`
+  and stamps `windsor/campaigns`, which is NOT in
+  `freshness_service.RETIRED_DATASETS` (only `google_ads_api/campaigns` is).
+  `scheduler/incremental_sync.RETIRED_DATASETS` is a second, differently
+  shaped registry of the same name.
+- Kept-step call expressions in both jobs are AST-identical to the parent
+  (only the `campaigns` batch is gone); `run_waste_detection` AST identical.
+  No test pins step ARGUMENTS: mutating `days=60`, the 29-day keyword window
+  or a batch `sync_type` passed every scheduler-related test file.
+- The 162H harness records the "durable row" as the args of a stubbed
+  `update_run`; there is no PG test of a partial weekly/monthly run.
+  `test_20` asserts war-room `ok` over a fake cursor. The war-room
+  `RETIRED_DATASETS` guard on `best_sync` is unproven (removing it: 82 pass).
+- `httpx2` (Starlette TestClient's client) is installed here only as a
+  dependency of `anthropic`; nothing else requires it.
+- Technique that worked: a scratch `git worktree add --detach` plus a probe
+  test importing the `pg` fixture from `tests/test_pr_ads_153e_a_pg_integration`
+  and overriding `require_auth` through `app.dependency_overrides`. The admin
+  bearer token alone does not satisfy `require_auth` routes.

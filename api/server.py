@@ -184,8 +184,6 @@ _DOCTRINE_DOC = _REPO_ROOT / "docs" / "DOCTRINE.md"
 # Core modules that must be importable for the service to be considered ready.
 _REQUIRED_MODULES = [
     "analysis.core",
-    "analysis.advisor",
-    "analysis.rule_advisor",
     "api.auth",
     "scheduler.daily",
     "scheduler.weekly",
@@ -562,9 +560,47 @@ def run_daily(request: Request) -> dict[str, Any]:
             _job_state["daily"] = False
 
 
+def _data_refresh_response(job: str, outcome: Any, started_at: str) -> dict[str, Any]:
+    """The manual-run response for a weekly / monthly data refresh.
+
+    PR-ADS-162H. These jobs used to return a report path, and the endpoint
+    answered `success` for anything that did not raise — including a monthly
+    run that had recorded itself `failed` and returned None. They now return
+    their own run outcome, and this republishes it.
+
+    Fail closed: an outcome this function does not recognise is `failed`, not
+    `success`. Not raising is not evidence that a run did its work.
+    """
+    finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    status = outcome.get("status") if isinstance(outcome, dict) else None
+    failed_steps = [str(s) for s in (outcome.get("failed_steps") or [])] \
+        if isinstance(outcome, dict) else []
+    if status not in ("success", "partial", "failed"):
+        log.error("[run/%s] returned no recognisable outcome: %r", job, outcome)
+        status = "failed"
+        failed_steps = failed_steps or ["run outcome missing"]
+    log.info("[run/%s] finished %s at %s", job, status, finished_at)
+    response: dict[str, Any] = {
+        "status": status,
+        "job": job,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "result": {"failed_steps": failed_steps},
+    }
+    if status == "failed":
+        response["error"] = ("run failed at: " + "; ".join(failed_steps)
+                             if failed_steps else "run failed")
+    return response
+
+
 @app.post("/run/weekly")
 def run_weekly(request: Request) -> dict[str, Any]:
-    """Trigger the weekly report scheduler. Requires admin session or ADMIN_API_TOKEN."""
+    """Trigger the weekly data refresh. Requires admin session or ADMIN_API_TOKEN.
+
+    Responds with the run's own outcome: `success`, `partial` (the run finished
+    and at least one step did not land — named in `result.failed_steps`) or
+    `failed`. No report is produced (PR-ADS-162H).
+    """
     check_admin_or_token(request)
 
     with _run_lock:
@@ -577,16 +613,7 @@ def run_weekly(request: Request) -> dict[str, Any]:
 
     try:
         from scheduler.weekly import run_weekly_report  # noqa: PLC0415
-        report_path = run_weekly_report()
-        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.info("[run/weekly] succeeded, finished at %s", finished_at)
-        return {
-            "status": "success",
-            "job": "weekly",
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "result": {"report_path": str(report_path) if report_path else None},
-        }
+        return _data_refresh_response("weekly", run_weekly_report(), started_at)
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log.error("[run/weekly] failed: %s", exc, exc_info=True)
@@ -604,7 +631,14 @@ def run_weekly(request: Request) -> dict[str, Any]:
 
 @app.post("/run/monthly")
 def run_monthly(request: Request) -> dict[str, Any]:
-    """Trigger the monthly report scheduler. Requires admin session or ADMIN_API_TOKEN."""
+    """Trigger the monthly data refresh. Requires admin session or ADMIN_API_TOKEN.
+
+    Responds with the run's own outcome: `success`, `partial` (the run finished
+    and at least one step did not land — named in `result.failed_steps`) or
+    `failed`. The monthly job does not raise for a failed step, so the status
+    it returns is the only evidence of one. No report is produced
+    (PR-ADS-162H).
+    """
     check_admin_or_token(request)
 
     with _run_lock:
@@ -617,16 +651,7 @@ def run_monthly(request: Request) -> dict[str, Any]:
 
     try:
         from scheduler.monthly import run_monthly_report  # noqa: PLC0415
-        report_path = run_monthly_report()
-        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.info("[run/monthly] succeeded, finished at %s", finished_at)
-        return {
-            "status": "success",
-            "job": "monthly",
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "result": {"report_path": str(report_path) if report_path else None},
-        }
+        return _data_refresh_response("monthly", run_monthly_report(), started_at)
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log.error("[run/monthly] failed: %s", exc, exc_info=True)
@@ -1823,6 +1848,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
         DATASET_FRESHNESS_CONFIG,
         BLOCKING_STATES,
         HAS_DATA_STATES,
+        RETIRED_DATASETS,
         CanonicalFreshnessStatus,
         compute_canonical_freshness,
     )
@@ -1982,10 +2008,29 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                 "updated_at":              None,
             })
 
-    # Append any extra rows in sync_state that are not in the known list
+    # Append any extra rows in sync_state that are not in the known list.
+    #
+    # PR-ADS-162H: except a RETIRED dataset. Its sync_state row outlives its
+    # writer, and listing it here would give it a default 8-day threshold and
+    # report it stale a week after its last write — a status for a dataset
+    # nothing is meant to fill. It is reported below as retired instead, with
+    # the last sync it did record, and takes no part in any summary count.
+    retired_datasets: list[dict] = []
     for key, row in db_map.items():
-        if key not in seen:
-            datasets.append(row)
+        if key in seen:
+            continue
+        if key in RETIRED_DATASETS:
+            retired_datasets.append({
+                "dataset_key":             row["dataset_key"],
+                "source":                  row["source"],
+                "dataset":                 row["dataset"],
+                "retired":                 True,
+                "reason":                  RETIRED_DATASETS[key],
+                "last_successful_sync_at": row["last_successful_sync_at"],
+                "last_source_date":        row["last_source_date"],
+            })
+            continue
+        datasets.append(row)
 
     # ── Compute canonical freshness for each dataset (PR-ADS-067) ──────────
     # First pass: compute non-dependent datasets to build canonical_status_map
@@ -2164,6 +2209,9 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
             "unknown": status_counts["unknown"],
         },
         "canonical_summary": canonical_counts,
+        # PR-ADS-162H: retired datasets that still hold a sync_state row. Not
+        # datasets, not counted above, and carrying no freshness status.
+        "retired_datasets": retired_datasets,
         "db_unavailable": False,
     }
 
@@ -5104,6 +5152,7 @@ def api_system_status_war_room(
         DATASET_FRESHNESS_CONFIG,
         BLOCKING_STATES,
         HAS_DATA_STATES,
+        RETIRED_DATASETS,
         compute_canonical_freshness,
     )
     from services.system_status_service import (  # noqa: PLC0415
@@ -5352,7 +5401,9 @@ def api_system_status_war_room(
                     # Find best last_successful_sync_at for this source
                     best_sync = None
                     for (s, d), srow in sync_map.items():
-                        if s == src_key:
+                        # PR-ADS-162H: a retired dataset's old sync row is not
+                        # evidence that its source synced.
+                        if s == src_key and (s, d) not in RETIRED_DATASETS:
                             lsa = srow.get("last_successful_sync_at")
                             if lsa and (best_sync is None or lsa > best_sync):
                                 best_sync = lsa
