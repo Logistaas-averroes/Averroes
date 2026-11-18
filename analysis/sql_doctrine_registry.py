@@ -453,28 +453,6 @@ CONSUMERS: list[dict] = [
        migration_notes="Per-contact SQL rows (contact id + company) in the drawer.",
        truth_status="sqls_not_closed_won None when unavailable",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
-    _c("Legacy summary KPIs (/api/summary)",
-       "confirmed_sqls and avg_cpql_usd from the campaigns scheduler snapshot.",
-       endpoint="GET /api/summary", service_function="api.server.api_summary",
-       repository_source="inline SQL over campaigns JOIN runs (latest run)",
-       source_table=SNAPSHOT_TABLE, sql_definition=SNAPSHOT_DEF, date_field=SNAPSHOT_DATE,
-       dedup_key="none (latest run id)", windows=["days lookback"], scope="other (snapshot)",
-       classification=CLS_LEGACY, code_location="api/server.py:api_summary",
-       migration_notes="Third doctrine: mql_status literals counted from JSON, no dedup, "
-                       "no exclusions, run_date. Not registered in cross-page parity.",
-       truth_status="db_unavailable → None; otherwise raw snapshot",
-       headline=True, cpql=True, executive=True),
-    _c("Dashboard trends + trend alerts (/api/dashboard/trends)",
-       "Period-over-period confirmed_sqls deltas and 'spend rose without SQLs' alerts.",
-       endpoint="GET /api/dashboard/trends",
-       service_function="api.server.api_dashboard_trends / _build_trend_alerts / _compute_severity",
-       repository_source="inline SQL over campaigns snapshot", source_table=SNAPSHOT_TABLE,
-       sql_definition=SNAPSHOT_DEF, date_field=SNAPSHOT_DATE, dedup_key="DISTINCT ON (campaign_name) latest run_date",
-       windows=["days lookback"], scope="other (snapshot)", classification=CLS_LEGACY,
-       code_location="api/server.py:api_dashboard_trends",
-       migration_notes="Severity +30 when confirmed_sqls == 0 with spend.",
-       truth_status="insufficient_data rather than comparing to zero",
-       headline=True, row=True, sorting=True, decision=True, executive=True, operational=True),
     _c("Historical Intelligence (/api/historical-intelligence)",
        "30d-vs-30d confirmed_sqls and CPQL movement with improving/deteriorating verdicts.",
        endpoint="GET /api/historical-intelligence",
@@ -571,7 +549,8 @@ CONSUMERS: list[dict] = [
        source_table=SNAPSHOT_TABLE, sql_definition="copies confirmed_sqls; cpql = spend / sqls",
        date_field=SNAPSHOT_DATE, dedup_key="none", windows=["snapshot"], scope="other",
        classification=CLS_LEGACY, code_location="db/writers.py:write_campaigns",
-       migration_notes="Feeds /api/summary, /api/dashboard/trends, action queue, historical intelligence.",
+       migration_notes="Feeds the action queue and historical intelligence "
+                       "(/api/summary and /api/dashboard/trends were retired in PR-ADS-162B).",
        truth_status="cpql None when sqls == 0", row=True, cpql=True),
     _c("leads snapshot writer (db.writers.write_leads / _map_status_category)",
        "Derives status_category from mql_status and stores contact_created_at from createdate.",
@@ -652,7 +631,7 @@ CONSUMERS: list[dict] = [
        source_table="n/a", sql_definition="metric identities", date_field="per identity", dedup_key="n/a",
        windows=BUSINESS, scope="per identity", classification=CLS_DIAGNOSTIC,
        code_location="services/cross_page_parity_service.py:METRIC_IDENTITIES",
-       migration_notes="/api/summary, trends and historical intelligence are not registered identities.",
+       migration_notes="Historical intelligence is not a registered identity.",
        truth_status="n/a"),
     _c("Campaign Evidence certification gate", "PR-ADS-157 read-only certification of the campaign page.",
        endpoint="python -m scripts.audit_campaign_evidence_certification",
@@ -747,8 +726,6 @@ _CAMP = "Dashboard Campaigns"
 _CTRY = "Dashboard Countries"
 _REV = "Dashboard Revenue"
 _DEALS = "Dashboard Deals"
-_SUMMARY = "Legacy summary KPIs (/api/summary)"
-_TRENDS = "Dashboard trends + trend alerts (/api/dashboard/trends)"
 _HI = "Historical Intelligence (/api/historical-intelligence)"
 _AQC = "Action Queue — campaign items"
 _AQG = "Action Queue — geo items"
@@ -1247,9 +1224,6 @@ RULES: list[dict] = [
     _r("api.geo", "api/server.py", CLS_LEGACY, _GEO, symbol="api_leads_country_summary"),
     _r("api.leads", "api/server.py", CLS_LEGACY, _LEADS_API,
        symbol=["api_leads", "_lead_quality_sql_reconciliation"]),
-    _r("api.summary", "api/server.py", CLS_LEGACY, _SUMMARY, symbol="api_summary"),
-    _r("api.trends", "api/server.py", CLS_LEGACY, _TRENDS,
-       symbol=["api_dashboard_trends", "_build_trend_alerts", "_compute_severity"]),
     _r("api.aq.campaign", "api/server.py", CLS_LEGACY, _AQC, symbol="_build_campaign_queue_items"),
     _r("api.aq.geo", "api/server.py", CLS_LEGACY, _AQG, symbol="_build_geo_queue_items"),
     _r("api.campaign_detail", "api/server.py", CLS_LEGACY, _CD, symbol="_build_campaign_detail"),
@@ -1425,19 +1399,6 @@ CPQL_CONSUMERS: list[dict] = [
         "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by summary.cohort_cpql_usd",
     },
     {
-        "consumer": "/api/summary avg_cpql_usd",
-        "code_location": "api/server.py:api_summary",
-        "spend_numerator_source": "SUM(campaigns.spend_usd) snapshot at latest run",
-        "currency_fx_contract": "snapshot column labelled USD; no FX contract",
-        "sql_denominator_definition": SNAPSHOT_DEF,
-        "sql_denominator_scope": "other (per campaign label, undeduplicated)",
-        "sql_denominator_date_field": SNAPSHOT_DATE,
-        "numerator_denominator_same_window": "both from the same snapshot run; neither is a business window",
-        "unmatched_sqls_excluded": False,
-        "denominator_incomplete_when_stage_dates_missing": "n/a",
-        "publication": "published without reconciliation",
-    },
-    {
         "consumer": "Historical Intelligence cpql movement",
         "code_location": "analysis/historical_intelligence.py:_safe_cpql",
         "spend_numerator_source": "campaigns.spend_usd snapshot rows, 30d vs prior 30d by run_date",
@@ -1587,8 +1548,8 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
      "code_location": "api/server.py:api_leads_country_summary"},
     {"id": "doctrine.third_snapshot_population",
      "summary": "campaigns.confirmed_sqls (analysis/core.py) counts mql_status literals from a "
-                "JSON pull with no date, dedup or exclusions; /api/summary, "
-                "/api/dashboard/trends, action queue and historical intelligence read it.",
+                "JSON pull with no date, dedup or exclusions; the action queue and "
+                "historical intelligence read it.",
      "code_location": "analysis/core.py:run_lead_quality"},
     {"id": "scope.keyword_attributable_two_definitions",
      "summary": "platform_sql_attribution keyword scope is criterion-level (campaign_id + "

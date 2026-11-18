@@ -1968,3 +1968,43 @@ lifecycle stage, counted in contacts and labelled as such.
 includes the real query on live PostgreSQL and the real `renderChannelFunnel`
 evaluated in node. The module is added to CI's PostgreSQL step. The service is
 registered in the SQL doctrine registry (`_CHANNEL_FUNNEL`).
+
+---
+
+## PR-ADS-162B — retire endpoints nothing calls (slice 1)
+
+**Why.** `api/server.py` had grown to 9,477 lines and 119 routes, and the UI never
+calls 29 of the `/api/*` routes. Most of those are still wired into old tests and
+guard registries, so they are being retired in slices, each with its tests and
+registries updated. This is the first slice: the routes with no caller and no
+dedicated test.
+
+**Removed** (about 800 lines of `api/server.py`, 240 lines of `API_CONTRACT.md`):
+
+| Route | What it was |
+| --- | --- |
+| `GET /api/summary` | legacy headline KPIs from the `campaigns` snapshot (third SQL definition) |
+| `GET /api/dashboard/trends` | legacy period-over-period trends over the same snapshot, with its alert helpers |
+| `GET /api/deals` | legacy `deals` table read |
+| `GET /api/campaigns/{campaign_name}/detail` | path-segment duplicate of `/api/campaign-detail` |
+| `GET /api/keyword-evidence/audit` | operator diagnostic; the script `audit_keyword_currency` remains |
+| `GET /api/google-ads-spend-coverage-audit` | operator diagnostic; its service function and test remain |
+| `GET /api/system/reality-audit` | operator diagnostic; the script `audit_production_reality` remains |
+
+Also removed: the helpers only those routes used (`_compute_severity`,
+`_build_trend_alerts`, `_trend_metric*`, the `_TREND_*` thresholds, the
+reality-audit cache) and `_nullable_int`, which was already unreferenced.
+
+**Registries.** `analysis/sql_doctrine_registry.py` no longer lists the summary
+and trends consumers, their rules, or the `/api/summary` CPQL consumer. The
+snapshot SQL definition now feeds only the action queue and historical
+intelligence.
+
+**Tests.** No test exercised these routes. The existing assertions that the UI
+does not call `/api/summary`, `/api/dashboard/trends` or `/api/deals?days=` still
+hold. No test was edited.
+
+**Next slices.** `/api/leads`, `/api/search-terms` (+ `/summary`), `/api/waste`,
+`/api/keywords`, the retired ROAS routes, `/api/revenue-by-source`, the hidden
+historical-intelligence page, and the Windsor connector. Each has tests and guard
+entries to update with it.

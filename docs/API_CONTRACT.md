@@ -380,36 +380,6 @@ When database is unavailable: `{ "days": 30, "leads": [], "db_unavailable": true
 
 ---
 
-#### `GET /api/deals?days=30`
-GCLID-matched deal rows for the last N days (max 1000 rows).
-
-**Auth:** Auth
-**Query params:** `days` (integer, default 30, max 365)
-**Response 200:**
-```json
-{
-  "days": 30,
-  "deals": [
-    {
-      "contact_id": "12345",
-      "company": "Acme Freight",
-      "country": "AE",
-      "keyword": "freight forwarding",
-      "campaign_name": "Gulf",
-      "deal_stage": "closedwon",
-      "deal_stage_label": "Closed Won",
-      "deal_amount_usd": 5000.00,
-      "mql_status": "CLOSED - Deal Created",
-      "gclid": "abc123",
-      "run_date": "2026-04-30"
-    }
-  ]
-}
-```
-When database is unavailable: `{ "days": 30, "deals": [], "db_unavailable": true }`
-
----
-
 #### `GET /api/waste?days=30` *(DEPRECATED — compatibility adapter, PR-ADS-153D)*
 
 > **Superseded by `GET /api/search-term-evidence/flagged`.** The standalone
@@ -617,32 +587,6 @@ When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true 
 
 ---
 
-#### `GET /api/summary?days=30`
-Aggregated headline metrics for the last N days.
-
-**Auth:** Auth
-**Query params:** `days` (integer, default 30, max 365)
-**Response 200:**
-```json
-{
-  "days": 30,
-  "total_spend_usd": 6420.00,
-  "confirmed_sqls": 8,
-  "avg_cpql_usd": 802.50,
-  "confirmed_waste_usd": 847.00,
-  "total_leads": 196,
-  "junk_rate_pct": 27.6,
-  "run_count": 4,
-  "last_run_at": "2026-04-30T15:10:01Z",
-  "last_run_status": "success"
-}
-```
-When database is unavailable: all numeric fields are `null`, `run_count` is `0`, `"db_unavailable": true`.
-
-**UI note (PR-ADS-028A):** The global data freshness bar reads run records from `/api/runs?days=90` (fixed window, not scoped to the reporting filter) using `normalizeRunStatus()` to handle in-progress rows. When the DB is unavailable, it falls back to `/runs/latest` (JSONL-backed). The badge represents the latest recorded scheduler run — a daily run may not refresh campaign or waste data. It is read-only and purely presentational — it does not write to any system.
-
----
-
 #### `GET /api/campaign-detail?campaign_name={encoded_name}&days=N` *(Preferred)*
 Campaign drill-down detail — full investigation context for a single campaign.
 
@@ -816,106 +760,6 @@ UI-safe display thresholds from `config/thresholds.yaml`.
 - `quality_score.strong_min` — quality score at or above this → strong badge
 - `quality_score.medium_min` — quality score at or above this (but below strong_min) → medium badge
 - `using_defaults` — present and `true` only when the YAML file could not be loaded
-
----
-
-#### `GET /api/campaigns/{campaign_name}/detail?days=N` *(Legacy — path-segment form)*
-Same response shape as `/api/campaign-detail`. Preserved for backwards compatibility.
-
-**Limitation:** Campaign names containing a literal forward slash (`/`) cannot be addressed via this route even when URL-encoded, because the router treats slashes as path separators. Use `/api/campaign-detail?campaign_name=...` for new callers.
-
----
-
-#### `GET /api/dashboard/trends?days=N`
-Previous-period trend comparison for the dashboard. Returns summary metrics, campaign movements, and display alerts comparing the current period against the previous period of equal length.
-
-**Auth:** Auth (session cookie, same as other dashboard endpoints)
-**Query params:** `days` (integer, default 30, max 365)
-**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
-**Phase 1 read-only:** Confirmed
-
-**Period definition:**
-- Current period: `NOW() - N days → NOW()`
-- Previous period: `NOW() - 2N days → NOW() - N days`
-
-**Response 200:**
-```json
-{
-  "days": 30,
-  "current_period":  { "start": "2026-04-02", "end": "2026-05-02" },
-  "previous_period": { "start": "2026-03-03", "end": "2026-04-02" },
-  "summary": {
-    "spend_usd":           { "current": 6500.25, "previous": 5900.00, "delta": 600.25, "delta_pct": 10.17, "trend": "up" },
-    "confirmed_sqls":      { "current": 8,       "previous": 5,       "delta": 3,      "delta_pct": 60.0,  "trend": "up" },
-    "confirmed_waste_usd": { "current": 420.00,  "previous": 300.00,  "delta": 120.00, "delta_pct": 40.0,  "trend": "up" },
-    "avg_junk_rate_pct":   { "current": 28.5,    "previous": 22.0,    "delta": 6.5,    "delta_pct": 29.55, "trend": "up" }
-  },
-  "campaign_movements": [
-    {
-      "campaign_name": "global - competitors",
-      "current":  { "spend_usd": 1000, "confirmed_sqls": 0, "junk_rate_pct": 42, "verdict": "FIX" },
-      "previous": { "spend_usd": 800,  "confirmed_sqls": 1, "junk_rate_pct": 25, "verdict": "HOLD" },
-      "movement": "worsened",
-      "reason": "SQLs fell by 1. Junk rate rose 17.0 points.",
-      "severity_score": 85
-    }
-  ],
-  "alerts": [
-    {
-      "campaign_name": "global - competitors",
-      "severity": "high",
-      "title": "Junk rate worsened",
-      "detail": "Junk rate increased from 25.0% to 42.0% (+17.0 points). Warrants review.",
-      "source": "campaigns table"
-    }
-  ],
-  "data_quality": {
-    "has_previous_period": true,
-    "current_runs": 2,
-    "previous_runs": 1,
-    "status": "ok"
-  }
-}
-```
-
-**Movement classification:**
-- `new` — campaign appears in current period but not previous
-- `dropped` — campaign present in previous but absent in current
-- `improved` — SQLs increased OR junk rate decreased ≥ 10 points
-- `worsened` — SQLs decreased OR junk rate increased ≥ 10 points OR spend rose ≥ 20% with zero SQLs
-- `stable` — no meaningful change detected
-- `insufficient_data` — junk rate unavailable in both periods
-
-**Thresholds used for movement classification (local constants in endpoint):**
-- Junk rate meaningful change: absolute delta ≥ 10 percentage points
-- Spend meaningful change: relative delta ≥ 20% of previous-period spend
-- SQL change meaningful: integer delta ≠ 0
-
-**Severity score (0–100, display-only — not an automated action recommendation):**
-- +30 if current SQLs = 0 and spend > 0
-- +25 if current junk rate ≥ 30% (high junk threshold default)
-- +20 if spend increased ≥ 20%
-- +20 if junk rate increased ≥ 10 points
-- +15 if verdict is FIX
-- +25 if verdict is CUT
-- Capped at 100
-
-**Alert language:** Evidence-based, warrants-review only. Does not use the words pause, cut, increase budget, or apply negatives.
-
-**Data quality states:**
-- `ok` — previous-period data available
-- `insufficient_previous_data` — no previous-period runs found (endpoint still returns current metrics)
-- `db_unavailable` — database offline (safe empty response returned)
-
-**DB unavailable response:**
-```json
-{ "days": 30, "summary": {}, "campaign_movements": [], "alerts": [], "data_quality": { "status": "db_unavailable" }, "db_unavailable": true }
-```
-
-**`campaign_movements` ordering:** Sorted by `severity_score` descending; top 10 returned.
-**`alerts` ordering:** Sorted by severity (high → medium → low), deduplicated per campaign; up to 8 returned.
-**`summary.spend_usd`** uses latest-run-per-period aggregation (same convention as `/api/summary`) to avoid double-counting overlapping weekly/monthly run snapshots.
-**`summary.confirmed_waste_usd`** is summed from `waste_terms` rows where `crm_junk_confirmed > 0` in each period.
 
 ---
 
@@ -2131,14 +1975,6 @@ criterion's rows. Returns `identity`, `activity` (verified USD + native + clicks
 observed date), `review_signal`, `daily` (per-source-date series, reported dates
 only — never fabricated as zero) and a `search_terms_link`.
 
-#### `GET /api/keyword-evidence/audit`
-**Auth:** Auth · **Read-only:** Yes (SELECT only). Operator audit: durable rows +
-criteria, earliest/latest durable source dates, rows with missing IDs, rows with
-unverified currency, duplicate-key candidates (0 under the unique index), rows
-with a quality observation, and the untouched legacy `keywords` snapshot count.
-No row is deleted, relabelled or assigned a currency. Also exposed as
-`scripts/audit_keyword_currency.py`.
-
 #### `GET /api/keyword-evidence/export`
 **Auth:** Auth · **Read-only:** Yes. Same filters as the list, **no pagination** —
 the COMPLETE server-filtered dataset. CSV includes the evidence window,
@@ -2606,17 +2442,13 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | POST | `/run/monthly` | Admin | Trigger monthly |
 | GET | `/api/campaigns` | Auth | Campaign metrics (DB, ?days=) |
 | GET | `/api/campaign-detail` | Auth | Campaign drill-down detail, query-param form (DB, ?campaign_name=&days=) **Preferred** |
-| GET | `/api/campaigns/{campaign_name}/detail` | Auth | Campaign drill-down detail, path-segment form (DB, ?days=) *Legacy* |
 | GET | `/api/leads` | Auth | Lead rows (DB, ?days=) |
-| GET | `/api/deals` | Auth | Deal rows (DB, ?days=) |
 | GET | `/api/waste` | Auth | Waste terms (DB, ?days=) |
 | GET | `/api/runs` | Auth | Run records (DB, ?days=) |
-| GET | `/api/summary` | Auth | Headline metrics (DB, ?days=) |
 | GET | `/api/geo` | Auth | Google Ads API geo performance by country/campaign (DB, ?days=) |
 | GET | `/api/keywords` | Auth | Google Ads API keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
-| GET | `/api/dashboard/trends` | Auth | Previous-period trend comparison for dashboard (DB, ?days=) |
 | GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
@@ -2774,82 +2606,6 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 ---
 
 ## System Reality Audit (PR-ADS-064)
-
-### `GET /api/system/reality-audit`
-
-**Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` Bearer header)  
-**Purpose:** Read-only production reality diagnostic. Reports row counts, freshness status, and verdicts for every major dataset table.  
-**Added:** PR-ADS-064
-
-#### Query Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `days` | int | 60 | Time window in days (1–90) |
-
-#### Response Shape
-
-```json
-{
-  "generated_at": "2026-05-25T12:00:00+00:00",
-  "days": 60,
-  "db_available": true,
-  "latest_run": {
-    "run_type": "weekly",
-    "status": "success",
-    "started_at": "2026-05-25T00:01:00+00:00",
-    "finished_at": "2026-05-25T00:05:00+00:00"
-  },
-  "datasets": {
-    "search_terms": {
-      "dataset": "search_terms",
-      "rows_7d": 0,
-      "rows_14d": 0,
-      "rows_30d": 0,
-      "rows_60d": 0,
-      "latest_date": null,
-      "freshness_status": "success",
-      "source": "google_ads_api",
-      "last_sync_type": "weekly/daily",
-      "last_sync_status": "success",
-      "verdict": "FRESH_BUT_EMPTY",
-      "reason": "Sync status says 'success' but table has zero rows in 60d window"
-    }
-  },
-  "sync_state": {},
-  "pipeline_blockers": [
-    {
-      "page": "Search Terms",
-      "blocker": "search_terms table: FRESH_BUT_EMPTY — ..."
-    },
-    {
-      "page": "N-Grams",
-      "blocker": "Depends on search_terms table which is empty/broken"
-    }
-  ]
-}
-```
-
-#### Verdicts
-
-| Verdict | Meaning |
-|---------|---------|
-| `OK` | Data present and within freshness threshold |
-| `RUNNING` | Sync is currently in progress (data may still be loading) |
-| `FRESH_BUT_EMPTY` | Sync says success but table has zero rows |
-| `STALE` | Latest date exceeds staleness threshold |
-| `EMPTY_VALID` | No sync expected and table is empty |
-| `MISSING_TABLE` | Table does not exist in the database |
-| `DB_UNAVAILABLE` | Database connection failed |
-| `BROKEN` | Exception or inconsistent state |
-
-#### Notes
-
-- **Read-only.** No external API calls. No data mutation.
-- Equivalent to running `python scripts/audit_production_reality.py --days 60 --json`
-- Admin/manual diagnostic endpoint. Responses are short-TTL cached in API to reduce DB load from repeated polling.
-
----
 
 ## System Status War Room (PR-ADS-068)
 
