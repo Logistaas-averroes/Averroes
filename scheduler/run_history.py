@@ -13,9 +13,16 @@ Record schema:
   status              — "success" | "failed" | "partial"
   failed_step         — step label if the run failed, else null
   error_message       — exception message if the run failed, else null
-  report_path         — path to generated report file, else null
+  report_path         — path to a generated result file, else null
   delivery_attempted  — true | false
   delivery_success    — true | false | null (null = not attempted)
+
+PR-ADS-162H: the weekly and monthly jobs no longer generate or email a report.
+They record report_path null, delivery_attempted false and delivery_success
+null on every run. The three fields are kept (the `runs` table has the same
+columns, and the daily pulse still records the path of its own JSON result).
+`partial` is now a status those two jobs record: the run reached its end and at
+least one data step did not land.
 
 Failure behaviour:
   All write errors are logged to stderr but never suppress the original

@@ -227,7 +227,7 @@ jobs:
             tests/test_pr_ads_156_f2_stale_analysis_and_durability.py \
             tests/test_pr_ads_156_f3_account_identity_cutover.py \
             tests/test_pr_ads_144_search_terms_revamp.py \
-            tests/test_rule_advisor_doctrine.py \
+            tests/test_pr_ads_162h_report_generation_retired.py \
             tests/test_scheduler_google_ads_cutover.py \
             tests/test_pr_ads_145_search_terms_completion.py \
             tests/test_pr_ads_129_roas_availability_geo_reconciliation.py -q

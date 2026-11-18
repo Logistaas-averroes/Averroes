@@ -50,7 +50,12 @@ def test_weekly_empty_search_terms_marks_success_not_success_empty(monkeypatch):
 
     monkeypatch.setattr(weekly, "start_run", lambda *_: {})
     monkeypatch.setattr(weekly, "finish_run", lambda *a, **k: None)
-    monkeypatch.setattr(weekly, "deliver_report", lambda *_: True)
+    # PR-ADS-162H: the stubs for `deliver_report`, `run_lead_quality`,
+    # `run_campaign_truth`, `generate_weekly_report` and `compute_ngram_findings`
+    # are removed with the code they replaced — the weekly job no longer builds
+    # or emails a report. Nothing else about this case changes: it is still the
+    # documented baseline failure (it patches the retired Windsor connector, so
+    # the real Google Ads pull runs and raises for want of credentials).
     monkeypatch.setattr(weekly, "persistence_succeeded", lambda rows, written: (len(rows or []) == 0 and written == 0) or written > 0)
 
     monkeypatch.setattr("connectors.windsor_pull.pull_campaign_performance", lambda **_: [])
@@ -72,10 +77,6 @@ def test_weekly_empty_search_terms_marks_success_not_success_empty(monkeypatch):
     # stub would raise TypeError and mask whatever this fixture is really about.
     monkeypatch.setattr("analysis.core.run_waste_detection",
                         lambda *a, **k: {"confirmed_waste_items": []})
-    monkeypatch.setattr("analysis.core.run_lead_quality", lambda: None)
-    monkeypatch.setattr("analysis.core.run_campaign_truth", lambda: {"campaigns": []})
-    monkeypatch.setattr("analysis.advisor.generate_weekly_report", lambda **_: "outputs/fake_report.md")
-    monkeypatch.setattr("analysis.rule_advisor.compute_ngram_findings", lambda *_: [])
 
     monkeypatch.setattr(weekly.db_writers, "write_run", lambda *_: 1)
     monkeypatch.setattr(weekly.db_writers, "start_sync_batch", lambda *a, **k: 1)

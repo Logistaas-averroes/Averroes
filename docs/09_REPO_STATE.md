@@ -2436,3 +2436,293 @@ disabled); the Dashboard target test no longer waves through a computed local
 named `target_page`; the legacy-keyword-consumer test asserts the Dashboard
 call site and names `/api/keywords` as an orphan; and the audit's summary
 sentence says it reconciles counts, not spend.
+
+## PR-ADS-162H — remove report generation and its email; keep the jobs' data steps
+
+**Why.** Owner decision ("delete action queue and reports"). 162G deleted the
+Reports page and left the generator running: the weekly and monthly jobs still
+built the advisor report and emailed it. Production, read before this slice:
+
+- **Weekly job** (`scheduler/weekly.py`, Mondays 04:00 UTC). Killed by Render at
+  the 512 MB memory limit about two minutes after it starts, every Monday since
+  at least 2026-10-19. Its last recorded success was 2026-06-01. Its `geo` and
+  `keywords` writes do land each Monday (latest `run_date` 2026-11-16), so the
+  kill comes after those writes and before waste detection completes — in the
+  keyword-facts / 60-day search-term sync / waste-detection region, not in the
+  report steps.
+- **Monthly job** (`scheduler/monthly.py`, 1st of the month 05:00 UTC).
+  Completes. Its email has failed every month (`delivery_attempted = true`,
+  `delivery_success = false`).
+- `waste_terms` and `search_term_review` hold 0 rows. The `campaigns` snapshot's
+  latest `run_date` is 2026-11-01, written by the monthly job.
+- Nobody receives the report and no page shows it.
+
+**What this does NOT fix.** Removing the report does not stop the weekly job
+being killed. The kill happens in the data steps this slice keeps, before the
+report steps were ever reached, so the weekly job will go on dying at the same
+point. Flagged-term detection (`run_waste_detection` → `write_waste_terms` →
+`record_flag_history`) stays unfed until the memory problem is solved — a
+larger instance, or streaming the 60-day search-term sync and the waste
+analysis instead of holding the rows in memory. That is an open owner
+decision, not something this slice settles. A killed run also never reaches
+`finish_run`, so its `runs` row keeps the `failed` it was inserted with; the
+`weekly` cadence keeps reporting failures, correctly.
+
+**Removed.**
+
+| What | Detail |
+| --- | --- |
+| Job steps (both jobs) | `run_lead_quality` (wrote `outputs/lead_quality.json`), `run_campaign_truth` (wrote `outputs/campaign_truth.json`), the `write_campaigns` step with its `google_ads_api/campaigns` sync batch, `compute_ngram_findings`, `generate_weekly_report` / `generate_monthly_report`, `deliver_report` |
+| Files | `scheduler/delivery.py`, `analysis/advisor.py`, `analysis/rule_advisor.py` |
+| `analysis/core.py` | `run_lead_quality`, `run_campaign_truth`, `determine_verdict`, their helpers (`_clean_campaign_name`, `_is_real_campaign`, `_canonicalise_campaign_name`, `_CAMPAIGN_CANONICAL`, `_HUBSPOT_SOURCE_PSEUDONAMES`) and the four status lists only they used (`IN_PROGRESS`, `UNKNOWN`, `JUNK`, `WRONG_FIT`) |
+| Monthly failure paths | "Advisor returned no report path" and "Report file not found": a run that makes no report cannot fail for want of one |
+| Readiness | `analysis.advisor` and `analysis.rule_advisor` in `api/server.py` `_REQUIRED_MODULES`; the SendGrid, advisor-mode and advisor-file checks in `scripts/healthcheck.py` and `scripts/phase1_readiness.py` (the preflight failed without SendGrid keys) |
+| Deploy config | `SENDGRID_API_KEY`, `REPORT_SENDER_EMAIL`, `REPORT_RECIPIENT_EMAIL`, `ANTHROPIC_API_KEY` in `render.yaml`; those and `ADVISOR_MODE` in `.env.example`; `sendgrid` in `requirements.txt` |
+| UI | the "Report: outputs/…" text after a manual run on the Scheduler page |
+| Registry | the report-pipeline consumer and the optional LLM report-writer consumer; rules `report.core.module`, `report.core`, `report.rule_advisor.module`, `report.rule_advisor`, `report.advisor` and `api.module`; two report decision surfaces; the `doctrine.third_snapshot_population` conflict (its producer and its publisher are both gone) |
+
+Every deletion was preceded by a search for other importers. The search found
+three that an import scan cannot see, because they name the modules as strings:
+the readiness endpoint's module list and the two preflight scripts. All three
+are corrected, and the new suite reads string constants for that reason.
+
+**Kept, and why.**
+
+| Step | Why |
+| --- | --- |
+| Google Ads pulls, HubSpot pulls | inputs of everything below |
+| `write_leads`, `write_deals` | the legacy `leads` / `deals` tables and their `hubspot/contacts`, `hubspot/deals` freshness |
+| `write_geo`, `write_keywords` | legacy snapshots live pages still read (PR-ADS-162G follow-up 2 and 4) |
+| `sync_keyword_daily_facts`, `sync_recent_search_terms` | the durable keyword facts and the canonical search-term sync |
+| `run_waste_detection` + `write_waste_terms` | the flagged state on Search Terms → Flagged |
+| `record_flag_history` (weekly only) | first / latest flagged dates; the waste-truth audit fails without it |
+| `run_gclid_match` + `write_gclid_attribution`, `write_gclid_coverage_snapshot` | the GCLID pages and their two freshness datasets |
+| `start_run` / `finish_run`, the `runs` row, run types `weekly` / `monthly` | the two monitoring cadences |
+
+Local JSON saves, each kept because something still reads the file:
+
+| Save | File | Reader |
+| --- | --- | --- |
+| `google_ads_save(campaigns, None, keywords, geos)` | `data/ads_campaigns.json` | `scheduler/daily.py` anomaly baseline; `revenue_attribution_service` diagnostic fallback |
+| | `data/ads_geos.json` | `revenue_attribution_service` diagnostic fallback |
+| | `data/ads_keywords.json` | none found; written by the same call and left as it was |
+| `google_ads_save(None, search_terms, None, None)` | `data/ads_search_terms.json` | `connectors/gclid_match.py` |
+| `hubspot_save(contacts, deals, crm_summary)` | `data/crm_contacts.json` | `connectors/gclid_match.py`, `analysis.core.run_waste_detection`, `revenue_attribution_service` fallback |
+| | `data/crm_deals.json` | `connectors/gclid_match.py` |
+| | `data/crm_summary.json` | none found; written by the same call and left as it was |
+| `gclid_save(gclid_result)` | match and coverage files | unchanged; not report plumbing |
+
+`db.writers.write_campaigns` is **not** deleted: `scripts/backfill_windsor.py`
+(the manual admin backfill) still calls it. `analysis.core.QUALIFIED` stays:
+`services/revenue_attribution_service.py` imports it. `anthropic` stays in
+`requirements.txt` although nothing imports it now — the test client's HTTP
+dependency is not listed in that file, and this package's own dependencies are
+the likeliest place CI gets it from. That was not verified against a clean
+install, so the line is left rather than risk the blocking job.
+
+Step labels are renumbered `1/4` … `4/4` in both jobs: Google Ads pull, HubSpot
+pull and durable writes, waste detection, GCLID match.
+
+**Run status — a behaviour change, stated plainly.** The jobs were recorded
+`success` once the report step was reached. A data step that failed on the way
+was logged inside a `try`/`except` and the run still ended `success`: a
+`write_geo` that persisted nothing, a search-term sync that reported not-ok, a
+GCLID match that raised. With the report gone the data steps are the job, so
+the run record now states what they did:
+
+| Status | When |
+| --- | --- |
+| `success` | every kept step **reported** landing (see "Known gaps" below) |
+| `partial` | the run reached its end, its run row exists, and at least one kept step did not land; `failed_step` lists them, `error_message` says why |
+| `failed` | the run could not continue: a Google Ads or HubSpot pull raised, waste detection raised, or (monthly) a connector snapshot is missing — unchanged; OR the run reached its end with no run row (usually an unreachable database), because a run with no durable record cannot show that anything landed |
+
+A step "did not land" when its writer wrote nothing although rows were fetched (`persistence_succeeded`: 0 of N — the writers return `len(rows)` or 0), its sync returned `ok: false`, `record_flag_history`
+returned `available: false`, the coverage snapshot wrote 0 rows, no run row
+could be created, or it raised. `partial` here means what it means everywhere
+else: monitoring shows the cadence yellow and does not advance
+`last_success_at`. Expect this on the first run after deploy if any of those
+steps has been failing unnoticed: the monthly job has been recording `success`
+with no evidence about them either way.
+
+One gap is left and named: `write_waste_terms` returns nothing and never
+raises, so a failed insert there is still invisible to the job.
+
+`report_path`, `delivery_attempted` and `delivery_success` stay as columns (no
+schema change). Both jobs write `NULL`, `FALSE`, `NULL`. The daily pulse still
+records the path of its own JSON result.
+
+**The callers.** The jobs return their outcome
+(`{run_type, status, failed_steps}`) instead of a report path.
+`POST /run/weekly` and `POST /run/monthly` republish it; they used to answer
+`success` for anything that did not raise, which for the monthly job — which
+records a failed step and returns without raising — included failed runs. An
+outcome the endpoint does not recognise is `failed`. The scheduled wrappers in
+`api/scheduler.py` log the outcome the same way instead of "succeeded". The
+Scheduler page shows a partial run as a warning naming the steps. Job ids and
+schedules are unchanged; the display names are "Weekly Data Refresh" and
+"Monthly Data Refresh".
+
+**The `campaigns` snapshot is no longer a dataset.** With its writer
+unscheduled the table gets no new rows, and a registered core dataset nothing
+fills can only report stale. It is unregistered everywhere it was treated as
+live:
+
+| Where | Change |
+| --- | --- |
+| `services/freshness_service.py` | the `campaigns` entry removed from `DATASET_FRESHNESS_CONFIG`; `RETIRED_DATASETS` added, naming `(google_ads_api, campaigns)` and why |
+| `/api/datasets/freshness` | the pair leaves the known list (derived from the config). The endpoint also lists every `sync_state` row it does not recognise, with a default 8-day threshold — and production holds that row — so a retired key is excluded from `datasets` and the counts and returned under `retired_datasets` with its last recorded sync and no status |
+| status war room | row counts and statuses are config-driven, so the table is no longer counted; a retired row no longer dates its source's last sync |
+| `services/system_status_service.py` | removed from `CORE_DATASETS` (the source of the "Campaigns data is stale" blocker), `PIPELINE_DEPENDENCIES` and the Google Ads source rollup; `PAGE_PIPELINE_IMPACT` for Dashboard and Campaigns now names `canonical_spend` |
+| `static/app.js` | `PAGE_DEPENDENCIES` for Dashboard, Campaign Revenue & Spend and Unit Economics, the matching `dependsOn` chips, the dataset label and the dataset → page link now use `google_ads_api/canonical_spend` |
+| `scripts/audit_production_reality.py` | the table is no longer audited against an 8-day threshold |
+
+`services/dataset_keys.py` is unchanged: `campaigns` is still a valid sync
+dataset key, stamped by Mailchimp and by the manual backfill. The table is not
+dropped. The Campaigns page's dataset, `canonical_spend`
+(`google_ads_campaign_daily_spend`), is untouched and still reported.
+
+**The doctrine registry.** Besides the removals above, the
+`campaigns snapshot writer` consumer and the `campaigns.cpql_usd` CPQL entry
+are kept and rewritten, because the writer and the column still exist: both now
+say the only caller is the manual backfill, whose rows carry no
+`confirmed_sqls`, so it stores a NULL CPQL. The static inventory reports no
+unclassified occurrence and no registry problem.
+
+**Tests.** `tests/test_pr_ads_162h_report_generation_retired.py` (31 tests, 84 cases):
+
+- the three files are gone and no production module imports, names as a
+  string, or calls anything from them;
+- neither job function calls a report function, `deliver_report` or
+  `write_campaigns`, or stamps a `campaigns` batch — read from the AST of the
+  job function, not from the file's text;
+- both job functions still call every kept step exactly once, stamp exactly
+  the seven sync batches that remain once `campaigns` is removed, keep every
+  JSON save, and keep their run type;
+- each job, run with every external call stubbed: all steps landing is
+  `success` with the three report columns `NULL` / `FALSE` / `NULL`; each kept
+  step broken one at a time (17 ways) is `partial` with the step named; each
+  step the run cannot continue past is `failed`;
+- the manual-run endpoints and the scheduled wrappers republish `success`,
+  `partial` and `failed`, and treat a missing or unrecognised outcome as
+  `failed`;
+- the `campaigns` snapshot is not a freshness dataset, `canonical_spend` is,
+  and Mailchimp's `campaigns` key is not swept up;
+- the status war room, over a database holding a 40-day-old `campaigns` sync
+  row and an empty `campaigns` table, raises no blocker and is `ok` — and the
+  same database with the old registration restored is `error`, so the first
+  result is not an accident;
+- the doctrine inventory is clean and the registry points at no deleted code;
+  the reader audit's structural checks, including the UI wording check, pass.
+
+Seventy-four of the 82 cases fail on the pre-change tree (measured by copying
+the file into a worktree of the parent commit). The eight that pass there are
+guards on things this slice keeps: the JSON readers, the weekly job's three
+`failed` paths, a raising run reported `failed` by both endpoints, the
+monitoring cadences, and the reader audit's structural checks.
+
+Older tests:
+
+- `test_rule_advisor_doctrine.py`, `test_rule_advisor_ngram_block.py`,
+  `test_core_campaign_truth.py` — removed. Each imported only deleted code.
+- `test_core_lead_quality.py` — reduced to the cases about `QUALIFIED`, which
+  survives; the cases about the four deleted status lists and a test-local copy
+  of the deleted junk-rate formula are removed, and the removal is asserted.
+- `test_pr_ads_162g_action_queue_reports_retired.py::test_11` — it pinned the
+  generator as untouched; it now states what this slice removed and kept.
+- `test_pr_ads_156_f1_freshness_truth.py::test_13b` — its weekly / monthly half
+  asserted the n-gram hand-off to the advisor. It now asserts that no n-gram or
+  report call remains and that waste detection still receives the availability
+  flag. The daily half is unchanged.
+- `test_pr_ads_156_f2_stale_analysis_and_durability.py::test_16` and the CI
+  workflow — `test_rule_advisor_doctrine` leaves the blocking contract step;
+  the new suite takes its place.
+- `test_search_terms_followup_fixes.py` — the weekly baseline case loses its
+  stubs of deleted functions. It still fails the documented way
+  (`OSError: Missing required Google Ads env vars`).
+- `test_system_status_truth.py`, `test_system_status_war_room.py`,
+  `test_canonical_freshness.py`, `test_dataset_freshness_endpoint.py`,
+  `test_dataset_freshness_ui_contract.py`, `test_empty_state_page_explanations.py`,
+  `test_platform_evidence_google_ads_api_cutover.py` — fixtures and required
+  keys that named the retired `campaigns` dataset use `canonical_spend`. Every
+  assertion about the mechanism is kept; the freshness-endpoint file gains a
+  case for the retired row.
+
+**Left alone.**
+
+1. `outputs/waste_report.json` is still written by `run_waste_detection` and
+   now has no reader. The 156-F2 tests read it to prove what the function did.
+2. `config/thresholds.yaml` keeps keys only the deleted code read:
+   `campaign_verdicts.scale.*`, `campaign_verdicts.fix.zero_sqls_with_intent_mismatch`,
+   `lead_quality.early_lead_grace_days`, `confirmed_cut_markets`.
+3. `db.writers.write_campaigns`, the `campaigns` table and the admin backfill's
+   `campaigns` dataset.
+4. `docs/PHASE1_PRODUCTION_READINESS.md` carries a banner instead of a rewrite.
+   Older audit documents still describe the report as it was.
+5. The follow-ups 4, 5 and 6 of PR-ADS-162G are unchanged.
+
+**Independent truth review (before the first push).** The
+`averroes-truth-auditor` drove both real job functions against a throwaway
+PostgreSQL with only the connectors stubbed and found **no blocker**. It
+confirmed `partial` reaches every surface unchanged — the job's return, both
+POST endpoints, the `runs` row, the run-history file, `/api/runs`, monitoring
+(yellow, `last_success_at` not advanced), per-dataset sync batches, canonical
+freshness and the Scheduler page — and that no kept step was removed,
+reordered or given different arguments. One finding was fixed here:
+
+- *`partial` when nothing landed.* With the database unreachable the weekly
+  job reached its end and recorded `partial` with five failed steps and no
+  run row. `run_outcome` now answers `failed` when the run row itself could
+  not be created. Tests `09a`, `11` and `11b` cover it; removing the rule
+  fails three cases.
+
+Also from that review: a test now pins the kept steps' windows and batch types
+(three literals could be changed with every test still green), and the wording
+above was corrected ("reported landing"; "wrote nothing", not "fewer rows").
+
+**Known gaps — `success` is only as true as what each step reports.** Not
+introduced by this slice, and not fixed by it:
+
+1. **A swallowed HubSpot error still ends `success`.**
+   `connectors/hubspot_pull.pull_paid_search_contacts` logs a non-429 API error
+   and returns `[]`; `persistence_succeeded([], 0)` is true. With an expired
+   token the run is `success`, `hubspot/contacts` is stamped fresh,
+   `data/crm_contacts.json` is overwritten with `[]` and a 0-of-0 coverage
+   snapshot is stored. `pull_deals_with_gclid` swallows per-contact failures
+   the same way. The Google Ads pulls raise and are not affected. Fix: make the
+   connector raise. This is the most important follow-up.
+2. `db.writers.write_waste_terms` returns `None` and never raises, so a failed
+   insert there is invisible; the waste batch records `len(items)`.
+3. `start_sync_batch` returning 0, or `finish_sync_batch` returning False, is
+   not noted: the run ends `success` with no freshness stamp for that dataset.
+4. **`failed` does not reach the `runs` table when a pull raises.** The run
+   row is first written after both pulls, so a run that fails in step 1 or 2
+   is `failed` in the run-history file and the POST response but has no row;
+   monitoring, which reads the table, keeps showing the previous outcome.
+   Fix: insert the row at `start_run`.
+5. If the leads/deals block raises after the row exists, the job drops its run
+   id: the return and the history file say `partial` while the row keeps the
+   `failed` it was inserted with and no `finished_at`. Low reachability (the
+   writers catch database errors); documented in `test_09`.
+6. The durable row for a partial run is asserted through a stubbed
+   `update_run`. The reviewer's PostgreSQL probe showed it is correct; no test
+   in the repository drives it to a real row yet.
+
+**Found in passing, own PR.** `services/freshness_service.py` names
+`deals.close_date` and `gclid_attribution.matched_at`, columns `db/schema.py`
+does not define. On a schema built from that file the war room's row count
+raises inside one transaction and every later statement fails silently:
+"Scheduler Latest Runs" reads "no run records found" and `rows_in_window` is
+empty for `deals` and every dataset after it. Present before this slice and
+unchanged by it. Not checked against production's actual schema.
+
+**Leftovers for a later slice,** by how much they can mislead an operator:
+`hubspot/deals` dependency chips on pages that read the deal ledger;
+`WINDSOR_API_KEY` / `WINDSOR_ACCOUNT_ID` still required by both preflights
+for a retired provider; the monthly required-files check still demands
+`ads_search_terms.json`; `outputs/waste_report.json`, `data/ads_keywords.json`
+and `data/crm_summary.json` are written with no reader; dead
+`config/thresholds.yaml` keys; `anthropic` in `requirements.txt` (kept: here
+it is what pulls in the test client's HTTP dependency — replace it with an
+explicit test dependency rather than deleting it); `write_campaigns` and the
+`campaigns` table; the manual backfill stamps `windsor/campaigns`, which the
+freshness endpoint still lists.

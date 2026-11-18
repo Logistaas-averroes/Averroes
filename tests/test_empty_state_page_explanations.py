@@ -136,11 +136,16 @@ class TestPageDependenciesCoverage:
         block = extract_js_object_block(APP_JS, "PAGE_DEPENDENCIES")
         assert block is not None, "Could not extract PAGE_DEPENDENCIES block"
         # At least the core data pages should reference source-qualified dataset keys
+        # PR-ADS-162H: "google_ads_api/campaigns" (the retired legacy
+        # snapshot) was the second key. The pages that named it read canonical
+        # daily spend, and a dependency on a dataset the freshness endpoint no
+        # longer reports can never resolve.
         qualified_keys = [
             "google_ads_api/search_terms",
-            "google_ads_api/campaigns",
+            "google_ads_api/canonical_spend",
             "hubspot/contacts",
         ]
+        assert "google_ads_api/campaigns" not in block
         for key in qualified_keys:
             assert f'"{key}"' in block or f"'{key}'" in block, (
                 f"PAGE_DEPENDENCIES should use source-qualified key '{key}'"

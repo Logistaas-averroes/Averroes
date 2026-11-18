@@ -114,11 +114,16 @@ Return the most recent record from `runtime_logs/run_history.jsonl`.
   "status": "success",
   "failed_step": null,
   "error_message": null,
-  "report_path": "outputs/weekly_report_2026-04-28.md",
-  "delivery_attempted": true,
-  "delivery_success": true
+  "report_path": null,
+  "delivery_attempted": false,
+  "delivery_success": null
 }
 ```
+`status` is `success`, `partial` or `failed`. Since PR-ADS-162H the weekly and
+monthly jobs produce no report: for those run types `report_path` is always
+`null`, `delivery_attempted` is `false` and `delivery_success` is `null`. On a
+`partial` run `failed_step` names the steps that did not land. (The daily pulse
+still records the path of its own JSON result.)
 **Response 200 (when no history):**
 ```json
 { "status": "empty", "message": "No run history found yet" }
@@ -182,14 +187,35 @@ Trigger the daily pulse scheduler.
 ---
 
 #### `POST /run/weekly`
-Trigger the weekly report scheduler. Same response shape as `/run/daily`, with `"job": "weekly"` and `result.report_path` ending in `.md`.
+Trigger the weekly data refresh. No report is produced (PR-ADS-162H).
 
 **Auth:** Admin only
+**Response 200:**
+```json
+{
+  "status": "partial",
+  "job": "weekly",
+  "started_at": "2026-11-16T04:00:00Z",
+  "finished_at": "2026-11-16T04:03:10Z",
+  "result": { "failed_steps": ["write_geo"] }
+}
+```
+`status` is the run's own outcome, not "the call did not raise":
+
+| `status` | Meaning | `result.failed_steps` |
+| --- | --- | --- |
+| `success` | every step landed | `[]` |
+| `partial` | the run finished and at least one step did not land | the steps |
+| `failed` | the run could not continue; the body also carries `error` | the step it stopped at, when known |
+
+A response the job did not shape (it raised) is the `/run/daily` failed shape.
 
 ---
 
 #### `POST /run/monthly`
-Trigger the monthly strategy report scheduler. Same response shape as `/run/daily`, with `"job": "monthly"`.
+Trigger the monthly data refresh. Same response shape and statuses as
+`/run/weekly`, with `"job": "monthly"`. The monthly job does not raise for a
+failed step, so `status` is the only evidence of one.
 
 **Auth:** Admin only
 
@@ -412,7 +438,7 @@ Scheduler run records for the last N days.
       "started_at": "2026-04-30T15:10:01Z",
       "finished_at": "2026-04-30T15:12:44Z",
       "status": "success",
-      "report_path": "outputs/weekly_report_2026-04-30.md"
+      "report_path": null
     }
   ]
 }
@@ -749,7 +775,7 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 > batches with `source="google_ads_api"`). Windsor remains only as
 > legacy/deprecated history, not the active source.
 
-- `google_ads_api` / `campaigns`
+- `google_ads_api` / `canonical_spend` (the Campaigns page's dataset)
 - `google_ads_api` / `keywords`
 - `google_ads_api` / `search_terms`
 - `google_ads_api` / `geo`
@@ -760,6 +786,14 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 - `analysis` / `waste_terms`
 - `computed` / `ngrams`
 - `analysis` / `historical_intelligence`
+
+> **PR-ADS-162H:** `google_ads_api` / `campaigns` (the legacy `campaigns`
+> snapshot table) is retired and is not a dataset here. The list above is
+> derived from `services.freshness_service.DATASET_FRESHNESS_CONFIG`; that
+> config is the authority. A retired key that still holds a `sync_state` row is
+> returned under `retired_datasets` — `{dataset_key, source, dataset, retired,
+> reason, last_successful_sync_at, last_source_date}` — with no freshness
+> status, and is excluded from `datasets`, `summary` and `canonical_summary`.
 
 **Status values (legacy):** `success` | `failed` | `running` | `unknown`
 
@@ -783,7 +817,7 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
   "datasets": [
     {
       "source": "google_ads_api",
-      "dataset": "campaigns",
+      "dataset": "canonical_spend",
       "status": "success",
       "last_successful_sync_at": "2026-05-04T06:00:00+00:00",
       "last_source_date": "2026-05-03",

@@ -16,9 +16,10 @@ A deletion is only clean if nothing still points at what was deleted. The check
 that matters most here is ``test_05``: a Dashboard card whose ``target_page`` is
 not a real page renders a link that silently bounces to the Dashboard.
 
-Out of scope, and pinned as untouched by ``test_11``: the report GENERATION
-pipeline (scheduler/weekly.py, scheduler/monthly.py, analysis/core.py,
-analysis/rule_advisor.py, analysis/advisor.py).
+Out of scope for 162G was the report GENERATION pipeline, which ``test_11``
+pinned as untouched. PR-ADS-162H then removed it; ``test_11`` now states what
+that slice removed and what it kept
+(``tests/test_pr_ads_162h_report_generation_retired.py`` holds the detail).
 """
 from __future__ import annotations
 
@@ -317,18 +318,29 @@ def test_10_the_doctrine_registry_holds_no_entry_for_the_deleted_surfaces():
     assert valence[0]["consumer"].startswith("Dashboard Overview")
 
 
-def test_11_the_report_generation_pipeline_is_untouched():
-    """Out of scope: deleting the viewer does not delete the generator. The
-    weekly/monthly jobs still run and still email the report."""
+def test_11_the_report_generator_went_in_162h_and_the_jobs_stayed():
+    """162G deleted the viewer and pinned the generator as untouched: the
+    weekly/monthly jobs still ran and still emailed the report. PR-ADS-162H
+    removed the generator and the email, and kept the jobs.
+
+    Removed: the advisor modules, the email module, and the registry's report
+    consumer with its rules. Kept: both job modules, the analysis module that
+    holds waste detection, and both manual run endpoints.
+    """
     from analysis import sql_doctrine_registry as registry
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py", "analysis/core.py",
-                "analysis/rule_advisor.py", "analysis/advisor.py"):
+    for rel in ("analysis/rule_advisor.py", "analysis/advisor.py",
+                "scheduler/delivery.py"):
+        assert not (ROOT / rel).exists(), rel
+    assert not hasattr(registry, "_REPORT")
+    assert not any("report pipeline" in c["consumer"] for c in registry.CONSUMERS)
+    rule_ids = {r["id"] for r in registry.RULES}
+    assert not {"report.core", "report.core.module", "report.rule_advisor",
+                "report.rule_advisor.module", "report.advisor"} & rule_ids
+
+    for rel in ("scheduler/weekly.py", "scheduler/monthly.py", "analysis/core.py"):
         assert (ROOT / rel).exists(), rel
-    consumers = {c["consumer"] for c in registry.CONSUMERS}
-    assert registry._REPORT in consumers                      # noqa: SLF001
-    report_rules = {r["id"] for r in registry.RULES
-                    if r["consumer"] == registry._REPORT}     # noqa: SLF001
-    assert {"report.core", "report.rule_advisor"} <= report_rules
+    from analysis import core
+    assert callable(core.run_waste_detection)
     import api.server as server
     paths = {r.path for r in server.app.routes}
     assert {"/run/weekly", "/run/monthly"} <= paths

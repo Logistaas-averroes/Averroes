@@ -70,13 +70,11 @@ PAGE_ACTION_NEEDED_STATES = frozenset([
 # ── Pipeline Dependency Map ─────────────────────────────────────────────────
 
 PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
-    "campaigns": {
-        "label": "Campaigns",
-        "source": "google_ads_api",
-        "page": "Campaigns",
-        "depends_on": [],
-        "blocks": [],
-    },
+    # PR-ADS-162H: the legacy `campaigns` snapshot is no longer a dataset here.
+    # Its scheduled writer was the report's campaign-truth step; with that gone
+    # the table gets no new rows, and a registered dataset nothing fills can
+    # only ever report stale. The Campaigns page's dataset is `canonical_spend`,
+    # below. See services.freshness_service.RETIRED_DATASETS.
     "search_terms": {
         "label": "Search Terms",
         "source": "google_ads_api",
@@ -208,7 +206,7 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     # from one platform and one set of credentials.
     "google_ads_api": {
         "label": "Google Ads API",
-        "datasets": ["campaigns", "search_terms", "keywords", "keyword_facts",
+        "datasets": ["search_terms", "keywords", "keyword_facts",
                      "geo", "canonical_spend", "canonical_geo"],
     },
     "hubspot": {
@@ -239,8 +237,10 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
 # ── Page Impact Mapping ─────────────────────────────────────────────────────
 
 PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
-    "dashboard": ["campaigns", "leads", "waste_terms"],
-    "campaigns": ["campaigns"],
+    # PR-ADS-162H: both entries named the retired `campaigns` snapshot. The
+    # spend both pages show comes from canonical daily spend.
+    "dashboard": ["canonical_spend", "leads", "waste_terms"],
+    "campaigns": ["canonical_spend"],
     "waste": ["waste_terms", "search_terms"],
     "search-terms": ["search_terms"],
     # PR-ADS-153F: the N-Gram page's only real dependency is search_terms.
@@ -263,7 +263,9 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
 # ── Core datasets vs derived ───────────────────────────────────────────────
 
 CORE_DATASETS = frozenset([
-    "campaigns", "search_terms", "leads", "deals", "keywords", "keyword_facts", "geo",
+    # PR-ADS-162H: "campaigns" (the legacy snapshot) removed — a core dataset
+    # with no scheduled writer raised a permanent stale blocker.
+    "search_terms", "leads", "deals", "keywords", "keyword_facts", "geo",
     # PR-ADS-153F: directly synced canonical Google Ads spend datasets.
     "canonical_spend", "canonical_geo",
 ])

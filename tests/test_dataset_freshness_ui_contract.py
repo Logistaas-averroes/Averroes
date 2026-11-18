@@ -38,7 +38,8 @@ KNOWN_DATASET_KEYS: set[str] = {
     # PR-ADS-153B/153C — canonical CRM funnel spine consumed by the Leads page.
     "hubspot/contact_funnel",
     "hubspot/lifecycle_events",
-    "google_ads_api/campaigns",
+    # PR-ADS-162H: "google_ads_api/campaigns" (the legacy snapshot) is retired
+    # and no longer a known freshness key.
     "google_ads_api/canonical_spend",   # PR-ADS-143: canonical daily-spend freshness
     "google_ads_api/keywords",
     "google_ads_api/keyword_facts",

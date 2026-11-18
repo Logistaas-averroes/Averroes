@@ -1,6 +1,11 @@
 # Logistaas Ads Intelligence System — Python Dependencies
 
 # API clients
+# PR-ADS-162H: no module imports `anthropic` any more (analysis/advisor.py was
+# its only user). It is left installed on purpose: fastapi's test client needs
+# an HTTP client package that this file does not list, and this package's own
+# dependencies are the likeliest place CI gets it from. Not verified — check
+# what a clean install provides before removing this line.
 anthropic>=0.40.0
 hubspot-api-client>=9.0.0
 google-ads>=24.0.0
@@ -19,9 +24,6 @@ aiofiles>=23.0.0
 
 # Scheduling
 apscheduler>=3.10.0
-
-# Email delivery
-sendgrid>=6.11.0
 
 # Database
 psycopg2-binary>=2.9.0

@@ -4,8 +4,8 @@
 # Targets:
 #   make healthcheck   — validate env vars and runtime dependencies
 #   make daily         — run the daily pulse scheduler
-#   make weekly        — run the weekly report scheduler
-#   make monthly       — run the monthly report scheduler
+#   make weekly        — run the weekly data refresh
+#   make monthly       — run the monthly data refresh
 #   make runs          — tail the 20 most recent run-history records
 #
 # Rules:
@@ -23,8 +23,8 @@ help:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  make healthcheck   Validate env vars + runtime dependencies"
 	@echo "  make daily         Run the daily pulse scheduler"
-	@echo "  make weekly        Run the weekly report scheduler"
-	@echo "  make monthly       Run the monthly report scheduler"
+	@echo "  make weekly        Run the weekly data refresh"
+	@echo "  make monthly       Run the monthly data refresh"
 	@echo "  make validate      Run Phase 1 end-to-end validation"
 	@echo "  make readiness     Run Phase 1 production readiness audit"
 	@echo "  make verify-deploy Run Phase 1 production readiness audit (alias for readiness)"

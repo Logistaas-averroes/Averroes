@@ -316,9 +316,15 @@ def test_all_datasets_have_config():
     writer and no sync batch, so its entry could only ever report "never run".
     ``canonical_spend`` and ``canonical_geo`` were added: they are real synced
     datasets and the ROAS / Country-ROAS denominators.
+
+    PR-ADS-162H: ``campaigns`` (the legacy snapshot table) was removed from
+    this list because it was removed from the config — its only scheduled
+    writer was the report's campaign-truth step, so a retained entry could only
+    ever report stale.
     """
+    assert "campaigns" not in DATASET_FRESHNESS_CONFIG
     required = [
-        "campaigns", "search_terms", "waste_terms",
+        "search_terms", "waste_terms",
         "keywords", "geo", "leads", "deals",
         "gclid_attribution", "gclid_coverage_snapshots",
         "canonical_spend", "canonical_geo",

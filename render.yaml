@@ -5,8 +5,13 @@
 # Render cron jobs decommissioned — scheduling is now handled inside the web
 # service process. The three former cron services (logistaas-daily-pulse,
 # logistaas-weekly-report, logistaas-monthly-strategy) must NOT be re-enabled
-# while the in-app scheduler is active — duplicate runs will generate
-# duplicate reports and emails.
+# while the in-app scheduler is active — duplicate runs would write every
+# dataset twice.
+#
+# PR-ADS-162H: the weekly and monthly jobs no longer generate or email a
+# report, so SENDGRID_API_KEY, REPORT_SENDER_EMAIL, REPORT_RECIPIENT_EMAIL and
+# ANTHROPIC_API_KEY are no longer declared here. Nothing in the service reads
+# them; values still set in the Render dashboard are ignored and can be deleted.
 #
 # Single-service architecture (Phase 1):
 #   One Render Web Service handles: UI, API, manual run endpoints,
@@ -18,7 +23,7 @@
 services:
   # ─────────────────────────────────────────────────────────
   # Web Service — FastAPI read-only API + in-app scheduler
-  # Handles: health checks, readiness, report/run endpoints,
+  # Handles: health checks, readiness, manual run endpoints,
   #          scheduled daily/weekly/monthly Phase 1 jobs
   # Start: python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
   # Health check: /health
@@ -35,19 +40,11 @@ services:
         value: production
       - key: ADMIN_API_TOKEN
         sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
       - key: HUBSPOT_API_KEY
         sync: false
       - key: WINDSOR_API_KEY
         sync: false
       - key: WINDSOR_ACCOUNT_ID
-        sync: false
-      - key: SENDGRID_API_KEY
-        sync: false
-      - key: REPORT_SENDER_EMAIL
-        sync: false
-      - key: REPORT_RECIPIENT_EMAIL
         sync: false
       # Mailchimp read-only email-marketing evidence (PR-ADS-151). Pull-only —
       # GET requests exclusively; never written back to Mailchimp. MAILCHIMP_API_KEY

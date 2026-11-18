@@ -8,6 +8,14 @@
 > unattended scheduled runs.  Every item must be checked manually before the system is
 > considered "live."
 
+> **Historical — do not follow the report or SendGrid items (PR-ADS-162H).** The
+> weekly and monthly jobs no longer generate or email a report, so
+> `ANTHROPIC_API_KEY`, `SENDGRID_API_KEY`, `REPORT_SENDER_EMAIL` and
+> `REPORT_RECIPIENT_EMAIL` (§3), the "report generation" and "delivery
+> attempted" log checks (§5), §6 "SendGrid Readiness" and the three report /
+> delivery rows of §7 no longer apply. Both jobs still run as data refreshes;
+> their run record is `success`, `partial` or `failed`.
+
 ---
 
 ## 1. Architecture Confirmation

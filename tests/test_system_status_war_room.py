@@ -50,7 +50,7 @@ def test_overall_status_warning_when_search_terms_fresh_but_empty():
 def test_overall_status_error_when_db_unavailable():
     """Any DB unavailable → overall error."""
     statuses = {ds: CanonicalFreshnessStatus.FRESH_WITH_DATA for ds in CORE_DATASETS}
-    statuses["campaigns"] = CanonicalFreshnessStatus.DB_UNAVAILABLE
+    statuses["canonical_spend"] = CanonicalFreshnessStatus.DB_UNAVAILABLE
     for ds in DERIVED_DATASETS:
         statuses[ds] = CanonicalFreshnessStatus.FRESH_WITH_DATA
     status, label = compute_overall_status(statuses)
@@ -79,7 +79,7 @@ def test_overall_status_neutral_when_empty():
 def test_summary_counts():
     """Summary counts correctly categorize datasets."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FRESH_WITH_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
         "waste_terms": CanonicalFreshnessStatus.DEPENDENCY_BLOCKED,
         "leads": CanonicalFreshnessStatus.FAILED,
@@ -128,7 +128,7 @@ def test_dependency_blocked_creates_blocker():
 def test_db_unavailable_creates_error_blocker():
     """DB unavailable creates an error-severity blocker."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.DB_UNAVAILABLE,
+        "canonical_spend": CanonicalFreshnessStatus.DB_UNAVAILABLE,
     }
     blockers = compute_critical_blockers(statuses)
 
@@ -141,11 +141,11 @@ def test_db_unavailable_creates_error_blocker():
 def test_failed_dataset_creates_blocker():
     """Failed dataset creates a blocker."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FAILED,
+        "canonical_spend": CanonicalFreshnessStatus.FAILED,
     }
     blockers = compute_critical_blockers(statuses)
 
-    failed_blocker = next((b for b in blockers if b["id"] == "campaigns_failed"), None)
+    failed_blocker = next((b for b in blockers if b["id"] == "canonical_spend_failed"), None)
     assert failed_blocker is not None
     assert failed_blocker["severity"] == "error"
 
@@ -154,9 +154,13 @@ def test_failed_dataset_creates_blocker():
 
 
 def test_source_health_groups_google_ads_api_datasets():
-    """Google Ads API source includes campaigns, search_terms, keywords, geo."""
+    """Google Ads API source includes canonical_spend, search_terms, keywords, geo.
+
+    PR-ADS-162H: the first member was the legacy `campaigns` snapshot. It is
+    retired (its scheduled writer was the report's campaign-truth step), and
+    the source rollup must not go on listing it."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FRESH_WITH_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "keywords": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
@@ -165,7 +169,8 @@ def test_source_health_groups_google_ads_api_datasets():
     google_ads = next((s for s in sources if s["source"] == "google_ads_api"), None)
     assert google_ads is not None
     assert google_ads["status"] == "ok"
-    assert "campaigns" in google_ads["datasets"]
+    assert "canonical_spend" in google_ads["datasets"]
+    assert "campaigns" not in google_ads["datasets"]
     assert "search_terms" in google_ads["datasets"]
     assert "keywords" in google_ads["datasets"]
     assert "geo" in google_ads["datasets"]
@@ -188,7 +193,7 @@ def test_source_health_groups_hubspot_datasets():
 def test_source_health_warning_when_dataset_empty():
     """Source shows warning when one of its datasets is empty."""
     statuses = {
-        "campaigns": CanonicalFreshnessStatus.FRESH_WITH_DATA,
+        "canonical_spend": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
         "keywords": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,

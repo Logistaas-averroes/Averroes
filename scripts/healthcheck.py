@@ -125,20 +125,11 @@ def check_hubspot(failures: list) -> None:
         failures.append("HUBSPOT_API_KEY")
 
 
-def check_advisor_mode(failures: list) -> None:
-    _header("Advisor Mode  [ADVISOR_MODE + ANTHROPIC_API_KEY]")
-    mode = os.environ.get("ADVISOR_MODE", "deterministic").strip().lower()
-    _pass("ADVISOR_MODE", f"value: {mode or 'deterministic (default)'}")
-
-    if mode == "claude":
-        # Claude mode requires ANTHROPIC_API_KEY
-        if not _check_env_var("ANTHROPIC_API_KEY"):
-            failures.append("ANTHROPIC_API_KEY (required when ADVISOR_MODE=claude)")
-    else:
-        # Deterministic mode — ANTHROPIC_API_KEY is optional
-        _check_env_var("ANTHROPIC_API_KEY", required=False)
-        if mode not in ("deterministic", ""):
-            _warn("ADVISOR_MODE", f"unknown value {mode!r} — defaulting to deterministic")
+# PR-ADS-162H: check_advisor_mode (ADVISOR_MODE / ANTHROPIC_API_KEY) and
+# check_sendgrid (SENDGRID_API_KEY / REPORT_SENDER_EMAIL / REPORT_RECIPIENT_EMAIL)
+# are removed. Both existed for the weekly / monthly advisor report, which is no
+# longer generated or emailed; requiring its keys failed the preflight for a
+# feature that does not exist.
 
 
 def check_auth(failures: list) -> None:
@@ -147,17 +138,6 @@ def check_auth(failures: list) -> None:
         failures.append("APP_SECRET_KEY")
     if not _check_env_var("AUTH_USERS_JSON"):
         failures.append("AUTH_USERS_JSON")
-
-
-def check_sendgrid(failures: list) -> None:
-    _header("SendGrid — Report Delivery  [required for weekly / monthly]")
-    # SENDGRID_API_KEY is required for delivery; sender/recipient are also required.
-    if not _check_env_var("SENDGRID_API_KEY"):
-        failures.append("SENDGRID_API_KEY")
-    if not _check_env_var("REPORT_SENDER_EMAIL"):
-        failures.append("REPORT_SENDER_EMAIL")
-    if not _check_env_var("REPORT_RECIPIENT_EMAIL"):
-        failures.append("REPORT_RECIPIENT_EMAIL")
 
 
 def check_google_ads(failures: list) -> None:
@@ -199,13 +179,10 @@ def check_imports(failures: list) -> None:
         ("connectors.windsor_pull",  "connectors/windsor_pull.py"),
         ("connectors.gclid_match",   "connectors/gclid_match.py"),
         ("analysis.core",            "analysis/core.py"),
-        ("analysis.advisor",         "analysis/advisor.py"),
-        ("analysis.rule_advisor",    "analysis/rule_advisor.py"),
         ("api.auth",                 "api/auth.py"),
         ("scheduler.daily",          "scheduler/daily.py"),
         ("scheduler.weekly",         "scheduler/weekly.py"),
         ("scheduler.monthly",        "scheduler/monthly.py"),
-        ("scheduler.delivery",       "scheduler/delivery.py"),
         ("scheduler.run_history",    "scheduler/run_history.py"),
     ]
     for mod, label in modules:
@@ -224,9 +201,7 @@ def main() -> int:
 
     check_windsor(critical_failures)
     check_hubspot(critical_failures)
-    check_advisor_mode(critical_failures)
     check_auth(critical_failures)
-    check_sendgrid(critical_failures)
     check_google_ads(critical_failures)   # optional — no failures added
     check_directories(critical_failures)
     check_config_files(critical_failures)

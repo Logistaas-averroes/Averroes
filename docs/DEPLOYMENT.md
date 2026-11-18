@@ -53,13 +53,13 @@ Render.com
        ├── GET  /scheduler/status    — In-app scheduler state (requires auth)
        ├── GET  /runs/latest         — Latest run history record (requires auth)
        ├── POST /run/daily           — Trigger daily pulse (requires admin)
-       ├── POST /run/weekly          — Trigger weekly report (requires admin)
-       └── POST /run/monthly         — Trigger monthly report (requires admin)
+       ├── POST /run/weekly          — Trigger weekly data refresh (requires admin)
+       └── POST /run/monthly         — Trigger monthly data refresh (requires admin)
 
 In-app scheduler (APScheduler, runs inside the web service process):
   Daily pulse      — every day at 06:00 Asia/Amman (03:00 UTC)
-  Weekly report    — every Monday at 07:00 Asia/Amman (04:00 UTC)
-  Monthly strategy — 1st of month at 08:00 Asia/Amman (05:00 UTC)
+  Weekly data refresh  — every Monday at 07:00 Asia/Amman (04:00 UTC)
+  Monthly data refresh — 1st of month at 08:00 Asia/Amman (05:00 UTC)
 ```
 
 All services are defined in `render.yaml` at the repo root.
@@ -99,8 +99,8 @@ All services are defined in `render.yaml` at the repo root.
 | `GET /scheduler/status` | Any auth | In-app scheduler state and next run times (read-only) |
 | `GET /runs/latest` | Any auth | Latest record from `runtime_logs/run_history.jsonl` |
 | `POST /run/daily` | Admin (cookie or Bearer) | Trigger daily pulse scheduler |
-| `POST /run/weekly` | Admin (cookie or Bearer) | Trigger weekly report scheduler |
-| `POST /run/monthly` | Admin (cookie or Bearer) | Trigger monthly report scheduler |
+| `POST /run/weekly` | Admin (cookie or Bearer) | Trigger the weekly data refresh |
+| `POST /run/monthly` | Admin (cookie or Bearer) | Trigger the monthly data refresh |
 
 Unauthenticated requests to protected endpoints return **401**.
 Authenticated requests with insufficient role return **403**.
@@ -147,12 +147,12 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 | `HUBSPOT_API_KEY` | ✅ required | HubSpot private app token |
 | `WINDSOR_API_KEY` | ✅ required | Windsor.ai API key |
 | `WINDSOR_ACCOUNT_ID` | ✅ required | Windsor.ai account identifier |
-| `ADVISOR_MODE` | ⬜ optional | `deterministic` (default) or `claude` |
-| `ANTHROPIC_API_KEY` | ⬜ optional | Required only when `ADVISOR_MODE=claude` |
 | `ADMIN_API_TOKEN` | ⬜ optional | For API-only manual triggers without dashboard login |
-| `SENDGRID_API_KEY` | ⬜ optional | For email delivery of reports |
-| `REPORT_SENDER_EMAIL` | ⬜ optional | Verified sender address |
-| `REPORT_RECIPIENT_EMAIL` | ⬜ optional | Report delivery recipient |
+
+> **PR-ADS-162H:** `ADVISOR_MODE`, `ANTHROPIC_API_KEY`, `SENDGRID_API_KEY`,
+> `REPORT_SENDER_EMAIL` and `REPORT_RECIPIENT_EMAIL` are no longer read by
+> anything. The weekly and monthly jobs no longer generate or email a report.
+> Values still set in the Render dashboard are ignored and can be deleted.
 
 > **Security warning:** `APP_SECRET_KEY` must be a long random secret (at least 32 bytes).
 > Never commit it to source control. Rotating this key will invalidate all active sessions.
@@ -165,21 +165,20 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 
 ---
 
-## Deterministic Advisor
+## Weekly and monthly jobs (no report)
 
-By default, `ADVISOR_MODE=deterministic`. Reports are generated from structured analysis outputs
-(`outputs/waste_report.json`, `outputs/lead_quality.json`, `outputs/campaign_truth.json`)
-without calling any external AI model.
+The advisor report and its email were removed in PR-ADS-162H. There is no
+advisor mode to configure and no report file to look for.
 
-Claude API is optional. To switch to Claude mode:
+The weekly and monthly jobs still run on their schedules, as data refreshes:
+Google Ads and HubSpot pulls, the legacy leads / deals / geo / keywords
+snapshots, durable keyword facts, the canonical search-term sync, search-term
+waste detection (weekly: plus flag history) and the GCLID match with its
+coverage snapshot.
 
-```bash
-ADVISOR_MODE=claude
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-If `ADVISOR_MODE=claude` is set but `ANTHROPIC_API_KEY` is missing, the scheduler will fail
-with a clear error message and suggest switching to deterministic mode.
+Each run is recorded `success` (every step landed), `partial` (the run finished
+and at least one step did not — the run record's `failed_step` names them) or
+`failed` (the run could not continue).
 
 ---
 
@@ -334,7 +333,7 @@ Expected response:
 With `ADMIN_API_TOKEN` set on the web service, you can trigger jobs remotely:
 
 ```bash
-# Weekly report
+# Weekly data refresh
 curl -X POST https://<service>.onrender.com/run/weekly \
   -H "Authorization: Bearer $ADMIN_API_TOKEN"
 
@@ -342,7 +341,7 @@ curl -X POST https://<service>.onrender.com/run/weekly \
 curl -X POST https://<service>.onrender.com/run/daily \
   -H "Authorization: Bearer $ADMIN_API_TOKEN"
 
-# Monthly strategy
+# Monthly data refresh
 curl -X POST https://<service>.onrender.com/run/monthly \
   -H "Authorization: Bearer $ADMIN_API_TOKEN"
 ```
@@ -358,8 +357,8 @@ curl -X POST https://<service>.onrender.com/run/monthly \
 | Job | Schedule (Asia/Amman) | UTC Equivalent |
 |-----|-----------------------|----------------|
 | Daily pulse | Every day at 06:00 | 03:00 UTC |
-| Weekly report | Every Monday at 07:00 | Monday 04:00 UTC |
-| Monthly strategy | 1st of month at 08:00 | 1st of month 05:00 UTC |
+| Weekly data refresh | Every Monday at 07:00 | Monday 04:00 UTC |
+| Monthly data refresh | 1st of month at 08:00 | 1st of month 05:00 UTC |
 
 **Timezone note:** Asia/Amman = UTC+3 year-round. Jordan suspended daylight saving
 time in 2022, so no DST offset applies.
@@ -429,22 +428,17 @@ After deploying, confirm the following:
 
 | Condition | Behaviour |
 |-----------|-----------|
-| `ANTHROPIC_API_KEY` missing | `analysis/advisor.py` raises `AuthenticationError` on first Claude call; run exits with traceback |
 | `HUBSPOT_API_KEY` missing | `connectors/hubspot_pull.py` returns empty contacts list; downstream steps proceed with no data |
 | `WINDSOR_API_KEY` / `WINDSOR_ACCOUNT_ID` missing | `connectors/windsor_pull.py` returns empty campaigns list; downstream steps proceed with no data |
-| `SENDGRID_API_KEY` missing | `scheduler/delivery.py` logs `[DELIVERY FAILURE] SENDGRID_API_KEY is not set` and returns `False`; scheduler still exits cleanly |
-| `REPORT_SENDER_EMAIL` missing | Same as above — delivery skipped, run does not fail |
-| `REPORT_RECIPIENT_EMAIL` missing | Same as above |
 
 ### API failures during cron run
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Windsor.ai API returns error / timeout | Monthly and weekly schedulers catch the exception, log `Step 1/6 FAILED`, and return `None` (run aborts cleanly) |
+| Windsor.ai API returns error / timeout | The monthly job logs `Step 1/4 FAILED`, records the run `failed` and returns that outcome; the weekly job records the run `failed` and re-raises |
 | HubSpot API returns 429 rate limit | `hubspot_pull.py` retries with exponential back-off; if retries exhausted, raises exception caught by monthly scheduler |
 | HubSpot API returns other error | Same retry logic; ultimately caught by monthly scheduler |
-| Claude API returns unexpected format | `analysis/advisor.py` returns `None`; monthly scheduler logs `Step 6/6 FAILED` |
-| SendGrid delivery fails | `delivery.py` logs `[DELIVERY FAILURE]` with HTTP status; returns `False`; does not raise |
+| A database write persists nothing, or a sync reports not-ok | The step is logged, the run continues, and the run is recorded `partial` with the step named in `failed_step` |
 
 All failures are logged to stdout, which Render captures and displays in the **Logs** tab.
 
@@ -502,8 +496,8 @@ python -m scheduler.monthly
 |---------|------|---------|
 | `make healthcheck` | `python scripts/healthcheck.py` | Validate env vars, dirs, imports |
 | `make daily` | `python -m scheduler.daily` | Run the daily pulse |
-| `make weekly` | `python -m scheduler.weekly` | Run the weekly report |
-| `make monthly` | `python -m scheduler.monthly` | Run the monthly report |
+| `make weekly` | `python -m scheduler.weekly` | Run the weekly data refresh |
+| `make monthly` | `python -m scheduler.monthly` | Run the monthly data refresh |
 | `make validate` | `python scripts/validate_phase1.py` | Phase 1 read-only validation |
 | `make runs` | `tail runtime_logs/run_history.jsonl` | Show last 20 run records |
 
@@ -520,7 +514,7 @@ python -m py_compile scheduler/monthly.py
 
 The dashboard is served at `/` and provides:
 
-- **System status cards** — health, readiness, latest run, latest report.
+- **System status cards** — health, readiness, latest run.
 - **Latest Run panel** — reads from `/runs/latest`.
 - **Manual Run Controls** — buttons for Daily, Weekly, Monthly. Require `ADMIN_API_TOKEN`.
 - **Doctrine reminder** — Phase 1 read-only status always visible.

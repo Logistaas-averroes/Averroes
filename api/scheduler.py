@@ -16,8 +16,11 @@ Responsibility:
 
 Schedules (Asia/Amman = UTC+3, no DST since Jordan suspended DST in 2022):
   Daily pulse     — every day at 06:00 Asia/Amman  (03:00 UTC)
-  Weekly report   — every Monday at 07:00 Asia/Amman (04:00 UTC)
-  Monthly strategy — 1st of month at 08:00 Asia/Amman (05:00 UTC)
+  Weekly data refresh  — every Monday at 07:00 Asia/Amman (04:00 UTC)
+  Monthly data refresh — 1st of month at 08:00 Asia/Amman (05:00 UTC)
+
+PR-ADS-162H: the weekly and monthly jobs no longer generate or email a report.
+Their job ids, schedules and run types are unchanged.
 """
 
 import logging
@@ -93,8 +96,29 @@ def _run_daily_scheduled() -> None:
             _job_state["daily"] = False
 
 
+def _log_data_refresh_outcome(job: str, outcome) -> None:
+    """Log what a weekly / monthly data refresh reported about itself.
+
+    PR-ADS-162H. "Did not raise" used to be logged as "succeeded", which was
+    false for a monthly run that had recorded itself `failed` and returned
+    None. The job's own outcome is logged instead; one that is missing or
+    unrecognised is an error, never a success.
+    """
+    status = outcome.get("status") if isinstance(outcome, dict) else None
+    steps = "; ".join(str(s) for s in (outcome.get("failed_steps") or [])) \
+        if isinstance(outcome, dict) else ""
+    if status == "success":
+        log.info("[scheduler/%s] succeeded", job)
+    elif status == "partial":
+        log.warning("[scheduler/%s] finished partially — did not land: %s", job, steps)
+    elif status == "failed":
+        log.error("[scheduler/%s] failed at: %s", job, steps)
+    else:
+        log.error("[scheduler/%s] returned no recognisable outcome: %r", job, outcome)
+
+
 def _run_weekly_scheduled() -> None:
-    """Scheduled wrapper for the weekly report."""
+    """Scheduled wrapper for the weekly data refresh."""
     with _run_lock:
         if _job_state["weekly"]:
             log.warning("[scheduler/weekly] skipped — already running (manual or previous scheduled run still active)")
@@ -104,8 +128,7 @@ def _run_weekly_scheduled() -> None:
     log.info("[scheduler/weekly] started (scheduled)")
     try:
         from scheduler.weekly import run_weekly_report  # noqa: PLC0415
-        run_weekly_report()
-        log.info("[scheduler/weekly] succeeded")
+        _log_data_refresh_outcome("weekly", run_weekly_report())
     except Exception as exc:  # noqa: BLE001
         log.error("[scheduler/weekly] failed: %s", exc, exc_info=True)
     finally:
@@ -114,7 +137,7 @@ def _run_weekly_scheduled() -> None:
 
 
 def _run_monthly_scheduled() -> None:
-    """Scheduled wrapper for the monthly strategy report."""
+    """Scheduled wrapper for the monthly data refresh."""
     with _run_lock:
         if _job_state["monthly"]:
             log.warning("[scheduler/monthly] skipped — already running (manual or previous scheduled run still active)")
@@ -124,8 +147,7 @@ def _run_monthly_scheduled() -> None:
     log.info("[scheduler/monthly] started (scheduled)")
     try:
         from scheduler.monthly import run_monthly_report  # noqa: PLC0415
-        run_monthly_report()
-        log.info("[scheduler/monthly] succeeded")
+        _log_data_refresh_outcome("monthly", run_monthly_report())
     except Exception as exc:  # noqa: BLE001
         log.error("[scheduler/monthly] failed: %s", exc, exc_info=True)
     finally:
@@ -207,22 +229,22 @@ def start_scheduler() -> None:
         misfire_grace_time=3600,  # 1-hour grace window for process restarts.
     )
 
-    # Weekly report — every Monday at 07:00 Asia/Amman.
+    # Weekly data refresh — every Monday at 07:00 Asia/Amman.
     _scheduler.add_job(
         _run_weekly_scheduled,
         trigger=CronTrigger(day_of_week="mon", hour=7, minute=0, timezone=_TZ),
         id="weekly",
-        name="Weekly Report",
+        name="Weekly Data Refresh",
         replace_existing=True,
         misfire_grace_time=3600,
     )
 
-    # Monthly strategy — 1st of every month at 08:00 Asia/Amman.
+    # Monthly data refresh — 1st of every month at 08:00 Asia/Amman.
     _scheduler.add_job(
         _run_monthly_scheduled,
         trigger=CronTrigger(day=1, hour=8, minute=0, timezone=_TZ),
         id="monthly",
-        name="Monthly Strategy",
+        name="Monthly Data Refresh",
         replace_existing=True,
         misfire_grace_time=3600,
     )

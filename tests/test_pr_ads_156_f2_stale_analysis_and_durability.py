@@ -623,12 +623,18 @@ def test_16_the_156_and_f1_suites_remain_collected_and_gated():
     "still green" is enforced by the gate rather than asserted here."""
     workflow = (_ROOT / ".github" / "workflows" / "pr-ads-153d-checks.yml").read_text(
         encoding="utf-8")
+    # PR-ADS-162H: "test_rule_advisor_doctrine" was fourth in this list. It
+    # tested analysis/rule_advisor.py, which is deleted with the report, so the
+    # suite no longer exists to be gated. Its place is taken by the suite that
+    # guards what F2 changed in those two jobs and now also guards their
+    # remaining data steps.
     for suite in ("test_pr_ads_156_evidence_freshness",
                   "test_pr_ads_156_f1_freshness_truth",
                   "test_pr_ads_156_f2_stale_analysis_and_durability",
-                  "test_rule_advisor_doctrine",
+                  "test_pr_ads_162h_report_generation_retired",
                   "test_pr_ads_144_pg_integration"):
         assert suite in workflow, suite
+    assert "test_rule_advisor_doctrine" not in workflow
 
     # And the earlier modules still hold the cases they claim to — a suite named
     # in the workflow but emptied of tests is a gate that passes on nothing.

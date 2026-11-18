@@ -97,26 +97,71 @@ def _call_endpoint(*, conn, days: int):
         return api_datasets_freshness(user={"username": "test"}, days=days)
 
 
+# PR-ADS-162H: the two cases below used `google_ads_api/campaigns` (the legacy
+# `campaigns` snapshot table) as their example dataset. It is retired, so they
+# use the dataset the Campaigns page reads; what each asserts is unchanged.
 def test_placeholder_unknown_sync_maps_to_not_run():
     conn, _ = _make_mock_conn()
     payload = _call_endpoint(conn=conn, days=60)
-    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "google_ads_api/campaigns")
-    assert campaigns["status"] == "unknown"
-    assert campaigns["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN
+    spend = next(d for d in payload["datasets"] if d["dataset_key"] == "google_ads_api/canonical_spend")
+    assert spend["status"] == "unknown"
+    assert spend["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN
 
 
 def test_days_one_uses_exact_one_day_window_for_counts():
     now = datetime.now(timezone.utc)
     conn, executed = _make_mock_conn(
-        sync_rows=[("google_ads_api", "campaigns", "success", now, date.today(), 11, None, now)],
-        count_by_table={"campaigns": 7},
+        sync_rows=[("google_ads_api", "canonical_spend", "success", now, date.today(), 11, None, now)],
+        count_by_table={"google_ads_campaign_daily_spend": 7},
     )
     payload = _call_endpoint(conn=conn, days=1)
-    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "google_ads_api/campaigns")
-    assert campaigns["rows_in_window"] == 7
-    campaign_count_calls = [c for c in executed if c.get("kind") == "count" and c.get("table") == "campaigns"]
-    assert campaign_count_calls, "Expected count query for campaigns table"
-    assert campaign_count_calls[0]["params"] == (date.today() - timedelta(days=1),)
+    spend = next(d for d in payload["datasets"] if d["dataset_key"] == "google_ads_api/canonical_spend")
+    assert spend["rows_in_window"] == 7
+    spend_count_calls = [c for c in executed if c.get("kind") == "count"
+                         and c.get("table") == "google_ads_campaign_daily_spend"]
+    assert spend_count_calls, "Expected count query for the canonical spend table"
+    assert spend_count_calls[0]["params"] == (date.today() - timedelta(days=1),)
+    # The retired snapshot table is not counted at all.
+    assert not [c for c in executed if c.get("kind") == "count" and c.get("table") == "campaigns"]
+
+
+def test_the_retired_campaigns_snapshot_is_reported_as_retired_not_as_a_dataset():
+    """PR-ADS-162H. Production holds a `(google_ads_api, campaigns)` sync_state
+    row from past weekly and monthly runs. Unregistering the dataset is not
+    enough: the endpoint also lists every sync_state row it does not recognise,
+    with a default 8-day threshold, so the retired snapshot would reappear as a
+    dataset and go stale a week after its last write."""
+    old = datetime.now(timezone.utc) - timedelta(days=40)
+    conn, executed = _make_mock_conn(
+        sync_rows=[
+            ("google_ads_api", "campaigns", "success", old, old.date(), 11, None, old),
+            ("google_ads_api", "canonical_spend", "success", old, old.date(), 12, None, old),
+        ],
+        batch_rows=[("google_ads_api", "campaigns", "success", 9)],
+        count_by_table={"google_ads_campaign_daily_spend": 3},
+    )
+    payload = _call_endpoint(conn=conn, days=60)
+    keys = [d["dataset_key"] for d in payload["datasets"]]
+    assert "google_ads_api/campaigns" not in keys
+    # It is disclosed, with what it last recorded — and with no status.
+    retired = payload["retired_datasets"]
+    assert [r["dataset_key"] for r in retired] == ["google_ads_api/campaigns"]
+    assert retired[0]["retired"] is True
+    assert retired[0]["last_successful_sync_at"] == old.isoformat()
+    assert "canonical_status" not in retired[0] and "severity" not in retired[0]
+    # It takes no part in the counts.
+    assert payload["summary"]["total"] == len(payload["datasets"])
+    # The dataset the Campaigns page reads is still reported, and is still
+    # judged: 40 days old against an 8-day threshold is stale.
+    spend = next(d for d in payload["datasets"]
+                 if d["dataset_key"] == "google_ads_api/canonical_spend")
+    assert spend["canonical_status"] == CanonicalFreshnessStatus.STALE_WITH_DATA
+    # An unrecognised key that is NOT retired is still listed, as before.
+    conn, _ = _make_mock_conn(
+        sync_rows=[("windsor", "campaigns", "success", old, old.date(), 1, None, old)])
+    payload = _call_endpoint(conn=conn, days=60)
+    assert "windsor/campaigns" in [d["dataset_key"] for d in payload["datasets"]]
+    assert payload["retired_datasets"] == []
 
 
 def test_row_count_query_failure_is_unknown_not_zero():

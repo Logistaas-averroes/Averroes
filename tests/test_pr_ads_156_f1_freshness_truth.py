@@ -464,19 +464,37 @@ def test_13_rows_are_adopted_only_after_the_ok_check(rel):
 
 
 def test_13b_failed_persistence_disables_downstream_analysis():
-    """Junk detection and n-grams are gated on the same availability flag, and
-    the report is told 'unavailable' rather than 'nothing found'."""
+    """Junk detection is gated on the availability flag, and the daily result
+    is told 'unavailable' rather than 'nothing found'.
+
+    PR-ADS-162H: the weekly / monthly half of this case asserted that the
+    n-gram findings handed to the advisor report were `None` (not `{}`) when
+    the sync had not persisted rows. The report, its n-gram block and
+    analysis/advisor.py are deleted, so that hand-off no longer exists. What
+    replaces it is the same rule on the analysis those two jobs still run:
+    waste detection receives the availability flag, and no n-gram computation
+    is left behind to run ungated.
+    """
     daily = (_ROOT / "scheduler" / "daily.py").read_text(encoding="utf-8")
     assert "detect_junk_terms(search_terms) if search_terms_available else []" in daily
     assert '"new_junk_terms_available": search_terms_available' in daily
 
     for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
-        src = (_ROOT / rel).read_text(encoding="utf-8")
-        assert "if search_terms_available else None" in src, rel
+        tree = ast.parse((_ROOT / rel).read_text(encoding="utf-8"))
+        called = _calls(tree)
+        assert "compute_ngram_findings" not in called, rel
+        assert not any(name.startswith("generate_") and name.endswith("_report")
+                       for name in called), rel
+        waste = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "run_waste_detection"]
+        assert len(waste) == 1, rel
+        flag = {kw.arg: kw.value for kw in waste[0].keywords}
+        assert set(flag) == {"search_term_evidence_available"}, rel
+        assert getattr(flag["search_term_evidence_available"], "id", None) \
+            == "search_terms_available", rel
 
-    # `None` is the advisor's "unavailable"; `{}` would read as "no findings".
-    advisor = (_ROOT / "analysis" / "advisor.py").read_text(encoding="utf-8")
-    assert "ngram_data: dict | None = None" in advisor
+    assert not (_ROOT / "analysis" / "advisor.py").exists()
 
 
 def test_13c_a_failed_pull_never_overwrites_the_previous_snapshot():
