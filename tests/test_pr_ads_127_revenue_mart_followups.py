@@ -77,15 +77,21 @@ def test_deal_ledger_status_present_when_available(monkeypatch):
 
 
 def test_loaddeals_maps_outage_to_unavailable_card_in_ui():
-    loader = _slice("async function loadDeals", span=2000)
-    # The mart's ledger status drives the ledger-unavailable state (not "empty").
-    assert "data.data_health" in loader and "deal_ledger_status" in loader
-    assert 'revenueDealsLedgerStatus = dealLedgerStatus === "database_unavailable"' in loader \
-        or '"database_unavailable"' in loader
-    # The database_unavailable branch is reachable again and renders the honest card.
-    page = _slice("function renderRevenueDealsPage", span=900)
-    assert '"database_unavailable"' in page
-    assert "renderRevenueDealsUnavailable()" in page
+    # PR-ADS-164A. This test used to assert the mechanism that WAS the defect:
+    # the loader recognised only `deal_ledger_status === "database_unavailable"`
+    # and defaulted every other status to "available" — but since PR-ADS-153E-B
+    # the server sends the canonical reason (`canonical_ledger_unreadable`,
+    # `canonical_ledger_stale`, …) and never that string, so the branch was
+    # unreachable and an outage rendered as "No closed-won deals found". The
+    # outage is now driven by the canonical verdict the mart passes through,
+    # and anything but a published verdict renders the unavailable card.
+    page = _fn("function renderRevenueDealsPage")
+    assert "closedWonPopulation(revenueDealsMart)" in page
+    assert 'state === "blocked"' in page
+    assert "renderRevenueDealsUnavailable(verdict)" in page
+    assert '"database_unavailable"' not in page
+    loader = _fn("async function loadDeals")
+    assert '|| "available"' not in loader, "a missing status must never default to available"
 
 
 # ── Fix #2 — Deals KPIs reconcile with the displayed rows ───────────────────
@@ -109,8 +115,13 @@ def test_ui_deal_summary_sourced_from_ledger_summary():
     # Prefer the backend deal-ledger summary; never the canonical attribution total.
     assert "data.ledger_summary" in fn
     assert "won_revenue_usd" not in fn
-    # Fallback (older payloads) sums the displayed rows — still internally consistent.
-    assert "deal_amount_usd" in fn
+    # PR-ADS-164A: the client-side fallback is gone. It re-added the rows with
+    # `Number(r.deal_amount_usd) || 0`, which counts a deal with no proven
+    # amount as zero and publishes the priced remainder as "Won Revenue" — a
+    # partial presented as the total. Without the server's ledger summary the
+    # strip now says Unavailable.
+    own = _fn("function martDealLedgerSummary")
+    assert "deal_amount_usd" not in own and ".reduce(" not in own
 
 
 # ── Fix #3/#4 — country no-geo wording is distinct from a reconciliation mismatch ─

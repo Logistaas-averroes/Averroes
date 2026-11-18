@@ -3148,3 +3148,80 @@ partial list with the caller carrying on).
    being dropped. Retry budgets differ by call: a search page gets 4 attempts
    (2 / 4 / 8 s), a per-contact or per-deal lookup 3 (2 / 4 s).
 9. 162H gaps 2, 3, 5 and 6 are unchanged.
+
+## PR-ADS-164A — the Deals and Revenue by Source pages say what they count, and never read "unavailable" as "none"
+
+**Why.** The owner reported that the Deals page and Revenue by Source "show
+different data". A read-only audit found they do not: both read the same
+canonical won-deal population (`canonical_revenue_service.load_won_deals`,
+all-source scope, same business window, same `deal_amount_usd`). They looked
+different because of how each presented it:
+
+- **Deals called an all-source list "attributed to Google Ads"** (subtitle and
+  footnote), and showed a Google Ads spend card above it.
+- **Two dead columns.** "Company" rendered the server's hard-coded `None`
+  (the ledger stores the deal's name, not an employer) — a dash on every row.
+  "Attribution" read `match_source`, which the canonical row has not carried
+  since PR-ADS-153E-B — "Needs Review" on every row.
+- **"Exact GCLID Matches"** labelled the count of deals in the
+  `gclid_attributable` scope, which is a subset of the list, not a match rate.
+- **Withheld revenue was a dash** on Deals and "Withheld" with its reason on
+  Revenue by Source.
+- **A stale or unreadable ledger read as "there are none"** — the important
+  one. Deals recognised only `deal_ledger_status == "database_unavailable"`
+  and defaulted every other value to "available"; since 153E-B the server
+  sends the canonical reason instead, so that branch was unreachable and
+  `canonical_ledger_stale` rendered "No closed-won deals found … the ledger is
+  available". Revenue by Source rendered its empty `groups` as "No attributed
+  source activity", and its drawer as "No attributed closed-won client detail
+  found".
+
+**What changed.** Presentation and labels, plus one pass-through key. No deal,
+customer or revenue figure is published or gated differently.
+
+| Where | Change |
+| --- | --- |
+| Server — `build_revenue_deals`, `build_revenue_by_source`, `build_source_platform_detail`, and the mart's deal and source views | Carry `closed_won_population`: the canonical `{value, status, reason}` of the won-deal count behind the rows, taken from `reader_row` / `subset_metrics` and passed through unchanged. The drawer's is for its own platform's deals. It is `None` on the campaign and country views, and in a drawer whose contact evidence could not be read. |
+| UI — one rule for all three surfaces (`closedWonPopulationState`) | **rows**: published, and exactly that many deals arrived. **empty**: published with value 0 — the only state that may say "No closed-won deals closed in this period". **blocked**: withheld, unavailable, an unrecognised status, no verdict, or a published count the rows contradict — the word and the reason through `canonicalMetricHtml`, no row, no figure, no "none". |
+| Deals page | Subtitle and footnote say every source, by close date. Columns are Deal, Closed, Country, Campaign, Source, Won Revenue — `deal_name` and the stored `acquisition_group` (the grouping Revenue by Source uses), with the dead two removed. The tile is "GCLID-attributable Deals". The count, revenue and average go through `rowMetricHtml` / `canonicalValueHtml`; a deal with no amount reads "Unavailable — no proven USD amount". The spend card is gone. `martDealLedgerSummary` no longer re-adds the rows client-side (it counted an unpriced deal as zero). |
+| Revenue by Source | The blocked state replaces the whole body, spend card included. The drawer treats a `source_health.status` other than `ready` as unreadable, not as empty. |
+
+**Not changed.** Which deals are members, how the count, revenue and customers
+are gated, the reader contract, `summary.metrics`, the mart's top-line, the
+Dashboard's own Deals tab, the campaign and country drawers, any page outside
+these two. No customers figure was added to the Deals page. The API still
+sends `exact_gclid_count` (an alias of `gclid_attributable_deals`) and
+`company: None` on each deal row; the UI reads neither.
+
+**Tests.** `tests/test_pr_ads_164a_sales_results_states.py`, 44 cases. The UI
+cases load the whole real `static/app.js` in a node `vm`, run the real loaders
+and render from payloads produced by the real builders over a stubbed ledger:
+current with deals, current with no deal in the window, stale, unreadable,
+coverage unproven, an undated won deal, and one deal with no amount. Against
+the parent commit 43 fail and 1 passes (the audit check 18 guard, which holds
+on `main` and is there to keep it holding). `test_20` bypasses the guard in a
+mutated `app.js` and shows the stale ledger reading as "none" again.
+
+Existing tests edited, each because it asserted what this slice removes: the
+old subtitle, the two dead columns and the deleted badge, the old card wording
+(113); the spend card on the Deals page (126, 128); the
+`"database_unavailable"` branch and the client-side re-aggregation (127). Two
+fixed character spans were widened where a renderer grew (113, 133).
+
+**Known gaps.** Not introduced here, not fixed here:
+
+1. **The leads half of Revenue by Source has no verdict.**
+   `build_revenue_by_source` reads `fetch_source_leads(...)["rows"]` and
+   ignores `available`, so an unreadable classification table renders as 0
+   leads. And when the ledger is withheld the page shows no leads at all
+   (`groups: []`), although `_unavailable_revenue_by_source` says the leads
+   structure "is still shown where it is readable".
+2. **`sourceGaSqlsChip` escapes HTML it built itself.** When the Google
+   Ads-source SQL count is null the chip prints the literal text
+   `<span class="dash-unavailable">Unavailable</span>`. It is an SQL surface
+   in the doctrine registry, so it was left for its own slice.
+3. The Deals page prints the close date as the stored ISO timestamp.
+4. The Deals page still shows the mart's diagnostics stack, whose messages are
+   about Google Ads spend and FX coverage.
+5. The fail-closed rule lives in `static/app.js` and its tests; no
+   `scripts/audit_*` gate enforces it in production.

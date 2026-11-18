@@ -2141,6 +2141,10 @@ const CANONICAL_REASON_LABELS = {
   acquisition_membership_unresolved: "a won deal's acquisition contact is unresolved",
   campaign_identity_unavailable: "campaign identity is unavailable",
   canonical_closed_won_population_unavailable: "the closed-won population is unavailable",
+  // PR-ADS-164A: the two fail-closed reasons a page gives when it cannot use
+  // the verdict it was sent (see closedWonBlockedMetric).
+  closed_won_verdict_missing: "the server sent no usable publication verdict for these deals",
+  closed_won_rows_do_not_match_count: "the deal rows received do not match the published count",
   sql_to_customer_rate_needs_one_acquisition_cohort_and_scope:
     "SQLs and won deals are different populations and cohorts",
   revenue_per_sql_needs_one_acquisition_cohort_and_scope:
@@ -2254,6 +2258,64 @@ function canonicalValueHtml(value, metric, formatter, opts) {
   const m = metric || {};
   if (m.status && m.status !== "published") return canonicalMetricHtml(m, formatter, opts);
   return dashValue(null);
+}
+
+// ── PR-ADS-164A — a won-deal list is read, empty, or not published ───────────
+// The Deals page, Revenue by Source and the source drawer each list or
+// partition a closed-won population. The API sends that population's canonical
+// verdict as `closed_won_population` = {value, status, reason}. The verdict
+// decides what an empty list means; an empty array alone never does:
+//   "rows"    published, and exactly that many deals arrived;
+//   "empty"   published with value 0 — the ledger WAS read and holds no deal;
+//   "blocked" everything else: withheld, unavailable, an unrecognised status,
+//             no verdict at all, or a published count the rows contradict.
+// `dealCount` is the number of deals the page received: its rows, or — for
+// Revenue by Source, whose groups partition the population — their sum.
+function closedWonPopulation(data) {
+  return (data && data.closed_won_population) || null;
+}
+
+function closedWonPopulationPublished(verdict) {
+  const v = verdict || {};
+  return v.status === "published" && typeof v.value === "number";
+}
+
+function closedWonPopulationState(verdict, dealCount) {
+  if (!closedWonPopulationPublished(verdict)) return "blocked";
+  if (dealCount !== verdict.value) return "blocked";
+  return verdict.value === 0 ? "empty" : "rows";
+}
+
+// The won deals the Revenue by Source groups hold between them. A group whose
+// count is not a number adds nothing, so the sum then contradicts the verdict.
+function sourceGroupDealCount(groups) {
+  return (groups || []).reduce(
+    (n, g) => n + (g && typeof g.closed_won_deals === "number" ? g.closed_won_deals : 0), 0);
+}
+
+// What a blocked list says: the API's own word and reason. Where it gave no
+// reason — no verdict, or a status this page does not know — the page says
+// that, rather than nothing. Never the count, and never "none found".
+function closedWonBlockedMetric(verdict) {
+  const v = verdict || {};
+  if (v.status === "published") {
+    return { status: "unavailable", reason: "closed_won_rows_do_not_match_count" };
+  }
+  return { status: v.status === "withheld" ? "withheld" : "unavailable",
+           reason: v.reason || "closed_won_verdict_missing", blocked_by: v.blocked_by };
+}
+
+function closedWonBlockedHtml(verdict) {
+  return canonicalMetricHtml(closedWonBlockedMetric(verdict), null, businessBlockerOpts());
+}
+
+function renderClosedWonBlocked(verdict) {
+  return `
+    <div class="revenue-blocked-card">
+      <div class="revenue-blocked-card__eyebrow">Closed-won deals</div>
+      <h3>${closedWonBlockedHtml(verdict)}</h3>
+      <p>Closed-won deals for this period are not published, so no deal, customer or revenue figure is shown. This does not mean that no deals closed.</p>
+    </div>`;
 }
 
 // Plain-text deal-count sub-line (escaped by the KPI template): the count, or
@@ -7793,52 +7855,67 @@ function closeLeadsDrawer() {
 
 // ── Deals page ─────────────────────────────────────────────────────────────
 
-// ── Closed-Won Deals — revenue ledger (PR-ADS-113) ──────────────────────────
-// Deal-level revenue truth: HubSpot closed-won deals attributed to Google Ads,
-// windowed by deal_close_date (NEVER the scheduler run_date). This is revenue
-// truth, not an active pipeline funnel (active pipeline lives in In Progress
-// Leads). Two distinct unhappy states: the durable ledger is unavailable, vs a
-// safe-empty window with no closed-won deals.
+// ── Closed-Won Deals — every source (PR-ADS-113, relabelled PR-ADS-164A) ────
+// Deal-level revenue truth: EVERY HubSpot closed-won deal in the window, from
+// every source (not only Google Ads), windowed by deal close date (NEVER the
+// scheduler run_date). This is revenue truth, not an active pipeline funnel.
+// The canonical verdict (closed_won_population) decides between three states:
+// deals listed, a read ledger with no deal in the window, and a population
+// that is withheld or unavailable — which never reads as "none".
 
 let revenueDealsData = [];
 let revenueDealsSummary = null;
 let revenueDealsLedgerStatus = null;
 
-function dealAttributionBadge(matchSource) {
-  switch ((matchSource || "").trim().toLowerCase()) {
-    case "gclid":     return '<span class="attribution-badge attribution-badge--tier1" title="Click-level match using GCLID evidence">Exact GCLID</span>';
-    case "crm_field": return '<span class="attribution-badge attribution-badge--tier2" title="Matched using a HubSpot CRM campaign field">CRM Match</span>';
-    case "first_url": return '<span class="attribution-badge attribution-badge--tier3" title="Matched using the landing-page URL">URL Match</span>';
-    default:          return '<span class="attribution-badge" title="No reliable attribution evidence — review needed">Needs Review</span>';
+// The deal's stored HubSpot source group — the same grouping Revenue by Source
+// uses, so a deal can be found in both. An identifier this map does not know
+// is shown as stored, never folded into another group.
+const DEAL_SOURCE_GROUP_LABELS = {
+  google_ads: "Google Ads",
+  other_paid: "Other Paid",
+  organic: "Organic",
+  offline: "Offline",
+  unclassified: "Unclassified",
+  ambiguous: "Ambiguous — contacts disagree",
+};
+
+function dealSourceLabel(group) {
+  if (group === null || group === undefined || group === "") return "—";
+  return DEAL_SOURCE_GROUP_LABELS[group] || String(group).replace(/_/g, " ");
+}
+
+// One deal's own USD amount. An unknown amount is never zero and never a dash.
+function dealAmountHtml(r) {
+  if (r.deal_amount_usd === null || r.deal_amount_usd === undefined) {
+    return `${dashValue(null)} <small class="metric-reason">no proven USD amount</small>`;
   }
+  return escapeHtml(fmtMoney(r.deal_amount_usd));
 }
 
-function renderRevenueDealsUnavailable() {
-  return `
-    <div class="revenue-blocked-card">
-      <div class="revenue-blocked-card__eyebrow">Revenue ledger</div>
-      <h3>Closed-won revenue is unavailable</h3>
-      <p>The durable attribution ledger cannot be read right now.</p>
-    </div>`;
+// Withheld or unavailable: the canonical word and reason, no figure.
+function renderRevenueDealsUnavailable(verdict) {
+  return renderClosedWonBlocked(verdict);
 }
 
+// Only reached when the canonical verdict is published with value 0.
 function renderRevenueDealsSafeEmptyState() {
   return `
     <div class="revenue-blocked-card revenue-empty-card">
-      <div class="revenue-blocked-card__eyebrow">Revenue ledger</div>
-      <h3>No closed-won deals found for this window</h3>
-      <p>The attribution ledger is available, but no HubSpot closed-won deals closed in this business window.</p>
+      <div class="revenue-blocked-card__eyebrow">Closed-won deals</div>
+      <h3>No closed-won deals closed in this period</h3>
+      <p>The deal ledger was read and is current. No HubSpot deal, from any source, was closed-won in this business window.</p>
     </div>`;
 }
 
 function renderRevenueDealsSummary(summary) {
   const s = summary || {};
+  const opts = businessBlockerOpts();
   return `
     <div class="revenue-summary-strip revenue-summary-strip--four">
-      <div><span>Closed-Won Deals</span><strong>${fmtCount(s.deal_count)}</strong></div>
-      <div><span>Won Revenue</span><strong>${fmtMoney(s.won_revenue)}</strong></div>
-      <div><span>Average Deal Value</span><strong>${fmtMoney(s.average_deal_value)}</strong></div>
-      <div><span>Exact GCLID Matches</span><strong>${fmtCount(s.exact_gclid_count)}</strong></div>
+      <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount, opts)}</strong></div>
+      <div><span>Won Revenue</span><strong>${rowMetricHtml(s, "won_revenue", fmtMoney, opts)}</strong></div>
+      <div><span>Average Deal Value</span><strong>${canonicalValueHtml(s.average_deal_value, (s.metrics || {}).revenue_usd, fmtMoney, opts)}</strong></div>
+      <div><span title="Deals in this list that came from Google Ads and carry both a campaign and a click ID (GCLID). A subset of the deals counted on the left.">GCLID-attributable Deals</span><strong>${dashValue(s.gclid_attributable_deals, fmtCount)}</strong></div>
     </div>
   `;
 }
@@ -7851,25 +7928,27 @@ function sortRevenueDealRows(rows) {
   );
 }
 
+// Only fields the deal row carries: the deal's own name (the ledger holds no
+// employer name) and its stored source group (it holds no click-match field).
 function renderRevenueDealsTable(rows) {
   const headerRow = `
     <tr>
-      <th>Company</th>
+      <th>Deal</th>
       <th>Closed</th>
       <th>Country</th>
       <th>Campaign</th>
+      <th>Source</th>
       <th>Won Revenue</th>
-      <th>Attribution</th>
     </tr>
   `;
   const bodyRows = rows.map((r) => `
     <tr>
-      <td>${escapeHtml(r.company || "—")}</td>
-      <td>${escapeHtml(r.deal_close_date || "—")}</td>
+      <td>${escapeHtml(r.deal_name || "—")}</td>
+      <td>${escapeHtml(r.deal_close_date ? String(r.deal_close_date).slice(0, 10) : "—")}</td>
       <td>${escapeHtml(r.country || "—")}</td>
       <td>${escapeHtml(r.campaign_name || "—")}</td>
-      <td>${fmtMoney(r.deal_amount_usd)}</td>
-      <td>${dealAttributionBadge(r.match_source)}</td>
+      <td>${escapeHtml(dealSourceLabel(r.acquisition_group))}</td>
+      <td>${dealAmountHtml(r)}</td>
     </tr>
   `).join("");
   return `
@@ -7894,25 +7973,28 @@ function renderRevenueDealsPage() {
     return;
   }
 
-  // Unavailable: the durable ledger/database cannot be read.
-  if (revenueDealsLedgerStatus === "database_unavailable") {
-    tableBody.innerHTML = renderRevenueDealsUnavailable();
+  // PR-ADS-164A: the canonical verdict decides, never an empty array.
+  const verdict = closedWonPopulation(revenueDealsMart);
+  const state = closedWonPopulationState(verdict, revenueDealsData.length);
+
+  // Withheld / unavailable / unrecognised: the word and the reason, no figure.
+  if (state === "blocked") {
+    tableBody.innerHTML = renderRevenueDealsUnavailable(verdict);
     return;
   }
 
-  // Safe-empty: ledger available but no closed-won deals in this window.
-  if (!revenueDealsData.length) {
+  // Published with value 0: the ledger was read and holds no deal here.
+  if (state === "empty") {
     tableBody.innerHTML = renderRevenueDealsSafeEmptyState();
     return;
   }
 
   const sorted = sortRevenueDealRows(revenueDealsData);
   tableBody.innerHTML = `
-    ${renderMartSpendTruth(revenueDealsMart)}
     ${renderRevenueDealsSummary(martDealLedgerSummary(revenueDealsMart))}
     ${renderMartDiagnostics(revenueDealsMart)}
     ${renderRevenueDealsTable(sorted)}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — HubSpot closed-won deals provide revenue, attributed to Google Ads by deal close date.</p>
+    <p class="revenue-footnote">Every HubSpot closed-won deal that closed in this period, from every source — not only Google Ads. Revenue is each deal's proven USD amount; Google Ads spend is shown on the Google Ads pages, not here.</p>
   `;
 }
 
@@ -7940,13 +8022,12 @@ async function loadDeals() {
     }
     if (!_revResponseIsCurrent("deals", token, data)) return;
     revenueDealsMart = data;
-    // PR-ADS-127: a durable deal-ledger OUTAGE must never read as an empty
-    // window. The mart surfaces the ledger's own availability in data_health; a
-    // "database_unavailable" status renders the honest "ledger cannot be read"
-    // card, not "No closed-won deals found".
-    const dealLedgerStatus = (data.data_health && data.data_health.deal_ledger_status) || "available";
-    revenueDealsLedgerStatus = dealLedgerStatus === "database_unavailable"
-      ? "database_unavailable" : "available";
+    // PR-ADS-164A: the mart answered. Whether its deal list is published,
+    // empty or withheld is read from data.closed_won_population at render
+    // time. (PR-ADS-127 mapped data_health.deal_ledger_status here, but
+    // recognised only "database_unavailable" and defaulted everything else —
+    // a stale ledger included — to "available", which rendered as "none".)
+    revenueDealsLedgerStatus = "loaded";
     // PR-ADS-127: the Deals summary comes from the ledger's OWN summary so its
     // count / Won Revenue / average all reconcile with the displayed deal rows.
     revenueDealsSummary = data.ledger_summary || null;
@@ -7965,23 +8046,14 @@ async function loadDeals() {
 }
 
 // Deal-ledger summary for the summary strip. PR-ADS-127: the count, Won Revenue,
-// average and exact-GCLID count ALL come from the mart's deal-ledger summary —
-// the SAME source as the displayed deal rows — so the strip always reconciles
-// with the table. (Earlier this mixed the canonical attribution total with the
-// raw ledger count, which diverged whenever a "not Google Ads" exclusion or an
-// identity remap was applied.) Falls back to aggregating the rows only when the
-// backend omits the ledger summary (older payloads).
+// average and GCLID-attributable count ALL come from the mart's deal-ledger
+// summary — the SAME source as the displayed deal rows — so the strip always
+// reconciles with the table. PR-ADS-164A: there is no client-side fallback.
+// Re-adding the rows here counted an unpriced deal as zero and published the
+// remainder as the total; without the server's summary the strip says
+// Unavailable.
 function martDealLedgerSummary(data) {
-  if (data && data.ledger_summary) return data.ledger_summary;
-  const rows = (data && data.rows) || [];
-  const dealCount = rows.length;
-  const wonRevenue = rows.reduce((acc, r) => acc + (Number(r.deal_amount_usd) || 0), 0);
-  return {
-    deal_count: dealCount,
-    won_revenue: dealCount ? Math.round(wonRevenue * 100) / 100 : null,
-    average_deal_value: dealCount ? Math.round((wonRevenue / dealCount) * 100) / 100 : null,
-    exact_gclid_count: rows.filter((r) => (r.match_source || "").toLowerCase() === "gclid").length,
-  };
+  return (data && data.ledger_summary) || null;
 }
 
 // ── Revenue Attribution Health — admin diagnostics (PR-ADS-113) ─────────────
@@ -9057,13 +9129,25 @@ function renderSourceContactRow(c) {
 }
 
 function renderSourceDrilldown(data) {
-  const status = (data && data.source_health && data.source_health.status) || "ready";
+  const status = data && data.source_health && data.source_health.status;
   if (status === "database_unavailable") {
     return `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
   }
   const contacts = (data && data.contacts) || [];
   const deals = (data && data.deals) || (data && data.rows) || [];
-  if (!contacts.length && !deals.length) {
+  // PR-ADS-164A: the canonical verdict for this platform's won deals decides
+  // what an empty list means. Withheld / unavailable shows the word and the
+  // reason, and nothing else.
+  const verdict = closedWonPopulation(data);
+  const dealState = closedWonPopulationState(verdict, deals.length);
+  if (dealState === "blocked") {
+    return `<div class="source-drilldown-empty">Closed-won deals behind this source: ${closedWonBlockedHtml(verdict)}</div>`;
+  }
+  // The contact half is "none" only when the server says its read succeeded.
+  if (status !== "ready") {
+    return `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
+  }
+  if (!contacts.length && dealState === "empty") {
     return `<div class="source-drilldown-empty">No attributed closed-won client detail found for this source in this window.</div>`;
   }
   // Section 1 — Leads / SQLs proof (windowed by contact_created_at).
@@ -9103,7 +9187,7 @@ function renderSourceDrilldown(data) {
       </table>
     </div>`
     : `<div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
-       <div class="source-drilldown-empty">No closed-won deals found for this source in this window.</div>`;
+       <div class="source-drilldown-empty">No closed-won deals closed in this period for this source.</div>`;
   return `${contactsSection}${dealsSection}`;
 }
 
@@ -9183,6 +9267,12 @@ function renderRevenueBySourcePage(data) {
   // never decides which source has spend. Empty groups are dropped to keep the
   // page a clean attribution view, not a diagnostics wall.
   const groups = (data && data.rows) || [];
+  // PR-ADS-164A: the verdict, not an empty page, says "none".
+  const verdict = closedWonPopulation(data);
+  if (closedWonPopulationState(verdict, sourceGroupDealCount(groups)) === "blocked") {
+    body.innerHTML = renderClosedWonBlocked(verdict);
+    return;
+  }
   // PR-ADS-140: the canonical Google Ads spend-truth proof block (native GBP + USD
   // reporting + FX/coverage status). Drives the Google Ads spend chip subline and
   // the "canonical campaign spend" proof chip so the page proves its number.
@@ -9190,7 +9280,7 @@ function renderRevenueBySourcePage(data) {
   const active = groups.filter((g) => g && ((g.channels && g.channels.length) || g.leads || g.closed_won_deals));
   const sections = active.length
     ? active.map((g, gi) => renderSourceGroupSection(g, gi, spendTruth)).join("")
-    : `<div class="revenue-empty-inline">No attributed source activity in this window.</div>`;
+    : `<div class="revenue-empty-inline">No closed-won deals closed in this period.</div>`;
   body.innerHTML = `
     ${renderMartSpendTruth(data)}
     ${renderMartDiagnostics(data)}
@@ -9748,6 +9838,9 @@ async function loadSystem() {
 async function loadRevenueBySource() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.bySource;
+  // PR-ADS-164A: a drawer answer cached before this reload belongs to an
+  // earlier read of the ledger; it must not open beside the new counts.
+  sourceDrilldownCache = {};
   setWindowRangeLoading("revenue-by-source-range");
   renderSourceBackfillPanelInit();
   const body = document.getElementById("revenue-by-source-body");

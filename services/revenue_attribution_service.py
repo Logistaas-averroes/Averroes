@@ -2332,20 +2332,27 @@ def build_country_deal_details(window: str, country: str,
 
 @_canonical_snapshot.single_snapshot
 def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
-    """Build the Closed-Won Revenue Ledger contract for a business window.
+    """Build the Closed-Won Deals contract for a business window.
 
-    PR-ADS-113. Read-only deal-level revenue truth from the durable
-    gclid_attribution table, windowed by deal_close_date (NEVER the scheduler
-    run_date). Only closed-won deals count as revenue. One latest row per
-    deal_id (deduped in the repository).
+    PR-ADS-113, on the canonical deal ledger since PR-ADS-153E-B. Read-only.
+    The population is EVERY HubSpot closed-won deal in the window — all
+    sources, not only Google Ads — read through
+    ``canonical_revenue.load_won_deals`` and windowed by deal close date
+    (NEVER the scheduler run_date).
 
-    Distinct states:
-      - ledger_status="database_unavailable" when the durable ledger cannot be
-        read. This is NOT the same as a safe-empty window.
-      - safe-empty: ledger available but no closed-won deals in the window
-        (deals == [], summary totals zeroed).
+    Three states, told apart by ``closed_won_population`` — the canonical
+    ``{value, status, reason}`` of the window's won-deal count (PR-ADS-164A):
 
-    Returns a contract with window, summary, deals, source_health, generated_at.
+      - published, value > 0: ``deals`` lists every one of them;
+      - published, value 0: the ledger WAS read and no deal closed in the
+        window (``deals == []``). Only this state means "there are none";
+      - withheld / unavailable: the population was not released (a stale or
+        unreadable ledger, unproven coverage, an undated or conflicting won
+        deal). ``deals == []`` and every count is None — an empty list here
+        says nothing about how many deals closed.
+
+    Returns a contract with window, summary, deals, closed_won_population,
+    source_health, generated_at.
 
     Raises:
         ValueError: If ``window`` is not a supported business window.
@@ -2360,18 +2367,24 @@ def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
         # distinct from safe-empty, and NOT a cue to fall back to
         # `gclid_attribution`: that table holds a narrower population, so a
         # fallback would quietly redefine "closed-won revenue" mid-incident.
+        withheld_metrics = canonical_revenue.reader_row(canonical, [])["metrics"]
         return {
             "window": resolved,
             "summary": {
                 "deal_count": None,
                 "closed_won_deals": None,
                 "customers": None,
-                "metrics": canonical_revenue.reader_row(canonical, [])["metrics"],
+                "metrics": withheld_metrics,
                 "won_revenue": None,
                 "average_deal_value": None,
                 "exact_gclid_count": None,
+                "gclid_attributable_deals": None,
             },
             "deals": [],
+            # PR-ADS-164A: the canonical verdict for the list above. `deals`
+            # is empty because nothing was released, NOT because nothing
+            # closed; the status and reason here are what say so.
+            "closed_won_population": withheld_metrics["closed_won_deals"],
             "source_health": {
                 "ledger_status": canonical.get("reason") or "database_unavailable",
                 "revenue_attribution_status": "canonical_ledger_unavailable",
@@ -2455,6 +2468,10 @@ def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
         "window": resolved,
         "summary": summary,
         "deals": deals,
+        # PR-ADS-164A: the canonical verdict for the list above — published
+        # with the exact count, so `deals == []` beside `value: 0` is a read
+        # ledger with no deal in the window, and nothing else is.
+        "closed_won_population": canon["metrics"]["closed_won_deals"],
         "source_health": {
             "ledger_status": "available",
             "revenue_attribution_status": (
