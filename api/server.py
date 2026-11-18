@@ -8920,6 +8920,29 @@ async def update_churn_input(
 # These are operator/audit endpoints, not final Email Marketing UI contracts.
 # ---------------------------------------------------------------------------
 
+@app.get("/api/channel-funnel")
+def api_channel_funnel(
+    window: str = Query(default="180d"),
+    _user=Depends(require_auth),
+) -> dict[str, Any]:
+    """The acquisition-cohort funnel for every channel (PR-ADS-162A, read-only).
+
+    Contacts created in the window, by HubSpot original source, with how many
+    have reached MQL / SQL / Opportunity / Customer stage. Publishes no deals,
+    revenue or spend. When the cohort cannot be published the response carries
+    the reason and no counts.
+    """
+    from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
+    from services.channel_funnel_service import build_channel_funnel  # noqa: PLC0415
+    try:
+        return build_channel_funnel(window)
+    except EvidenceWindowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/channel-funnel] failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="channel funnel failed") from exc
+
+
 @app.get("/api/mailchimp/status")
 def api_mailchimp_status(request: Request, user: dict = Depends(require_auth),
                          live: int = 1) -> dict[str, Any]:

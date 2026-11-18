@@ -1922,3 +1922,49 @@ The audits it runs are read-only.
 
 **Tests.** `tests/test_pr_ads_161j_daily_certification.py` (10, including a
 live-PostgreSQL round trip). The module is added to CI's PostgreSQL step.
+
+---
+
+## PR-ADS-162A — Channels page: one acquisition cohort, every channel
+
+**Why.** The owner wants the product to assess every marketing channel, not only
+Google Ads. Production data (2026-11-18, 21,791 contacts) showed what the app was
+not surfacing:
+
+* Paid Social is the second paid channel: 2,461 contacts, split between LinkedIn
+  (1,336) and Facebook (1,121).
+* AI referrals (chatgpt.com) and organic search exist but appear nowhere as
+  channels.
+* Mailchimp is **not** connected in production: 0 rows, and no sync batch has
+  ever run. An email page would have been empty.
+
+**What.** A new sidebar page, **Channels** (`GET /api/channel-funnel`,
+`services/channel_funnel_service.py`).
+
+* **Cohort.** Contacts created in the window (30d / 60d / 180d / all time). It
+  uses the same membership rule, account-local window days and freshness verdict
+  as Campaign Evidence's acquisition cohort, over all sources.
+* **Channel.** HubSpot's original source, unmodified. The original-source
+  drill-down (linkedin, facebook, chatgpt.com, a campaign label) is shown
+  underneath: the top 8 values, with the rest folded into one row.
+* **Stages.** MQL, SQL, Opportunity, Customer stage. A contact has reached a stage
+  on any of:
+  * a direct stage-entry timestamp;
+  * a recovered stage-entry timestamp;
+  * a current lifecycle stage ranked at or beyond it.
+
+  SQL uses the cohort service's own `sql_proof`, so there is one SQL rule. Nothing
+  is inferred downward: opportunity evidence is not SQL evidence, so a later stage
+  can exceed an earlier one for a channel.
+* **One publication verdict** (`sql_publication`). Rows that do not sum to the
+  total, an incomplete bootstrap, a failed incremental or an unknown watermark
+  withhold the whole table. The payload then carries **no counts at all**.
+
+**Not on this page.** Deals, revenue, customers (companies), spend and cost per
+SQL have their own owners and gates. "Customer stage" is the HubSpot contact
+lifecycle stage, counted in contacts and labelled as such.
+
+**Tests.** `tests/test_pr_ads_162a_channel_funnel.py` (16 tests, 19 cases). It
+includes the real query on live PostgreSQL and the real `renderChannelFunnel`
+evaluated in node. The module is added to CI's PostgreSQL step. The service is
+registered in the SQL doctrine registry (`_CHANNEL_FUNNEL`).
