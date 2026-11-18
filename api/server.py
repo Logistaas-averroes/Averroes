@@ -52,7 +52,6 @@ Protected endpoints (require authenticated session):
   GET  /api/monitoring/status     — Read-only monitoring summary: stale/failure state per run type (requires auth).
   POST /api/backfill/run          — Trigger admin-only historical backfill (requires admin or ADMIN_API_TOKEN).
   GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
-  GET  /api/historical-intelligence — Read-only historical trend analysis over local data (requires auth).
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
   GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for the Campaign / Country Revenue & Spend pages (requires auth; PR-ADS-107A).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
@@ -5424,118 +5423,6 @@ def api_backfill_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
         }
 
 
-# ---------------------------------------------------------------------------
-# Historical Intelligence endpoint — GET /api/historical-intelligence
-# Read-only trend analysis over local historical data.
-# No external writes. No Google Ads writes. No HubSpot writes.
-# Phase 1 read-only externally confirmed.
-# ---------------------------------------------------------------------------
-
-_HI_ENTITY_CAMPAIGNS = "campaigns"
-_HI_ENTITY_GEO       = "geo"
-_HI_VALID_ENTITIES   = {_HI_ENTITY_CAMPAIGNS, _HI_ENTITY_GEO}
-_HI_DEFAULT_DAYS     = 30
-_HI_DEFAULT_LIMIT    = 25
-_HI_MAX_DAYS         = 180
-
-
-@app.get("/api/historical-intelligence")
-def api_historical_intelligence(
-    user: dict = Depends(require_auth),
-    entity: str = Query(
-        default=_HI_ENTITY_CAMPAIGNS,
-        description="Entity to analyse: campaigns | geo",
-    ),
-    current_days: int = Query(
-        default=_HI_DEFAULT_DAYS,
-        description="Length of the current comparison window in days (1–180)",
-    ),
-    previous_days: int = Query(
-        default=_HI_DEFAULT_DAYS,
-        description="Length of the previous comparison window in days (1–180)",
-    ),
-    limit: int = Query(
-        default=_HI_DEFAULT_LIMIT,
-        description="Maximum rows returned (1–100)",
-    ),
-) -> dict[str, Any]:
-    """Return read-only historical trend signals for the requested entity.
-
-    Compares the current period (most recent N days) to the previous period
-    (the N days before that) using data already in the local database.
-
-    Does NOT call Google Ads, HubSpot, Windsor, or any external service.
-    Does NOT mutate any data.
-    Phase 1 read-only externally confirmed.
-    """
-    # ── Parameter sanitisation ─────────────────────────────────────────────
-    entity = entity.strip().lower() if entity else ""
-    if not entity:
-        entity = _HI_ENTITY_CAMPAIGNS
-    elif entity not in _HI_VALID_ENTITIES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported entity '{entity}'. Expected one of: {', '.join(sorted(_HI_VALID_ENTITIES))}.",
-        )
-
-    current_days  = max(1, min(_HI_MAX_DAYS, current_days))
-    previous_days = max(1, min(_HI_MAX_DAYS, previous_days))
-    limit         = max(1, min(100, limit))
-
-    from analysis.historical_intelligence import (  # noqa: PLC0415
-        compute_campaign_trends,
-        compute_geo_trends,
-        load_campaign_trend_rows,
-        load_geo_trend_rows,
-    )
-    from db.connection import get_conn  # noqa: PLC0415
-
-    _insufficient: dict[str, Any] = {
-        "entity":        entity,
-        "current_days":  current_days,
-        "previous_days": previous_days,
-        "status":        "insufficient_data",
-        "message":       "Historical intelligence requires at least two comparable periods.",
-        "summary": {
-            "improving":          0,
-            "deteriorating":      0,
-            "stable":             0,
-            "insufficient_data":  0,
-            "new_activity":       0,
-            "no_recent_activity": 0,
-        },
-        "rows": [],
-    }
-
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return {**_insufficient, "db_unavailable": True}
-
-            if entity == _HI_ENTITY_GEO:
-                raw_rows = load_geo_trend_rows(conn, current_days, previous_days)
-                result   = compute_geo_trends(
-                    raw_rows,
-                    current_days=current_days,
-                    previous_days=previous_days,
-                )
-            else:
-                raw_rows = load_campaign_trend_rows(conn, current_days, previous_days)
-                result   = compute_campaign_trends(
-                    raw_rows,
-                    current_days=current_days,
-                    previous_days=previous_days,
-                )
-
-    except Exception as exc:  # noqa: BLE001
-        log.error("[api/historical-intelligence] database error: %s", exc, exc_info=True)
-        return {**_insufficient, "db_unavailable": True}
-
-    # Apply row limit
-    result["rows"] = result.get("rows", [])[:limit]
-    return result
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # SEARCH TERMS PRODUCTION VERDICT (PR-ADS-066)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -8051,75 +7938,6 @@ async def get_attribution_confidence_summary(
         "definitions": definitions,
         "message": summary["message"],
     }
-
-
-@app.get("/api/admin/churn-input")
-async def get_churn_input(
-    _user=Depends(check_admin_or_token),
-):
-    """Return current churn configuration as JSON."""
-    from connectors.hubspot_churn import load_churn_input
-
-    try:
-        config = load_churn_input()
-    except Exception as exc:
-        log.error("Failed to load churn config: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to load churn config") from exc
-
-    return config
-
-
-class ChurnInputUpdate(BaseModel):
-    month: str
-    rate: float
-
-
-@app.post("/api/admin/churn-input")
-async def update_churn_input(
-    payload: ChurnInputUpdate,
-    _user=Depends(check_admin_or_token),
-):
-    """Update monthly churn rate in config/churn_input.yaml.
-
-    Validation:
-      - Month format must be YYYY-MM.
-      - Rate must be 0 <= rate <= 1.
-      - Local config write only. No HubSpot write.
-    """
-    # Validate month format
-    if not re.match(r"^\d{4}-\d{2}$", payload.month):
-        raise HTTPException(status_code=400, detail="month must be YYYY-MM format")
-
-    # Validate rate bounds
-    if payload.rate < 0 or payload.rate > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="rate must be between 0 and 1",
-        )
-
-    # Update local YAML
-    config_path = Path(__file__).parent.parent / "config" / "churn_input.yaml"
-
-    try:
-        if config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
-        else:
-            config = {"default_monthly_churn": 0.03, "monthly": {}, "campaign_overrides": {}}
-
-        if "monthly" not in config:
-            config["monthly"] = {}
-
-        config["monthly"][payload.month] = payload.rate
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-
-    except Exception as exc:
-        log.error("Failed to update churn config: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to update churn config") from exc
-
-    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

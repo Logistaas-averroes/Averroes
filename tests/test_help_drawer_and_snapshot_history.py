@@ -62,7 +62,6 @@ REQUIRED_HELP_PAGES = [
     "scheduler",
     "health",
     "backfill",
-    "churn-input",
 ]
 
 
@@ -152,17 +151,11 @@ def test_gclid_help_says_readiness_audit():
         "GCLID help must clarify it does not implement actual bridge"
 
 
-def test_churn_input_help_says_local_only():
-    """Churn Input help must say local config only, no external writes."""
-    churn_start = JS.find('"churn-input"', JS.find("PAGE_HELP_CONTENT"))
-    assert churn_start != -1, "churn-input key not found in PAGE_HELP_CONTENT"
-    churn_section = JS[churn_start:churn_start + 1500]
-    assert "local" in churn_section.lower(), \
-        "Churn Input help must mention local configuration"
-    assert "does NOT write to HubSpot" in churn_section or \
-           "does not write to HubSpot" in churn_section.lower() or \
-           "does NOT write" in churn_section, \
-        "Churn Input help must say no writes to HubSpot/Google Ads"
+def test_churn_input_help_is_retired_with_its_page():
+    """PR-ADS-162D retired the Churn Input page: no current figure read the
+    churn rate it stored. Its help entry must not outlive it."""
+    help_block = JS[JS.find("PAGE_HELP_CONTENT"):JS.find("PAGE_HELP_CONTENT") + 20000]
+    assert '"churn-input"' not in help_block
 
 
 # ── Revenue Snapshot History UI ────────────────────────────────────────────

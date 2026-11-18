@@ -2114,3 +2114,50 @@ the suite: "nothing to fix" without a counted zero; deals ignoring staleness;
 deals ignoring coverage; spend always current; newest-run ordering reversed;
 exit 0 accepted without every audit holding; a sync reason filed under
 HubSpot; an unknown source status rendered healthy.
+
+---
+
+## PR-ADS-162D — retire two pages nothing depended on
+
+**Why.** The owner asked for fewer pages and a simpler product. A page
+inventory (every page's loader, endpoints, tables, inbound links and tests)
+plus production row counts found two pages with no reader:
+
+| Page | Finding |
+| --- | --- |
+| Historical Trends (`#/historical-intelligence`) | No sidebar entry and no link from any page — reachable only by typing the URL. Its CPQL "improving / deteriorating" verdict read `COALESCE(confirmed_sqls, 0)` from the legacy `campaigns` snapshot: a missing value became a zero, and it was a third SQL definition. |
+| Churn Input (`#/churn-input`) | Stored a monthly churn rate in a local YAML file. `canonical_unit_economics_service` never reads it — LTV, CAC and payback are withheld there for want of recurring revenue, whatever the rate. The Unit Economics help text said the opposite and pointed the reader here; that text is corrected. |
+
+**Deleted, not hidden.**
+
+- `static/app.js`, `static/index.html`, `static/styles.css`: both pages'
+  routes, sections, loaders, state, wiring, help/explanation entries and
+  styles. An old bookmark falls through `navigate()`'s unknown-page branch to
+  the Dashboard.
+- `api/server.py`: `GET /api/historical-intelligence`,
+  `GET` and `POST /api/admin/churn-input`.
+- `analysis/historical_intelligence.py` and its test file.
+- `analysis/sql_doctrine_registry.py`: the Historical Intelligence consumer,
+  module and row rules, UI rule, CPQL entry and verdict entry. One legacy SQL
+  definition fewer.
+- `docs/API_CONTRACT.md`: the churn-input sections.
+
+**Kept on purpose.** `connectors/hubspot_churn.py` and
+`config/churn_input.yaml` are still imported by the legacy snapshot chain
+(`analysis/roas_calculator.py`, `services/unit_economics_service.py`,
+`services/roas_snapshot_service.py`). They go with that chain, not with this
+page. `analysis/rule_advisor._build_historical_intelligence_block` takes a
+dict nobody passes; it is report code and out of scope here.
+
+**Tests.** `tests/test_pr_ads_162d_page_retirement.py` (7 tests, 10 cases):
+no route, section, sidebar entry, loader, style or endpoint remains (the
+endpoints are checked on the running app: 404 and absent from the route
+table); an old bookmark resolves to the Dashboard (the real `PAGES` list
+evaluated in node); every remaining sidebar page still routes and no page
+section is orphaned; the doctrine registry holds no entry for the deleted
+surface and the inventory has nothing unclassified; no text still points at a
+retired page. Nine of the ten cases fail on the pre-removal tree. Page-existence
+assertions in `test_sidebar_navigation_structure.py`,
+`test_help_drawer_and_snapshot_history.py` and
+`test_empty_state_page_explanations.py` were turned into retirement
+assertions, as PR-ADS-153D did for Flagged Waste Terms.

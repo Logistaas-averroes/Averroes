@@ -22,7 +22,7 @@
 | **Command Center** | Daily operator pages | Dashboard, Action Queue, Reports |
 | **Platform Evidence** | Raw ad platform data and analytics (active source: **Google Ads API** — see PR-ADS-105; Windsor is legacy) | Campaigns, Search Terms, Keywords, Countries |
 | **CRM & Revenue** | Canonical CRM funnel plus revenue-truth ROAS, deal attribution, unit economics | Leads, Deals, ROAS by Campaign, ROAS by Country, Revenue by Source, Unit Economics |
-| **Admin** | System operation, diagnostics, and configuration | Data Runs, System Status, Revenue Health, Admin Backfill, GCLID Attribution, Churn Input |
+| **Admin** | System operation, diagnostics, and configuration | System, and under "Advanced tools": Data Runs, System Status, Revenue Health, Admin Backfill, GCLID Attribution *(Churn Input retired in PR-ADS-162D)* |
 
 ---
 
@@ -69,7 +69,7 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 | System Status | `health` | Admin |
 | Admin Backfill | `backfill` | Admin |
 | GCLID Attribution | `gclid-attribution` | Admin *(forensics, PR-ADS-153D)* |
-| Churn Input | `churn-input` | Admin |
+| System | `system` | Admin *(PR-ADS-162C)* |
 
 ### Backward-Compatible Route Aliases
 
@@ -148,7 +148,7 @@ The `ngrams` route alias still works — it navigates to `search-terms` and auto
 
 **Admin pages** (Admin group):
 - `nav-health-item` and `nav-backfill-item` may have visibility logic tied to user role
-- Churn Input requires admin role
+- System requires admin role (PR-ADS-162C); Churn Input was retired in PR-ADS-162D
 - Visually quieter (`.nav-item--admin` class)
 - System Status and Admin Backfill require admin role in current implementation
 

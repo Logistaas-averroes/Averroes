@@ -1,5 +1,10 @@
 # Historical Intelligence
 
+> **RETIRED in PR-ADS-162D.** The page, `GET /api/historical-intelligence` and
+> `analysis/historical_intelligence.py` are deleted. The page had no sidebar
+> entry and no inbound link, and its CPQL verdict coerced a missing SQL count
+> to zero. This document is kept as a record only.
+
 ## Purpose
 
 Historical Intelligence analyzes local historical data only. It does not modify
