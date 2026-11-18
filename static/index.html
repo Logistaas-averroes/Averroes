@@ -137,6 +137,14 @@
         <!-- CRM & Revenue (PR-ADS-153C) -->
         <li class="sidebar__section-label" role="heading" aria-level="2">CRM &amp; Revenue</li>
         <li>
+          <a class="nav-item" data-page="channels" href="#" role="button" tabindex="0" aria-label="Channels — funnel by marketing channel">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            </span>
+            <span class="nav-item__label">Channels</span>
+          </a>
+        </li>
+        <li>
           <a class="nav-item" data-page="leads" href="#" role="button" tabindex="0" aria-label="Leads — HubSpot CRM funnel">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -638,6 +646,27 @@
       </section>
 
       <!-- Revenue by Acquisition Source (PR-ADS-117) -->
+      <section id="page-channels" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Channels</h1>
+          <p class="page-subtitle">Of the contacts acquired in this period, how many have reached each funnel stage so far — for every marketing channel. Channel is HubSpot's original source for the contact.</p>
+        </header>
+        <div class="roas-window-controls">
+          <label class="roas-window-label" for="channels-window">Acquired in:</label>
+          <select id="channels-window" class="waste-filter-select" aria-label="Acquisition window">
+            <option value="30d">Last 30 days</option>
+            <option value="60d">Last 60 days</option>
+            <option value="180d" selected>Last 180 days</option>
+            <option value="all_time">All time</option>
+          </select>
+          <button id="channels-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+          <span class="roas-window-range" id="channels-range" aria-live="polite"></span>
+        </div>
+        <div id="channels-body">
+          <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
+        </div>
+      </section>
+
       <section id="page-revenue-by-source" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Revenue by Source</h1>

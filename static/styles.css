@@ -7706,3 +7706,10 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   border-radius: 8px;
 }
 .kw-sql-note strong { color: var(--text-primary, #111827); }
+
+/* ── Channels funnel (PR-ADS-162A) ─────────────────────────────────────── */
+.channel-funnel-table th.num, .channel-funnel-table td.num { text-align: right; white-space: nowrap; }
+.channel-funnel-total td { font-weight: 600; border-bottom: 2px solid var(--border, #e2e8f0); }
+.channel-funnel-pct { color: var(--text-muted); font-size: 0.85em; }
+.channel-funnel-drill { padding-left: var(--space-5); color: var(--text-muted); }
+.channel-funnel-note { color: var(--text-muted); padding: var(--space-4) var(--space-5); margin: 0; font-size: 0.9em; }

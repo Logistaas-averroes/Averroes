@@ -1579,6 +1579,7 @@ function loadPage(page) {
     case "churn-input":     loadChurnInput();     break;
     case "revenue-health":  loadRevenueHealth();  break;
     case "revenue-by-source": loadRevenueBySource(); break;
+    case "channels":        loadChannels();        break;
   }
 }
 
@@ -9438,6 +9439,96 @@ function renderRevenueBySourcePage(data) {
   `;
 }
 
+// ── Channels: the acquisition-cohort funnel for every channel (PR-ADS-162A) ──
+// One table, one publication verdict. When the cohort is not published the
+// page shows the withholding word and its reason — never a number.
+
+const CHANNEL_FUNNEL_REASON_LABELS = {
+  canonical_funnel_unreadable: "the contact data could not be read",
+  cohort_reconciliation_failed: "the channel rows do not add up to the total",
+  data_watermark_unknown: "the time of the last contact sync is unknown",
+  source_bootstrap_incomplete: "the contact history is still being copied from HubSpot",
+  source_last_incremental_failed: "the last contact sync failed",
+  source_no_successful_incremental: "no contact sync has succeeded yet",
+  source_sync_state_missing: "contacts have not been synced yet",
+  source_sync_state_unavailable: "the contact sync state could not be read",
+  source_incremental_provenance_missing: "the last contact sync cannot be verified",
+};
+
+let _channelsReqSeq = 0;
+
+function channelFunnelPct(part, whole) {
+  if (!whole) return "";
+  return ` <span class="channel-funnel-pct">(${(100 * part / whole).toFixed(1)}%)</span>`;
+}
+
+function channelFunnelRowHtml(row, stages, opts) {
+  const o = opts || {};
+  const name = o.drill
+    ? `<span class="channel-funnel-drill">${escapeHtml(row.value)}</span>`
+    : `<strong>${escapeHtml(row.label)}</strong>`;
+  const cells = stages.map((st) =>
+    `<td class="num">${Number(row[st.key]).toLocaleString()}${channelFunnelPct(row[st.key], row.contacts)}</td>`).join("");
+  return `<tr${o.total ? ' class="channel-funnel-total"' : ""}><td>${name}</td>
+    <td class="num">${Number(row.contacts).toLocaleString()}</td>${cells}</tr>`;
+}
+
+function renderChannelFunnel(data) {
+  const pub = data.publication || {};
+  const stages = data.stages || [];
+  const w = data.window || {};
+  const range = w.is_all_time ? `All time, to ${w.end_date}` : `${w.start_date} to ${w.end_date}`;
+  const asOf = (data.freshness || {}).as_of;
+  if (pub.status !== "published" || !data.channels || !data.totals) {
+    const word = pub.status === "unavailable" ? "Unavailable" : "Withheld";
+    const reason = CHANNEL_FUNNEL_REASON_LABELS[pub.reason]
+      || String(pub.reason || "the cohort could not be published").replace(/_/g, " ");
+    return `<div class="panel"><p class="empty-state" style="padding:var(--space-5)">
+      <strong>${word}</strong> — ${escapeHtml(reason)}. No figures are shown until the contact data is complete and current.</p></div>`;
+  }
+  const head = stages.map((st) => `<th class="num">${escapeHtml(st.label)}</th>`).join("");
+  const body = data.channels.map((ch) => {
+    const drill = (ch.drilldowns || []).length > 1 || ((ch.drilldowns || [])[0] || {}).value !== "(none)"
+      ? ch.drilldowns.map((d) => channelFunnelRowHtml(d, stages, { drill: true })).join("") : "";
+    return channelFunnelRowHtml(ch, stages) + drill;
+  }).join("");
+  const total = channelFunnelRowHtml({ label: "All channels", ...data.totals }, stages, { total: true });
+  const notes = data.notes || {};
+  return `
+    <div class="panel">
+      <div class="panel__header">Contacts acquired ${escapeHtml(range)} — stage reached so far${asOf ? `, measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</div>
+      <div style="overflow-x:auto">
+        <table class="data-table channel-funnel-table">
+          <thead><tr><th>Channel</th><th class="num">Contacts</th>${head}</tr></thead>
+          <tbody>${total}${body}</tbody>
+        </table>
+      </div>
+      <p class="channel-funnel-note">
+        Percentages are the share of that row's contacts. ${escapeHtml(notes.stages || "")}
+        ${escapeHtml(notes.channels || "")} ${escapeHtml(notes.maturity || "")}
+        Spend, cost per SQL, deals and revenue by channel are not on this page yet.</p>
+    </div>`;
+}
+
+async function loadChannels() {
+  const sel = document.getElementById("channels-window");
+  const body = document.getElementById("channels-body");
+  const rangeEl = document.getElementById("channels-range");
+  const window_ = (sel && sel.value) || "180d";
+  const token = ++_channelsReqSeq;
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading channels…</p>';
+  if (rangeEl) rangeEl.textContent = "";
+  try {
+    const data = await fetchJSON(`/api/channel-funnel?window=${encodeURIComponent(window_)}`);
+    if (token !== _channelsReqSeq) return;  // a newer request superseded this one
+    if (body) body.innerHTML = renderChannelFunnel(data);
+  } catch (err) {
+    console.error("[loadChannels]", err);
+    if (token !== _channelsReqSeq) return;
+    if (body) body.innerHTML = '<div class="panel"><p class="empty-state" style="padding:var(--space-5)"><strong>Unavailable</strong> — the channel funnel could not be loaded.</p></div>';
+  }
+}
+
 async function loadRevenueBySource() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.bySource;
@@ -16125,6 +16216,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     revHealthWindow.value = getRoasBusinessWindow();
     revHealthWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
+
+  // Wire up Channels controls (PR-ADS-162A — acquisition windows)
+  const channelsRefresh = document.getElementById("channels-refresh-btn");
+  const channelsWindow  = document.getElementById("channels-window");
+  if (channelsRefresh) channelsRefresh.addEventListener("click", loadChannels);
+  if (channelsWindow) channelsWindow.addEventListener("change", loadChannels);
 
   // Wire up Revenue by Source controls (business windows — PR-ADS-117)
   const bySourceRefresh = document.getElementById("revenue-by-source-refresh-btn");

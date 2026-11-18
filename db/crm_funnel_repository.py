@@ -545,6 +545,60 @@ def fetch_acquisition_cohort_contacts(start_at, end_before) -> dict:
         return _unavailable(rows=[], missing_created_at=None)
 
 
+def fetch_channel_funnel_contacts(start_at, end_before) -> dict:
+    """Canonical contacts created in ``[start_at, end_before)``, ALL sources,
+    with the evidence for every funnel stage (PR-ADS-162A).
+
+    The same population and window rule as
+    :func:`fetch_acquisition_cohort_contacts` — ``created_at`` alone decides
+    membership, a contact with no ``created_at`` is in no window and is counted
+    in ``missing_created_at`` — but each row carries, for every funnel event,
+    the DIRECT stage-entry timestamp and the RECOVERED one as
+    ``<event>_entered_direct`` / ``<event>_entered_recovered``. They are
+    evidence that a stage was reached, never a window date.
+
+    Read-only.
+    """
+    a = FUNNEL_ALIAS
+    stage_cols = ",\n                           ".join(
+        f"{direct_date_sql(e)} AS {e}_entered_direct,\n"
+        f"                           {recovered_date_sql(e)} AS {e}_entered_recovered"
+        for e in FUNNEL_EVENTS)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[], missing_created_at=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {a}.id AS funnel_row_id,
+                           {a}.contact_id,
+                           {a}.created_at,
+                           {a}.lifecycle_stage,
+                           {stage_cols},
+                           {a}.hs_analytics_source,
+                           {a}.hs_analytics_source_data_1
+                    FROM {FUNNEL_TABLE} {a}
+                    {_recovery_join()}
+                    WHERE {a}.created_at IS NOT NULL
+                      AND (%s::timestamptz IS NULL OR {a}.created_at >= %s)
+                      AND {a}.created_at < %s
+                    ORDER BY {a}.contact_id, {a}.id
+                    """,
+                    (start_at, start_at, end_before),
+                )
+                rows = _rows_as_dicts(cur)
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {FUNNEL_TABLE} WHERE created_at IS NULL")
+                missing_created_at = cur.fetchone()[0]
+        return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
+                "recovery_table": RECOVERY_TABLE,
+                "missing_created_at": missing_created_at}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_channel_funnel_contacts failed: %s", exc)
+        return _unavailable(rows=[], missing_created_at=None)
+
+
 # ── PR-ADS-160 — the prospective coverage boundary, read side ───────────────
 #
 # Every read here returns the boundary as what it is: an UPPER BOUND on an

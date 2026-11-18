@@ -63,6 +63,7 @@ COHORT_DEDUP = "contact_id"
 #: Defined here, not with the other consumer labels below, because the
 #: CONSUMERS list (which precedes them) names it.
 _COHORT = "PR-ADS-161B canonical marketing outcome cohorts (acquisition cohort)"
+_CHANNEL_FUNNEL = "PR-ADS-162A Channels page — acquisition-cohort funnel for every channel"
 
 SNAPSHOT_DEF = "campaigns.confirmed_sqls (count of mql_status in {CLOSED - Sales Qualified, CLOSED - Deal Created} from data/crm_contacts.json)"
 SNAPSHOT_DATE = "run_date (scheduler snapshot date)"
@@ -232,6 +233,26 @@ CONSUMERS: list[dict] = [
                     "campaignRowSqlPublication(data.cohort, camp) — the detail "
                     "response's verdict, never page state",
        row=True, cpql=True, drawer=True, decision=True, operational=True),
+    _c(_CHANNEL_FUNNEL,
+       "Channels page: contacts created in the window, by HubSpot original "
+       "source, and how many have reached MQL / SQL / Opportunity / Customer "
+       "stage as of the contact-funnel watermark. One publication verdict; no "
+       "deals, revenue, customers or spend.",
+       endpoint="GET /api/channel-funnel",
+       service_function="services.channel_funnel_service.build_channel_funnel "
+                        "/ build_funnel / reached (SQL = cohort sql_proof)",
+       repository_source="db.crm_funnel_repository.fetch_channel_funnel_contacts",
+       source_table=f"{LIFECYCLE_TABLE} + hubspot_lifecycle_stage_history",
+       sql_definition=COHORT_DEF, date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
+       windows=EVIDENCE,
+       scope="all_sources, by HubSpot original source",
+       classification=CLS_CANONICAL,
+       code_location="services/channel_funnel_service.py:build_channel_funnel",
+       migration_notes="Same cohort, window days, SQL proof and publication "
+                       "verdict as Campaign Evidence, over all sources.",
+       truth_status="totals and channels are None unless the one publication "
+                    "verdict is published; withheld means absent",
+       headline=True, row=True, operational=True),
     _c(_COHORT,
        "The acquisition-cohort contract: contacts created in a window and their "
        "SQL outcome as of the canonical contact-funnel watermark, bucketed into "
@@ -1038,6 +1059,9 @@ RULES: list[dict] = [
                "sql_metric_metadata", "_jsonable_cohort",
                "read_freshness", "build_window_outcomes",
                "lifecycle_event_disclosure"]),
+    # PR-ADS-162A: the same cohort over every source, for the Channels page.
+    _r("channelfunnel.service", "services/channel_funnel_service.py",
+       CLS_CANONICAL, _CHANNEL_FUNNEL, symbol=["build_channel_funnel"]),
     # The read-only audit of the above. Diagnostic: it publishes nothing.
     _r("cohort.audit", "scripts/audit_marketing_outcome_cohorts.py", CLS_DIAGNOSTIC,
        _COHORT,
