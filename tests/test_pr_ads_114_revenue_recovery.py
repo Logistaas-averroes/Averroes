@@ -112,14 +112,20 @@ def test_no_gclid_anywhere_stays_unattributed():
     assert counts["closed_won_deals_without_gclid"] == 1
 
 
-def test_connector_normalise_prefers_direct_then_url_gclid():
+def test_connector_normalise_prefers_direct_then_url_gclid(monkeypatch):
     pytest.importorskip("hubspot")
     import connectors.hubspot_pull as hp
+
+    # PR-ADS-163A: the three stubs below were plain assignments, never undone,
+    # so the connector kept the last lambda for the rest of the session and
+    # every later test that drove the real won-deal pull resolved each deal to
+    # an empty contact. They are installed with monkeypatch now. No assertion
+    # here changed.
 
     # Direct hs_google_click_id wins → match_source gclid.
     direct = {"id": "c1", "properties": {"hs_google_click_id": "G-DIRECT",
               "hs_analytics_first_url": "https://x.com/?gclid=G-URL"}}
-    hp._fetch_primary_contact_for_deal = lambda deal_id: direct
+    monkeypatch.setattr(hp, "_fetch_primary_contact_for_deal", lambda deal_id: direct)
     out = hp._normalise_won_deal({"id": "d1", "properties": {"dealstage": "326093516",
                                   "closedate": "2026-01-01", "amount": "100"}})
     assert out["gclid"] == "G-DIRECT"
@@ -127,7 +133,7 @@ def test_connector_normalise_prefers_direct_then_url_gclid():
 
     # No direct field → extract from first_url → match_source first_url.
     url_only = {"id": "c2", "properties": {"hs_analytics_first_url": "https://x.com/?gclid=G-URL"}}
-    hp._fetch_primary_contact_for_deal = lambda deal_id: url_only
+    monkeypatch.setattr(hp, "_fetch_primary_contact_for_deal", lambda deal_id: url_only)
     out2 = hp._normalise_won_deal({"id": "d2", "properties": {"dealstage": "326093516",
                                    "closedate": "2026-01-01", "amount": "100"}})
     assert out2["gclid"] == "G-URL"
@@ -135,7 +141,7 @@ def test_connector_normalise_prefers_direct_then_url_gclid():
 
     # No click evidence at all → unattributable.
     none_contact = {"id": "c3", "properties": {}}
-    hp._fetch_primary_contact_for_deal = lambda deal_id: none_contact
+    monkeypatch.setattr(hp, "_fetch_primary_contact_for_deal", lambda deal_id: none_contact)
     out3 = hp._normalise_won_deal({"id": "d3", "properties": {"dealstage": "326093516",
                                    "closedate": "2026-01-01", "amount": "100"}})
     assert out3["gclid"] is None
@@ -147,9 +153,19 @@ def test_connector_normalise_prefers_direct_then_url_gclid():
 
 def test_connector_pulls_closed_won_by_closedate():
     # The won-deal pull filters by dealstage + closedate, never run_date or createdate.
-    idx = CONN_SRC.find("def pull_closed_won_deals_in_range")
+    #
+    # PR-ADS-163A: the search moved out of `pull_closed_won_deals_in_range` into
+    # `_iter_closed_won_deal_pages`, which the sources pull now shares. The
+    # same assertions are made where the search lives, and the pull is checked
+    # to read its deals from there and nowhere else.
+    pull_idx = CONN_SRC.find("def pull_closed_won_deals_in_range")
+    assert pull_idx != -1
+    pull_body = CONN_SRC[pull_idx:CONN_SRC.find("def _normalise_won_deal")]
+    assert "_iter_closed_won_deal_pages(" in pull_body
+    assert "do_search" not in pull_body
+    idx = CONN_SRC.find("def _iter_closed_won_deal_pages")
     assert idx != -1
-    body = CONN_SRC[idx:idx + 2500]
+    body = CONN_SRC[idx:pull_idx]
     assert '"propertyName": "dealstage"' in body
     assert '"propertyName": "closedate"' in body
     assert "run_date" not in body

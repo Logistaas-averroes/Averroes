@@ -723,3 +723,52 @@ connectors stubbed) unless marked "read".
   test importing the `pg` fixture from `tests/test_pr_ads_153e_a_pg_integration`
   and overriding `require_auth` through `app.dependency_overrides`. The admin
   bearer token alone does not satisfy `require_auth` routes.
+
+## PR-ADS-163A review (local commit 0ed399f on c3d04a1, 2026-11-18; not yet pushed)
+Legacy HubSpot pulls raise `HubSpotPullIncompleteError` instead of returning a
+truncated list. Verified by execution on exported copies of both commits.
+- Counterfactual holds: the new suite is 73 passed on 0ed399f, 52 failed / 21
+  passed on the parent (the 21 are controls and already-recovered transients).
+- The SDK's `hubspot.crm.contacts.ApiException` and `hubspot.crm.deals.ApiException`
+  are unrelated classes (checked on the installed SDK). The SDK maps only
+  urllib3 SSLError to `ApiException(status=0)`; other transport errors
+  (MaxRetryError, timeouts) escape raw — loud, but not the named error.
+- STILL OPEN, same defect class, not in 163A: `pull_closed_won_deals_with_sources_in_range`
+  swallows a per-deal `HubSpotRetryableError` into `lookup_failed: True`, and
+  `scheduler/incremental_sync._sync_source_classification` never reads that
+  flag. Executed: the deal is upserted `unclassified / no_classified_contact`
+  with `associated_contact_id` None (ON CONFLICT overwrites), step `success`,
+  run `success`, batch stamped today. Only `source_attribution_service` honours
+  `lookup_failed`. `deal_source_attribution` is legacy (reconciliation ledger B,
+  Mailchimp audit), not a canonical revenue reader.
+- That same sources pull first calls `pull_closed_won_deals_in_range`, whose
+  per-deal primary-contact lookup it discards. Since 163A a failure in that
+  discarded lookup fails the whole source step (and a source-backfill chunk).
+- Retry budgets differ: search pages 4 attempts (2/4/8 s); the per-contact
+  association scan and `_fetch_primary_contact_for_deal` 3 attempts (2/4 s).
+  The latter retries every status including 404 and logs nothing on retry.
+- 163A's caller tests assert recorded `finish_sync_batch` / `update_run` mock
+  calls; no test drives a real `sync_state` or `runs` row (docs/09 says so).
+- `_sync_source_classification` writes contact classifications before the deal
+  pull, so a deal-pull failure reports `failed` over rows that landed.
+- `revenue_recovery_service` / `source_attribution_service` cannot return
+  `failed` once any chunk is attempted (`chunks_detail` is always appended).
+- Tooling: `git`/`grep` output is rewritten by an `rtk` wrapper that truncates
+  diffs and match lists. Use the Read tool, or `$(command -v -p git)` to a
+  file, for anything that must be complete.
+- UPDATE (second review, amended commit): both "STILL OPEN" entries above are
+  FIXED in the amended 163A commit. `_sync_source_classification` fails the
+  step when a deal carries `lookup_failed`; the sources pull is a deals-only
+  search with no primary-contact read; a 404 is raised with no retry. The
+  suite is 108 cases; 30 of the first 104 fail on 0ed399f.
+- CORRECTION to the SSLError line above: on SDK 13.0.0 a urllib3 SSLError
+  becomes `ApiException(status=0)` and then a raw `AttributeError`
+  ('NoneType' object has no attribute 'decode') inside the SDK. Loud, not the
+  named error, deliberately not caught.
+- A malformed SEARCH 200 (`{"total": 0}`) reaches the pull as `results=None`.
+  It raised `TypeError` at 9eb5fe7; `_legacy_search_page` now raises the named
+  error (test_49).
+- `_request_timeout=30` is per attempt; the SDK leaves urllib3's default
+  `Retry(3)` in place, so one call to an unreachable host can take ~4x that.
+- Render installs hubspot-api-client 13.0.0 (build log 2026-11-18), the
+  version the signatures were checked against.

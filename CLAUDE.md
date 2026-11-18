@@ -354,6 +354,22 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   must honour the filter, report `total` and change its data during the scan,
   or it cannot see this class of bug.
 
+- **A HubSpot pull that hits an API or transport error, an exhausted retry or
+  a malformed response raises; it does not return what it has** (PR-ADS-163A).
+  The legacy contact pulls in `connectors/hubspot_pull.py` logged an API error
+  and returned `[]` or the pages read so far: with an expired token the monthly
+  job recorded `success`, stamped `hubspot/contacts` fresh and overwrote
+  `data/crm_contacts.json` with `[]`. Raise `HubSpotPullIncompleteError`, bound
+  every retry, do not retry a 404, and never `break` or `return` out of an
+  `except` in a pull. A 200 with no `results` list is not an empty answer, and
+  a deal returned with `lookup_failed: True` is not a row to write. The SDK
+  has one `ApiException` per API package (the contacts one does not catch a
+  deals error) and lets urllib3 errors through: catch `HUBSPOT_SDK_READ_ERRORS`.
+  A TLS failure is the exception: the SDK dies on it with a raw
+  `AttributeError`, which is loud but not the named error.
+  This is not a completeness check — those pulls still page by offset and
+  never read `total`, the landmine above, which this did not address.
+
 - **`now()` is transaction-start time.** For an instant stamped *after* a read
   inside the same transaction, use `clock_timestamp()`.
 

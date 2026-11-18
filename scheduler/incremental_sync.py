@@ -1093,6 +1093,21 @@ def _sync_source_classification(
 
         deals = pull_closed_won_deals_with_sources_in_range(
             date_from=str(date_from), date_to=str(date_to))
+        # PR-ADS-163A: a deal carrying `lookup_failed` is one whose contacts'
+        # sources could NOT be read — the connector returns it with no contacts
+        # so the caller can withhold it. This step never read the flag: it
+        # attributed the deal from its empty contact list and upserted it
+        # `unclassified / no_classified_contact`, over whatever attribution was
+        # stored, and ended `success`. An unread lookup is not a finding, so
+        # the step fails before any deal row is prepared or written, the way
+        # `source_attribution_service` keeps such a chunk incomplete.
+        unread = [str(d.get("deal_id")) for d in deals if d.get("lookup_failed")]
+        if unread:
+            raise RuntimeError(
+                f"contact sources could not be read for {len(unread)} of "
+                f"{len(deals)} closed-won deal(s) (deal id(s): "
+                f"{', '.join(unread[:10])}{' …' if len(unread) > 10 else ''}); "
+                "no deal source attribution was written")
         deal_rows = [attribute_deal_row(d) for d in deals]
         deals_written = db_writers.upsert_deal_source_attribution(deal_rows)
 
