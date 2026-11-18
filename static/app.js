@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source", "channels"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -46,7 +46,8 @@ const RETIRED_PAGE_REDIRECTS = {
 // command center on business windows — so it joins the clean revenue chrome.
 // PR-ADS-153C: Leads is a CRM/business page — business windows, clean chrome.
 // PR-ADS-162A: Channels has its own acquisition-window selector — clean chrome.
-const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels"];
+// PR-ADS-162C: System is a plain status page — clean chrome.
+const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels", "system"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -1237,6 +1238,9 @@ function showApp(user) {
   // Show/hide System Health nav item
   const healthNav = document.getElementById("nav-health-item");
   if (healthNav) healthNav.hidden = user.role !== "admin";
+  // Show/hide System nav item (admin-only — PR-ADS-162C)
+  const systemNav = document.getElementById("nav-system-item");
+  if (systemNav) systemNav.hidden = user.role !== "admin";
   // Show/hide Historical Backfill nav item
   const backfillNav = document.getElementById("nav-backfill-item");
   if (backfillNav) backfillNav.hidden = user.role !== "admin";
@@ -1455,7 +1459,7 @@ function navigate(page, options) {
   }
 
   // Validate page exists — fallback to dashboard for invalid routes
-  if (!PAGES.includes(page)) {
+  if (!PAGES.includes(page) || adminOnlyDenied(page)) {
     navigate("dashboard", { updateHash: true, replace: true });
     return;
   }
@@ -1539,6 +1543,9 @@ function navigate(page, options) {
   // keys off _currentPage (e.g. loadMonitoringStatus) lands on the right state.
   applyPageChrome(page);
 
+  // PR-ADS-162C: never highlight an item inside a collapsed Advanced group.
+  if (ADVANCED_ADMIN_PAGES.includes(page)) setAdvancedNavOpen(true);
+
   // Update URL hash
   if (updateHash) {
     navigateToHash(page, { replace: options.replace });
@@ -1581,6 +1588,7 @@ function loadPage(page) {
     case "revenue-health":  loadRevenueHealth();  break;
     case "revenue-by-source": loadRevenueBySource(); break;
     case "channels":        loadChannels();        break;
+    case "system":          loadSystem();          break;
   }
 }
 
@@ -9528,6 +9536,274 @@ async function loadChannels() {
   }
 }
 
+// ── System: the state of the platform in plain words (PR-ADS-162C) ──────────
+// It shows recorded facts and decides nothing. The certification verdict is the
+// one the daily job stored; a verdict that is missing or old is "not checked",
+// never a pass. Every unknown state renders as a warning, never as healthy.
+
+const ADVANCED_ADMIN_PAGES = ["scheduler", "gclid-attribution", "health", "revenue-health", "backfill", "churn-input"];
+
+// The System page is admin-only: navigate() sends anyone else to the Dashboard.
+function adminOnlyDenied(page) {
+  return page === "system" && !(_currentUser && _currentUser.role === "admin");
+}
+
+function setAdvancedNavOpen(open) {
+  const nav = document.querySelector(".sidebar__nav");
+  const btn = document.getElementById("nav-advanced-toggle");
+  if (nav) nav.classList.toggle("sidebar__nav--advanced-open", !!open);
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+// What each daily check proves, in plain words — and no more than it proves.
+const SYSTEM_CHECK_LABELS = {
+  reader_cutover: "Every page reads won deals, customers and revenue from one source",
+  closed_won_truth: "Won-deal, customer and revenue figures match the stored deal records",
+  deal_company_associations: "A customer count is shown only where every won deal's company is proven",
+  crm_truth_exceptions: "Every hidden customer or revenue figure names what blocks it",
+  marketing_outcome_cohorts: "Lead and SQL counts on the Campaigns page add up",
+  campaign_evidence: "The Campaigns page shows only figures it can prove",
+};
+
+const SYSTEM_CERT_TEXT = {
+  certified: { tone: "ok", headline: "Yes — the latest daily check passed",
+    detail: "The checks found no won-deal, customer or revenue figure, and no Campaigns-page lead or SQL count, that disagrees with the stored records. Figures that cannot be proven are hidden, not guessed." },
+  violation: { tone: "bad", headline: "No — a daily check failed",
+    detail: "A check found a figure that the stored records do not support. Treat the dashboard with caution until this is fixed." },
+  not_certified: { tone: "warn", headline: "Not confirmed — a check could not finish",
+    detail: "Not every check finished, so the numbers are unverified." },
+  not_checked: { tone: "warn", headline: "Not checked in the last day",
+    detail: "The daily check has not recorded a recent result, so the numbers are unverified." },
+  unavailable: { tone: "warn", headline: "The check result could not be read",
+    detail: "The database did not return the daily check result, so the numbers are unverified." },
+};
+
+// Every reason a won deal can block a figure: [who fixes it, one deal, several].
+// "hubspot" is a record the sales team corrects; "platform" is our data sync and
+// needs nothing done in HubSpot. A reason missing here is shown as "other",
+// never under the HubSpot heading.
+const SYSTEM_FIX_TEXT = {
+  unresolved_no_company: ["hubspot", "won deal is not linked to any company", "won deals are not linked to any company"],
+  ambiguous_multiple_companies: ["hubspot", "won deal is linked to more than one company", "won deals are linked to more than one company"],
+  no_amount: ["hubspot", "won deal has no amount", "won deals have no amount"],
+  unknown_currency: ["hubspot", "won deal has no proven currency", "won deals have no proven currency"],
+  no_close_date_for_fx: ["hubspot", "won deal has no close date, so its amount cannot be converted to US dollars", "won deals have no close date, so their amounts cannot be converted to US dollars"],
+  negative_amount: ["hubspot", "won deal has a negative amount", "won deals have a negative amount"],
+  invalid_amount: ["hubspot", "won deal has an amount that is not a number", "won deals have an amount that is not a number"],
+  missing_close_date: ["hubspot", "won deal has no close date", "won deals have no close date"],
+  won_flag_true_in_another_stage: ["hubspot", "deal is marked won but sits in another stage", "deals are marked won but sit in another stage"],
+  won_stage_but_won_flag_not_true: ["hubspot", "deal sits in the won stage but is not marked won", "deals sit in the won stage but are not marked won"],
+  association_unavailable: ["platform", "won deal's company has not been read from HubSpot yet", "won deals' companies have not been read from HubSpot yet"],
+  latest_association_attempt_failed: ["platform", "won deal's company could not be re-read on the last attempt", "won deals' companies could not be re-read on the last attempt"],
+  deal_modified_after_association_observation: ["platform", "won deal changed after its company was last read", "won deals changed after their companies were last read"],
+  not_certified_by_latest_complete_scan: ["platform", "won deal was not covered by the last full company check", "won deals were not covered by the last full company check"],
+  home_currency_unverified: ["platform", "won deal cannot be converted to US dollars because the account's home currency is not verified", "won deals cannot be converted to US dollars because the account's home currency is not verified"],
+  no_fx_rate_for_close_date: ["platform", "won deal has no exchange rate for its close date", "won deals have no exchange rate for their close dates"],
+  currency_reason_not_recorded: ["platform", "won deal's US-dollar value is not proven and no reason was recorded", "won deals' US-dollar values are not proven and no reason was recorded"],
+};
+
+const SYSTEM_WINDOW_LABELS = {
+  "evidence/7d": "last 7 days", "evidence/14d": "last 14 days", "evidence/30d": "last 30 days",
+  "evidence/60d": "last 60 days", "evidence/180d": "last 180 days", "evidence/all_time": "all time",
+  "business/current_quarter": "this quarter", "business/last_quarter": "last quarter",
+  "business/last_6_months": "last 6 months", "business/ytd": "year to date", "business/all_time": "all time",
+};
+
+const SYSTEM_CONTACT_REASONS = {
+  source_bootstrap_incomplete: "History is still being copied from HubSpot",
+  source_last_incremental_failed: "The last update failed",
+  source_no_successful_incremental: "No successful update has run yet",
+  source_sync_state_missing: "No update has run yet",
+  source_incremental_provenance_missing: "The last update cannot be confirmed",
+};
+
+function systemAgo(hours) {
+  const h = Number(hours);
+  if (hours === null || hours === undefined || !Number.isFinite(h) || h < 0) return "at an unknown time";
+  if (h < 1) return "less than an hour ago";
+  if (h < 48) return `${Math.round(h)} hour${Math.round(h) === 1 ? "" : "s"} ago`;
+  return `${Math.round(h / 24)} days ago`;
+}
+
+function systemLimit(hours) {
+  const h = Number(hours);
+  return (hours !== null && hours !== undefined && Number.isFinite(h) && h > 0)
+    ? `no successful update in the last ${Math.round(h)} hours` : "the last successful update is too old";
+}
+
+function systemCertCard(cert) {
+  const c = cert || {};
+  const text = SYSTEM_CERT_TEXT[c.state] || SYSTEM_CERT_TEXT.unavailable;
+  const known = Object.prototype.hasOwnProperty.call(SYSTEM_CERT_TEXT, c.state) && c.state !== "unavailable";
+  let detail = text.detail;
+  if (c.state === "not_certified" && c.could_not_run) detail = "The daily check could not run, so nothing was checked.";
+  let when = "";
+  if (known) {
+    when = c.checked_at
+      ? `Last checked ${systemAgo(c.age_hours)} (${escapeHtml(String(c.checked_at).slice(0, 16).replace("T", " "))} UTC).`
+      : "No check has been recorded yet.";
+  }
+  const audits = Array.isArray(c.audits) ? c.audits : [];
+  // A pass lists what was checked; anything else lists only what did not pass.
+  const shown = c.state === "certified" ? audits : audits.filter((a) => a.outcome !== "holds");
+  const list = shown.map((a) => {
+    const word = a.outcome === "holds" ? "Passed" : (a.outcome === "violation" ? "Failed" : "Could not finish");
+    const label = SYSTEM_CHECK_LABELS[a.key] || String(a.key || "check").replace(/_/g, " ");
+    return `<li class="system-check system-check--${a.outcome === "holds" ? "ok" : "bad"}">${word} — ${escapeHtml(label)}</li>`;
+  }).join("");
+  return `<div class="panel system-card system-card--${text.tone}">
+    <div class="panel__header">Can you trust the numbers?</div>
+    <div class="system-card__body">
+      <p class="system-card__headline">${escapeHtml(text.headline)}</p>
+      <p>${escapeHtml(detail)} ${when}</p>
+      ${list ? `<ul class="system-checks">${list}</ul>` : ""}
+      <p class="system-card__note">This check runs every morning. It covers won deals, customers, revenue and the Campaigns page's lead and SQL counts. It does not re-check ad spend, the Channels page, Leads or search terms, and it cannot see a deal or contact that was never entered in HubSpot.</p>
+    </div></div>`;
+}
+
+// One line per source. Only status "current" is healthy; every other status,
+// including one this code has never seen, is a warning.
+function systemSourceLine(src) {
+  const s = src || {};
+  const label = escapeHtml(s.label || String(s.key || "source").replace(/_/g, " "));
+  const hidden = " Won-deal, customer and revenue figures are hidden until it does.";
+  let ok = false;
+  let state = "Could not be read";
+  if (s.key === "hubspot_contacts") {
+    if (s.status === "current") { ok = true; state = "Up to date"; }
+    else if (s.status === "late") state = `Late — ${systemLimit(s.limit_hours)}`;
+    else if (s.status === "not_proven") state = SYSTEM_CONTACT_REASONS[s.reason] || "Not confirmed up to date";
+  } else if (s.key === "hubspot_deals") {
+    if (s.status === "current") { ok = true; state = "Up to date"; }
+    else if (s.status === "late") state = `Late — ${systemLimit(s.limit_hours)}.${hidden}`;
+    else if (s.status === "not_proven") {
+      state = (s.history_copied === false ? "History is still being copied from HubSpot."
+        : "Not confirmed — the last update did not succeed.") + hidden;
+    }
+  } else if (s.key === "google_ads_spend") {
+    if (s.status === "current" && s.complete_through) { ok = true; state = `Complete through ${escapeHtml(String(s.complete_through))}`; }
+    else if (s.status === "late") {
+      const ranges = (Array.isArray(s.missing_ranges) ? s.missing_ranges : []).map((r) =>
+        r.start === r.end ? String(r.start) : `${r.start} to ${r.end}`);
+      state = ranges.length ? `Late — no spend recorded for ${escapeHtml(ranges.join(", "))}`
+        : "Late — a recent spend update failed";
+    }
+  }
+  const when = s.last_success_at ? `Last successful update ${systemAgo(s.age_hours)}` : "No successful update on record";
+  return `<tr><td><strong>${label}</strong></td><td>${when}</td><td class="system-source--${ok ? "ok" : "warn"}">${state}</td></tr>`;
+}
+
+function systemFixCard(cert) {
+  const c = cert || {};
+  const fix = c.crm_data_to_fix;
+  const header = `<div class="panel__header">What needs fixing</div>`;
+  if (!fix || typeof fix !== "object") {
+    return `<div class="panel system-card">${header}
+      <div class="system-card__body"><p><strong>Unknown</strong> — the daily check did not record this.</p></div></div>`;
+  }
+  const groups = { hubspot: [], platform: [], other: [] };
+  Object.values(fix.by_family || {}).forEach((fam) => {
+    Object.entries((fam || {}).by_reason || {}).forEach(([reason, n]) => {
+      const t = SYSTEM_FIX_TEXT[reason];
+      const count = Number.isFinite(Number(n)) && n !== null ? Number(n) : null;
+      const phrase = t ? (count === 1 ? t[1] : t[2]) : `won deal(s): ${String(reason).replace(/_/g, " ")}`;
+      groups[t ? t[0] : "other"].push(
+        `<li><strong>${count === null ? "An unknown number of" : count.toLocaleString()}</strong> ${escapeHtml(phrase)}.</li>`);
+    });
+  });
+  const blockers = (Array.isArray(fix.dataset_blockers) ? fix.dataset_blockers : []).map((b) => {
+    const o = (b && typeof b === "object") ? b : { code: b };
+    const words = o.explanation || String(o.code || "unnamed problem").replace(/_/g, " ");
+    return `<li>${escapeHtml(String(words))}</li>`;
+  });
+  const windows = Array.isArray(fix.windows) ? fix.windows : [];
+  const hidden = { customers: [], revenue_usd: [] };
+  windows.forEach((w) => {
+    const name = SYSTEM_WINDOW_LABELS[w.window] || String(w.window);
+    ["customers", "revenue_usd"].forEach((k) => {
+      if (w[k] !== "published" && !hidden[k].includes(name)) hidden[k].push(name);
+    });
+  });
+  const effect = (what, list) => {
+    if (!list.length) return "";
+    const every = windows.length > 0 && windows.every((w) => list.includes(SYSTEM_WINDOW_LABELS[w.window] || String(w.window)));
+    return every ? `${what} hidden for every period.` : `${what} hidden for: ${escapeHtml(list.join(", "))}.`;
+  };
+  const effects = [effect("Customer counts are", hidden.customers), effect("Revenue is", hidden.revenue_usd)].filter(Boolean);
+  const total = fix.deals_with_any_exception;
+  const countKnown = Number.isInteger(total) && total >= 0;
+  const anyItem = groups.hubspot.length || groups.platform.length || groups.other.length;
+
+  const parts = [];
+  if (c.checked_at) parts.push(`<p class="system-card__note">As of the last daily check, ${systemAgo(c.age_hours)}.</p>`);
+  if (blockers.length) {
+    parts.push(`<p><strong>A data problem on our side</strong> (nothing to do in HubSpot):</p><ul class="system-fix-list">${blockers.join("")}</ul>`);
+  }
+  if (!countKnown) {
+    parts.push(`<p><strong>Unknown</strong> — the daily check could not count the deals that need fixing.</p>`);
+  }
+  if (groups.hubspot.length) {
+    parts.push(`<p><strong>In HubSpot</strong> (for the sales team):</p><ul class="system-fix-list">${groups.hubspot.join("")}</ul>
+      <p><button type="button" class="btn btn--secondary" data-system-goto="health">Open the list of deals to fix</button></p>`);
+  }
+  if (groups.platform.length) {
+    parts.push(`<p><strong>On our side</strong> (data sync — nothing to do in HubSpot):</p><ul class="system-fix-list">${groups.platform.join("")}</ul>`);
+  }
+  if (groups.other.length) {
+    parts.push(`<p><strong>Other blockers:</strong></p><ul class="system-fix-list">${groups.other.join("")}</ul>`);
+  }
+  if (effects.length) parts.push(`<p><strong>Because of this:</strong> ${effects.join(" ")}</p>`);
+  if (!windows.length) {
+    parts.push(`<p><strong>Unknown</strong> — the daily check did not record which periods show their figures.</p>`);
+  } else if (countKnown && total === 0 && !blockers.length && !anyItem && !effects.length) {
+    // Said only on a proven zero: a counted total of 0, no blocker of any
+    // kind, and every period recorded as shown.
+    parts.push(`<p>Nothing to fix — no won deal is blocking a figure.</p>`);
+  }
+  return `<div class="panel system-card">${header}<div class="system-card__body">${parts.join("")}</div></div>`;
+}
+
+const SYSTEM_ADVANCED_LINKS = [
+  ["scheduler", "Data Runs", "See when the scheduled updates ran, and start one by hand."],
+  ["revenue-health", "Revenue Health", "Match HubSpot campaign names to Google Ads campaigns, and refill missing spend."],
+  ["health", "System Status", "Technical detail on every data pipeline, and the list of deals to fix."],
+  ["gclid-attribution", "GCLID Attribution", "Click-level Google Ads tracking detail."],
+  ["backfill", "Admin Backfill", "Re-import older history."],
+  ["churn-input", "Churn Input", "A stored churn rate. No current figure uses it."],
+];
+
+function renderSystemOverview(data) {
+  const d = data || {};
+  const cert = d.certification || {};
+  const sources = (Array.isArray(d.sources) ? d.sources : []).map(systemSourceLine).join("");
+  const links = SYSTEM_ADVANCED_LINKS.map(([page, name, what]) =>
+    `<li><a href="#/${page}" data-system-goto="${page}"><strong>${escapeHtml(name)}</strong></a> — ${escapeHtml(what)}</li>`).join("");
+  return `${systemCertCard(cert)}
+    <div class="panel system-card"><div class="panel__header">Is the data up to date?</div>
+      <div style="overflow-x:auto"><table class="data-table"><tbody>${sources
+        || '<tr><td>Unknown — no source could be read.</td></tr>'}</tbody></table></div></div>
+    ${systemFixCard(cert)}
+    <div class="panel system-card"><div class="panel__header">Advanced tools — rarely needed</div>
+      <div class="system-card__body"><ul class="system-fix-list">${links}</ul></div></div>`;
+}
+
+let _systemReqSeq = 0;
+
+async function loadSystem() {
+  const body = document.getElementById("system-body");
+  const token = ++_systemReqSeq;
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading…</p>';
+  try {
+    const data = await fetchJSON("/api/system/overview");
+    if (token !== _systemReqSeq) return;
+    if (body) body.innerHTML = renderSystemOverview(data);
+  } catch (err) {
+    console.error("[loadSystem]", err);
+    if (token !== _systemReqSeq) return;
+    if (body) body.innerHTML = '<div class="panel"><p class="empty-state" style="padding:var(--space-5)"><strong>Unavailable</strong> — the system status could not be loaded.</p></div>';
+  }
+}
+
 async function loadRevenueBySource() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.bySource;
@@ -16215,6 +16491,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     revHealthWindow.value = getRoasBusinessWindow();
     revHealthWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
+
+  // Wire up the System page and the Advanced tools group (PR-ADS-162C)
+  const systemRefresh = document.getElementById("system-refresh-btn");
+  if (systemRefresh) systemRefresh.addEventListener("click", loadSystem);
+  const systemBody = document.getElementById("system-body");
+  if (systemBody) systemBody.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-system-goto]");
+    if (!el) return;
+    e.preventDefault();
+    navigate(el.dataset.systemGoto, { updateHash: true });
+  });
+  const advancedToggle = document.getElementById("nav-advanced-toggle");
+  if (advancedToggle) advancedToggle.addEventListener("click", () => {
+    const nav = document.querySelector(".sidebar__nav");
+    setAdvancedNavOpen(!(nav && nav.classList.contains("sidebar__nav--advanced-open")));
+  });
 
   // Wire up Channels controls (PR-ADS-162A — acquisition windows)
   const channelsRefresh = document.getElementById("channels-refresh-btn");

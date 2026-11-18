@@ -5934,6 +5934,19 @@ _war_room_cache_lock = threading.Lock()
 _war_room_cache: dict[int, dict[str, Any]] = {}
 
 
+@app.get("/api/system/overview")
+def api_system_overview(request: Request) -> dict[str, Any]:
+    """The System page (PR-ADS-162C, admin only, read-only).
+
+    The latest daily certification verdict as recorded, when each source last
+    updated, and the CRM data that keeps figures withheld. Facts only: it
+    decides no publication. No HubSpot or Google Ads call.
+    """
+    check_admin_or_token(request)
+    from services.system_overview_service import build_system_overview  # noqa: PLC0415
+    return build_system_overview()
+
+
 @app.get("/api/system/status-war-room")
 def api_system_status_war_room(
     request: Request,

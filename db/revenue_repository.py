@@ -2201,3 +2201,39 @@ def fetch_all_known_campaigns(customer_id: str | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_all_known_campaigns failed: %s", exc)
         return {"available": False, "campaigns": []}
+
+
+def fetch_spend_coverage_recency(customer_id: str | None = None) -> dict:
+    """The newest VERIFIED chunk of the canonical spend coverage ledger.
+
+    PR-ADS-162C, for the System page: ``{available, chunk_end, updated_at}``.
+    ``google_ads_spend_coverage`` is the ledger every revenue page's spend
+    coverage is judged from. The newest chunk is chosen by ``chunk_end``, not
+    by write time, so refilling an old month does not read as a fresh daily
+    feed. ``available=False`` means the ledger could not be read;
+    ``chunk_end=None`` with ``available=True`` means it holds no verified
+    chunk. Read-only.
+    """
+    empty = {"chunk_end": None, "updated_at": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, **empty}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_end, updated_at
+                    FROM google_ads_spend_coverage
+                    WHERE status = 'verified'
+                      AND (%s::text IS NULL OR customer_id = %s)
+                    ORDER BY chunk_end DESC, updated_at DESC
+                    LIMIT 1
+                    """, (customer_id, customer_id))
+                row = cur.fetchone()
+        if row is None:
+            return {"available": True, **empty}
+        return {"available": True, "chunk_end": _as_date(row[0]),
+                "updated_at": row[1]}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_spend_coverage_recency failed: %s", exc)
+        return {"available": False, **empty}
