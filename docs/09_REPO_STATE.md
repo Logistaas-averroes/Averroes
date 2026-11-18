@@ -2217,3 +2217,39 @@ the service it tested.
 caught a sentence written in PR-ADS-162D: the corrected Unit Economics help
 text named ROAS and CAC, which check 18 forbids in any UI text. It is reworded
 in 162D.
+
+---
+
+## PR-ADS-162F — the sidebar says what each group holds
+
+**Why.** The owner could not tell what the sections were for. "Command
+Center", "Platform Evidence" and "CRM & Revenue" are internal names.
+
+**What changed.** Labels and order only — no page added, removed or renamed,
+and no route key changed.
+
+| Group | Pages |
+| --- | --- |
+| Overview | Dashboard, Channels |
+| Google Ads | Campaigns, Search Terms, Keyword Evidence, Countries, Action Queue, Reports |
+| Sales Results | Leads, Deals, Revenue by Source, Campaign Revenue & Spend, Country Revenue & Spend, Unit Economics |
+| Admin | System, Advanced tools (Data Runs, GCLID Attribution, System Status, Revenue Health, Admin Backfill) |
+
+- Channels moves up beside the Dashboard: it is the all-channel view, not a
+  HubSpot detail page.
+- Action Queue and Reports move under Google Ads, because both are built on
+  Google Ads data only. Whether to keep, rebuild on all-channel data or delete
+  them is an open owner decision; placing them here makes their scope visible
+  in the meantime.
+- The group structure is ready for more ad platforms: a "Meta Ads" or
+  "LinkedIn Ads" group would sit beside "Google Ads".
+
+**Tests.** `tests/test_pr_ads_162f_sidebar_groups.py` pins the exact groups,
+order and pages, that the old names are gone from the screen, that all twenty
+sidebar pages still route, and that admin gating and the Advanced group are
+unchanged. Three older tests that named the old groups
+(`test_sidebar_navigation_structure.py`, `test_pr_ads_153c_leads_page.py`,
+`test_pr_ads_153d_waste_consolidation.py`) now name the new ones; each keeps
+its rule (Leads sits in the sales group; the four ad-platform pages sit
+together; GCLID Attribution is not in the sales group). Verified in a browser:
+seven pages opened from the regrouped menu with no script error.

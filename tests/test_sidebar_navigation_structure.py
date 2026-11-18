@@ -44,10 +44,14 @@ NEW_VISIBLE_LABELS = [
     "Unit Economics",
 ]
 
+# PR-ADS-162F: the groups were renamed to say what they hold. "Command
+# Center", "Platform Evidence" and "CRM & Revenue" became "Overview",
+# "Google Ads" and "Sales Results" (the exact membership and order are pinned
+# in tests/test_pr_ads_162f_sidebar_groups.py).
 SIDEBAR_GROUPS = [
-    "Command Center",
-    "Platform Evidence",
-    "CRM &amp; Revenue",
+    "Overview",
+    "Google Ads",
+    "Sales Results",
     "Admin",
 ]
 
@@ -120,8 +124,9 @@ def test_old_duplicate_menu_items_removed():
 
 
 def test_revenue_attribution_section_exists():
-    """Revenue & Attribution section must exist in the sidebar."""
-    assert "CRM &amp; Revenue" in HTML
+    """The revenue section must exist in the sidebar (PR-ADS-162F: it is
+    labelled "Sales Results"; it was "CRM & Revenue")."""
+    assert ">Sales Results</li>" in HTML
 
 
 def test_roas_pages_exist():

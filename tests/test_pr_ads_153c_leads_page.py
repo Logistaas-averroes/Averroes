@@ -223,8 +223,10 @@ def test_lead_intelligence_section_is_removed():
 
 
 def test_leads_nav_item_exists_under_crm_and_revenue():
-    assert "CRM &amp; Revenue" in _INDEX_HTML
-    crm_section = _INDEX_HTML.split("CRM &amp; Revenue")[1].split("<!-- Admin -->")[0]
+    # PR-ADS-162F renamed the group "CRM & Revenue" to "Sales Results". The
+    # rule is unchanged: Leads sits in the CRM/sales group, before Admin.
+    assert ">Sales Results</li>" in _INDEX_HTML
+    crm_section = _INDEX_HTML.split(">Sales Results</li>")[1].split("<!-- Admin -->")[0]
     assert 'data-page="leads"' in crm_section
     assert ">Leads<" in crm_section
 
