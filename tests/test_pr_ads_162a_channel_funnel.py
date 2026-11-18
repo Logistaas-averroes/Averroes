@@ -292,3 +292,27 @@ def test_16_the_real_query_and_counts_on_a_live_database(monkeypatch):
             connection._pool.closeall()
             connection._pool = None
         cluster.stop()
+
+
+def test_17_every_sidebar_page_is_routable():
+    """A sidebar item whose page is missing from the router's PAGES list is
+    silently redirected to the Dashboard. This PR shipped that bug for
+    `channels` on its first push; no sidebar page may be unroutable."""
+    import re
+    html = (ROOT / "static/index.html").read_text()
+    js = (ROOT / "static/app.js").read_text()
+    pages = set(re.findall(r'"([a-z0-9-]+)"',
+                           re.search(r"const PAGES = \[(.*?)\];", js, re.S).group(1)))
+    nav = set(re.findall(r'class="nav-item[^"]*" data-page="([a-z0-9-]+)"', html))
+    assert "channels" in nav
+    assert nav <= pages, f"sidebar pages the router rejects: {sorted(nav - pages)}"
+    for page in sorted(nav):
+        assert f'id="page-{page}"' in html, f"no section for {page}"
+        assert f'case "{page}":' in js, f"loadPage has no case for {page}"
+
+
+def test_18_channels_uses_the_clean_page_chrome():
+    import re
+    js = (ROOT / "static/app.js").read_text()
+    revenue = re.search(r"const REVENUE_PAGES = \[(.*?)\];", js, re.S).group(1)
+    assert '"channels"' in revenue

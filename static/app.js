@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source", "channels"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -45,7 +45,8 @@ const RETIRED_PAGE_REDIRECTS = {
 // PR-ADS-134: the Dashboard is now the Executive Overview — a business-truth
 // command center on business windows — so it joins the clean revenue chrome.
 // PR-ADS-153C: Leads is a CRM/business page — business windows, clean chrome.
-const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads"];
+// PR-ADS-162A: Channels has its own acquisition-window selector — clean chrome.
+const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
