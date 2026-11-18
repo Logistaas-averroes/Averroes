@@ -245,6 +245,7 @@ def run_revenue_recovery(
         # ── Phase 1: contacts (prerequisite for Leads / SQLs) ─────────────────
         state["phase"] = "contacts"
         state["current_chunk"] = chunk_key
+        contacts_ok = True
         try:
             contacts = pull_paid_search_contacts_in_range(
                 date_from=chunk_from.isoformat(), date_to=chunk_to.isoformat(),
@@ -260,11 +261,13 @@ def run_revenue_recovery(
             else:
                 summary["paid_contacts_recovered"] += len(contacts)
         except Exception as exc:  # noqa: BLE001
+            contacts_ok = False
             errors.append(f"contacts {chunk_key}: {exc}")
             log.warning("[revenue_recovery] contacts %s failed: %s", chunk_key, exc)
 
         # ── Phase 2: closed-won deals by closedate → attribution ──────────────
         state["phase"] = "revenue"
+        revenue_ok = True
         try:
             deals = pull_closed_won_deals_in_range(
                 date_from=chunk_from.isoformat(), date_to=chunk_to.isoformat(),
@@ -283,11 +286,19 @@ def run_revenue_recovery(
             # In dry-run, attributed_deal_rows_written stays 0 (nothing written);
             # closed_won_deals_with_gclid is the expected impact.
         except Exception as exc:  # noqa: BLE001
+            revenue_ok = False
             errors.append(f"revenue {chunk_key}: {exc}")
             log.warning("[revenue_recovery] revenue %s failed: %s", chunk_key, exc)
 
         chunks_detail.append(chunk_result)
-        completed.add(chunk_key)
+        # PR-ADS-163A: only a chunk whose two phases both finished is recorded
+        # complete, the rule `source_attribution_service` already applies. This
+        # used to add every chunk, so one whose HubSpot pull failed was skipped
+        # by every later resume and its contacts and revenue were never read.
+        # (The pulls now raise instead of returning a truncated list, which is
+        # what makes a failed chunk visible here at all.)
+        if contacts_ok and revenue_ok:
+            completed.add(chunk_key)
         state["completed_chunks"] = list(completed)
         state["last_chunk_result"] = chunk_result
         # Persist a durable checkpoint after every chunk so progress (and the

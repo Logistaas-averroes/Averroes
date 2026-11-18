@@ -505,22 +505,28 @@ def test_connector_propagates_retryable_errors():
     assert "except HubSpotRetryableError" in pull
 
 
-def test_connector_association_failure_via_node_not_needed():
+def test_connector_association_failure_via_node_not_needed(monkeypatch):
     # Behavioural: a raised association error must propagate as lookup_failed.
     pytest.importorskip("hubspot")
     import connectors.hubspot_pull as hp
-    monkey_deal = {"deal_id": "z1"}
-    # Patch the underlying won-deal pull + the two lookups.
-    orig_assoc = hp._fetch_associated_contact_ids
-    orig_props = hp._fetch_contact_source_props
-    hp.pull_closed_won_deals_in_range = lambda a, b: [dict(monkey_deal)]
+    monkey_deal = {"id": "z1", "properties": {}}
+    # Patch the underlying won-deal search + the two lookups.
+    #
+    # PR-ADS-163A, two changes, neither to an assertion:
+    # * `pull_closed_won_deals_in_range` was assigned here and never restored
+    #   (only the two lookups were), so the connector kept this lambda for the
+    #   rest of the session and no later test could reach the real pull.
+    #   Everything is installed with monkeypatch now.
+    # * the sources pull no longer reads its deals through
+    #   `pull_closed_won_deals_in_range` (whose primary-contact lookup it never
+    #   used); it reads `_iter_closed_won_deal_pages`. The stub moves to that
+    #   seam and returns what it returns: pages of raw deals.
+    monkeypatch.setattr(hp, "_iter_closed_won_deal_pages",
+                        lambda pull, a, b: iter([[dict(monkey_deal)]]))
     def boom(_):
         raise hp.HubSpotRetryableError("503")
-    hp._fetch_associated_contact_ids = boom
-    try:
-        out = hp.pull_closed_won_deals_with_sources_in_range("2026-01-01", "2026-01-31")
-    finally:
-        hp._fetch_associated_contact_ids = orig_assoc
-        hp._fetch_contact_source_props = orig_props
+    monkeypatch.setattr(hp, "_fetch_associated_contact_ids", boom)
+    out = hp.pull_closed_won_deals_with_sources_in_range("2026-01-01", "2026-01-31")
+    assert out[0]["deal_id"] == "z1"
     assert out[0]["lookup_failed"] is True
     assert out[0]["contacts"] == []

@@ -2690,6 +2690,9 @@ introduced by this slice, and not fixed by it:
    snapshot is stored. `pull_deals_with_gclid` swallows per-contact failures
    the same way. The Google Ads pulls raise and are not affected. Fix: make the
    connector raise. This is the most important follow-up.
+   **Fixed in PR-ADS-163A (below):** the legacy pulls raise
+   `HubSpotPullIncompleteError`, and both jobs record `failed` and store
+   nothing. Gap 4 still applies to that failed run.
 2. `db.writers.write_waste_terms` returns `None` and never raises, so a failed
    insert there is invisible; the waste batch records `len(items)`.
 3. `start_sync_batch` returning 0, or `finish_sync_batch` returning False, is
@@ -2866,3 +2869,282 @@ not yet observed):
    of the 564 created in October). The sync reads modified contacts and never
    learns of a removal. Reached-SQL (70) and reached-Opportunity (46) for
    October matched HubSpot exactly.
+
+## PR-ADS-163A — legacy HubSpot pulls fail loudly instead of returning a truncated list
+
+**Why.** PR-ADS-162H "Known gaps" item 1. Five legacy pulls in
+`connectors/hubspot_pull.py` could finish without having read their result and
+still hand back a list. With an expired HubSpot token, `scheduler/monthly.py`
+recorded the run `success`, stamped `hubspot/contacts` fresh, overwrote
+`data/crm_contacts.json` with `[]` and stored a 0-of-0 GCLID coverage snapshot.
+An empty list from a failed first page is also what a month with no leads
+returns; nothing downstream could tell them apart. (The incremental-sync half
+was checked once against a throwaway PostgreSQL with the real writers: on the
+parent commit `hubspot/contacts` and `hubspot/deals` ended `success` over zero
+rows and their `sync_state` rows were stamped. That was a one-off local check.
+It is not in the repository.)
+
+**What this is, and is not.** A pull now raises `HubSpotPullIncompleteError`
+on an API error, a transport error, an exhausted retry, or a response it
+cannot read. It does **not** prove that a pull which returns has read every
+record: these pulls page by offset and never read HubSpot's `total`, so a
+record deleted or re-sorted while the scan runs can still shift a page — the
+PR-ADS-161I failure. See "NOT covered" 1.
+
+**What each pull did, and does now.** The connector imports
+`hubspot.crm.contacts.ApiException`. The SDK generates a separate
+`ApiException` for every API package with no common base, so that `except`
+never caught an error from the deals API. That is why the five did not all
+fail the same way.
+
+| Pull | Before | Now |
+| --- | --- | --- |
+| `pull_paid_search_contacts` | non-429 API error: logged, `break`, returned the pages read (`[]` on page one). 429: slept 4 s and retried with no limit | raises `HubSpotPullIncompleteError`; 429 retried 3 times per page (2 s, 4 s, 8 s), then raises |
+| `pull_paid_search_contacts_in_range` | the same | the same |
+| `pull_all_contacts_in_range` | the same | the same |
+| `pull_closed_won_deals_in_range` | a deals-search error was not caught: it propagated as the raw SDK exception, including a single 429 (no retry). The swallow was one level down: `_fetch_primary_contact_for_deal` caught every error and returned `None`, so a won deal whose contact lookup failed came back as a deal with `gclid=None` — "no click evidence" | a deals-search error raises `HubSpotPullIncompleteError`, 429 retried as above. A contact lookup is retried up to 3 attempts and then raises; `gclid=None` now only means the contact was read and has none. A deal whose lookup answered `results: []` is still returned unattributed |
+| `pull_deals_with_gclid` | an association read that failed 3 times: logged, contact skipped, its deals missing from the list. A deal read that failed: raw SDK exception, no retry on 429 (the handler written for it never matched) | raises `HubSpotPullIncompleteError` when any GCLID contact's associations or deals cannot be read after 3 attempts. A 429 on a deal read is now retried; deals are collected per attempt, so the retry returns each deal once |
+
+Four rules apply to all five, and to the sources pull below:
+
+- **A 404 is an answer, not an outage.** It is raised without a retry and
+  without the 2 s + 4 s sleeps. It still raises: returning `gclid=None` for a
+  deal whose contact read answered 404 would claim "no click evidence".
+- **A 200 that is not an association list is not "nothing associated".**
+  `payload.get("results", [])` read a response with no `results` key as an
+  empty one, and a reference with no object id was skipped; the list came back
+  short with no error. Both raise, as does a response that announces a second
+  page (these readers request one page; pagination is still the `PR-ADS-028`
+  TODO). An explicit `results: []` is still a valid empty answer.
+  `_association_object_ids` is the one parser.
+- **A refused connection or a timeout is the same named error.**
+  `MaxRetryError` and `ReadTimeoutError` escaped as raw urllib3 exceptions.
+  They are caught (`HUBSPOT_SDK_READ_ERRORS`) and raised as
+  `HubSpotPullIncompleteError` with the original as `cause`. On a search page
+  they are not retried, like any other non-429 error. **A TLS failure is not
+  covered:** SDK 13.0.0 turns a urllib3 `SSLError` into `ApiException(status=0)`
+  and then fails in its own error handling with a raw `AttributeError`. The
+  pull does not return, so the step still fails, but not under the named
+  error; it is not caught, because catching `AttributeError` would hide real
+  defects.
+- **A search page with no `results` list raises.** For a 200 whose body has no
+  `results` key the SDK returns `results=None`; the pulls died on a bare
+  `TypeError`. `_legacy_search_page` raises the named error instead.
+- **Every SDK read has a timeout.** The SDK applies none unless given one, so
+  a HubSpot that stopped answering held the pull open without limit. Each
+  `do_search` and `get_by_id` these pulls make passes
+  `_request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS` (30 s, what the REST
+  calls already used). The limit is per request, not per pull.
+
+`HubSpotPullIncompleteError` carries `pull` (the function), `records_read`
+(how many records it had read, which are discarded) and `cause`. It is not a
+subclass of `HubSpotRetryableError`, so no existing per-deal handler can catch
+a whole-pull failure. `HUBSPOT_API_EXCEPTIONS` names both SDK exception
+classes. The unused `_retry_on_rate_limit` decorator is deleted: it wrapped
+`pull_paid_search_contacts`, whose inner loop caught every `ApiException`
+first, so it never ran.
+
+On a run where every read answers, each pull returns the same records in the
+same order as before; the clean multi-page cases in the new suite pass on the
+parent commit too. The requests differ in two ways: the SDK calls carry a
+timeout, and the sources pull makes fewer of them (next paragraph).
+
+**The sources pull, `pull_closed_won_deals_with_sources_in_range`.** Two
+defects of the same class, found by the independent review of the first
+version of this slice (`0ed399f`):
+
+- It read its deals through `pull_closed_won_deals_in_range`, which resolves
+  every deal's primary contact for click evidence the sources pull never
+  used: a second association read and a full contact read per deal, thrown
+  away. Once that lookup raised instead of returning `None`, a failure in a
+  lookup nobody read failed `hubspot/source_classification` and a
+  source-backfill chunk. The won-deal search is now one generator,
+  `_iter_closed_won_deal_pages`, shared by both pulls; the sources pull reads
+  deal id, close date and amount from it and makes no primary-contact read.
+- It returns a deal whose source lookup failed as `lookup_failed: True` with
+  no contacts. `source_attribution_service` skips such a deal.
+  `scheduler/incremental_sync._sync_source_classification` never read the
+  flag: it attributed the deal from its empty contact list, upserted it
+  `unclassified / no_classified_contact` over the stored attribution, and
+  ended `success`. The step now fails when any pulled deal carries the flag,
+  before a deal row is prepared or written.
+
+**The callers.** Every caller was found by a search for the names, including
+imports inside functions. Two needed a code change.
+
+| Caller | On a pull that raises |
+| --- | --- |
+| `scheduler/monthly.py:141-142` | the existing step-2 handler (`:331`) records the run `failed` in the run history and returns `{status: failed}`. `hubspot_save` is never reached, so `data/crm_contacts.json` keeps its previous content. No `hubspot/contacts` or `hubspot/deals` batch is opened, `write_leads` is not called, and the run stops before the GCLID match, so no coverage snapshot is written. No code change |
+| `scheduler/weekly.py:89-90` | the existing outer handler (`:518`) records `failed` and re-raises. The same four things do not happen. No code change |
+| `scheduler/daily.py:51` | as for a failing Google Ads pull: the outer handler (`:206`) updates the run row it inserted to `failed` and re-raises. No contacts batch, no `write_leads`, no saved result. No code change |
+| `scheduler/incremental_sync.py:768` `hubspot/contacts` | the step's own handler finishes its batch `failed` (so `sync_state` keeps its previous watermark — `finish_sync_batch` only moves it on `success`), appends to `errors`, and returns `{status: failed}`; `write_leads` is not called. The run is `partial` or `failed` by `_overall_status`, and the `runs` row gets that exact word. No code change |
+| `scheduler/incremental_sync.py:830-833` `hubspot/deals` | the same, for either pull. `write_deals` is not called |
+| `scheduler/incremental_sync.py:894` `gclid/matches` | the same. `write_gclid_attribution` is not called |
+| `scheduler/incremental_sync.py:1090-1110` `hubspot/source_classification` | **changed.** A contact pull or a deal page that raises was already handled as above. What was not: a deal returned with `lookup_failed`. The step now raises on it (`:1104`), so the batch is `failed`, the error names the deals, and `upsert_deal_source_attribution` is not called for that pull. The contact classifications are written before the deal pull and stay written — see "NOT covered" 4 |
+| `scripts/backfill_hubspot.py:40,46` | the existing `pull_error` path: the chunk's batch is finished `failed`, the error is listed, the chunk is not counted complete, the result is `failed` (no chunk completed) or `partial`, and the backfill run row is `failed`. No code change |
+| `services/revenue_recovery_service.py:250,272` | **changed.** The error was already listed and the run `partial`, but the chunk was added to `completed_chunks` whatever happened, so a resume skipped it for good. A chunk is now recorded complete only when both phases finished, the rule `source_attribution_service` already applies |
+| `services/source_attribution_service.py:893,913` | existing: `contacts_ok` / `deals_ok` false, chunk not completed, error listed; a `lookup_failed` deal is skipped and keeps the chunk incomplete. No code change |
+| `services/mailchimp_audit_service.py:334` | existing handler: identity bridge unavailable, outcomes withheld. It used to build the bridge from a truncated list and call it available. No code change |
+| `db/writers.py` | names `pull_deals_with_gclid` only in the `write_deals` docstring; it does not call a pull |
+
+No HubSpot or Google Ads write is added. The test portal has no write API and
+replaces every `requests` verb except GET with a stub that fails.
+
+**Expect this after deploy.**
+
+- PR-ADS-154C recorded 429 responses in the legacy `hubspot/deals` association
+  scan in production. A contact that is still rate limited on its third
+  attempt (after 2 s and 4 s) used to be skipped; it now fails the
+  `hubspot/deals` step, and the incremental run is `partial`. That dataset is
+  registered non-authoritative and does not move truth readiness, but the run
+  status will say `partial` on such a day.
+- **In the weekly and monthly jobs the same exhausted 429 on one contact
+  aborts the whole run.** `pull_deals_with_gclid` is in step 2, and a raise
+  there ends the job: the geo, keyword, search-term, waste and GCLID steps are
+  skipped, no `runs` row is written (162H gap 4), and the Google Ads JSON
+  snapshots from step 1 are already saved. Before this slice the run went on
+  with that contact's deals missing and ended `success`. This is a known
+  consequence, not an oversight: the alternative is a `deals` table that is
+  silently short. The legacy deal pull is scheduled for removal — nothing
+  reads the `deals` table, and its newest production row is dated 2026-05-25 —
+  which removes the step rather than softening the error.
+- A lookup that answers 404 for one object (a deal's contact, a contact's
+  associations) fails its dataset on every run until that object is gone from
+  the window or readable again. It used to be recorded as "no click evidence"
+  or "no deals".
+- `hubspot/source_classification` will end `failed` on a day when one deal's
+  source lookup cannot be read. It used to end `success` and overwrite that
+  deal's stored attribution with `unclassified`.
+
+**Tests.** `tests/test_pr_ads_163a_hubspot_pull_fails_loudly.py` — 49 tests,
+108 cases. Every case drives the real connector function over a fake HubSpot
+portal that honours the filters each pull sends, pages by `after`, raises the
+SDK's own exception class for the API that was called, and fails a chosen
+request once, a few times, or for good — with a status, a transport error, or
+a 200 that is not an association list. No pull is stubbed. The portal does
+not change during a scan, so none of this exercises offset paging over moving
+data.
+
+- the four search pulls: 401 on page one raises and returns nothing; 500 on
+  page three raises with `records_read == 200`; a persistent 429 raises after
+  exactly `MAX_RETRIES + 1` attempts with the 2 / 4 / 8 s schedule; a transient
+  429 is retried; the 429 budget is per page; a clean three-page pull returns
+  exactly the expected records; a transport error raises the named error with
+  the urllib3 exception as `cause`;
+- `pull_deals_with_gclid`: all reads succeeding returns every deal; a failed
+  association read (401, 500, 429, connection error) raises after 3 attempts;
+  a 404 raises after one; a deal that cannot be fetched raises; a transient
+  failure loses nothing and duplicates nothing; an unread second page raises;
+  four shapes of unusable 200 raise; `results: []` is a valid empty answer;
+- `pull_closed_won_deals_in_range`: a deal whose contact cannot be read raises
+  instead of returning `gclid=None` (429, 500, 404 without a retry, a
+  transport error after 3 attempts, four shapes of unusable 200); a transient
+  lookup failure keeps the GCLID; a deal with no contact is still returned;
+- the sources pull: it makes no primary-contact read and one association read
+  per deal; a failed page raises under its own name; a failed source read, a
+  404, a transport error, an unusable 200 and a second page each mark that
+  deal `lookup_failed` and no other;
+- every SDK read made by these pulls carries the 30 s timeout;
+- no `except` handler in these functions contains `break` or `return`, and
+  none retries inside a `while` loop (read from the AST);
+- the real weekly and monthly job functions (the 162H harness, with the two
+  pulls, the lead summary and the JSON save put back as the real functions)
+  over an expired token, a 500 on page three, and one unreadable contact: the
+  run is `failed`, `write_leads` and `hubspot_save` are never called, the
+  snapshot file is byte-for-byte what it was, no batch finishes at all, and
+  no coverage snapshot is written. A control runs both jobs over a healthy
+  portal to `success`;
+- the real daily pulse: raises, the inserted run row is updated `failed`, no
+  batch, no leads, no saved result;
+- the real incremental sync (the `_patch_all_datasets_success` fixture with the
+  HubSpot pulls put back): with an expired token the run is `partial`, the run
+  type written is `daily_incremental_sync`, and each of the four legacy
+  datasets is `failed` with its batch finished `failed` and no source date;
+  a mid-scan 500 persists none of the pages before it; one unreadable contact
+  fails only `hubspot/deals`; one unread source lookup fails
+  `hubspot/source_classification` with no deal attribution written and leaves
+  `gclid/matches` `success`; one failed click-evidence read fails
+  `gclid/matches` and leaves `hubspot/source_classification` `success`; a
+  healthy control is `success`;
+- the backfill script, revenue recovery (including the resume that now
+  re-reads the failed chunk) and the Mailchimp identity bridge.
+
+Measured by copying the file into a worktree of each commit:
+
+- **On the parent commit (`c3d04a1`): 81 cases fail, 23 pass.** Of the 23,
+  thirteen are controls (clean pulls, healthy runs, the valid empty answer,
+  the connector's `lookup_failed` contract). The other ten are transient
+  failures the old code already recovered from: a 429 on a contact search was
+  retried (without limit, which is what the persistent-429 cases fail on),
+  and a transient association failure was retried up to 3 attempts.
+- **On the first version of this slice (`0ed399f`): 30 cases fail** — the
+  cases for the review findings above: the unread source lookup written as
+  `unclassified`; 211 primary-contact reads by the sources pull and a failed
+  click-evidence read failing the source step; a 404 attempted 3 times; an
+  unusable 200 returning 108 or 109 of 110 deals, a won deal with
+  `gclid=None`, or a source lookup marked successful and empty; a raw urllib3
+  exception; SDK calls with no timeout.
+
+Older tests changed. No assertion about behaviour was removed or relaxed.
+
+- `test_pr_ads_114_revenue_recovery.py::test_connector_normalise_prefers_direct_then_url_gclid`
+  and `test_pr_ads_117_revenue_by_source.py::test_connector_association_failure_via_node_not_needed`
+  replaced connector functions by plain assignment and never restored them
+  (`_fetch_primary_contact_for_deal`, `pull_closed_won_deals_in_range`), so the
+  connector kept a lambda for the rest of the session and no later test could
+  reach the real won-deal pull. Both use `monkeypatch` now. The new suite
+  checks, before every test, that the functions it drives are the real ones.
+- The same `test_pr_ads_117` test stubbed `pull_closed_won_deals_in_range` as
+  the sources pull's source of deals. That seam moved: it stubs
+  `_iter_closed_won_deal_pages`, returning pages of raw deals, and also
+  asserts the deal id.
+- `test_pr_ads_114_revenue_recovery.py::test_connector_pulls_closed_won_by_closedate`
+  read the dealstage / closedate filter out of the first 2,500 characters of
+  `pull_closed_won_deals_in_range`. The filter lives in
+  `_iter_closed_won_deal_pages` now; the same four assertions are made there,
+  plus two that the pull reads its deals from that function and runs no
+  search of its own.
+
+No existing test asserted the old behaviour (a failed pull returning `[]` or a
+partial list with the caller carrying on).
+
+**NOT covered.**
+
+1. **Offset paging over moving data.** The four search pulls page by `after`
+   offset and never read HubSpot's `total`. A record deleted, created or
+   re-sorted while the scan runs can shift a page, and a pull that returns
+   normally can still have skipped a record — exactly the PR-ADS-161I
+   landmine. Nothing here detects it. The fix there was keyset paging plus a
+   `total` check; these pulls have neither.
+2. **A failed weekly or monthly run still has no `runs` row** (162H gap 4).
+   The row is first written after both pulls, so the run this slice now fails
+   is `failed` in the run-history file and the POST response, and monitoring,
+   which reads the table, keeps showing the previous outcome. This slice makes
+   that gap easier to reach. Fix: insert the row at `start_run`, as the daily
+   pulse does.
+3. `iter_contacts_modified_since._search` still retries a 429 without limit
+   and passes no timeout. It raises on every other API error, and was out of
+   scope here. `pull_deals_for_ledger` catches the contacts `ApiException`
+   around a deals search: with the installed SDK that handler never runs, so
+   its 429 retry and its `complete: False` answer are unreachable for an API
+   error, which propagates instead and fails the ledger step. Loud, but not
+   what the code says it does. Neither was touched.
+4. **`_sync_source_classification` writes the contact classifications before
+   it pulls the deals.** When the deal pull raises or carries a
+   `lookup_failed` deal, the batch is `failed` over contact rows that landed.
+   The rows are correct; the batch understates what was stored.
+5. **A failed revenue-recovery phase leaves zeros in the chunk detail.** The
+   chunk is not completed and the error is listed, but `chunks[n]` still says
+   `contacts_read: 0` or `deals_found: 0` with no flag that the figure was
+   never measured. `revenue_recovery_service` and `source_attribution_service`
+   also answer `partial` when every chunk failed (`failed` needs zero chunks
+   attempted).
+6. A 5xx or a transport error on a search page is not retried; it fails the
+   step until the next run. Only 429 has a retry budget there. The 30 s
+   timeout bounds one request, not a pull.
+7. The batch and watermark assertions read recorded `finish_sync_batch` and
+   `update_run` calls. No test here drives a real `sync_state` or `runs` row.
+8. Association pagination is not implemented; a second page raises instead of
+   being dropped. Retry budgets differ by call: a search page gets 4 attempts
+   (2 / 4 / 8 s), a per-contact or per-deal lookup 3 (2 / 4 s).
+9. 162H gaps 2, 3, 5 and 6 are unchanged.

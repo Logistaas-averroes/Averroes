@@ -9,11 +9,12 @@ import os
 import json
 import math
 import time
-import functools
 from datetime import datetime, timedelta
 import requests
+import urllib3
 import hubspot
 from hubspot.crm.contacts import ApiException
+from hubspot.crm.deals import ApiException as DealsApiException
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -52,6 +53,124 @@ class HubSpotSearchIncompleteError(Exception):
     and must never be reported as complete. Raised instead of the completion
     sentinel, so a bootstrap stays partial and an incremental run fails.
     """
+
+
+#: PR-ADS-163A. The SDK generates one ``ApiException`` PER API package, with no
+#: common base: ``hubspot.crm.deals`` raises its own class, which
+#: ``except ApiException`` (the contacts class imported above) does not catch.
+#: The legacy pulls call both APIs, so they catch both.
+HUBSPOT_API_EXCEPTIONS = (ApiException, DealsApiException)
+
+#: What the SDK lets through from the transport: a refused connection, a reset
+#: or a timeout (``MaxRetryError``, ``ReadTimeoutError`` …) escapes as the raw
+#: urllib3 exception. A TLS failure is NOT covered: SDK 13.0.0 turns a urllib3
+#: ``SSLError`` into ``ApiException(status=0)`` and then fails inside its own
+#: error handling with ``AttributeError: 'NoneType' object has no attribute
+#: 'decode'``. That is loud — the pull does not return — but it is not the
+#: named error, and it is deliberately not caught here: catching
+#: ``AttributeError`` would hide real defects.
+HUBSPOT_TRANSPORT_EXCEPTIONS = (urllib3.exceptions.HTTPError,)
+
+#: Every way an SDK read can fail: the API answered with an error, or the
+#: request never got an answer.
+HUBSPOT_SDK_READ_ERRORS = HUBSPOT_API_EXCEPTIONS + HUBSPOT_TRANSPORT_EXCEPTIONS
+
+#: Passed as ``_request_timeout`` on every SDK call the legacy pulls make. The
+#: SDK applies no timeout of its own, so a HubSpot that stopped answering held
+#: the pull open with no limit. Matches the ``timeout=30`` of the REST calls.
+HUBSPOT_REQUEST_TIMEOUT_SECONDS = 30
+
+
+def _is_not_found(exc) -> bool:
+    """A 404, from the SDK or from ``requests``. HubSpot answered: the object
+    is not there. Asking again gets the same answer, so it is never retried."""
+    if getattr(exc, "status", None) == 404:
+        return True
+    return getattr(getattr(exc, "response", None), "status_code", None) == 404
+
+
+class _UnusableAssociationResponse(Exception):
+    """A 200 from the v4 associations API that cannot be read as the whole
+    answer: not an association list, or one that continues on another page.
+    Internal: each caller converts it to its own named error."""
+
+
+def _association_object_ids(payload, *, reject_next_page: bool) -> list:
+    """The associated object ids in a v4 association list response.
+
+    ``{"results": []}`` is a valid answer: nothing is associated. A response
+    with no ``results`` key, or a reference with no object id, is NOT an empty
+    answer — reading it as one drops records without an error — and raises.
+    ``reject_next_page``: these readers request one page, so a response that
+    announces another is a list they would return short.
+    """
+    if not isinstance(payload, dict) or "results" not in payload:
+        raise _UnusableAssociationResponse(
+            "the response has no `results` key")
+    results = payload["results"]
+    if not isinstance(results, list):
+        raise _UnusableAssociationResponse("`results` is not a list")
+    paging = payload.get("paging")
+    if reject_next_page and isinstance(paging, dict) and paging.get("next"):
+        raise _UnusableAssociationResponse(
+            "more than one page of associations (only the first is read)")
+    ids = []
+    for ref in results:
+        object_id = (ref.get("toObjectId") or ref.get("id")) \
+            if isinstance(ref, dict) else None
+        if not object_id:
+            raise _UnusableAssociationResponse(
+                "an association reference has no object id")
+        ids.append(str(object_id))
+    return ids
+
+
+def _describe_hubspot_failure(exc) -> str:
+    """A short, log-safe description of why a HubSpot read failed."""
+    if exc is None:
+        return "unknown failure"
+    status = getattr(exc, "status", None)
+    if status is not None:          # an SDK ApiException
+        reason = getattr(exc, "reason", None)
+        return f"HubSpot API error HTTP {status}" + (f" ({reason})" if reason else "")
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
+class HubSpotPullIncompleteError(Exception):
+    """A legacy pull could not read its whole result set.
+
+    PR-ADS-163A. The three contact pulls (``pull_paid_search_contacts``,
+    ``pull_paid_search_contacts_in_range``, ``pull_all_contacts_in_range``)
+    used to log a HubSpot error, stop, and RETURN what they had: ``[]`` when
+    the first page failed, the first pages when a later one did. A caller
+    cannot tell that list from a complete one, so with an expired token the
+    monthly job recorded ``success``, stamped ``hubspot/contacts`` fresh and
+    overwrote ``data/crm_contacts.json`` with ``[]``. ``pull_deals_with_gclid``
+    skipped a contact whose associations it could not read, and
+    ``pull_closed_won_deals_in_range`` returned a won deal whose contact it
+    could not read as a deal with no click evidence.
+
+    These five pulls now raise this on an API or transport error, an exhausted
+    retry, or a malformed response, and the records already read are discarded.
+    That is not a proof of completeness: they page by offset and never read
+    HubSpot's ``total``, so a record deleted or re-sorted while the scan runs
+    can still shift a page (the PR-ADS-161I failure). Not addressed here.
+
+    ``pull``          the function that could not finish
+    ``records_read``  how many records it had read before the failure
+    ``cause``         the underlying exception, or None
+    """
+
+    def __init__(self, pull: str, records_read: int, cause=None,
+                 detail: str | None = None):
+        self.pull = pull
+        self.records_read = int(records_read)
+        self.cause = cause
+        self.detail = detail or _describe_hubspot_failure(cause)
+        super().__init__(
+            f"{pull} could not return a complete result: {self.detail}. "
+            f"{self.records_read} record(s) read before the failure were "
+            "discarded, not returned")
 
 
 # Fields confirmed live from Logistaas HubSpot account
@@ -151,32 +270,58 @@ def get_client():
     return hubspot.Client.create(access_token=HUBSPOT_API_KEY)
 
 
-def _retry_on_rate_limit(func):
-    """Decorator: retry with exponential backoff on HubSpot 429 errors."""
+def _legacy_search_page(pull: str, records_read: int, search):
+    """One page of a legacy search pull: the whole page, or an exception.
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                return func(*args, **kwargs)
-            except ApiException as exc:
-                if exc.status == 429 and attempt < MAX_RETRIES:
-                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    logger.warning(
-                        "HubSpot rate limited (429) — retry %d/%d in %ds",
-                        attempt, MAX_RETRIES, wait,
-                    )
-                    time.sleep(wait)
-                else:
-                    raise
-    return wrapper
+    PR-ADS-163A. ``search`` performs the request. A 429 is retried at most
+    ``MAX_RETRIES`` times with exponential backoff — ``MAX_RETRIES + 1``
+    attempts per page, the budget ``pull_deals_for_ledger`` uses — and then
+    raised: these loops used to wait and retry a 429 with no limit. Any other
+    API error, and any transport error the SDK lets through (a refused
+    connection, a timeout), is raised at once as the same named error. Nothing
+    is returned for a page that was not read.
+
+    A 200 that carries no ``results`` list (the SDK returns ``results=None``
+    for a body without that key) is not an empty page: it raises too.
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            page = search()
+            if not isinstance(getattr(page, "results", None), list):
+                detail = "the search response carries no `results` list"
+                logger.error(
+                    "%s failed after reading %d record(s): %s",
+                    pull, records_read, detail)
+                raise HubSpotPullIncompleteError(pull, records_read, None, detail)
+            return page
+        except HUBSPOT_SDK_READ_ERRORS as exc:
+            status = getattr(exc, "status", None)
+            if status == 429 and attempt < MAX_RETRIES:
+                wait = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "HubSpot rate limited during %s — retry %d/%d in %ds",
+                    pull, attempt + 1, MAX_RETRIES, wait,
+                )
+                time.sleep(wait)
+                continue
+            detail = _describe_hubspot_failure(exc)
+            if status == 429:
+                detail = f"still rate limited (HTTP 429) after {attempt + 1} attempts"
+            logger.error(
+                "%s failed after reading %d record(s): %s", pull, records_read, detail)
+            raise HubSpotPullIncompleteError(pull, records_read, exc, detail) from exc
+    raise HubSpotPullIncompleteError(      # unreachable: the loop returns or raises
+        pull, records_read, None, "retry budget exhausted")
 
 
-@_retry_on_rate_limit
 def pull_paid_search_contacts(days_back: int = 90) -> list:
     """
     Pull all contacts with source = PAID_SEARCH from the last N days.
     These are the contacts we can reconcile with Google Ads via GCLID.
+
+    Raises ``HubSpotPullIncompleteError`` (PR-ADS-163A) when a page cannot be
+    read: it is never answered with the pages before it, and never with ``[]``.
+    Pages by offset without reading ``total``; see that class for the limit.
     """
     client = get_client()
     cutoff = datetime.utcnow() - timedelta(days=days_back)
@@ -186,8 +331,9 @@ def pull_paid_search_contacts(days_back: int = 90) -> list:
     after = None
 
     while True:
-        try:
-            response = client.crm.contacts.search_api.do_search(
+        response = _legacy_search_page(
+            "pull_paid_search_contacts", len(contacts),
+            lambda: client.crm.contacts.search_api.do_search(
                 public_object_search_request={
                     "filterGroups": [
                         {
@@ -208,25 +354,16 @@ def pull_paid_search_contacts(days_back: int = 90) -> list:
                     "properties": CONTACT_PROPERTIES,
                     "limit": 100,
                     "after": after
-                }
-            )
+                },
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            ),
+        )
 
-            contacts.extend([c.to_dict() for c in response.results])
+        contacts.extend([c.to_dict() for c in response.results])
 
-            if response.paging and response.paging.next:
-                after = response.paging.next.after
-            else:
-                break
-
-        except ApiException as exc:
-            if exc.status == 429:
-                wait = INITIAL_BACKOFF_SECONDS * 2
-                logger.warning(
-                    "HubSpot rate limited during pagination — waiting %ds", wait
-                )
-                time.sleep(wait)
-                continue
-            logger.error("HubSpot API error: %s", exc)
+        if response.paging and response.paging.next:
+            after = response.paging.next.after
+        else:
             break
 
     logger.info("Pulled %d paid search contacts (last %d days)", len(contacts), days_back)
@@ -239,6 +376,8 @@ def pull_paid_search_contacts_in_range(date_from: str, date_to: str) -> list:
     Used by the historical backfill framework (PR-ADS-071).
     Filters by hs_analytics_source = PAID_SEARCH and createdate GTE/LTE.
     Paginates using the HubSpot CRM search API cursor.
+    Raises ``HubSpotPullIncompleteError`` (PR-ADS-163A) when a page cannot be
+    read, instead of returning the pages before it.
     NEVER writes to HubSpot.
     """
     client = get_client()
@@ -263,8 +402,9 @@ def pull_paid_search_contacts_in_range(date_from: str, date_to: str) -> list:
     after = None
 
     while True:
-        try:
-            response = client.crm.contacts.search_api.do_search(
+        response = _legacy_search_page(
+            "pull_paid_search_contacts_in_range", len(contacts),
+            lambda: client.crm.contacts.search_api.do_search(
                 public_object_search_request={
                     "filterGroups": [
                         {
@@ -290,24 +430,15 @@ def pull_paid_search_contacts_in_range(date_from: str, date_to: str) -> list:
                     "properties": CONTACT_PROPERTIES,
                     "limit": 100,
                     "after": after,
-                }
-            )
-            contacts.extend([c.to_dict() for c in response.results])
+                },
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            ),
+        )
+        contacts.extend([c.to_dict() for c in response.results])
 
-            if response.paging and response.paging.next:
-                after = response.paging.next.after
-            else:
-                break
-
-        except ApiException as exc:
-            if exc.status == 429:
-                wait = INITIAL_BACKOFF_SECONDS * 2
-                logger.warning(
-                    "HubSpot rate limited during backfill pagination — waiting %ds", wait
-                )
-                time.sleep(wait)
-                continue
-            logger.error("HubSpot API error during backfill: %s", exc)
+        if response.paging and response.paging.next:
+            after = response.paging.next.after
+        else:
             break
 
     logger.info(
@@ -326,6 +457,11 @@ def pull_deals_with_gclid(contacts: list) -> list:
     Endpoint: GET /crm/v4/objects/contacts/{contact_id}/associations/deals
     This avoids SDK breakage when hubspot-api-client (>=9.0.0) reorganises its
     associations interface between minor versions.
+
+    Returns the deals of EVERY GCLID contact or raises
+    ``HubSpotPullIncompleteError`` (PR-ADS-163A). A contact whose associations
+    or deals could not be read used to be logged and skipped, so the list
+    silently omitted its deals.
     """
     client = get_client()
     gclid_contacts = [
@@ -337,98 +473,124 @@ def pull_deals_with_gclid(contacts: list) -> list:
     for contact in gclid_contacts:
         contact_id = contact["id"]
         gclid = contact["properties"]["hs_google_click_id"]
-
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                # Use REST API directly — version-agnostic, never breaks on SDK upgrades
-                assoc_url = (
-                    f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/contacts"
-                    f"/{contact_id}/associations/deals"
-                )
-                headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
-                resp = requests.get(assoc_url, headers=headers, timeout=30)
-
-                if resp.status_code == 429 and attempt < MAX_RETRIES:
-                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    logger.warning(
-                        "HubSpot rate limited on associations — retry %d/%d in %ds",
-                        attempt, MAX_RETRIES, wait,
-                    )
-                    time.sleep(wait)
-                    continue
-
-                resp.raise_for_status()
-                assoc_results = resp.json().get("results", [])  # TODO PR-ADS-028: add associations pagination
-
-                for deal_ref in assoc_results:
-                    deal_id = deal_ref.get("toObjectId") or deal_ref.get("id")
-                    if not deal_id:
-                        continue
-                    deal = client.crm.deals.basic_api.get_by_id(
-                        deal_id=str(deal_id),
-                        properties=["dealname", "dealstage", "amount",
-                                   "closedate", "createdate", "pipeline",
-                                   "hs_deal_stage_probability"]
-                    )
-                    deal_dict = deal.to_dict()
-                    deal_dict["gclid"] = gclid
-                    deal_dict["contact_id"] = contact_id
-                    deal_dict["stage_label"] = DEAL_STAGE_MAP.get(
-                        deal_dict.get("properties", {}).get("dealstage", ""), "Unknown"
-                    )
-                    deals.append(deal_dict)
-                break  # success — exit retry loop
-
-            except requests.exceptions.RequestException as exc:
-                if attempt < MAX_RETRIES:
-                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    logger.warning(
-                        "Transient error fetching associations for contact %s — retry %d/%d in %ds: %s",
-                        contact_id, attempt, MAX_RETRIES, wait, exc,
-                    )
-                    time.sleep(wait)
-                else:
-                    logger.warning(
-                        "Failed to fetch associations for contact %s after %d retries: %s",
-                        contact_id, MAX_RETRIES, exc,
-                    )
-                    break
-            except ApiException as exc:
-                if exc.status == 429 and attempt < MAX_RETRIES:
-                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    logger.warning(
-                        "HubSpot rate limited on deal fetch — retry %d/%d in %ds",
-                        attempt, MAX_RETRIES, wait,
-                    )
-                    time.sleep(wait)
-                else:
-                    logger.warning(
-                        "Failed to fetch deals for contact %s: %s",
-                        contact_id, exc,
-                    )
-                    break
+        deals.extend(
+            _deals_for_gclid_contact(client, contact_id, gclid, len(deals)))
 
     logger.info("Found %d deals linked to GCLID contacts", len(deals))
     return deals
 
 
-def pull_closed_won_deals_in_range(date_from: str, date_to: str) -> list:
-    """Pull HubSpot closed-won deals by **closedate** (revenue truth) — PR-ADS-114.
+def _deals_for_gclid_contact(client, contact_id, gclid, records_read: int) -> list:
+    """Every deal associated with one GCLID contact, or an exception.
 
-    This is the revenue-recovery / daily revenue source. It fetches deals
-    DIRECTLY by dealstage = Deal Won / Payment Received and closedate in range —
-    it does NOT walk recently-created contacts (which misses historical revenue).
+    PR-ADS-163A. Retries a 429 and a transient request error up to
+    ``MAX_RETRIES`` attempts, as before. What changed is the end of the budget:
+    it raises ``HubSpotPullIncompleteError`` instead of logging and moving on to
+    the next contact. The deals are collected per attempt and handed back only
+    when the contact was read in full, so a retry cannot return a deal twice.
 
-    For each won deal it resolves the associated contact and captures the real
-    GCLID / campaign / keyword / country evidence. NO synthetic GCLID is ever
-    created: deals without click evidence are returned with gclid=None so the
-    caller can report (and never attribute) them honestly.
+    A 404 is an answer and is not retried. A 200 without a ``results`` key, or
+    with a reference that has no deal id, raises: both used to be read as "no
+    deals" and the contact's deals dropped without an error.
+    """
+    pull = "pull_deals_with_gclid"
 
-    Returns a list of normalised dicts:
-        {deal_id, contact_id, gclid, campaign_name, keyword, country, company,
-         deal_close_date, deal_amount_usd, deal_stage, deal_stage_label}
+    def _incomplete(exc, what: str):
+        detail = f"{what} for contact {contact_id}"
+        if exc is not None:
+            detail += f": {_describe_hubspot_failure(exc)}"
+        logger.error("%s failed after reading %d deal(s): %s",
+                     pull, records_read, detail)
+        return HubSpotPullIncompleteError(pull, records_read, exc, detail)
 
-    NEVER writes to HubSpot.
+    for attempt in range(1, MAX_RETRIES + 1):
+        contact_deals = []
+        try:
+            # Use REST API directly — version-agnostic, never breaks on SDK upgrades
+            assoc_url = (
+                f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/contacts"
+                f"/{contact_id}/associations/deals"
+            )
+            headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+            resp = requests.get(assoc_url, headers=headers, timeout=30)
+
+            if resp.status_code == 429 and attempt < MAX_RETRIES:
+                wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "HubSpot rate limited on associations — retry %d/%d in %ds",
+                    attempt, MAX_RETRIES, wait,
+                )
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            # TODO PR-ADS-028: add associations pagination. Until then a second
+            # page is refused, not dropped.
+            try:
+                deal_ids = _association_object_ids(
+                    resp.json(), reject_next_page=True)
+            except _UnusableAssociationResponse as bad:
+                raise _incomplete(
+                    None, f"unusable deal-association response ({bad})") from bad
+
+            for deal_id in deal_ids:
+                deal = client.crm.deals.basic_api.get_by_id(
+                    deal_id=deal_id,
+                    properties=["dealname", "dealstage", "amount",
+                               "closedate", "createdate", "pipeline",
+                               "hs_deal_stage_probability"],
+                    _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+                )
+                deal_dict = deal.to_dict()
+                deal_dict["gclid"] = gclid
+                deal_dict["contact_id"] = contact_id
+                deal_dict["stage_label"] = DEAL_STAGE_MAP.get(
+                    deal_dict.get("properties", {}).get("dealstage", ""), "Unknown"
+                )
+                contact_deals.append(deal_dict)
+            return contact_deals  # the contact was read in full
+
+        except requests.exceptions.RequestException as exc:
+            if attempt < MAX_RETRIES and not _is_not_found(exc):
+                wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "Transient error fetching associations for contact %s — retry %d/%d in %ds: %s",
+                    contact_id, attempt, MAX_RETRIES, wait, exc,
+                )
+                time.sleep(wait)
+            else:
+                raise _incomplete(
+                    exc, f"deal associations could not be read after "
+                         f"{attempt} attempt(s)") from exc
+        except HUBSPOT_SDK_READ_ERRORS as exc:
+            if getattr(exc, "status", None) == 429 and attempt < MAX_RETRIES:
+                wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "HubSpot rate limited on deal fetch — retry %d/%d in %ds",
+                    attempt, MAX_RETRIES, wait,
+                )
+                time.sleep(wait)
+            else:
+                raise _incomplete(exc, "a deal could not be fetched") from exc
+
+    raise HubSpotPullIncompleteError(      # unreachable: the loop returns or raises
+        pull, records_read, None,
+        f"retry budget exhausted for contact {contact_id}")
+
+
+def _iter_closed_won_deal_pages(pull: str, date_from: str, date_to: str):
+    """Yield closed-won deals by **closedate**, one page of raw deal dicts at a
+    time — the deal search and nothing else.
+
+    PR-ADS-163A. The ONE won-deal search, shared by
+    ``pull_closed_won_deals_in_range`` (which then resolves each deal's click
+    evidence) and ``pull_closed_won_deals_with_sources_in_range`` (which reads
+    every associated contact's source and has no use for click evidence). The
+    second used to get its deals through the first, so a lookup it discarded
+    could fail it.
+
+    ``pull`` names the caller in ``HubSpotPullIncompleteError``. The window is
+    the deal's close date and nothing else.
     """
     client = get_client()
 
@@ -443,11 +605,12 @@ def pull_closed_won_deals_in_range(date_from: str, date_to: str) -> list:
     from_ms = _to_ms(str(date_from), start=True)
     to_ms = _to_ms(str(date_to), start=False)
 
-    deals: list = []
+    read = 0
     after = None
     while True:
-        try:
-            response = client.crm.deals.search_api.do_search(
+        response = _legacy_search_page(
+            pull, read,
+            lambda: client.crm.deals.search_api.do_search(
                 public_object_search_request={
                     "filterGroups": [
                         {
@@ -465,22 +628,58 @@ def pull_closed_won_deals_in_range(date_from: str, date_to: str) -> list:
                                    "createdate", "pipeline"],
                     "limit": 100,
                     "after": after,
-                }
-            )
-            for d in response.results:
-                deals.append(_normalise_won_deal(d.to_dict()))
-            if response.paging and response.paging.next:
-                after = response.paging.next.after
-            else:
-                break
-        except ApiException as exc:
-            if exc.status == 429:
-                wait = INITIAL_BACKOFF_SECONDS * 2
-                logger.warning("HubSpot rate limited pulling closed-won deals — waiting %ds", wait)
-                time.sleep(wait)
-                continue
-            logger.error("HubSpot API error pulling closed-won deals: %s", exc)
+                },
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            ),
+        )
+        page = [d.to_dict() for d in response.results]
+        read += len(page)
+        yield page
+        if response.paging and response.paging.next:
+            after = response.paging.next.after
+        else:
             break
+
+
+def pull_closed_won_deals_in_range(date_from: str, date_to: str) -> list:
+    """Pull HubSpot closed-won deals by **closedate** (revenue truth) — PR-ADS-114.
+
+    This is the revenue-recovery / daily revenue source. It fetches deals
+    DIRECTLY by dealstage = Deal Won / Payment Received and closedate in range —
+    it does NOT walk recently-created contacts (which misses historical revenue).
+
+    For each won deal it resolves the associated contact and captures the real
+    GCLID / campaign / keyword / country evidence. NO synthetic GCLID is ever
+    created: deals without click evidence are returned with gclid=None so the
+    caller can report (and never attribute) them honestly.
+
+    Raises ``HubSpotPullIncompleteError`` (PR-ADS-163A) when a page of deals
+    cannot be read, and when a deal's contact cannot be read: gclid=None means
+    the contact was read and carries no click evidence, never that the lookup
+    failed.
+
+    Returns a list of normalised dicts:
+        {deal_id, contact_id, gclid, campaign_name, keyword, country, company,
+         deal_close_date, deal_amount_usd, deal_stage, deal_stage_label}
+
+    NEVER writes to HubSpot.
+    """
+    deals: list = []
+    for page in _iter_closed_won_deal_pages(
+            "pull_closed_won_deals_in_range", date_from, date_to):
+        for deal_dict in page:
+            try:
+                deals.append(_normalise_won_deal(deal_dict))
+            except HubSpotRetryableError as exc:
+                # The deal was read but its contact — the only place its click
+                # evidence lives — was not. Returning it with gclid=None would
+                # report "no click evidence" for a lookup that never answered.
+                logger.error(
+                    "pull_closed_won_deals_in_range failed after reading %d "
+                    "deal(s): %s", len(deals), exc)
+                raise HubSpotPullIncompleteError(
+                    "pull_closed_won_deals_in_range", len(deals), exc,
+                    str(exc)) from exc
 
     logger.info(
         "Pulled %d closed-won deals by closedate (range %s → %s)",
@@ -543,31 +742,55 @@ def _fetch_primary_contact_for_deal(deal_id) -> dict | None:
     """Return the first associated contact (with properties) for a deal, or None.
 
     Uses the version-agnostic CRM v4 associations REST endpoint, then fetches the
-    contact's properties. Read-only; tolerant of transient errors.
+    contact's properties. Read-only.
+
+    None means the lookup ANSWERED ``results: []``: the deal has no associated
+    contact. PR-ADS-163A: a lookup that failed used to return None too, so a
+    rate-limited won deal came back as a deal with no click evidence. It now
+    retries up to ``MAX_RETRIES`` attempts, the way
+    ``_fetch_contact_source_props`` does, and then raises
+    ``HubSpotRetryableError``. Two things are raised without a retry: a 404
+    (HubSpot answered; the answer will not change) and a 200 that is not an
+    association list (no ``results`` key, or a reference with no contact id).
     """
     if not deal_id:
         return None
     client = get_client()
-    try:
-        assoc_url = (
-            f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/deals/{deal_id}/associations/contacts"
-        )
-        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
-        resp = requests.get(assoc_url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        if not results:
-            return None
-        contact_id = results[0].get("toObjectId") or results[0].get("id")
-        if not contact_id:
-            return None
-        contact = client.crm.contacts.basic_api.get_by_id(
-            contact_id=str(contact_id), properties=CONTACT_PROPERTIES,
-        )
-        return contact.to_dict()
-    except (requests.exceptions.RequestException, ApiException) as exc:
-        logger.warning("Failed to resolve contact for deal %s: %s", deal_id, exc)
-        return None
+    assoc_url = (
+        f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/deals/{deal_id}/associations/contacts"
+    )
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+            resp = requests.get(assoc_url, headers=headers, timeout=30)
+            if resp.status_code == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            resp.raise_for_status()
+            try:
+                contact_ids = _association_object_ids(
+                    resp.json(), reject_next_page=False)
+            except _UnusableAssociationResponse as bad:
+                raise HubSpotRetryableError(
+                    f"contact lookup failed for deal {deal_id}: unusable "
+                    f"contact-association response ({bad})") from bad
+            if not contact_ids:
+                return None
+            contact = client.crm.contacts.basic_api.get_by_id(
+                contact_id=contact_ids[0], properties=CONTACT_PROPERTIES,
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            )
+            return contact.to_dict()
+        except (requests.exceptions.RequestException,
+                *HUBSPOT_SDK_READ_ERRORS) as exc:
+            if attempt < MAX_RETRIES and not _is_not_found(exc):
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"contact lookup failed for deal {deal_id} after {attempt} "
+                f"attempt(s): {_describe_hubspot_failure(exc)}") from exc
+    raise HubSpotRetryableError(
+        f"contact lookup exhausted retries for deal {deal_id}")
 
 
 def pull_contacts_by_ids(contact_ids: list) -> dict:
@@ -606,6 +829,9 @@ def pull_all_contacts_in_range(date_from: str, date_to: str) -> list:
     NOT filtered to PAID_SEARCH, so Organic / Offline / Other Paid contacts are
     classified too. Returns raw contact dicts (with Original Source + drill-down
     properties). Read-only — NEVER writes to HubSpot.
+
+    Raises ``HubSpotPullIncompleteError`` (PR-ADS-163A) when a page cannot be
+    read, instead of returning the pages before it.
     """
     client = get_client()
     from datetime import timezone, time as _time
@@ -619,8 +845,9 @@ def pull_all_contacts_in_range(date_from: str, date_to: str) -> list:
     from_ms, to_ms = _to_ms(str(date_from), True), _to_ms(str(date_to), False)
     contacts, after = [], None
     while True:
-        try:
-            response = client.crm.contacts.search_api.do_search(
+        response = _legacy_search_page(
+            "pull_all_contacts_in_range", len(contacts),
+            lambda: client.crm.contacts.search_api.do_search(
                 public_object_search_request={
                     "filterGroups": [{"filters": [
                         {"propertyName": "createdate", "operator": "GTE", "value": str(from_ms)},
@@ -629,18 +856,14 @@ def pull_all_contacts_in_range(date_from: str, date_to: str) -> list:
                     "properties": CONTACT_PROPERTIES,
                     "limit": 100,
                     "after": after,
-                }
-            )
-            contacts.extend([c.to_dict() for c in response.results])
-            if response.paging and response.paging.next:
-                after = response.paging.next.after
-            else:
-                break
-        except ApiException as exc:
-            if exc.status == 429:
-                time.sleep(INITIAL_BACKOFF_SECONDS * 2)
-                continue
-            logger.error("HubSpot API error pulling all contacts: %s", exc)
+                },
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            ),
+        )
+        contacts.extend([c.to_dict() for c in response.results])
+        if response.paging and response.paging.next:
+            after = response.paging.next.after
+        else:
             break
     logger.info("Pulled %d contacts (all sources, %s → %s)", len(contacts), date_from, date_to)
     return contacts
@@ -1674,41 +1897,53 @@ def pull_closed_won_deals_with_sources_in_range(date_from: str, date_to: str) ->
     attribution without splitting revenue. Read-only — NEVER writes to HubSpot.
 
     A deal whose association/source lookup fails (after bounded retries) is
-    returned with ``lookup_failed: True`` and NO contacts, so the caller can keep
-    that deal's chunk incomplete (retryable) rather than fabricating an
-    Unclassified row. A deal with a *successful* empty association is genuinely
-    Unclassified (contacts == [], lookup_failed False).
+    returned with ``lookup_failed: True`` and NO contacts. That entry is NOT an
+    answer: the caller must not write it. ``source_attribution_service`` skips
+    it and keeps the chunk incomplete; the incremental sync fails the step
+    (PR-ADS-163A — it used to upsert the deal as Unclassified). A deal with a
+    *successful* empty association is genuinely Unclassified
+    (contacts == [], lookup_failed False).
+
+    PR-ADS-163A: the deals come from the deal search alone
+    (``_iter_closed_won_deal_pages``). This used to call
+    ``pull_closed_won_deals_in_range``, which resolves every deal's primary
+    contact for click evidence this function never read — so a failure in a
+    lookup it discarded failed the source step. A page of deals that cannot be
+    read raises ``HubSpotPullIncompleteError``.
 
     Returns [{deal_id, deal_close_date, deal_amount_usd, lookup_failed,
               contacts:[{contact_id, source_primary, source_detail}]}].
     """
-    raw = pull_closed_won_deals_in_range(date_from, date_to)
     out = []
-    for d in raw:
-        deal_id = d.get("deal_id")
-        entry = {
-            "deal_id": deal_id,
-            "deal_close_date": d.get("deal_close_date"),
-            "deal_amount_usd": d.get("deal_amount_usd"),
-            "lookup_failed": False,
-            "contacts": [],
-        }
-        try:
-            contact_ids = _fetch_associated_contact_ids(deal_id)
-            for cid in contact_ids:
-                props = _fetch_contact_source_props(cid)
-                entry["contacts"].append({
-                    "contact_id": cid,
-                    "source_primary": props.get("hs_analytics_source"),
-                    "source_detail": props.get("hs_analytics_source_data_1"),
-                })
-        except HubSpotRetryableError as exc:
-            # Transient/HTTP failure — do NOT classify as Unclassified; leave the
-            # deal's chunk incomplete so it is retried on resume.
-            logger.warning("Source lookup failed for deal %s (retryable): %s", deal_id, exc)
-            entry["lookup_failed"] = True
-            entry["contacts"] = []
-        out.append(entry)
+    for page in _iter_closed_won_deal_pages(
+            "pull_closed_won_deals_with_sources_in_range", date_from, date_to):
+        for deal_dict in page:
+            props = deal_dict.get("properties", {}) or {}
+            raw_id = deal_dict.get("id")
+            deal_id = str(raw_id) if raw_id is not None else None
+            entry = {
+                "deal_id": deal_id,
+                "deal_close_date": props.get("closedate") or None,
+                "deal_amount_usd": props.get("amount"),
+                "lookup_failed": False,
+                "contacts": [],
+            }
+            try:
+                contact_ids = _fetch_associated_contact_ids(deal_id)
+                for cid in contact_ids:
+                    source = _fetch_contact_source_props(cid)
+                    entry["contacts"].append({
+                        "contact_id": cid,
+                        "source_primary": source.get("hs_analytics_source"),
+                        "source_detail": source.get("hs_analytics_source_data_1"),
+                    })
+            except HubSpotRetryableError as exc:
+                # A failed lookup — do NOT classify as Unclassified; mark the
+                # deal so the caller withholds it.
+                logger.warning("Source lookup failed for deal %s (retryable): %s", deal_id, exc)
+                entry["lookup_failed"] = True
+                entry["contacts"] = []
+            out.append(entry)
     return out
 
 
@@ -1718,7 +1953,11 @@ def _fetch_associated_contact_ids(deal_id) -> list:
     Retries on rate-limit / transient request errors; raises HubSpotRetryableError
     on persistent failure so the caller never mistakes an API failure for a deal
     that genuinely has no associated contacts. An empty list means a SUCCESSFUL
-    lookup with no associations.
+    lookup that answered ``results: []``.
+
+    PR-ADS-163A: a 404 is raised without a retry, and a 200 without a
+    ``results`` key, with a reference that has no contact id, or announcing a
+    second page raises instead of being read as "no contacts".
     """
     if not deal_id:
         return []
@@ -1731,14 +1970,14 @@ def _fetch_associated_contact_ids(deal_id) -> list:
                 time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
                 continue
             resp.raise_for_status()
-            ids = []
-            for r in resp.json().get("results", []):
-                cid = r.get("toObjectId") or r.get("id")
-                if cid:
-                    ids.append(str(cid))
-            return ids
+            try:
+                return _association_object_ids(resp.json(), reject_next_page=True)
+            except _UnusableAssociationResponse as bad:
+                raise HubSpotRetryableError(
+                    f"association lookup failed for deal {deal_id}: unusable "
+                    f"contact-association response ({bad})") from bad
         except (requests.exceptions.RequestException, ApiException) as exc:
-            if attempt < MAX_RETRIES:
+            if attempt < MAX_RETRIES and not _is_not_found(exc):
                 time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
                 continue
             raise HubSpotRetryableError(
@@ -1751,6 +1990,9 @@ def _fetch_contact_source_props(contact_id) -> dict:
 
     Retries on rate-limit / transient errors; raises HubSpotRetryableError on
     persistent failure (never silently returns {} for an API failure).
+
+    PR-ADS-163A: a 404 is raised without a retry, a transport error the SDK
+    lets through is handled like an API error, and the read has a timeout.
     """
     if not contact_id:
         return {}
@@ -1759,19 +2001,12 @@ def _fetch_contact_source_props(contact_id) -> dict:
             contact = get_client().crm.contacts.basic_api.get_by_id(
                 contact_id=str(contact_id),
                 properties=["hs_analytics_source", "hs_analytics_source_data_1"],
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
             )
             return contact.to_dict().get("properties", {}) or {}
-        except ApiException as exc:
-            if getattr(exc, "status", None) == 429 and attempt < MAX_RETRIES:
-                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-                continue
-            if attempt < MAX_RETRIES:
-                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-                continue
-            raise HubSpotRetryableError(
-                f"contact source lookup failed for {contact_id}: {exc}") from exc
-        except requests.exceptions.RequestException as exc:
-            if attempt < MAX_RETRIES:
+        except (requests.exceptions.RequestException,
+                *HUBSPOT_SDK_READ_ERRORS) as exc:
+            if attempt < MAX_RETRIES and not _is_not_found(exc):
                 time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
                 continue
             raise HubSpotRetryableError(
