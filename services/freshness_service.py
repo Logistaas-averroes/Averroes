@@ -305,18 +305,31 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "leads",
     },
+    # PR-ADS-163B: `date_column` named `close_date`, a column the `deals` table
+    # has never had (db/schema.py), so this dataset's row count could not be
+    # read. `run_date` is the date each snapshot row is written under, as for
+    # the other run-snapshot tables here. NOTE what this dataset is: the legacy
+    # GCLID-contact deal pull's table, not the canonical deal ledger the
+    # revenue pages read (see docs/09, PR-ADS-163B). No page reads this table,
+    # so it names none.
     "deals": {
         "table": "deals",
-        "date_column": "close_date",
+        "date_column": "run_date",
         "source": "hubspot",
         "dataset": "deals",
         "stale_threshold_days": 8,
         "depends_on": [],
-        "page": "deals",
+        "page": None,
     },
+    # PR-ADS-163B: `date_column` named `matched_at`, which does not exist.
+    # `created_at` is when a match was FIRST recorded, and it is the date the
+    # GCLID Attribution page windows on (`/api/gclid-attribution`). It is
+    # deliberately not `updated_at`: every re-confirmation of an old match
+    # stamps that, so a run that only re-touched old rows would read "fresh
+    # with data" beside a page showing none.
     "gclid_attribution": {
         "table": "gclid_attribution",
-        "date_column": "matched_at",
+        "date_column": "created_at",
         "source": "gclid",
         "dataset": "matches",
         "stale_threshold_days": 8,

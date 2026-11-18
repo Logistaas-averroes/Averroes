@@ -110,6 +110,7 @@ def _dataset_freshness_map() -> dict:
     """
     from datetime import date, timedelta  # noqa: PLC0415
     from db.connection import get_conn  # noqa: PLC0415
+    from db.isolated_read import execute_isolated  # noqa: PLC0415
     from services.freshness_service import (  # noqa: PLC0415
         DATASET_FRESHNESS_CONFIG, compute_canonical_freshness,
     )
@@ -146,7 +147,8 @@ def _dataset_freshness_map() -> dict:
                             ws = date.today() - timedelta(days=60)
                             q = _psql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= %s").format(
                                 _psql.Identifier(table), _psql.Identifier(date_col))
-                            cur.execute(q, (ws,))
+                            # PR-ADS-163B: isolated — see execute_isolated.
+                            execute_isolated(cur, q, (ws,))
                             rcount = int(cur.fetchone()[0] or 0)
                         except Exception:  # noqa: BLE001
                             rcount = None

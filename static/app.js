@@ -14288,7 +14288,8 @@ function renderWarRoom(el, data) {
   for (const [key, label] of [["latest_daily", "Daily"], ["latest_weekly", "Weekly"], ["latest_monthly", "Monthly"], ["latest_incremental", "Incremental"]]) {
     const run = sched[key];
     const runStatus = run ? run.status : "not_run";
-    const rCls = runStatus === "success" ? "war-room-run--ok" : runStatus === "failed" ? "war-room-run--error" : "war-room-run--neutral";
+    // PR-ADS-163B: a partial run is not the same grey as "never ran".
+    const rCls = runStatus === "success" ? "war-room-run--ok" : runStatus === "failed" ? "war-room-run--error" : runStatus === "partial" ? "war-room-run--warn" : "war-room-run--neutral";
     html += `
       <div class="war-room-run ${rCls}">
         <div class="war-room-run__label">${escapeHtml(label)}</div>

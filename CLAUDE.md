@@ -357,6 +357,18 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
 - **`now()` is transaction-start time.** For an instant stamped *after* a read
   inside the same transaction, use `clock_timestamp()`.
 
+- **A `try/except` around a query does not isolate it.** PostgreSQL aborts a
+  transaction on its first error, so every later statement on that cursor
+  fails with "current transaction is aborted", whatever it asked
+  (PR-ADS-163B: one freshness registry entry naming a missing column blanked
+  the row count of every dataset after it, and the latest-batch read for all,
+  on every request). Independent diagnostic reads that share a cursor go
+  through `db.isolated_read.execute_isolated` (a savepoint). A mock cursor
+  that lets the statement after a failed one succeed cannot see this class of
+  bug; test it on a real database. And every `(table, date_column)` in
+  `DATASET_FRESHNESS_CONFIG` must exist in the schema `init_db()` builds —
+  `tests/test_pr_ads_163b_freshness_row_counts.py::test_01` is the guard.
+
 - **One transaction is not one snapshot.** Under the default READ COMMITTED
   isolation PostgreSQL takes a fresh snapshot per *statement*. Reads that must
   agree need `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` before the
