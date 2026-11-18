@@ -81,14 +81,14 @@ SOURCE_LABELS = {
 }
 
 STAGE_NOTE = (
-    "Each stage counts contacts with canonical evidence of reaching it: a "
-    "stage-entry timestamp, or a current lifecycle stage at or beyond it. "
-    "'Customer stage' is the HubSpot contact lifecycle stage, counted in "
-    "contacts; it is not the company-level customer count on revenue pages.")
+    "A contact counts for a stage when HubSpot shows it got there: a date it "
+    "entered the stage, or a current lifecycle stage at or beyond it. "
+    "'Customer stage' counts contacts whose lifecycle stage is Customer; it "
+    "is not the number of customer companies shown on the revenue pages.")
 CHANNEL_NOTE = (
-    "Channel is HubSpot's original source for the contact, unmodified. The "
-    "drill-down is HubSpot's original-source detail (for example linkedin, "
-    "facebook, chatgpt.com or a campaign name).")
+    "Channel is HubSpot's 'original source' for the contact, unchanged. The "
+    "sources under a channel are HubSpot's original-source detail (for "
+    "example linkedin, facebook, chatgpt.com or a campaign name).")
 
 
 def source_key(row: dict) -> str:

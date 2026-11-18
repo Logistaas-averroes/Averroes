@@ -548,20 +548,19 @@
 
       <!-- Revenue by Acquisition Source (PR-ADS-117) -->
       <section id="page-channels" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Channels</h1>
-          <p class="page-subtitle">Of the contacts acquired in this period, how many have reached each funnel stage so far — for every marketing channel. Channel is HubSpot's original source for the contact.</p>
+        <header class="page-header channels-header">
+          <div>
+            <h1 class="page-title">Channels</h1>
+            <p class="page-subtitle">Where your contacts come from, and how far each channel's contacts get. Counts every marketing channel, not only Google Ads.</p>
+          </div>
+          <div id="channels-window" class="channel-funnel-seg" role="group" aria-label="Contacts acquired in">
+            <span class="channel-funnel-seg__label">Acquired in the last</span>
+            <button type="button" class="channel-funnel-seg__btn" data-channels-window="30d" aria-pressed="false">30 days</button>
+            <button type="button" class="channel-funnel-seg__btn" data-channels-window="60d" aria-pressed="false">60 days</button>
+            <button type="button" class="channel-funnel-seg__btn is-active" data-channels-window="180d" aria-pressed="true">180 days</button>
+            <button type="button" class="channel-funnel-seg__btn" data-channels-window="all_time" aria-pressed="false">All time</button>
+          </div>
         </header>
-        <div class="roas-window-controls">
-          <label class="roas-window-label" for="channels-window">Acquired in:</label>
-          <select id="channels-window" class="waste-filter-select" aria-label="Acquisition window">
-            <option value="30d">Last 30 days</option>
-            <option value="60d">Last 60 days</option>
-            <option value="180d" selected>Last 180 days</option>
-            <option value="all_time">All time</option>
-          </select>
-          <button id="channels-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
-        </div>
         <div id="channels-body">
           <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
         </div>

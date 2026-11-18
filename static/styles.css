@@ -7336,7 +7336,58 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .channel-funnel-table th.num, .channel-funnel-table td.num { text-align: right; white-space: nowrap; }
 .channel-funnel-total td { font-weight: 600; border-bottom: 2px solid var(--border, #e2e8f0); }
 .channel-funnel-pct { color: var(--text-muted); font-size: 0.85em; }
-.channel-funnel-drill { padding-left: var(--space-5); color: var(--text-muted); }
+.channel-funnel-drill { padding-left: calc(var(--space-5) + 14px); color: var(--text-secondary); }
+
+/* ── Channels page revamp (PR-ADS-162I) ─────────────────────────────────── */
+.channels-header { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
+.channel-funnel-seg { display: inline-flex; align-items: center; gap: 2px; background: var(--surface-card); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+.channel-funnel-seg__label { font-size: 12px; color: var(--text-muted); padding: 0 var(--space-2) 0 var(--space-3); white-space: nowrap; }
+.channel-funnel-seg__btn { border: 0; background: transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--text-secondary); padding: 6px 14px; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+.channel-funnel-seg__btn:hover { background: var(--brand-sky-bg); }
+.channel-funnel-seg__btn:focus-visible, .channel-funnel-sort:focus-visible, .channel-funnel-toggle:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: 2px; }
+.channel-funnel-seg__btn.is-active { background: var(--brand-midnight); color: #fff; }
+.channel-funnel-context { color: var(--text-secondary); font-size: 13px; margin: 0 0 var(--space-4); }
+.channel-funnel-totals { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: var(--space-5); }
+.channel-funnel-totals .dash-outcomes__cell { background: var(--surface-card); box-shadow: var(--shadow-sm); padding: 14px 16px; border-top: 3px solid var(--border-strong); }
+.channel-funnel-totals .dash-outcomes__value { font-size: 28px; line-height: 1.15; }
+.channel-funnel-totals .dash-outcomes__sub { font-size: 12px; }
+.channel-funnel-compare { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+.channel-funnel-compare__label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.channel-funnel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--space-5); margin-bottom: var(--space-5); align-items: start; }
+.channel-funnel-rank { display: grid; grid-template-columns: minmax(110px, 30%) 1fr minmax(120px, auto); align-items: center; gap: var(--space-3); padding: 7px 0; }
+.channel-funnel-rank + .channel-funnel-rank { border-top: 1px solid var(--border); }
+.channel-funnel-rank__name { font-size: 13px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-funnel-rank__value { text-align: right; font-size: 14px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.channel-funnel-rank__sub { display: block; font-size: 11px; color: var(--text-muted); }
+.channel-funnel-rank--small .channel-funnel-rank__name, .channel-funnel-rank--small .channel-funnel-rank__value strong { color: var(--text-muted); font-weight: 500; }
+.channel-funnel-rank__divider { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); padding: var(--space-3) 0 var(--space-1); border-top: 1px solid var(--border); margin-top: var(--space-2); }
+.channel-funnel-rank .channel-funnel-bar { height: 10px; margin: 0; }
+.channel-funnel-bar { display: block; height: 4px; border-radius: 999px; background: #eef2f7; overflow: hidden; margin-top: 5px; }
+.channel-funnel-bar__fill { display: block; height: 100%; border-radius: 999px; min-width: 2px; }
+.channel-funnel-empty { color: var(--text-muted); font-size: 13px; margin: var(--space-3) 0 0; }
+.channel-funnel-panel { padding-bottom: var(--space-3); margin-bottom: var(--space-5); }
+.channel-funnel-panel .dash-panel__header { align-items: center; }
+.channel-funnel-table td { vertical-align: middle; }
+.channel-funnel-table .channel-funnel-cell { min-width: 120px; font-variant-numeric: tabular-nums; }
+.channel-funnel-sort { border: 0; background: none; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; padding: 0; }
+.channel-funnel-sort:hover { color: var(--text-primary); }
+.channel-funnel-sort.is-active { color: var(--text-primary); }
+.channel-funnel-sort.is-active::after { content: " ↓"; }
+.channel-funnel-toggle { border: 0; background: none; font: inherit; color: inherit; cursor: pointer; padding: 0; display: inline-flex; align-items: center; gap: 8px; text-align: left; }
+.channel-funnel-leaf { display: inline-block; padding-left: 22px; }
+.channel-funnel-caret { display: inline-block; width: 14px; color: var(--text-muted); transition: transform 0.15s; }
+.channel-funnel-toggle[aria-expanded="true"] .channel-funnel-caret { transform: rotate(90deg); }
+.channel-funnel-count { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+.channel-funnel-child td { background: var(--surface-alt); font-size: 0.93em; }
+.channel-funnel-total .channel-funnel-bar { display: none; }
+.channel-funnel-howto ul { margin: var(--space-2) 0 0; padding-left: var(--space-5); color: var(--text-secondary); font-size: 13px; }
+.channel-funnel-howto li { margin-bottom: 4px; }
+#channels-body.is-refreshing { opacity: 0.55; transition: opacity 0.15s; }
+@media (max-width: 720px) {
+  .channel-funnel-rank { grid-template-columns: 1fr auto; }
+  .channel-funnel-rank__track { grid-column: 1 / -1; order: 3; }
+  .channel-funnel-seg { flex-wrap: wrap; border-radius: var(--radius-md); }
+}
 .channel-funnel-note { color: var(--text-muted); padding: var(--space-4) var(--space-5); margin: 0; font-size: 0.9em; }
 
 /* ── System page + Advanced tools group (PR-ADS-162C) ──────────────────── */
