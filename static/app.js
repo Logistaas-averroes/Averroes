@@ -9216,24 +9216,160 @@ const CHANNEL_FUNNEL_REASON_LABELS = {
 };
 
 let _channelsReqSeq = 0;
+let _channelsWindow = "180d";
+let _channelsData = null;
+// What the reader chose to look at. It changes the presentation only: every
+// figure on the page is a count the API published, or a share of two of them.
+const _channelsView = { stage: null, sort: "contacts" };
+
+// PR-ADS-162I. A rate on a handful of contacts moves by several points with
+// each one. Below this many contacts a channel's rates are still shown, but
+// marked, and ranked after the channels with enough contacts to compare.
+const CHANNEL_FUNNEL_SMALL_SAMPLE = 30;
+const CHANNEL_FUNNEL_STAGE_COLORS = ["#8ecdf9", "#129ef5", "#0b68b8", "#011931"];
+// How a stage is named when counting contacts in it. A stage the API adds
+// later falls back to "<its label> contacts".
+function channelFunnelPlural(stage) {
+  const plurals = {
+    reached_mql: "MQLs", reached_sql: "SQLs",
+    reached_opportunity: "opportunities", reached_customer_stage: "customer-stage contacts",
+  };
+  return plurals[stage.key] || `${stage.label} contacts`;
+}
+
+// A missing count is unknown, never zero: it renders as a dash with no share.
+function channelFunnelCount(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function channelFunnelNum(v) {
+  const n = channelFunnelCount(v);
+  return n === null ? "—" : n.toLocaleString();
+}
+
+function channelFunnelRate(part, whole) {
+  const p = channelFunnelCount(part);
+  const w = channelFunnelCount(whole);
+  return (p === null || !w) ? null : 100 * p / w;
+}
 
 function channelFunnelPct(part, whole) {
-  if (!whole) return "";
-  return ` <span class="channel-funnel-pct">(${(100 * part / whole).toFixed(1)}%)</span>`;
+  const r = channelFunnelRate(part, whole);
+  return r === null ? "" : ` <span class="channel-funnel-pct">(${r.toFixed(1)}%)</span>`;
+}
+
+function channelFunnelBar(pct, color) {
+  if (pct === null) return "";
+  const w = Math.max(0, Math.min(100, pct)).toFixed(1);
+  return `<span class="channel-funnel-bar" aria-hidden="true"><span class="channel-funnel-bar__fill" style="width:${w}%;background:${color}"></span></span>`;
+}
+
+function channelFunnelIsSmall(row) {
+  const n = channelFunnelCount(row.contacts);
+  return n !== null && n < CHANNEL_FUNNEL_SMALL_SAMPLE;
+}
+
+function channelFunnelSmallBadge() {
+  return ` <span class="dash-badge dash-badge--muted" title="Fewer than ${CHANNEL_FUNNEL_SMALL_SAMPLE} contacts. Each contact moves these percentages by several points, so compare with care.">small sample</span>`;
+}
+
+function channelFunnelHasDrill(ch) {
+  const d = ch.drilldowns || [];
+  return d.length > 1 || (d.length === 1 && d[0].value !== "(none)");
 }
 
 function channelFunnelRowHtml(row, stages, opts) {
   const o = opts || {};
-  const name = o.drill
-    ? `<span class="channel-funnel-drill">${escapeHtml(row.value)}</span>`
-    : `<strong>${escapeHtml(row.label)}</strong>`;
-  const cells = stages.map((st) =>
-    `<td class="num">${Number(row[st.key]).toLocaleString()}${channelFunnelPct(row[st.key], row.contacts)}</td>`).join("");
-  return `<tr${o.total ? ' class="channel-funnel-total"' : ""}><td>${name}</td>
-    <td class="num">${Number(row.contacts).toLocaleString()}</td>${cells}</tr>`;
+  let name;
+  if (o.drill) {
+    name = `<span class="channel-funnel-drill">${escapeHtml(row.value)}</span>`;
+  } else if (o.children) {
+    name = `<button type="button" class="channel-funnel-toggle" data-channel-toggle="${escapeHtml(row.source)}" aria-expanded="false">
+        <span class="channel-funnel-caret" aria-hidden="true">▸</span><strong>${escapeHtml(row.label)}</strong>
+        <span class="channel-funnel-count">${o.children} ${o.children === 1 ? "source" : "sources"}</span></button>`;
+  } else {
+    name = `<span class="channel-funnel-leaf"><strong>${escapeHtml(row.label)}</strong></span>`;
+  }
+  if (!o.total && !o.drill && channelFunnelIsSmall(row)) name += channelFunnelSmallBadge();
+  const cells = stages.map((st, i) => {
+    const color = CHANNEL_FUNNEL_STAGE_COLORS[i % CHANNEL_FUNNEL_STAGE_COLORS.length];
+    return `<td class="num channel-funnel-cell">${channelFunnelNum(row[st.key])}${channelFunnelPct(row[st.key], row.contacts)}${
+      channelFunnelBar(channelFunnelRate(row[st.key], row.contacts), color)}</td>`;
+  }).join("");
+  const attrs = o.total ? ' class="channel-funnel-total"'
+    : o.drill ? ` class="channel-funnel-child" data-channel-child="${escapeHtml(o.parent)}" hidden` : "";
+  return `<tr${attrs}><td>${name}</td>
+    <td class="num">${channelFunnelNum(row.contacts)}</td>${cells}</tr>`;
 }
 
-function renderChannelFunnel(data) {
+// The totals strip: how many contacts were acquired, and how far they got.
+function channelFunnelTotalsHtml(totals, stages) {
+  const cells = [`<div class="dash-outcomes__cell">
+      <div class="dash-outcomes__label">Contacts acquired</div>
+      <div class="dash-outcomes__value">${channelFunnelNum(totals.contacts)}</div>
+      <div class="dash-outcomes__sub">in this period</div></div>`];
+  stages.forEach((st, i) => {
+    const color = CHANNEL_FUNNEL_STAGE_COLORS[i % CHANNEL_FUNNEL_STAGE_COLORS.length];
+    const rate = channelFunnelRate(totals[st.key], totals.contacts);
+    cells.push(`<div class="dash-outcomes__cell channel-funnel-stat" style="border-top-color:${color}">
+      <div class="dash-outcomes__label">Reached ${escapeHtml(st.label)}</div>
+      <div class="dash-outcomes__value">${channelFunnelNum(totals[st.key])}</div>
+      <div class="dash-outcomes__sub">${rate === null ? "share unknown" : `${rate.toFixed(1)}% of contacts`}</div></div>`);
+  });
+  return `<div class="dash-outcomes channel-funnel-totals">${cells.join("")}</div>`;
+}
+
+// Two rankings for one stage: who brings the most, and who converts best.
+function channelFunnelRankHtml(data, stage, mode) {
+  const total = channelFunnelCount((data.totals || {})[stage.key]);
+  const rows = (data.channels || []).map((ch) => ({
+    label: ch.label, contacts: channelFunnelCount(ch.contacts),
+    count: channelFunnelCount(ch[stage.key]),
+    rate: channelFunnelRate(ch[stage.key], ch.contacts),
+    small: channelFunnelIsSmall(ch),
+  })).filter((r) => r.count !== null);
+  if (!rows.length) return '<p class="channel-funnel-empty">No channel has a count for this stage.</p>';
+  if (mode === "volume") {
+    if (!total) {
+      return `<p class="channel-funnel-empty">No contact acquired in this period has reached ${escapeHtml(stage.label)} yet.</p>`;
+    }
+    const max = Math.max(...rows.map((r) => r.count));
+    return rows.sort((a, b) => b.count - a.count).map((r) => `
+      <div class="channel-funnel-rank">
+        <div class="channel-funnel-rank__name">${escapeHtml(r.label)}</div>
+        <div class="channel-funnel-rank__track">${channelFunnelBar(max ? 100 * r.count / max : 0, "#129ef5")}</div>
+        <div class="channel-funnel-rank__value"><strong>${r.count.toLocaleString()}</strong>
+          <span class="channel-funnel-rank__sub">${(100 * r.count / total).toFixed(1)}% of all</span></div>
+      </div>`).join("");
+  }
+  const rated = rows.filter((r) => r.rate !== null);
+  const line = (r) => `
+      <div class="channel-funnel-rank${r.small ? " channel-funnel-rank--small" : ""}">
+        <div class="channel-funnel-rank__name">${escapeHtml(r.label)}</div>
+        <div class="channel-funnel-rank__track">${channelFunnelBar(r.rate, r.small ? "#cbd5e1" : "#0b68b8")}</div>
+        <div class="channel-funnel-rank__value"><strong>${r.rate.toFixed(1)}%</strong>
+          <span class="channel-funnel-rank__sub">${r.count.toLocaleString()} of ${r.contacts.toLocaleString()}</span></div>
+      </div>`;
+  const enough = rated.filter((r) => !r.small).sort((a, b) => b.rate - a.rate);
+  const few = rated.filter((r) => r.small).sort((a, b) => b.rate - a.rate);
+  return enough.map(line).join("")
+    + (few.length ? `<div class="channel-funnel-rank__divider">Fewer than ${CHANNEL_FUNNEL_SMALL_SAMPLE} contacts — too few to compare</div>${few.map(line).join("")}` : "");
+}
+
+function channelFunnelSorted(channels, view, stages) {
+  const key = view.sort;
+  const rows = channels.slice();
+  if (!key || key === "contacts") {
+    return rows.sort((a, b) => (channelFunnelCount(b.contacts) || 0) - (channelFunnelCount(a.contacts) || 0));
+  }
+  if (!stages.some((st) => st.key === key)) return rows;
+  return rows.sort((a, b) => (channelFunnelCount(b[key]) || 0) - (channelFunnelCount(a[key]) || 0));
+}
+
+function renderChannelFunnel(data, view) {
+  const v = view || {};
   const pub = data.publication || {};
   const stages = data.stages || [];
   const w = data.window || {};
@@ -9246,44 +9382,99 @@ function renderChannelFunnel(data) {
     return `<div class="panel"><p class="empty-state" style="padding:var(--space-5)">
       <strong>${word}</strong> — ${escapeHtml(reason)}. No figures are shown until the contact data is complete and current.</p></div>`;
   }
-  const head = stages.map((st) => `<th class="num">${escapeHtml(st.label)}</th>`).join("");
-  const body = data.channels.map((ch) => {
-    const drill = (ch.drilldowns || []).length > 1 || ((ch.drilldowns || [])[0] || {}).value !== "(none)"
-      ? ch.drilldowns.map((d) => channelFunnelRowHtml(d, stages, { drill: true })).join("") : "";
-    return channelFunnelRowHtml(ch, stages) + drill;
+  const stage = stages.find((st) => st.key === v.stage)
+    || stages.find((st) => st.key === "reached_sql") || stages[0];
+  const sortKey = v.sort || "contacts";
+  const stagePicker = stages.length > 1 ? `<div class="channel-funnel-seg" role="group" aria-label="Stage to compare">${
+    stages.map((st) => `<button type="button" class="channel-funnel-seg__btn${st === stage ? " is-active" : ""}" data-channel-stage="${escapeHtml(st.key)}" aria-pressed="${st === stage}">${escapeHtml(st.label)}</button>`).join("")}</div>` : "";
+  const rankings = stage ? `
+    <div class="channel-funnel-grid">
+      <div class="dash-panel dash-anim">
+        <div class="dash-panel__header"><div>
+          <h3 class="dash-panel__title">Where your ${escapeHtml(channelFunnelPlural(stage))} come from</h3>
+          <p class="dash-panel__sub">Contacts acquired in this period that have reached ${escapeHtml(stage.label)}, by channel.</p></div></div>
+        ${channelFunnelRankHtml(data, stage, "volume")}
+      </div>
+      <div class="dash-panel dash-anim">
+        <div class="dash-panel__header"><div>
+          <h3 class="dash-panel__title">Which channels convert best to ${escapeHtml(stage.label)}</h3>
+          <p class="dash-panel__sub">Share of each channel's own contacts that have reached ${escapeHtml(stage.label)}.</p></div></div>
+        ${channelFunnelRankHtml(data, stage, "rate")}
+      </div>
+    </div>` : "";
+  const head = stages.map((st) =>
+    `<th class="num"><button type="button" class="channel-funnel-sort${sortKey === st.key ? " is-active" : ""}" data-channel-sort="${escapeHtml(st.key)}" title="Sort by ${escapeHtml(st.label)}">${escapeHtml(st.label)}</button></th>`).join("");
+  const body = channelFunnelSorted(data.channels, v, stages).map((ch) => {
+    const drill = channelFunnelHasDrill(ch) ? ch.drilldowns : [];
+    return channelFunnelRowHtml(ch, stages, { children: drill.length })
+      + drill.map((d) => channelFunnelRowHtml(d, stages, { drill: true, parent: ch.source })).join("");
   }).join("");
   const total = channelFunnelRowHtml({ label: "All channels", ...data.totals }, stages, { total: true });
+  const anyDrill = data.channels.some(channelFunnelHasDrill);
   const notes = data.notes || {};
   return `
-    <div class="panel">
-      <div class="panel__header">Contacts acquired ${escapeHtml(range)} — stage reached so far${asOf ? `, measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</div>
+    <p class="channel-funnel-context">Contacts acquired <strong>${escapeHtml(range)}</strong> · stage reached so far${
+      asOf ? ` · measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</p>
+    ${channelFunnelTotalsHtml(data.totals, stages)}
+    ${stage ? `<div class="channel-funnel-compare"><span class="channel-funnel-compare__label">Compare channels on:</span>${stagePicker}</div>` : ""}
+    ${rankings}
+    <div class="dash-panel dash-anim channel-funnel-panel">
+      <div class="dash-panel__header"><div>
+        <h3 class="dash-panel__title">Every channel, every stage</h3>
+        <p class="dash-panel__sub">Each percentage is the share of that row's contacts. Click a column to sort${anyDrill ? "; click a channel to see its sources" : ""}.</p></div>
+        ${anyDrill ? '<button type="button" class="btn btn--secondary channel-funnel-expand" data-channel-expand-all aria-pressed="false">Show all sources</button>' : ""}
+      </div>
       <div style="overflow-x:auto">
         <table class="data-table channel-funnel-table">
-          <thead><tr><th>Channel</th><th class="num">Contacts</th>${head}</tr></thead>
+          <thead><tr><th>Channel</th>
+            <th class="num"><button type="button" class="channel-funnel-sort${sortKey === "contacts" ? " is-active" : ""}" data-channel-sort="contacts" title="Sort by contacts">Contacts</button></th>${head}</tr></thead>
           <tbody>${total}${body}</tbody>
         </table>
       </div>
-      <p class="channel-funnel-note">
-        Percentages are the share of that row's contacts. ${escapeHtml(notes.stages || "")}
-        ${escapeHtml(notes.channels || "")} ${escapeHtml(notes.maturity || "")}
-        Spend, cost per SQL, deals and revenue by channel are not on this page yet.</p>
+    </div>
+    <div class="dash-panel channel-funnel-howto">
+      <h3 class="dash-panel__title">How to read this page</h3>
+      <ul>
+        <li>${escapeHtml(notes.channels || "Channel is HubSpot's original source for the contact.")}</li>
+        <li>${escapeHtml(notes.stages || "Each stage counts contacts with evidence of reaching it.")}</li>
+        <li>${escapeHtml(notes.maturity || "Recent contacts have had less time to progress.")}</li>
+        <li>Spend, cost per SQL, deals and revenue by channel are not on this page yet.</li>
+      </ul>
     </div>`;
 }
 
-async function loadChannels() {
-  const sel = document.getElementById("channels-window");
+function renderChannelsFromCache() {
   const body = document.getElementById("channels-body");
-  const window_ = (sel && sel.value) || "180d";
+  if (body && _channelsData) body.innerHTML = renderChannelFunnel(_channelsData, _channelsView);
+}
+
+async function loadChannels() {
+  const body = document.getElementById("channels-body");
+  const window_ = _channelsWindow || "180d";
   const token = ++_channelsReqSeq;
-  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading channels…</p>';
+  document.querySelectorAll("[data-channels-window]").forEach((btn) => {
+    const on = btn.dataset.channelsWindow === window_;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  if (body) {
+    if (_channelsData) body.classList.add("is-refreshing");
+    else body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading channels…</p>';
+  }
   try {
     const data = await fetchJSON(`/api/channel-funnel?window=${encodeURIComponent(window_)}`);
     if (token !== _channelsReqSeq) return;  // a newer request superseded this one
-    if (body) body.innerHTML = renderChannelFunnel(data);
+    _channelsData = data;
+    if (body) { body.classList.remove("is-refreshing"); body.innerHTML = renderChannelFunnel(data, _channelsView); }
   } catch (err) {
     console.error("[loadChannels]", err);
     if (token !== _channelsReqSeq) return;
-    if (body) body.innerHTML = '<div class="panel"><p class="empty-state" style="padding:var(--space-5)"><strong>Unavailable</strong> — the channel funnel could not be loaded.</p></div>';
+    // A failed load never leaves the previous window's figures on screen.
+    _channelsData = null;
+    if (body) {
+      body.classList.remove("is-refreshing");
+      body.innerHTML = '<div class="panel"><p class="empty-state" style="padding:var(--space-5)"><strong>Unavailable</strong> — the channel funnel could not be loaded.</p></div>';
+    }
   }
 }
 
@@ -15868,11 +16059,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     setAdvancedNavOpen(!(nav && nav.classList.contains("sidebar__nav--advanced-open")));
   });
 
-  // Wire up Channels controls (PR-ADS-162A — acquisition windows)
-  const channelsRefresh = document.getElementById("channels-refresh-btn");
-  const channelsWindow  = document.getElementById("channels-window");
-  if (channelsRefresh) channelsRefresh.addEventListener("click", loadChannels);
-  if (channelsWindow) channelsWindow.addEventListener("change", loadChannels);
+  // Wire up Channels controls (PR-ADS-162A acquisition windows; PR-ADS-162I
+  // segmented window buttons, stage comparison, sorting and source rows).
+  const channelsWindow = document.getElementById("channels-window");
+  if (channelsWindow) channelsWindow.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-channels-window]");
+    if (!btn) return;
+    _channelsWindow = btn.dataset.channelsWindow;
+    loadChannels();
+  });
+  const channelsBody = document.getElementById("channels-body");
+  if (channelsBody) channelsBody.addEventListener("click", (e) => {
+    const stageBtn = e.target.closest("[data-channel-stage]");
+    if (stageBtn) { _channelsView.stage = stageBtn.dataset.channelStage; renderChannelsFromCache(); return; }
+    const sortBtn = e.target.closest("[data-channel-sort]");
+    if (sortBtn) { _channelsView.sort = sortBtn.dataset.channelSort; renderChannelsFromCache(); return; }
+    const rowsOf = (source) => Array.from(channelsBody.querySelectorAll("[data-channel-child]"))
+      .filter((tr) => tr.dataset.channelChild === source);
+    const toggle = e.target.closest("[data-channel-toggle]");
+    if (toggle) {
+      const open = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      rowsOf(toggle.dataset.channelToggle).forEach((tr) => { tr.hidden = !open; });
+      return;
+    }
+    const all = e.target.closest("[data-channel-expand-all]");
+    if (all) {
+      const open = all.getAttribute("aria-pressed") !== "true";
+      all.setAttribute("aria-pressed", open ? "true" : "false");
+      all.textContent = open ? "Hide all sources" : "Show all sources";
+      channelsBody.querySelectorAll("[data-channel-toggle]").forEach((t) => t.setAttribute("aria-expanded", open ? "true" : "false"));
+      channelsBody.querySelectorAll("[data-channel-child]").forEach((tr) => { tr.hidden = !open; });
+    }
+  });
 
   // Wire up Revenue by Source controls (business windows — PR-ADS-117)
   const bySourceRefresh = document.getElementById("revenue-by-source-refresh-btn");

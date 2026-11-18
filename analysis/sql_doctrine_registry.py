@@ -1246,6 +1246,11 @@ RULES: list[dict] = [
     # freshness strip on every evidence page) as a Dashboard reader.
     _r("ui.overview.delta_valence", "static/app.js", CLS_MIXED, _OVW,
        symbol="renderPageDatasetFreshness", pattern="sqls_field_ref"),
+    # PR-ADS-162I: the Channels page names its SQL stage "SQLs" in a ranking
+    # title. It is the acquisition cohort published by
+    # `channelfunnel.service`; the page computes no SQL figure of its own.
+    _r("ui.channelfunnel", "static/app.js", CLS_CANONICAL, _CHANNEL_FUNNEL,
+       symbol="channelFunnelPlural", pattern="frontend_sqls_label"),
     _r("ui.channels", "static/app.js", CLS_MIXED, _CHAN,
        symbol=["renderDashboardChannels", "renderChanKpiRow", "chanQualityBubbleSVG",
                "renderChanQualityPanel", "wireChanQualityHover", "renderChanPlatformMatrix",

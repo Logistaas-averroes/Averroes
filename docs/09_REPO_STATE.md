@@ -2726,3 +2726,44 @@ it is what pulls in the test client's HTTP dependency — replace it with an
 explicit test dependency rather than deleting it); `write_campaigns` and the
 `campaigns` table; the manual backfill stamps `windsor/campaigns`, which the
 freshness endpoint still lists.
+
+## PR-ADS-162I — the Channels page, redesigned
+
+**Why.** Owner request: "revamp channels page ui and ux just like the dashboard
+or make it better". The page was one table. It answered "how many", and left
+the reader to work out which channel brings the SQLs and which converts.
+
+**What changed — presentation only.** `/api/channel-funnel` is untouched apart
+from the wording of two notes. Every figure on the page is a count that
+endpoint published, or a share of two of them. The page still decides nothing
+about publication: a withheld funnel shows the word and the reason and no
+figure, ranking, control or table.
+
+| Part | Detail |
+| --- | --- |
+| Window | Four buttons (30 / 60 / 180 days, all time) replace the select and the Refresh button. They are exactly the windows the API accepts |
+| Totals strip | Contacts acquired, then each stage reached with its share of contacts, on the dashboard's `dash-outcomes` cells |
+| Two rankings | For one chosen stage (SQL by default): "Where your SQLs come from" (count and share of all) and "Which channels convert best to SQL" (share of the channel's own contacts) |
+| Small samples | A channel with fewer than 30 contacts keeps its rates, carries a "small sample" mark, and is ranked below the channels with enough contacts to compare. In production's 180-day window Email Marketing converts 5 of 9 (55.6%), the highest rate on the page; it no longer reads as the best channel |
+| Table | Same columns and figures as before, with a bar per rate. Click a column to sort. A channel's sources are collapsed under it and open on click |
+| Unknown counts | A count the payload does not carry renders as a dash. The old page rendered `NaN` |
+| Failed load | Clears the cached funnel, so the previous window's figures cannot stay on screen under a new window's button |
+| Notes | "canonical evidence" and "unmodified" replaced with plain wording in `STAGE_NOTE` / `CHANNEL_NOTE` |
+
+**Not changed.** The cohort rule, the stages, the channel names, the
+publication verdict, the freshness gate. No spend, deal, revenue or customer
+figure is on this page; "Customer stage" is still contacts.
+
+**Tests.** `tests/test_pr_ads_162i_channels_page_revamp.py` — 20 cases that
+evaluate the real functions from `static/app.js` in `node`. The existing
+`tests/test_pr_ads_162a_channel_funnel.py` passes unedited. Checked in a real
+browser (Playwright): sorting, stage comparison, expanding sources, window
+buttons, no page error, no horizontal scroll at phone width.
+
+**Known gap, found while checking this page against HubSpot (2026-11-18).**
+For contacts created in October 2026 the stored funnel and HubSpot agree
+exactly on reached-SQL (70) and reached-Opportunity (46). The contact count
+does not: 564 stored, 557 in HubSpot. The 7 extra no longer exist in HubSpot —
+deleted or merged — and the sync, which reads modified contacts, never learns
+of a removal. 30 such contacts are stored today. Removing them is the next
+backend slice; until then "Contacts" on this page can run slightly high.
