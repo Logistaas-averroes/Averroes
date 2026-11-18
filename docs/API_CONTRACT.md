@@ -2609,6 +2609,62 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 
 ## System Status War Room (PR-ADS-068)
 
+### `GET /api/system/overview`
+
+PR-ADS-162C. Admin only: an admin session cookie, or `Authorization: Bearer
+<ADMIN_API_TOKEN>`. Read-only; no HubSpot or Google Ads call. Feeds the
+**System** page.
+
+```json
+{
+  "generated_at": "2026-11-18T04:30:00+00:00",
+  "certification": {
+    "state": "certified | violation | not_certified | not_checked | unavailable",
+    "verdict": "CERTIFIED",
+    "checked_at": "2026-11-17T07:40:10+00:00",
+    "age_hours": 20.8,
+    "max_age_hours": 26,
+    "could_not_run": false,
+    "audits": [{"key": "closed_won_truth", "outcome": "holds"}],
+    "crm_data_to_fix": {"deals_with_any_exception": 25, "by_family": {}, "dataset_blockers": [], "windows": []}
+  },
+  "sources": [
+    {"key": "hubspot_contacts", "label": "HubSpot contacts", "status": "current", "fresh": true, "reason": "source_fresh", "last_success_at": "...", "age_hours": 22.5, "limit_hours": 36},
+    {"key": "hubspot_deals", "label": "HubSpot deals", "status": "current", "last_success_at": "...", "age_hours": 22.5, "limit_hours": 36.0, "reasons": [], "history_copied": true},
+    {"key": "google_ads_spend", "label": "Google Ads spend", "status": "current", "window_start": "2026-11-11", "window_end": "2026-11-17", "complete_through": "2026-11-17", "missing_ranges": [], "unresolved_failed_chunks": 0, "last_success_at": "...", "age_hours": 22.4}
+  ],
+  "external_calls_performed": false
+}
+```
+
+**`certification`** is the newest `platform_certification_runs` row, as
+recorded.
+
+| `state` | When |
+| --- | --- |
+| `certified` | exit code `0`, finished within `max_age_hours`, AND a non-empty audit list in which every outcome is `holds` |
+| `violation` | exit code `1`, finished within `max_age_hours` |
+| `not_certified` | exit code `2`, an unrecognised or missing exit code, or exit code `0` without every audit holding. `could_not_run` is true when the run itself failed and no audit ran |
+| `not_checked` | no row; a row older than `max_age_hours`; a future-dated row; no finish time |
+| `unavailable` | the table could not be read |
+
+`verdict` is kept for context and is never the thing to render.
+
+**`sources`** — each carries one `status`; only `current` is healthy. The page
+owns no freshness rule; each status is the verdict the platform already
+publishes by:
+
+| Source | Verdict used | `status` |
+| --- | --- | --- |
+| `hubspot_contacts` | `marketing_outcome_cohort_service.read_freshness` (the canonical assessor), `fresh`/`reason` passed through | `current` when `fresh is True`; `late` for `source_stale`; `unavailable` when `fresh is None`; otherwise `not_proven` |
+| `hubspot_deals` | `canonical_revenue_service.ledger_freshness` — `check_sync_coverage` + `freshness_block` + `ledger_staleness` (`deal_ledger.max_staleness_hours`) | `current` only when coverage is proven and `stale is False`; `late` when proven but stale; `not_proven` when coverage is not proven; `unavailable` when the sync state is unreadable |
+| `google_ads_spend` | `google_ads_spend_service.analyze_coverage` over `google_ads_spend_coverage`, for the last 7 complete account days (ending yesterday, account time zone) | `current` when the window is complete; `late` when a day is missing or a failed chunk is unresolved; `unavailable` when the ledger is unreadable |
+
+`last_success_at` is a proven success only: for deals it is NULL unless
+coverage is proven (never a failed attempt's time); for spend it is the write
+time of the newest verified chunk by `chunk_end`, so refilling an old month
+does not read as a fresh feed.
+
 ### `GET /api/system/status-war-room`
 
 **Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` Bearer header)  

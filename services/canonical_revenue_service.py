@@ -287,6 +287,32 @@ def single_snapshot(fn):
     return _wrapped
 
 
+def ledger_freshness(now=None) -> dict:
+    """The deal ledger's coverage and staleness verdict, exactly as every
+    closed-won figure is judged (PR-ADS-162C, for the System page).
+
+    The same three steps ``window_view`` applies to a snapshot —
+    ``check_sync_coverage``, ``freshness_block``, ``ledger_staleness`` — over
+    the sync-state row alone. It reads no deal and publishes no figure.
+    ``latest_successful_incremental_at`` is NULL unless coverage is proven;
+    ``stale`` is NULL when coverage is not proven (it withholds for that
+    reason instead). ``sync_state_available`` False means the row could not be
+    read at all.
+    """
+    from db import deal_ledger_repository as ledger_repo
+    from services import canonical_customer_revenue_service as ccr
+    from services.revenue_reconciliation_service import check_sync_coverage
+
+    now = now or datetime.now(timezone.utc)
+    state = ledger_repo.fetch_sync_state() or {}
+    available = bool(state.get("available"))
+    findings = check_sync_coverage(
+        {"available": available, "row": state.get("row")})
+    block = ccr.freshness_block(state.get("row"), findings, now)
+    return {**block, **ccr.ledger_staleness(block),
+            "sync_state_available": available}
+
+
 def load_won_deals(window=None, *, start=None, end=None, now=None,
                    require_ready: bool = True) -> dict:
     """The canonical won-deal population of one business window.

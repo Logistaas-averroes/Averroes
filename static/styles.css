@@ -7713,3 +7713,23 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .channel-funnel-pct { color: var(--text-muted); font-size: 0.85em; }
 .channel-funnel-drill { padding-left: var(--space-5); color: var(--text-muted); }
 .channel-funnel-note { color: var(--text-muted); padding: var(--space-4) var(--space-5); margin: 0; font-size: 0.9em; }
+
+/* ── System page + Advanced tools group (PR-ADS-162C) ──────────────────── */
+.sidebar__nav .nav-advanced { display: none; }
+.sidebar__nav.sidebar__nav--advanced-open .nav-advanced { display: list-item; }
+.sidebar__nav.sidebar__nav--advanced-open .nav-advanced[hidden] { display: none; }
+.nav-advanced-toggle { width: 100%; background: none; border-top: 0; border-right: 0; border-bottom: 0; font: inherit; text-align: left; cursor: pointer; }
+.nav-advanced-toggle .nav-item__icon svg { transition: transform 0.15s; }
+.nav-advanced-toggle[aria-expanded="true"] .nav-item__icon svg { transform: rotate(90deg); }
+.system-card { margin-bottom: var(--space-4); }
+.system-card__body { padding: var(--space-4) var(--space-5); }
+.system-card__body p { margin: 0 0 var(--space-3) 0; }
+.system-card__headline { font-size: 1.25rem; font-weight: 600; }
+.system-card--ok .system-card__headline { color: #047857; }
+.system-card--warn .system-card__headline { color: #b45309; }
+.system-card--bad .system-card__headline { color: #b91c1c; }
+.system-card__note { color: var(--text-muted); font-size: 0.85rem; }
+.system-checks, .system-fix-list { margin: 0 0 var(--space-3) 0; padding-left: var(--space-5); }
+.system-checks li, .system-fix-list li { margin-bottom: 6px; }
+.system-check--ok { color: var(--text-muted); }
+.system-check--bad, .system-source--warn { color: #b45309; font-weight: 600; }

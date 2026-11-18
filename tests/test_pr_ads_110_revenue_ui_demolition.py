@@ -44,7 +44,7 @@ def test_revenue_pages_constant_includes_both_roas_pages():
     # PR-ADS-134 rebuilt the Dashboard as the Executive Overview (business
     # windows, revenue truth), so it joined the clean revenue chrome as well.
     # PR-ADS-153C: Leads is a CRM/business page and joined the clean revenue chrome.
-    assert 'REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels"]' in JS
+    assert 'REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels", "system"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -219,8 +219,9 @@ def test_other_pages_not_treated_as_revenue_pages():
 def test_revenue_pages_list():
     # PR-ADS-113 extended the revenue-page set with Deals + Revenue Health;
     # PR-ADS-134 added the rebuilt Dashboard (Executive Overview);
-    # PR-ADS-162A added Channels (its own acquisition-window selector).
+    # PR-ADS-162A added Channels (its own acquisition-window selector);
+    # PR-ADS-162C added System (a plain status page).
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert names == ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels"]
+    assert names == ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels", "system"]

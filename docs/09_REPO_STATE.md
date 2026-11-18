@@ -2008,3 +2008,109 @@ hold. No test was edited.
 `/api/keywords`, the retired ROAS routes, `/api/revenue-by-source`, the hidden
 historical-intelligence page, and the Windsor connector. Each has tests and guard
 entries to update with it.
+
+---
+
+## PR-ADS-162C — one plain-language System page; technical admin pages folded away
+
+**Why.** The Admin section listed six technical pages (Data Runs, GCLID
+Attribution, System Status, Revenue Health, Admin Backfill, Churn Input) with
+no plain statement of the three things an operator needs: can the numbers be
+trusted, is the data up to date, and what has to be fixed. The daily
+certification (PR-ADS-161J) recorded a verdict that no screen showed.
+
+**What changed.**
+
+- `GET /api/system/overview` (admin only) —
+  `services/system_overview_service.py`. Three blocks, all read from the local
+  database:
+  1. **Certification**: the newest `platform_certification_runs` row as
+     recorded. `certified` requires exit code `0`, a finish time within
+     `CERTIFICATION_MAX_AGE_HOURS` (26h) AND a non-empty audit list in which
+     every outcome is `holds`. No row, an old row, a future-dated row or a
+     missing finish time is `not_checked`; an unrecognised exit code, or a `0`
+     without every audit holding, is `not_certified`; an unreadable table is
+     `unavailable`.
+  2. **Sources**: one `status` per source; only `current` is healthy. The page
+     owns no freshness rule — each status is the verdict the platform already
+     publishes by:
+     - HubSpot contacts: `cohort.read_freshness` (the canonical assessor);
+     - HubSpot deals: `canonical_revenue_service.ledger_freshness` (new) —
+       `check_sync_coverage` + `freshness_block` + `ledger_staleness`, the
+       same three steps every closed-won figure is judged by;
+     - Google Ads spend: `analyze_coverage` over the durable
+       `google_ads_spend_coverage` ledger for the last 7 complete account days
+       (`revenue_repository.fetch_spend_coverage`, plus
+       `fetch_spend_coverage_recency`, new, for the newest verified chunk).
+  3. **What needs fixing**: the `crm_data_to_fix` block the certification
+     stored, passed through.
+- **System page** (`#/system`, admin only, clean chrome): "Can you trust the
+  numbers?", "Is the data up to date?", "What needs fixing" and a described
+  list of the advanced tools. The fix card separates records the sales team
+  corrects **in HubSpot** from blockers **on our side** (the sync's own state),
+  names which periods are hidden, dates itself by the last check, and links
+  into the CRM Truth Exceptions workbench.
+- **Sidebar**: Admin is now `System` plus a collapsed `Advanced tools` group
+  holding the six technical pages. Nothing was removed; a deep link to a folded
+  page opens the group. Items hidden from non-admins stay hidden when it opens.
+
+**What it does not do.** It decides no publication. The pass wording is scoped
+to what the six audits check — won deals, customers, revenue and the Campaigns
+page's lead and SQL counts — and says on the page that ad spend, the Channels
+page, Leads and search terms are not re-checked, and that a record that never
+reached HubSpot cannot be seen. The 26h limit decides only whether a recorded
+verdict is still current; it is not a data-freshness rule.
+
+**Known limits, stated.** (1) The verdict row is written when a run ends. If
+today's run leaves no row (a failed write, a deploy mid-run, a misfire),
+yesterday's pass stays the newest row until it is 26h old — up to about two
+hours in which the page says the *latest* check passed, with its age shown.
+(2) The row records no build identity, so a deploy after 07:30 is covered by
+that morning's verdict until the next run. (3) The spend ledger marks a day
+covered when it was fetched during that day, so "complete through yesterday"
+before the morning sync includes a partially-fetched yesterday — the same
+definition every revenue page uses.
+
+**Independent truth review (before first push).** The `averroes-truth-auditor`
+found two blockers in the first implementation, both reproduced through the
+real code and both fixed here:
+
+- *B1 — "Nothing to fix" when nobody looked.* An unavailable CRM Truth
+  Exceptions audit stores `{deals_with_any_exception: null, by_family: {},
+  dataset_blockers: [], windows: []}`; the card read the empty lists as an
+  all-clear. Now "Nothing to fix" is said only on a counted zero with no
+  blocker and every period recorded as shown; a NULL count is "Unknown".
+- *B2 — deals read "Last update succeeded" for a ledger the platform treats
+  as stale or unproven.* The first version judged the deal ledger by
+  `last_status == "success"` alone: a second, weaker freshness rule.
+  `last_incremental_at` is stamped on every attempt and `last_status` is
+  shared between modes, so a week-old success, a failed incremental followed
+  by a bootstrap re-run, and a bootstrap with no incremental all read healthy
+  while every closed-won figure was withheld. The line now comes from the
+  ledger's own gate.
+
+Also fixed from that review: spend was read from the best-effort
+`google_ads_account_daily_spend` side table (now the coverage ledger); the
+pass wording promised spend and "every figure" (now scoped); the sync's own
+blockers were listed under a HubSpot heading; "Other periods show their
+figures" was printed when none did; an unreadable result said "no check has
+been recorded"; a crashed run said "no wrong figure was found"; timestamps
+were labelled UTC without being converted; the API doc named a header that
+returns 401.
+
+**Tests.** `tests/test_pr_ads_162c_system_page.py` (40 tests, 69 cases), on
+production-shaped fixtures: the certification summary production stored on
+2026-11-17; contact rows driven through the real `assess`; nine deal sync-state
+shapes driven through the real coverage gate, plus a test that the page and
+the reader contract reach the same verdict on each; spend through the real
+`analyze_coverage`; the unavailable and stale-ledger fix blocks produced by
+the real audit code; every reason code in `reason_vocabulary()` required to
+have plain words and an owner; the real renderer evaluated in node; the
+endpoint through a test client; and the real reads on a live PostgreSQL
+(empty database, two runs where the newest decides, a refilled old month that
+must not read as the newest fetch, another account's chunk that must not
+count). Added to CI's PostgreSQL step. Eight mutations were each shown to fail
+the suite: "nothing to fix" without a counted zero; deals ignoring staleness;
+deals ignoring coverage; spend always current; newest-run ordering reversed;
+exit 0 accepted without every audit holding; a sync reason filed under
+HubSpot; an unknown source status rendered healthy.
