@@ -209,26 +209,20 @@ def test_no_external_writes():
         assert term not in source_lower, f"Forbidden term found: {term}"
 
 
-def test_confidence_summary_endpoint_exists():
-    """Server contains the confidence-summary endpoint."""
-    server_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "api", "server.py",
-    )
-    with open(server_path, "r", encoding="utf-8") as f:
-        source = f.read()
-    assert "/api/attribution/confidence-summary" in source
-
-
-def test_frontend_calls_confidence_endpoint():
-    """Frontend app.js calls /api/attribution/confidence-summary."""
-    app_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "static", "app.js",
-    )
-    with open(app_path, "r", encoding="utf-8") as f:
-        source = f.read()
-    assert "/api/attribution/confidence-summary" in source
+def test_confidence_summary_endpoint_is_retired():
+    """PR-ADS-162E: /api/attribution/confidence-summary counted confidence
+    tiers over legacy local-JSON ROAS rows (the persisted snapshot, or a live
+    ``analysis.roas_calculator`` run). That chain is deleted, and the card on
+    the GCLID Attribution page with it. The confidence labels themselves
+    (``analysis.attribution_confidence``) remain: revenue rows still carry one.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel in (("api", "server.py"), ("static", "app.js"), ("static", "index.html")):
+        with open(os.path.join(root, *rel), "r", encoding="utf-8") as f:
+            source = f.read()
+        assert "/api/attribution/confidence-summary" not in source, rel
+        assert "attribution-confidence-summary" not in source, rel
+        assert "loadAttributionConfidenceSummary" not in source, rel
 
 
 def test_frontend_calls_gclid_readiness_endpoint():
@@ -251,7 +245,6 @@ def test_frontend_gclid_page_has_readiness_containers():
     with open(html_path, "r", encoding="utf-8") as f:
         source = f.read()
     assert "gclid-readiness-summary" in source
-    assert "attribution-confidence-summary" in source
     assert "gclid-readiness-blockers" in source
 
 

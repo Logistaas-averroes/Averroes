@@ -158,54 +158,33 @@ def test_churn_input_help_is_retired_with_its_page():
     assert '"churn-input"' not in help_block
 
 
-# ── Revenue Snapshot History UI ────────────────────────────────────────────
+# ── Revenue Snapshot History UI — retired (PR-ADS-162E) ────────────────────
+# The section showed persisted local-JSON ROAS snapshots. Since PR-ADS-161E
+# every figure in them was withheld as non-canonical, so the block displayed
+# dates and the word "Withheld". PR-ADS-162E deleted it with its routes, its
+# daily job and the legacy chain behind it. These assertions replace the ones
+# that pinned its existence.
 
-def test_snapshot_history_container_exists():
-    """Snapshot history container must exist in the Reports page."""
-    assert 'id="snapshot-history-container"' in HTML
-    assert 'id="snapshot-history-section"' in HTML
+def test_snapshot_history_is_retired():
+    assert 'id="snapshot-history-container"' not in HTML
+    assert 'id="snapshot-history-section"' not in HTML
+    assert "loadRevenueSnapshotHistory" not in JS
+    assert "/api/reports/roas/snapshots" not in JS
+    assert ".snapshot-history-section" not in CSS
+    assert ".snapshot-latest-card" not in CSS
 
 
-def test_snapshot_history_calls_api_endpoints():
-    """JS must call the correct snapshot API endpoints."""
-    assert "/api/reports/roas/snapshots/latest" in JS
-    assert "/api/reports/roas/snapshots?" in JS or "/api/reports/roas/snapshots" in JS
+def test_no_legacy_verdict_or_ltv_fields_are_rendered():
+    """The snapshot block was the last reader of the legacy SCALE/HOLD/FIX/CUT
+    counts and of LTV/CAC from local JSON."""
+    for field in ("scale_count", "hold_count", "fix_count", "cut_count",
+                  "insufficient_data_count", "ltv_cac_ratio"):
+        assert field not in JS, field
 
 
 def test_no_bare_snapshot_routes():
-    """Must not use bare /reports/roas/snapshots routes (must use /api/ prefix)."""
-    # Find all snapshot fetches — they must use /api/ prefix
-    snapshot_fetches = re.findall(r'fetch\(["\']([^"\']*snapshot[^"\']*)', JS)
-    for url in snapshot_fetches:
-        assert url.startswith("/api/"), (
-            f"Found bare snapshot route without /api/ prefix: {url}"
-        )
-
-
-def test_snapshot_history_empty_state():
-    """Snapshot history must handle empty state gracefully."""
-    assert "No revenue snapshots exist yet" in JS
-
-
-def test_snapshot_history_shows_verdict_counts():
-    """Snapshot history must display SCALE/HOLD/FIX/CUT counts."""
-    assert "scale_count" in JS
-    assert "hold_count" in JS
-    assert "fix_count" in JS
-    assert "cut_count" in JS
-    assert "insufficient_data_count" in JS
-
-
-def test_snapshot_history_shows_economics():
-    """Snapshot history must show LTV/CAC and payback if available."""
-    assert "ltv_cac_ratio" in JS
-    assert "payback_months" in JS
-
-
-def test_snapshot_history_css_exists():
-    """Snapshot history CSS classes must be defined."""
-    assert ".snapshot-history-section" in CSS
-    assert ".snapshot-latest-card" in CSS
+    """No fetch of any snapshot route remains, with or without /api/."""
+    assert re.findall(r'fetch\(["\']([^"\']*snapshot[^"\']*)', JS) == []
 
 
 # ── Open/Close Functions Exist ─────────────────────────────────────────────
@@ -218,8 +197,3 @@ def test_open_help_drawer_function_exists():
 def test_close_help_drawer_function_exists():
     """closeHelpDrawer function must exist."""
     assert "function closeHelpDrawer(" in JS
-
-
-def test_load_revenue_snapshot_history_function_exists():
-    """loadRevenueSnapshotHistory function must exist."""
-    assert "function loadRevenueSnapshotHistory(" in JS

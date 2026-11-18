@@ -218,25 +218,6 @@ INVENTORY = (
      "families": ("revenue", "customers"),
      "canonical_via": None, "status": "removed"},
     {"consumer": "api/server.py",
-     "surface": "/api/reports/roas/campaigns, /api/reports/roas/countries",
-     "existing_source": "analysis.roas_calculator over local JSON",
-     "existing_meaning": "won deals as customers; local-JSON revenue and ROAS",
-     "canonical_replacement": "withheld (legacy_local_revenue_not_canonical); "
-                              "superseded_by /api/revenue-attribution",
-     "window_cohort": "n/a",
-     "ui_effect": "none (no frontend consumer)",
-     "families": ("customers", "revenue", "legacy_roas"),
-     "canonical_via": "_LEGACY_REVENUE_WITHHELD", "status": "withheld"},
-    {"consumer": "api/server.py",
-     "surface": "/api/reports/roas/snapshots, /api/reports/roas/snapshots/latest",
-     "existing_source": "persisted local-JSON ROAS snapshots",
-     "existing_meaning": "revenue, ROAS, LTV/CAC and verdict counts",
-     "canonical_replacement": "withheld: metadata only, every outcome removed",
-     "window_cohort": "n/a",
-     "ui_effect": "Snapshot history says Withheld + reason; links Campaign Revenue & Spend",
-     "families": ("revenue", "legacy_roas", "legacy_cac"),
-     "canonical_via": "_withhold_legacy_roas_snapshot", "status": "withheld"},
-    {"consumer": "api/server.py",
      "surface": "/api/attribution/gclid-readiness (won_deals)",
      "existing_source": "data/hubspot_won_deals.json",
      "existing_meaning": "a local-file won-deal count",
@@ -245,14 +226,6 @@ INVENTORY = (
      "ui_effect": "Won Deals card reads Withheld + reason",
      "families": ("customers",),
      "canonical_via": "won_deals_status", "status": "withheld"},
-    {"consumer": "api/server.py",
-     "surface": "/api/attribution/confidence-summary",
-     "existing_source": "local ROAS snapshot rows",
-     "existing_meaning": "attribution tier counts only — no outcome figure",
-     "canonical_replacement": "deferred: publishes no deal, customer, revenue "
-                              "or ratio value",
-     "window_cohort": "n/a", "ui_effect": "unchanged",
-     "families": (), "canonical_via": None, "status": "deferred"},
     {"consumer": "api/server.py",
      "surface": "/api/mailchimp/audit (admin)",
      "existing_source": "deal_source_attribution via fetch_durable_outcome_populations",
@@ -287,14 +260,6 @@ INVENTORY = (
                               "not a page publishing a total",
      "window_cohort": "business window", "ui_effect": "unchanged",
      "families": (), "canonical_via": None, "status": "deferred"},
-    {"consumer": "scheduler/daily.py",
-     "surface": "daily ROAS snapshot job",
-     "existing_source": "services.roas_snapshot_service (local JSON)",
-     "existing_meaning": "persists a local snapshot file",
-     "canonical_replacement": "deferred: still persisted locally; every route "
-                              "that serves it withholds the figures",
-     "window_cohort": "n/a", "ui_effect": "none",
-     "families": (), "canonical_via": None, "status": "deferred"},
     {"consumer": "static/app.js",
      "surface": "every dashboard, Campaign / Country Revenue & Spend, Revenue by "
                 "Source, Unit Economics, mapping page",
@@ -326,11 +291,14 @@ OWNERS = (
 )
 #: Legacy modules no production route reads any more (the routes that did now
 #: withhold). Named so a new consumer of them fails ``inventory_complete``.
+#: PR-ADS-162E deleted the local-JSON ROAS chain outright
+#: (``analysis/roas_calculator.py``, ``analysis/unit_economics.py``,
+#: ``services/unit_economics_service.py``, ``services/roas_snapshot_service.py``
+#: and its two smoke scripts), with the routes and the daily job that served
+#: it; :data:`READER_ENTRY_POINTS` still names its functions, so re-adding one
+#: makes its module a reader that must be inventoried.
 RETIRED_LEGACY = (
-    "analysis/roas_calculator.py", "analysis/unit_economics.py",
     "analysis/attribution_matcher.py", "analysis/gclid_readiness_audit.py",
-    "services/unit_economics_service.py", "services/roas_snapshot_service.py",
-    "scripts/smoke_test_roas.py", "scripts/smoke_test_roas_snapshot.py",
     "scripts/report_missing_deal_amounts.py",
 )
 #: A reference to any of these makes a module a closed-won reader.
@@ -576,12 +544,14 @@ def structural_checks(a: Audit) -> dict:
         a.check("no_external_calls_no_writes", not bad_imp,
                 f"{rel} imports {bad_imp}")
     server = _text(SERVER)
-    for fn in ("get_roas_campaigns", "get_roas_countries"):
-        i = server.find(f"async def {fn}(")
-        region = server[i:server.find("@app.", i + 1)]
-        a.check("no_external_calls_no_writes",
-                "compute_all_" not in region,
-                f"{fn} still computes from the legacy chain")
+    # PR-ADS-162E: the local-JSON ROAS report and snapshot routes are deleted
+    # (they had been withholding every figure since PR-ADS-161E). Nothing in
+    # the server may route to, or compute from, that chain again.
+    for gone in ("compute_all_campaign_roas", "compute_all_country_roas",
+                 "load_latest_roas_snapshot", "load_roas_snapshots",
+                 "generate_roas_snapshot", '"/api/reports/roas/'):
+        a.check("no_external_calls_no_writes", gone not in server,
+                f"{SERVER} references the deleted legacy ROAS chain: {gone}")
 
     # 18 — no UI text presents a period ratio as ROAS or CAC.
     ui_bad = ui_ratio_label_violations(js, _text("static/index.html"))

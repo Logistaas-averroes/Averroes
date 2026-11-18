@@ -368,7 +368,7 @@ CONSUMERS: list[dict] = [
     _c("Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)",
        "Row-level sqls and classify_verdict (watch/waste) on the legacy population; "
        "JSON fallback path imports analysis.core.QUALIFIED.",
-       endpoint="GET /api/revenue-attribution, /api/reports/roas/*",
+       endpoint="GET /api/revenue-attribution",
        service_function="services.revenue_attribution_service._build_db_rows / _finalize_row / classify_verdict",
        repository_source="db.revenue_repository.fetch_lead_quality",
        source_table=LEGACY_TABLE, sql_definition="row.get('status_category') == 'qualified'",

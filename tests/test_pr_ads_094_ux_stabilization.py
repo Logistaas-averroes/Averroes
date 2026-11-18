@@ -85,22 +85,12 @@ def test_no_hardcoded_60d_in_gclid_readiness():
     assert "getCurrentWindowParam()" in gclid_section
 
 
-def test_no_hardcoded_60d_in_confidence_summary():
-    """Attribution confidence must NOT use hardcoded window=60d."""
-    start = JS.find("function loadAttributionConfidenceSummary")
-    assert start != -1, "loadAttributionConfidenceSummary function not found"
-    confidence_section = JS[start:start + 2000]
-    assert 'window=60d' not in confidence_section
-    assert "getCurrentWindowParam()" in confidence_section
-
-
-def test_no_hardcoded_60d_in_snapshot_history():
-    """Revenue snapshot history must NOT use hardcoded window=60d."""
-    start = JS.find("function loadRevenueSnapshotHistory")
-    assert start != -1, "loadRevenueSnapshotHistory function not found"
-    snapshot_section = JS[start:start + 2000]
-    assert 'window=60d' not in snapshot_section
-    assert "getCurrentWindowParam()" in snapshot_section
+def test_confidence_summary_and_snapshot_history_loaders_are_retired():
+    """PR-ADS-162E deleted both loaders with the legacy local-JSON ROAS chain
+    they read. Neither may return with any window, hardcoded or not."""
+    assert "function loadAttributionConfidenceSummary" not in JS
+    assert "function loadRevenueSnapshotHistory" not in JS
+    assert "window=60d" not in JS
 
 
 def test_roas_campaigns_uses_business_window():

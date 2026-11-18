@@ -7608,24 +7608,12 @@ def api_campaign_mapping_exclude(body: CampaignExcludeRequest, request: Request)
             "match_method": "not_google_ads"}
 
 
-#: PR-ADS-161E. Readers that computed closed-won deals, customers, revenue,
-#: ROAS, CAC or verdicts from local JSON / Windsor instead of the canonical
-#: closed-won owner (docs/46, read through the reader contract, docs/48). They
-#: publish no figure: each is withheld with this reason, and the canonical
-#: replacement is named.
+#: PR-ADS-161E. The reason a figure computed from local JSON / Windsor, instead
+#: of the canonical closed-won owner (docs/46, read through the reader
+#: contract, docs/48), is withheld. PR-ADS-162E deleted the legacy ROAS report
+#: and snapshot routes that carried it; the GCLID readiness diagnostic is the
+#: one remaining user.
 LEGACY_REVENUE_WITHHELD_REASON = "legacy_local_revenue_not_canonical"
-_LEGACY_REVENUE_WITHHELD = {
-    "status": "withheld",
-    "reason": LEGACY_REVENUE_WITHHELD_REASON,
-    "revenue_status": {"status": "withheld",
-                       "reason": LEGACY_REVENUE_WITHHELD_REASON,
-                       "canonical_replacement": "/api/revenue-attribution"},
-}
-#: Snapshot fields that describe the snapshot itself, not an outcome.
-_LEGACY_SNAPSHOT_METADATA = ("id", "snapshot_id", "snapshot_date", "window",
-                             "generated_at", "created_at")
-
-
 #: Key fragments of a closed-won OUTCOME figure (a customer, won-deal or
 #: revenue count / sum / subset proof) in a legacy payload.
 _LEGACY_OUTCOME_KEY_PARTS = ("customer", "closed_won", "revenue")
@@ -7660,75 +7648,6 @@ def _withhold_legacy_closed_won_outcomes(payload):
                 "status": "withheld",
                 "reason": "legacy_deal_source_attribution_not_canonical",
                 "canonical_replacement": "/api/revenue-attribution"}}
-
-
-def _withhold_legacy_roas_snapshot(snapshot):
-    """A persisted ROAS snapshot with every outcome figure removed.
-
-    The snapshot's spend, revenue, ACV/LTV, deal counts, ROAS, LTV/CAC and
-    verdict counts were computed from local JSON by the retired chain. Withheld
-    means absent: only the metadata and the withholding status are returned.
-    """
-    if not isinstance(snapshot, dict):
-        return snapshot
-    out = {k: snapshot[k] for k in _LEGACY_SNAPSHOT_METADATA if k in snapshot}
-    out.update(_LEGACY_REVENUE_WITHHELD)
-    return out
-
-
-@app.get("/api/reports/roas/campaigns")
-async def get_roas_campaigns(
-    window: str = Query(default="60d"),
-    _user=Depends(require_auth),
-):
-    """DEPRECATED (PR-ADS-108) — legacy ad-window campaign ROAS report.
-
-    Superseded by GET /api/revenue-attribution (business windows + durable
-    sources). Retained only for backward compatibility; no frontend path uses
-    it. This is NOT competing truth — do not build new consumers on it.
-
-    Revenue source: HubSpot won deals.
-    Spend source: Google Ads API.
-    Google Ads conversion value is NOT used.
-    """
-    window_days = _parse_window(window)
-
-    # PR-ADS-161E: this report counted won deals as customers and summed
-    # revenue from local JSON, outside the canonical closed-won owner. It no
-    # longer computes anything: every figure is withheld with the reason, and
-    # the canonical replacement is named.
-    return {
-        "window": f"{window_days}d",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "google_ads_conversion_value_used": False,
-        "deprecated": True,
-        "superseded_by": "/api/revenue-attribution",
-        **_LEGACY_REVENUE_WITHHELD,
-    }
-
-
-@app.get("/api/reports/roas/countries")
-async def get_roas_countries(
-    window: str = Query(default="60d"),
-    _user=Depends(require_auth),
-):
-    """DEPRECATED (PR-ADS-108) — legacy ad-window country ROAS report.
-
-    Superseded by GET /api/revenue-attribution (business windows + durable
-    sources). Retained only for backward compatibility; no frontend path uses
-    it. This is NOT competing truth — do not build new consumers on it.
-    """
-    window_days = _parse_window(window)
-
-    # PR-ADS-161E: withheld — see get_roas_campaigns.
-    return {
-        "window": f"{window_days}d",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "google_ads_conversion_value_used": False,
-        "deprecated": True,
-        "superseded_by": "/api/revenue-attribution",
-        **_LEGACY_REVENUE_WITHHELD,
-    }
 
 
 @app.get("/api/reports/unit-economics")
@@ -7777,57 +7696,6 @@ async def get_unit_economics(
 
 
 # ---------------------------------------------------------------------------
-# ROAS Snapshot Endpoints (PR-ADS-080C)
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/reports/roas/snapshots/latest")
-async def get_roas_snapshot_latest(
-    window: str = Query(default="60d"),
-    _user=Depends(require_auth),
-):
-    """Return the latest persisted ROAS snapshot for a given window.
-
-    This is a historical/persisted view — not live-computed.
-    """
-    from services.roas_snapshot_service import load_latest_roas_snapshot
-
-    window_days = _parse_window(window)  # validates window format
-
-    snapshot = load_latest_roas_snapshot(window=f"{window_days}d")
-    if snapshot is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No legacy snapshot found for window={window_days}d",
-        )
-    return _withhold_legacy_roas_snapshot(snapshot)
-
-
-@app.get("/api/reports/roas/snapshots")
-async def get_roas_snapshots(
-    window: str = Query(default="60d"),
-    limit: int = Query(default=30, ge=1, le=100),
-    _user=Depends(require_auth),
-):
-    """Return historical ROAS snapshots (most recent first).
-
-    This is a historical/persisted view — not live-computed.
-    """
-    from services.roas_snapshot_service import load_roas_snapshots
-
-    window_days = _parse_window(window)  # validates window format
-
-    snapshots = load_roas_snapshots(limit=limit, window=f"{window_days}d")
-    return {
-        "window": f"{window_days}d",
-        "limit": limit,
-        "count": len(snapshots),
-        "snapshots": [_withhold_legacy_roas_snapshot(s) for s in snapshots],
-        **_LEGACY_REVENUE_WITHHELD,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Attribution Confidence & GCLID Readiness Endpoints (PR-ADS-081/082)
 # ---------------------------------------------------------------------------
 
@@ -7869,75 +7737,6 @@ async def get_gclid_readiness(
         "status": "withheld", "reason": LEGACY_REVENUE_WITHHELD_REASON,
         "canonical_replacement": "/api/revenue-attribution"}
     return {**result, "summary": summary}
-
-
-@app.get("/api/attribution/confidence-summary")
-async def get_attribution_confidence_summary(
-    window: str = Query(default="60d"),
-    _user=Depends(require_auth),
-):
-    """Attribution Confidence Summary (PR-ADS-082).
-
-    Returns confidence tier distribution across legacy campaign revenue rows.
-    Uses latest snapshot if available, otherwise computes live.
-    Read-only — no writes to any external system.
-    """
-    from analysis.attribution_confidence import (
-        CONFIDENCE_DEFINITIONS,
-        summarize_roas_confidence,
-    )
-    from services.roas_snapshot_service import load_latest_roas_snapshot
-
-    window_days = _parse_window(window)
-    window_str = f"{window_days}d"
-
-    # Try latest snapshot first, fall back to live computation
-    snapshot = load_latest_roas_snapshot(window=window_str)
-    if snapshot:
-        campaigns = snapshot.get("campaigns", [])
-        countries = snapshot.get("countries", [])
-    else:
-        from analysis.roas_calculator import (
-            compute_all_campaign_roas,
-            compute_all_country_roas,
-        )
-        try:
-            campaigns = compute_all_campaign_roas(window_days=window_days)
-            countries = compute_all_country_roas(window_days=window_days)
-        except Exception as exc:
-            log.error("Confidence summary computation failed: %s", exc)
-            raise HTTPException(
-                status_code=500, detail="Confidence summary computation failed"
-            ) from exc
-
-    summary = summarize_roas_confidence(campaigns, countries)
-
-    # Build definitions for response (label + trust_level + description only)
-    definitions = {}
-    for key, defn in CONFIDENCE_DEFINITIONS.items():
-        definitions[key] = {
-            "label": defn["label"],
-            "trust_level": defn["trust_level"],
-            "description": defn["description"],
-        }
-
-    return {
-        "window": window_str,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "overall_confidence": summary["overall_confidence"],
-        "summary": {
-            "campaign_rows": summary["campaign_rows"],
-            "country_rows": summary["country_rows"],
-            "tier_1_count": summary["tier_1_count"],
-            "tier_2_count": summary["tier_2_count"],
-            "tier_3_count": summary["tier_3_count"],
-            "tier_1_share": summary["tier_1_share"],
-            "tier_2_share": summary["tier_2_share"],
-            "tier_3_share": summary["tier_3_share"],
-        },
-        "definitions": definitions,
-        "message": summary["message"],
-    }
 
 
 # ---------------------------------------------------------------------------
