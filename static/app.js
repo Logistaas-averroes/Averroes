@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "roas-campaigns", "roas-countries", "unit-economics", "revenue-health", "revenue-by-source", "channels", "system"];
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "unit-economics", "revenue-health", "revenue-by-source", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -152,8 +152,6 @@ const PAGE_DATASET_MAP = {
   leads:             ["hubspot/contact_funnel", "hubspot/lifecycle_events"],
   deals:             ["hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
-  action_queue:      ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
-  reports:           ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
 };
 
 // Pages whose output is derived/computed from the source datasets above rather
@@ -174,22 +172,6 @@ const PAGE_EXPLANATIONS = {
     dependsOn: ["campaigns", "leads", "deals", "gclid_attribution"],
     emptyMeans: "No verified spend or closed-won revenue exists in the selected business window.",
     nextAction: "Open Revenue Health to check spend, FX, and revenue truth status."
-  },
-  "action-queue": {
-    title: "Action Queue",
-    purpose: "Ranked human-review items based on campaign, waste, geo, keyword, and data-quality signals.",
-    source: "Campaigns, search terms, waste, and lead data.",
-    dependsOn: ["campaigns", "search_terms", "waste_terms", "leads"],
-    emptyMeans: "No queue rules crossed the current review thresholds for this window.",
-    nextAction: "Check System Status to verify all pipelines are running."
-  },
-  reports: {
-    title: "Reports",
-    purpose: "Latest generated advisor report from the scheduled analysis pipeline.",
-    source: "Weekly/monthly report generation jobs.",
-    dependsOn: ["weekly_report"],
-    emptyMeans: "No report has been generated yet. Reports appear after weekly or monthly scheduler jobs complete.",
-    nextAction: "Check Data Runs to confirm scheduler has executed."
   },
   campaigns: {
     title: "Campaign Evidence",
@@ -314,23 +296,9 @@ const PAGE_HELP_CONTENT = {
   dashboard: {
     what: "Executive overview of Google Ads spend, HubSpot closed-won revenue, pipeline conversion, source mix, and computed action signals for one business window.",
     source: "Canonical Revenue Decision Mart (Google Ads spend truth + HubSpot closed-won revenue truth), Revenue by Source, and the closed-won deal ledger.",
-    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaign Revenue & Spend, Revenue by Source, Action Queue) to drill down.",
+    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaign Revenue & Spend, Revenue by Source) to drill down.",
     doNotAssume: "'Unavailable' means the truth layer withheld a metric (FX, coverage, or lead-date safety) — it is never a $0. Period Revenue / Ad Spend (a non-cohort operational ratio) applies to Google Ads only; other sources are revenue-only.",
-    checkNext: "Revenue Health for truth blockers, or Action Queue for items needing human review."
-  },
-  "action-queue": {
-    what: "Ranked list of items requiring human review — campaigns to investigate, waste to confirm, geo anomalies, keyword issues, and data quality flags.",
-    source: "Generated from campaign verdicts, waste detection, geo intelligence, keyword metrics, and data quality checks.",
-    howToUse: "Work top-down by severity. Each item links to the relevant evidence page. Items are prompts for investigation, not automated actions.",
-    doNotAssume: "Severity is advisory only. An empty queue means no rules crossed thresholds — it does not guarantee account health.",
-    checkNext: "System Status to verify all pipelines ran, then the specific page linked from each queue item."
-  },
-  reports: {
-    what: "Latest generated advisor report from the scheduled analysis pipeline. Shows the most recent markdown report file.",
-    source: "Weekly/monthly report generation jobs produce markdown files.",
-    howToUse: "Read the latest report for a narrative summary. Use the Copy button to share with stakeholders. Refresh to check for newer reports.",
-    doNotAssume: "This is a point-in-time snapshot, not a live re-analysis. Data may have changed since the report was generated.",
-    checkNext: "Data Runs to see when the last report was generated."
+    checkNext: "Revenue Health for truth blockers, or Campaign Revenue & Spend for the campaigns behind a decision card."
   },
   campaigns: {
     what: "Campaign Evidence — genuine selected-window totals for spend, leads, SQLs, junk and CPQL, with a factual Outcome Status per campaign (SQL producer · Junk-heavy · Spend without SQL proof · Mapping review · No outcome evidence · Data unavailable). Outcome Status is a description of the window's evidence, not a scale/cut recommendation.",
@@ -444,8 +412,6 @@ const PAGE_HELP_CONTENT = {
 
 const PAGE_DEPENDENCIES = {
   dashboard:               ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
-  "action-queue":          ["google_ads_api/campaigns", "google_ads_api/search_terms", "hubspot/contacts"],
-  reports:                 ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
   campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
@@ -517,10 +483,6 @@ let geoMergedRows = [];
 let keywordRows = [];
 let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
-// Action Queue page state
-let actionQueueItems = [];
-let actionQueueStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
-
 // Search Terms page state lives with the PR-ADS-144 module (see
 // "Search Terms + Patterns evidence page" section).
 
@@ -555,12 +517,6 @@ let keywordsPrefill = null;
 // Campaign drawer N-Gram drilldown state
 let drawerNgramRows = [];
 let drawerNgramStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
-
-// Reports page state
-let latestReportMarkdown = "";
-let latestReportMeta = null;
-let reportLoadStatus = "idle"; // idle | loading | ok | empty | error
-let reportCopyFeedbackTimer = null;
 
 // Dataset Freshness state
 let datasetFreshnessRows = [];
@@ -1140,24 +1096,6 @@ async function fetchJSON(url, options = {}) {
   return res.json();
 }
 
-async function fetchText(path) {
-  const res = await fetch(path, { credentials: "same-origin" });
-  if (res.status === 401) {
-    showLogin();
-    throw new Error("Authentication required");
-  }
-  if (res.status === 403) throw new Error("HTTP 403");
-  if (res.status === 404) {
-    const err = new Error("Not found");
-    err.status = 404;
-    throw err;
-  }
-  if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`);
-  }
-  return res.text();
-}
-
 async function loadUiThresholds() {
   try {
     const data = await fetchJSON("/api/config/ui-thresholds");
@@ -1519,7 +1457,6 @@ function navigate(page, options) {
 function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboardTab();                       break;
-    case "reports":       loadReports(); break;
     case "campaigns":     loadCampaigns();                          break;
     case "search-terms":  loadSearchTermsEvidence();                break;
     case "geo":           loadGeo();                                break;
@@ -1539,7 +1476,6 @@ function loadPage(page) {
       break;
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
-    case "action-queue":  loadActionQueue();   break;
     case "backfill":      loadBackfillStatus(); break;
     case "roas-campaigns":  loadRoasCampaigns();  break;
     case "roas-countries":  loadRoasCountries();  break;
@@ -1713,7 +1649,7 @@ async function loadMonitoringStatus() {
 // attribute on the placeholder <p id="run-meta-{sectionKey}">.
 //
 // Sections that depend on weekly/monthly data (campaigns, waste, keywords,
-// geo, lead_quality, deals, gclid_attribution, action_queue, search_terms,
+// geo, lead_quality, deals, gclid_attribution, search_terms,
 // ngrams, in_progress_leads) use the latest run of any type because the global
 // freshness bar already shows the latest run.  If no run data is available the
 // strip shows a neutral unavailability note — it never shows false-fresh state.
@@ -1957,150 +1893,6 @@ function renderPageDatasetFreshness(sectionKey) {
   el.className = (errorCount > 0)
     ? "run-meta is-stale"
     : (warningCount > 0 ? "run-meta is-canonical-warning" : (freshCount === totalCount ? "run-meta is-fresh" : "run-meta"));
-}
-
-function updateReportActionButtons() {
-  const copyBtn    = document.getElementById("report-copy-btn");
-  const refreshBtn = document.getElementById("report-refresh-btn");
-  const hasReport  = reportLoadStatus === "ok" && !!latestReportMarkdown.trim();
-  if (copyBtn)    copyBtn.disabled = !hasReport || reportLoadStatus === "loading";
-  if (refreshBtn) refreshBtn.disabled = reportLoadStatus === "loading";
-}
-
-async function loadReports() {
-  const metaEl = document.getElementById("reports-meta");
-  const bodyEl = document.getElementById("reports-viewer-body");
-
-  // Cancel any pending copy-feedback timeout before resetting state.
-  if (reportCopyFeedbackTimer) {
-    clearTimeout(reportCopyFeedbackTimer);
-    reportCopyFeedbackTimer = null;
-  }
-
-  reportLoadStatus = "loading";
-  latestReportMarkdown = "";
-  latestReportMeta = null;
-  updateReportActionButtons();
-
-  if (metaEl) metaEl.innerHTML = "";
-  if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">Loading report…</p>`;
-
-  // Fetch metadata (non-fatal — raw report can still show without it).
-  try {
-    latestReportMeta = await fetchJSON("/reports/latest");
-  } catch (_) {
-    latestReportMeta = null;
-  }
-
-  // If metadata explicitly says no report exists, skip raw fetch.
-  if (latestReportMeta && latestReportMeta.exists === false) {
-    reportLoadStatus = "empty";
-    _renderReportsMeta(latestReportMeta);
-    updateReportActionButtons();
-    if (bodyEl) {
-      bodyEl.innerHTML = `
-        <p class="empty-state">No generated report found yet.</p>
-        <p class="empty-state-sub">Reports appear after weekly or monthly scheduler jobs complete.</p>`;
-    }
-    return;
-  }
-
-  // Fetch raw markdown body.
-  try {
-    latestReportMarkdown = await fetchText("/reports/latest/raw");
-    reportLoadStatus = latestReportMarkdown.trim() ? "ok" : "empty";
-  } catch (err) {
-    // 404 means no report on disk — treat as empty state, not a hard error.
-    reportLoadStatus = err.status === 404 ? "empty" : "error";
-    latestReportMarkdown = "";
-  }
-
-  _renderReportsMeta(latestReportMeta);
-  updateReportActionButtons();
-
-  if (!bodyEl) return;
-
-  if (reportLoadStatus === "error") {
-    bodyEl.innerHTML = `<p class="empty-state">Could not load latest report. Check API health or run status.</p>`;
-  } else if (reportLoadStatus === "empty") {
-    bodyEl.innerHTML = `
-      <p class="empty-state">No generated report found yet.</p>
-      <p class="empty-state-sub">Reports appear after weekly or monthly scheduler jobs complete.</p>`;
-  } else {
-    bodyEl.innerHTML = `<pre class="report-markdown">${escapeHtml(latestReportMarkdown)}</pre>`;
-  }
-}
-
-function _renderReportsMeta(meta) {
-  const metaEl = document.getElementById("reports-meta");
-  if (!metaEl) return;
-
-  const filename    = meta && meta.filename    ? meta.filename    : null;
-  const generatedAt = meta && meta.generated_at ? meta.generated_at : null;
-  const path        = meta && meta.path        ? meta.path        : null;
-  const reportType  = meta && meta.report_type ? meta.report_type : null;
-
-  // Report is available if metadata says so OR if the raw body loaded successfully.
-  const hasReportBody = !!(latestReportMarkdown && latestReportMarkdown.trim());
-  const exists = meta && meta.exists === true || hasReportBody;
-
-  metaEl.innerHTML = `
-    <div class="report-meta-card">
-      <div class="report-meta-card__label">Report file</div>
-      <div class="report-meta-card__value">${filename ? escapeHtml(filename) : "—"}</div>
-    </div>
-    <div class="report-meta-card">
-      <div class="report-meta-card__label">Generated</div>
-      <div class="report-meta-card__value">${generatedAt ? fmtDate(generatedAt) : "—"}</div>
-    </div>
-    <div class="report-meta-card">
-      <div class="report-meta-card__label">Source</div>
-      <div class="report-meta-card__value">${path ? escapeHtml(path) : "outputs/*.md"}</div>
-    </div>
-    <div class="report-meta-card">
-      <div class="report-meta-card__label">Type / Status</div>
-      <div class="report-meta-card__value">${reportType ? escapeHtml(reportType) : "—"} · ${exists ? "Available" : "Unavailable"}</div>
-    </div>`;
-}
-
-function copyLatestReport() {
-  const btn = document.getElementById("report-copy-btn");
-  const origHTML = btn ? btn.innerHTML : null;
-
-  const showFeedback = (success) => {
-    if (!btn) return;
-    btn.innerHTML = success
-      ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
-      : `Copy failed`;
-    btn.disabled = true;
-    reportCopyFeedbackTimer = setTimeout(() => {
-      reportCopyFeedbackTimer = null;
-      if (!btn || origHTML === null) return;
-      btn.innerHTML = origHTML;
-      // Re-enable only if the report is still loaded — guard against a concurrent refresh.
-      btn.disabled = !(reportLoadStatus === "ok" && !!latestReportMarkdown.trim());
-    }, 2000);
-  };
-
-  if (!latestReportMarkdown) return;
-
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(latestReportMarkdown).then(
-      () => showFeedback(true),
-      () => showFeedback(false),
-    );
-  } else {
-    const ta = document.createElement("textarea");
-    ta.value = latestReportMarkdown;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
-    document.body.removeChild(ta);
-    showFeedback(ok);
-  }
 }
 
 // ── Dashboard — Executive Overview command center (PR-ADS-134) ─────────────
@@ -7363,7 +7155,7 @@ function wireCampaignEvidenceControls() {
 
 // ── Flagged Waste Terms page — RETIRED (PR-ADS-153D) ───────────────────────
 // The standalone page is gone. Its investigation functionality lives in
-// Search Terms → Flagged, and its actionable subset lives in the Action Queue.
+// Search Terms → Flagged.
 // `#/waste` redirects there (see RETIRED_PAGE_REDIRECTS), so old links still
 // land on the equivalent view rather than a dead end.
 //
@@ -10801,7 +10593,8 @@ let _flagFilters = { q: "", campaign: "", reviewState: "", reason: "",
                      minSpend: "", sqlState: "", sort: "priority", page: 1 };
 let _flagReqId = 0;
 let _flagDebounceTimer = null;
-// Term to focus when arriving from an Action Queue link.
+// Term to focus when arriving from a deep link that names one
+// (#/search-terms?tab=flagged&term=…).
 let _flagFocusTerm = null;
 let _stData = null;                  // /api/search-term-evidence payload
 let _stLoadState = "idle";           // idle | loading | ok | db_unavailable | error
@@ -10924,8 +10717,8 @@ function loadSearchTermsEvidence() {
     _stTab = _stPendingTab;
     _stPendingTab = null;
   }
-  // An Action Queue link carries the term it wants investigated, so the queue
-  // item lands on the row it is about rather than on a generic list.
+  // A deep link may carry the term it wants investigated, so it lands on the
+  // row it is about rather than on a generic list.
   // URLSearchParams.get() already decodes, so this value is used as-is.
   // Decoding again would throw URIError on a legitimate term such as "100%".
   const focusTerm = hashParams.get("term");
@@ -11533,7 +11326,6 @@ function renderFlaggedQuarantine(data) {
       ${sample ? `<details><summary>Diagnostic sample</summary><ul>${sample}</ul></details>` : ""}
       ${(truth.reasons || []).length
         ? `<p class="grace-note">Invariant: ${escapeHtml((truth.reasons || []).join(", "))}</p>` : ""}
-      <p class="grace-note">No Action Queue item is created from quarantined evidence.</p>
     </div>`;
 }
 
@@ -11568,8 +11360,8 @@ function flagReviewOutageNotice(data) {
 
 function flagFocusNotice() {
   if (!_flagFocusTerm) return "";
-  return `<p class="grace-note">Filtered to <strong>${escapeHtml(_flagFocusTerm)}</strong> from an
-    Action Queue link. <button type="button" class="revenue-filter-chip" id="flag-clear-focus">Show all flagged terms</button></p>`;
+  return `<p class="grace-note">Filtered to <strong>${escapeHtml(_flagFocusTerm)}</strong> by the
+    link that opened this view. <button type="button" class="revenue-filter-chip" id="flag-clear-focus">Show all flagged terms</button></p>`;
 }
 
 function renderFlaggedKPIs(kpis) {
@@ -11720,7 +11512,7 @@ function renderFlaggedTable() {
       <th class="td--num">Clicks</th>
       <th title="Why this term is flagged, from the shared waste-reason taxonomy">Reason flagged</th>
       <th class="td--num" title="Search-term-attributable lifecycle SQLs — a strict attribution subset">SQL evidence</th>
-      <th title="Local review decision — shared with the Action Queue">Review state</th>
+      <th title="Local review decision">Review state</th>
       <th title="Deterministic, explainable priority — hover for the exact components">Priority</th>
       <th>First flagged</th>
       <th title="Latest date Google Ads reported this term">Latest seen</th>
@@ -15132,8 +14924,8 @@ function renderCampaignDrawer(data) {
   // PR-ADS-161B review round 3 — gated on THIS response's verdict
   // (`data.cohort`, returned by /api/campaign-detail with the row), narrowed by
   // the row's own copy. Never on the Campaign page's state: the drawer is also
-  // opened from the Action Queue, where that state may be absent or belong to
-  // an earlier request.
+  // opened from another page (the Search Terms drawer), where that state may
+  // be absent or belong to an earlier request.
   const drawerCohort = data.cohort || null;
   const drawerSqlPub = campaignRowSqlPublication(drawerCohort, camp);
   // The drawer headline status obeys the same gate as the table.
@@ -15842,224 +15634,6 @@ function copyDrawerWasteTerms(terms, btn) {
   }
 }
 
-// ── Action Queue page ──────────────────────────────────────────────────────
-
-const QUEUE_TYPE_LABELS = {
-  campaign_review:     "Campaign",
-  waste_review:        "Waste",
-  geo_review:          "Geo",
-  keyword_review:      "Keyword",
-  data_quality_review: "Data Quality",
-};
-
-async function loadActionQueue() {
-  renderPageDatasetFreshness("action_queue");
-  const listEl = document.getElementById("action-queue-list");
-  if (listEl) listEl.innerHTML = `<p class="empty-state">Loading action queue…</p>`;
-
-  ["aq-kpi-total", "aq-kpi-high", "aq-kpi-medium", "aq-kpi-low"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = "—";
-  });
-
-  actionQueueStatus = "loading";
-  actionQueueItems = [];
-
-  try {
-    const data = await fetchJSON(`/api/action-queue?days=${getSelectedDays()}`);
-
-    if (data.db_unavailable) {
-      actionQueueStatus = "db_unavailable";
-      actionQueueItems = [];
-      _renderActionQueueKPIs(null);
-      _renderActionQueueList();
-      return;
-    }
-
-    actionQueueItems = data.items || [];
-    actionQueueStatus = actionQueueItems.length === 0 ? "empty" : "ok";
-    _renderActionQueueKPIs(data.summary || null);
-    _renderActionQueueList();
-
-  } catch (_) {
-    actionQueueStatus = "error";
-    actionQueueItems = [];
-    _renderActionQueueKPIs(null);
-    _renderActionQueueList();
-  }
-}
-
-function _renderActionQueueKPIs(summary) {
-  const totalEl  = document.getElementById("aq-kpi-total");
-  const highEl   = document.getElementById("aq-kpi-high");
-  const mediumEl = document.getElementById("aq-kpi-medium");
-  const lowEl    = document.getElementById("aq-kpi-low");
-
-  if (!summary) {
-    [totalEl, highEl, mediumEl, lowEl].forEach((el) => {
-      if (el) el.textContent = "—";
-    });
-    return;
-  }
-
-  if (totalEl)  totalEl.textContent  = String(summary.total  ?? "—");
-  if (highEl)   highEl.textContent   = String(summary.high   ?? "—");
-  if (mediumEl) mediumEl.textContent = String(summary.medium ?? "—");
-  if (lowEl)    lowEl.textContent    = String(summary.low    ?? "—");
-}
-
-function _getFilteredQueueItems() {
-  const sevSel  = document.getElementById("aq-filter-severity");
-  const typeSel = document.getElementById("aq-filter-type");
-  const sevVal  = sevSel  ? sevSel.value  : "";
-  const typeVal = typeSel ? typeSel.value : "";
-
-  let items = actionQueueItems;
-  if (sevVal)  items = items.filter((i) => i.severity === sevVal);
-  if (typeVal) items = items.filter((i) => i.type     === typeVal);
-  return items;
-}
-
-function _renderActionQueueList() {
-  const listEl = document.getElementById("action-queue-list");
-  if (!listEl) return;
-
-  if (actionQueueStatus === "db_unavailable") {
-    listEl.innerHTML = `
-      <div class="action-queue-item action-queue-item--empty">
-        <p class="empty-state">Action Queue temporarily unavailable — database offline.</p>
-      </div>`;
-    return;
-  }
-
-  if (actionQueueStatus === "error") {
-    listEl.innerHTML = `
-      <div class="action-queue-item action-queue-item--empty">
-        <p class="empty-state">Could not load Action Queue. Check API health or run status.</p>
-      </div>`;
-    return;
-  }
-
-  const items = _getFilteredQueueItems();
-
-  if (items.length === 0) {
-    const isFiltered = (document.getElementById("aq-filter-severity") || {}).value ||
-                       (document.getElementById("aq-filter-type")     || {}).value;
-    listEl.innerHTML = `
-      <div class="action-queue-item action-queue-item--empty">
-        <p class="empty-state">${isFiltered
-          ? "No items match the current filter."
-          : "No review items found for the selected window."
-        }</p>
-        ${!isFiltered ? `<p class="empty-state-sub">This means no queue rules crossed the current review thresholds.</p>` : ""}
-      </div>`;
-    return;
-  }
-
-  listEl.innerHTML = items.map((item) => _renderQueueItemCard(item)).join("");
-
-  // Wire up action buttons
-  listEl.querySelectorAll(".queue-action-btn[data-campaign]").forEach((btn) => {
-    btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
-  });
-  listEl.querySelectorAll(".queue-action-btn[data-navigate]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      // A queue item may carry a deep link so the action lands on the row it is
-      // about (e.g. Search Terms → Flagged, focused on that term) rather than on
-      // a generic list. Setting the hash lets the normal router resolve it.
-      const deep = btn.dataset.navigateHash;
-      if (deep) { window.location.hash = deep; return; }
-      navigate(btn.dataset.navigate);
-    });
-  });
-}
-
-function _renderQueueItemCard(item) {
-  const rawSev  = item.severity || "low";
-  const rawType = item.type     || "";
-  // Sanitize values used in class names against known allowed sets
-  const sev   = ["high", "medium", "low"].includes(rawSev) ? rawSev : "low";
-  const type  = Object.prototype.hasOwnProperty.call(QUEUE_TYPE_LABELS, rawType) ? rawType : "";
-  const score = item.severity_score != null ? item.severity_score : 0;
-
-  const sevBadge  = `<span class="action-queue-badge severity-${escapeHtml(sev)}">${escapeHtml(sev.toUpperCase())}</span>`;
-  const typeBadge = `<span class="queue-type-badge queue-type-${escapeHtml(type)}">${escapeHtml(QUEUE_TYPE_LABELS[type] || type)}</span>`;
-
-  // Build evidence mini-grid
-  const ev = item.evidence || {};
-  const evEntries = Object.entries(ev).filter(([, v]) => v !== null && v !== undefined);
-  let evidenceHtml = "";
-  if (evEntries.length > 0) {
-    const cells = evEntries.map(([k, v]) => {
-      const label = k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-      const display = typeof v === "number"
-        ? (k.includes("usd") ? fmtDollar(v) : (k.includes("pct") ? v.toFixed(1) + "%" : String(v)))
-        : escapeHtml(String(v));
-      return `<div class="queue-evidence-cell"><div class="queue-evidence-cell__label">${escapeHtml(label)}</div><div class="queue-evidence-cell__value">${display}</div></div>`;
-    }).join("");
-    evidenceHtml = `<div class="queue-evidence-grid">${cells}</div>`;
-  }
-
-  // Build read-only action button driven by primary_link contract; fall back to type-based defaults.
-  let actionBtn = "";
-  const link = item.primary_link || {};
-  // Only trust navigation to pages explicitly listed in the PAGES registry.
-  const linkAction  = typeof link.action        === "string" ? link.action        : "";
-  const linkPage    = typeof link.page          === "string" && PAGES.includes(link.page) ? link.page : "";
-  const linkCampaign = typeof link.campaign_name === "string" && link.campaign_name ? link.campaign_name : "";
-
-  if (linkAction === "open_campaign_drawer" && (linkCampaign || item.campaign_name)) {
-    const campaignName = linkCampaign || item.campaign_name;
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(campaignName)}">Investigate campaign</button>`;
-  } else if (linkAction === "navigate" && linkPage) {
-    const navLabels = {
-      "search-terms": "View flagged term", geo: "View Geo",
-      keywords: "View Keywords", scheduler: "View Scheduler",
-    };
-    const label = navLabels[linkPage] || "View";
-    // Deep link is accepted only when it targets the page the item already
-    // declared, so a payload can never redirect the button somewhere else.
-    const deep = typeof link.hash === "string" &&
-      link.hash.startsWith(`#/${linkPage}`) ? link.hash : "";
-    const deepAttr = deep ? ` data-navigate-hash="${escapeHtml(deep)}"` : "";
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="${escapeHtml(linkPage)}"${deepAttr}>${escapeHtml(label)}</button>`;
-  } else if (type === "campaign_review" && item.campaign_name) {
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(item.campaign_name)}">Investigate campaign</button>`;
-  } else if (type === "waste_review") {
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="search-terms" data-navigate-hash="#/search-terms?tab=flagged">View flagged term</button>`;
-  } else if (type === "geo_review") {
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="geo">View Geo</button>`;
-  } else if (type === "keyword_review") {
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="keywords">View Keywords</button>`;
-  } else if (type === "data_quality_review") {
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="scheduler">View Scheduler</button>`;
-  }
-
-  const sourceHtml = item.source
-    ? `<div class="queue-source">Source: ${escapeHtml(item.source)}</div>`
-    : "";
-
-  return `
-    <div class="action-queue-item severity-border-${escapeHtml(sev)}">
-      <div class="action-queue-item__header">
-        <div class="action-queue-item__badges">
-          ${sevBadge}
-          ${typeBadge}
-          <span class="queue-score-note">Score: ${score}</span>
-        </div>
-        ${actionBtn ? `<div class="queue-readonly-actions">${actionBtn}</div>` : ""}
-      </div>
-      <div class="action-queue-item__title">${escapeHtml(item.title || "")}</div>
-      <div class="action-queue-item__detail">${escapeHtml(item.detail || "")}</div>
-      ${evidenceHtml}
-      ${sourceHtml}
-    </div>`;
-}
-
-function applyActionQueueFilters() {
-  _renderActionQueueList();
-}
-
 // ── Init ───────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -16178,23 +15752,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Keyword Evidence (PR-ADS-146) wires its own controls inside the page shell
   // (wireKeywordControls) — no global keyword filter wiring here.
 
-  // Wire up action queue filter controls
-  const aqSevSel  = document.getElementById("aq-filter-severity");
-  const aqTypeSel = document.getElementById("aq-filter-type");
-  if (aqSevSel)  aqSevSel.addEventListener("change",  applyActionQueueFilters);
-  if (aqTypeSel) aqTypeSel.addEventListener("change",  applyActionQueueFilters);
-
   // Wire up campaign drawer close controls
   const drawerCloseBtn = document.getElementById("drawer-close-btn");
   const drawerOverlay  = document.getElementById("campaign-drawer-overlay");
   if (drawerCloseBtn) drawerCloseBtn.addEventListener("click", closeCampaignDrawer);
   if (drawerOverlay)  drawerOverlay.addEventListener("click", closeCampaignDrawer);
-
-  // Wire up reports page controls
-  const reportCopyBtn    = document.getElementById("report-copy-btn");
-  const reportRefreshBtn = document.getElementById("report-refresh-btn");
-  if (reportCopyBtn)    reportCopyBtn.addEventListener("click", copyLatestReport);
-  if (reportRefreshBtn) reportRefreshBtn.addEventListener("click", loadReports);
 
   // Wire up dataset freshness refresh button
   const dfRefreshBtn = document.getElementById("dataset-freshness-refresh-btn");

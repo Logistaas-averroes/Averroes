@@ -11,8 +11,8 @@ HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 # All required data-page route keys (must never change without a migration PR)
 REQUIRED_ROUTE_KEYS = [
     "dashboard",
-    "action-queue",
-    "reports",
+    # PR-ADS-162G: "action-queue" and "reports" were deleted (pages, routes and
+    # endpoints); see tests/test_pr_ads_162g_action_queue_reports_retired.py.
     "campaigns",
     "search-terms",
     "geo",

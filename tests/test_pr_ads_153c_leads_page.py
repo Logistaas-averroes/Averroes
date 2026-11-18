@@ -263,7 +263,10 @@ def test_retired_loader_is_gone():
 
 def test_action_queue_has_no_links_to_retired_pages():
     """Action Queue's server-side primary_link pages must not reference a
-    retired page (they never did — this locks it in)."""
+    retired page (they never did — this locks it in).
+
+    PR-ADS-162G deleted the Action Queue itself. The assertions are unchanged:
+    no server link and no button names a retired page."""
     for retired in ('"page": "opportunities"', '"page": "leads"'):
         assert retired not in _SERVER_PY
     assert 'data-navigate="opportunities"' not in _APP_JS

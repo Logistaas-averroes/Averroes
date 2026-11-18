@@ -160,8 +160,9 @@ SEARCH_TERMS_SOURCE = PLATFORM_EVIDENCE_SOURCE
 SEARCH_TERMS_DATASET = "search_terms"
 
 # The LEGACY per-run keyword snapshot (`keywords`). Registered because live
-# non-evidence surfaces still read it (campaign drill-down previews, keyword
-# themes, the keyword-review queue), so its rows must keep resolving. It is
+# non-evidence surface still reads it (the Dashboard keyword themes; the
+# campaign drill-down preview migrated in PR-ADS-157), so its rows must keep
+# resolving. It is
 # never the source of a Keyword Evidence figure.
 LEGACY_KEYWORD_SNAPSHOT_SOURCE = PLATFORM_EVIDENCE_SOURCE
 LEGACY_KEYWORD_SNAPSHOT_DATASET = "keywords"

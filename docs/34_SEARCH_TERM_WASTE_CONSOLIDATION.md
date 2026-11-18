@@ -280,6 +280,11 @@ historically flagged, and a repeated sync cannot reopen it (§25, §44).
 
 ## 10. Action Queue integration (§17–§19)
 
+> **Retired in PR-ADS-162G.** The Action Queue page and `GET /api/action-queue`
+> are deleted. This section, and the mentions of the queue in §7, §9 and §15,
+> describe the system as it was. Search Terms → Flagged is now the only
+> surface for this population.
+
 One durable flagged term → one queue item, id `waste-review-<identity[:24]>`,
 stable until the term is resolved. Terms whose review state is a finished
 decision (`keep` / `resolved`) carry no remaining action and are excluded.
@@ -398,17 +403,20 @@ search-term waste belongs in the Action Queue.
 
 `scripts/audit_search_term_waste_truth.py` exits **non-zero** on any of:
 
-* a duplicate `term_identity` in the COMPLETE flagged population — audited
-  BEFORE the Action Queue deduplicates, because auditing after the dedup would
-  hide exactly the defect the gate exists to catch;
+* a duplicate `term_identity` in the COMPLETE flagged population, audited
+  before any deduplication;
 * row count, KPI count and pagination total disagreeing;
-* the page and the queue disagreeing on a term's spend or reason;
 * `truth_state = mismatch`;
 * canonical facts or the local review store unavailable;
 * no durable flag history persisted while flagged terms exist (i.e. the weekly
   write path is not running);
-* the queue reporting review state unavailable while presenting as empty;
 * any database error — an audit that cannot run is a FAILED audit, never a pass.
+
+> **PR-ADS-162G.** The Action Queue page was deleted, and with it two checks
+> that used to be listed here: the page and the queue disagreeing on a term's
+> spend or reason, and the queue reporting review state unavailable while
+> presenting as empty. Both compared two reads of the same builder. The audit
+> now reconciles counts only; it holds no spend assertion.
 
 `--json` returns the same non-zero status. Durable identities are computed with
 the shared `analysis.search_term_identity` contract, never by concatenating SQL

@@ -612,3 +612,47 @@ Recurring patterns (durable):
   1 contact read). Disclosed in docs/09 with a SELECT check, but docs/09 item 6
   claims the opposite.
 - `migrations.migration_id` is VARCHAR(50); keep new ids under that.
+
+## PR-ADS-162G review (7fe8bb0, parent d5a1875; Action Queue + Reports deleted)
+- No blocker. Deletion is clean: no removed JS/py name is referenced, all
+  `api.server` imports resolve, every `target_page` / `navigate(` / `#/` target
+  is in `PAGES`, removed CSS classes and ids are unused. 162G file: 16 of 18
+  cases fail on the parent (test_11, test_14 are the "kept" guards).
+- "Report pipeline" is a misnomer. `scheduler/weekly.py` + `monthly.py` are the
+  ONLY writers of `waste_terms` (a production source of the Flagged state:
+  `classification_source = "waste_terms"`), the legacy `geo`, `keywords`,
+  `campaigns` tables and `gclid_coverage_snapshots`, and the only callers of
+  `run_gclid_match`. `record_flag_history` is called from weekly ONLY.
+  `data/ads_campaigns.json` (weekly/monthly save) is the daily pulse's anomaly
+  baseline. Their `runs` rows are the `weekly` / `monthly` monitoring cadences.
+- Legacy `campaigns` table: no evidence reader, but NOT reader-less. The
+  freshness readers count its rows (`/api/datasets/freshness`, status war room,
+  `system_status_service`), and `campaigns` is in `CORE_DATASETS`, so a stopped
+  writer raises a System blocker ("Campaigns data is stale") and can read as a
+  critical core failure. It is also listed in `PAGE_PIPELINE_IMPACT` and in
+  app.js `PAGE_DEPENDENCIES` (dashboard, roas-campaigns, unit-economics), but
+  `getPageCanonicalStatus` is only called for campaigns, search-terms and
+  ngrams. Legacy `deals` table: no SELECT outside those generic freshness row
+  counts (pre-existing).
+- `/api/keywords` and `/api/waste` have no caller in `static/`. The only
+  in-product reader of legacy `keywords` is `fetch_keyword_theme_snapshot`.
+- The weekly/monthly report is still emailed (SendGrid, `scheduler/delivery.py`;
+  env keys declared in render.yaml). `ADVISOR_MODE=claude` sends the data
+  summary to the Anthropic API.
+- `scripts/audit_search_term_waste_truth.py` is in neither CI nor
+  `audit_platform_certification.AUDITS`; only the 153D PG tests run it. It
+  reconciles COUNTS only: KPI spend vs row spend and `review_needed` vs action
+  rows are not checked (executed). On a quarantined payload it also reports
+  "local review store unavailable", which is false (the quarantine payload
+  hard-codes `review_state_available: False`), and that masks removal of the
+  mismatch check in its PG test.
+- Doctrine scanner (`js_symbol_at`) attributes a top-level JS literal to the
+  preceding column-0 function. A rule bound by `symbol` with no `pattern`
+  pre-classifies everything in that function too (executed: a new
+  `confirmed_sqls` read in `renderPageDatasetFreshness` is silently bound to
+  Dashboard Overview by `ui.overview.delta_valence`).
+- Pattern: a "kept checks" test that asserts failure-message strings passes
+  with every check disabled (162G test_12, executed). An AST target reader that
+  exempts `Name(id="target_page")` passes a local variable of that name.
+- Scratch worktrees via `git worktree add --detach` outside the reviewed tree
+  worked for mutation runs; PG tests ran (python3.11).

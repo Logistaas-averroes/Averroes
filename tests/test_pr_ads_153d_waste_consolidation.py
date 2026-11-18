@@ -6,7 +6,7 @@ PR-ADS-153D — Search-Term Waste Consolidation & Navigation Cleanup.
 Covers the required suites:
   §40  navigation — Flagged Waste Terms retired, Search Terms stays under
        Google Ads, GCLID Attribution moves to Admin, old URLs redirect, no dead
-       Action Queue links;
+       links to the retired page;
   §41  search-term truth — repeated run snapshots cannot double-count, canonical
        spend is the ONE source, annotations are not a second ledger, campaign
        identity is preserved and same-text terms never collide;
@@ -15,8 +15,9 @@ Covers the required suites:
        a broader scope;
   §43  flag / review state — durable, shared, local-only, auditable after
        resolution, unmapped reasons surfaced;
-  §44  Action Queue — one durable term → one item, stable across repeated sync,
-       resolved terms not reopened, same spend and reason as the page;
+  §44  Action Queue — DELETED in PR-ADS-162G with the page and its endpoint;
+       what remains here is the retirement assertion and the priority rules,
+       which belong to the flagged view;
   §45  windows — evidence vocabulary, no leftover waste-specific resolver;
   §46  privacy / governance — no PII, no Google Ads mutation, no Mailchimp.
 
@@ -215,16 +216,10 @@ def test_no_dead_action_queue_or_drawer_links_to_the_retired_page():
     assert 'navigate("waste"' not in _APP_JS
     assert 'href="#/waste"' not in _APP_JS
     assert 'data-navigate="waste"' not in _APP_JS
-    # The queue's waste action goes to the canonical destination instead.
-    assert 'data-navigate="search-terms"' in _APP_JS
-
-
-def test_action_queue_link_lands_on_the_flagged_view_for_that_term():
-    fn = _SERVER_PY.split("def _build_waste_queue_items(")[1].split("\ndef ")[0]
-    assert '"page": "search-terms"' in fn
-    assert "#/search-terms?tab=flagged&term=" in fn
-    # The frontend honours a deep link only when it targets the declared page.
-    assert "link.hash.startsWith(`#/${linkPage}`)" in _APP_JS
+    # PR-ADS-162G: this test also asserted that the Action Queue's waste button
+    # (`data-navigate="search-terms"`) existed. The queue is deleted, and so is
+    # test_action_queue_link_lands_on_the_flagged_view_for_that_term, whose
+    # whole subject was the queue item's deep link. See the §44 retirement test.
 
 
 def test_retired_page_registries_are_cleaned_up():
@@ -557,12 +552,12 @@ def test_no_surface_claims_a_google_ads_mutation_happened(phrase):
     review_endpoint = _SERVER_PY.split(
         '@app.post("/api/search-term-evidence/review")')[1].split("@app.")[0]
     review_module = (_ROOT / "analysis" / "search_term_review_state.py").read_text()
-    queue_builder = _SERVER_PY.split(
-        "def _build_waste_queue_items(")[1].split("\ndef ")[0]
 
+    # PR-ADS-162G: the third surface here was the Action Queue's waste builder,
+    # deleted with the page. The two surfaces that still word a local review
+    # decision are checked exactly as before.
     for text, label in ((flagged_ui, "flagged tab"),
-                        (review_endpoint, "review endpoint"),
-                        (queue_builder, "queue builder")):
+                        (review_endpoint, "review endpoint")):
         assert phrase not in text.lower(), f"{label}: {phrase!r}"
     # The review module names the phrases only to forbid them.
     assert phrase in review_module.lower()
@@ -647,92 +642,42 @@ def test_no_duplicate_frontend_reason_mapping():
 
 
 # =============================================================================
-# §44 — Action Queue
+# §44 — Action Queue (DELETED in PR-ADS-162G)
 # =============================================================================
-def _queue(monkeypatch, agg, **kw):
+# The Action Queue page, GET /api/action-queue and the server's
+# `_build_waste_queue_items` are gone, so the tests whose whole subject was the
+# queue item are gone with them:
+#   test_one_durable_term_produces_one_queue_item
+#   test_repeated_sync_does_not_duplicate_a_queue_item
+#   test_resolved_term_is_not_reopened_by_a_repeated_observation
+#   test_queue_item_and_page_row_share_spend_and_reason
+#   test_queue_discloses_unavailable_attribution
+#   test_queue_never_reads_the_run_snapshot_table
+# What they protected on the PAGE is still pinned where it always was: one row
+# per durable identity (merge-blocker 1 below), resolved/keep leaving no action
+# (test_keep_and_resolved_remove_the_remaining_action), unavailable attribution
+# as null (§42), and no snapshot double-counting (§41).
+def test_the_action_queue_waste_builder_is_retired():
     from api import server
 
-    _patch(monkeypatch, agg, **kw)
-    return server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
-
-
-def test_one_durable_term_produces_one_queue_item(monkeypatch):
-    items = _queue(monkeypatch, _agg([
-        _g("freight jobs", "Brand - UK", "1", spend=200.0, rows=5,
-           flagged=True, junk="job_seeker"),
-    ]), sql_attr=_no_attribution())
-    assert len(items) == 1
-    assert items[0]["evidence"]["term_identity"] == identity.term_identity_key(
-        "1", "freight jobs")
-
-
-def test_repeated_sync_does_not_duplicate_a_queue_item(monkeypatch):
-    """Five run snapshots of the same term still yield one item with one id."""
-    agg = _agg([_g("freight jobs", "Brand - UK", "1", spend=200.0, rows=5,
-                   flagged=True, junk="job_seeker")])
-    waste = [{"search_term": "freight jobs", "campaign_name": "Brand - UK",
-              "junk_category": "job_seeker", "matched_pattern": "jobs",
-              "crm_junk_confirmed": 1, "run_date": f"2026-07-0{d}"}
-             for d in range(1, 6)]
-    first = _queue(monkeypatch, agg, waste_rows=waste, sql_attr=_no_attribution())
-    second = _queue(monkeypatch, agg, waste_rows=waste, sql_attr=_no_attribution())
-    assert len(first) == len(second) == 1
-    assert first[0]["id"] == second[0]["id"]      # stable across runs
-
-
-def test_resolved_term_is_not_reopened_by_a_repeated_observation(monkeypatch):
-    agg = _agg([_g("freight jobs", "Brand - UK", "1", spend=200.0,
-                   flagged=True, junk="job_seeker")])
-    ident = identity.term_identity_key("1", "freight jobs")
-    items = _queue(monkeypatch, agg, reviews={ident: {
-        "term_identity": ident, "review_state": "resolved"}},
-        sql_attr=_no_attribution())
-    assert items == []
-
-
-def test_queue_item_and_page_row_share_spend_and_reason(monkeypatch):
-    agg = _agg([_g("freight jobs", "Brand - UK", "1", spend=200.0,
-                   flagged=True, junk="job_seeker")])
-    _patch(monkeypatch, agg, sql_attr=_no_attribution())
-    row = _flagged()["rows"][0]
-
-    from api import server
-    item = server._build_waste_queue_items(None, 30, 100.0)[0]  # noqa: SLF001
-    assert item["evidence"]["spend_usd"] == row["spend_usd"]
-    assert item["evidence"]["flag_reason"] == row["flag_reason"]
-    assert item["evidence"]["term_identity"] == row["term_identity"]
-
-
-def test_queue_discloses_unavailable_attribution(monkeypatch):
-    items = _queue(monkeypatch, _agg([
-        _g("freight jobs", "Brand - UK", "1", spend=200.0, flagged=True,
-           junk="job_seeker"),
-    ]), sql_attr=_no_attribution())
-    assert "not a proven zero" in items[0]["detail"]
-    assert items[0]["evidence"]["sql_attribution_status"] == "unavailable"
-    assert items[0]["evidence"]["applied_to_google_ads"] is False
-
-
-def test_queue_never_reads_the_run_snapshot_table():
-    fn = _SERVER_PY.split("def _build_waste_queue_items(")[1].split("\ndef ")[0]
-    # Checked against the CODE — the docstring necessarily quotes the old SQL in
-    # order to explain the defect it replaced.
-    code = _strip_py_docstrings_and_comments(fn)
-    # The builder issues no SQL of its own at all — it calls the canonical
-    # service. (`waste_terms` still appears as a provenance LABEL on the item,
-    # which is a truthful description of the annotation source, not a read.)
-    assert "cur.execute" not in code
-    assert "FROM waste_terms" not in code
-    assert "SUM(spend_usd)" not in code
-    assert "build_flagged_search_terms" in code
+    for name in ("_build_waste_queue_items", "_build_campaign_queue_items",
+                 "_build_geo_queue_items", "_build_keyword_queue_items",
+                 "_build_data_quality_items", "api_action_queue",
+                 "_evidence_window_for_days"):
+        assert not hasattr(server, name), name
+    assert "/api/action-queue" not in {r.path for r in server.app.routes}
+    assert "/api/action-queue" not in _APP_JS
 
 
 def test_priority_is_explainable_and_never_an_ai_score(monkeypatch):
-    items = _queue(monkeypatch, _agg([
+    # PR-ADS-162G: this read the reasons off the queue item, which copied them
+    # verbatim from the flagged row. Same population, same threshold, read from
+    # the row itself now that the queue is deleted.
+    _patch(monkeypatch, _agg([
         _g("freight jobs", "Brand - UK", "1", spend=200.0, rows=4,
            flagged=True, junk="job_seeker"),
     ]), sql_attr=_no_attribution())
-    reasons = items[0]["evidence"]["priority_reasons"]
+    reasons = _flagged(high_spend_usd=100.0)["rows"][0]["priority_reasons"]
     codes = {r["code"] for r in reasons}
     assert "high_spend" in codes
     assert "clear_disqualifying_intent" in codes
@@ -784,14 +729,10 @@ def test_no_waste_specific_window_resolver_remains():
     assert "_wasteData" not in _APP_JS
 
 
-def test_action_queue_snaps_to_a_canonical_evidence_window():
-    from api.server import _evidence_window_for_days
-
-    assert _evidence_window_for_days(7) == "7d"
-    assert _evidence_window_for_days(30) == "30d"
-    # Never narrower than requested — that direction cannot under-report.
-    assert _evidence_window_for_days(31) == "60d"
-    assert _evidence_window_for_days(365) == "all_time"
+# PR-ADS-162G: test_action_queue_snaps_to_a_canonical_evidence_window is removed.
+# `_evidence_window_for_days` translated the Action Queue's `days` lookback into
+# an evidence window and had no other caller; it was deleted with the queue
+# (asserted absent in test_the_action_queue_waste_builder_is_retired).
 
 
 def test_all_time_does_not_claim_completeness(monkeypatch):
@@ -1034,8 +975,6 @@ def _flagged_variant_case():
 
 def test_case_variants_reconcile_across_every_surface(monkeypatch):
     """The exact reported reproduction, asserted end to end."""
-    from api import server
-
     _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
     payload = _flagged()
 
@@ -1044,11 +983,9 @@ def test_case_variants_reconcile_across_every_surface(monkeypatch):
     assert payload["kpis"]["flagged_terms"] == 1
     assert payload["kpis"]["flagged_spend_usd"] == 30.0
     assert payload["rows"][0]["spend_usd"] == 30.0
-
-    items = server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
-    assert len(items) == 1
-    assert items[0]["evidence"]["spend_usd"] == 30.0
-    assert items[0]["evidence"]["term_identity"] == payload["rows"][0]["term_identity"]
+    # PR-ADS-162G: the fourth surface was the Action Queue item for this term
+    # (one item, the same $30, the same identity). The queue is deleted; rows,
+    # pagination and KPIs above are every surface that remains.
 
 
 def test_row_count_always_equals_identity_count(monkeypatch):
@@ -1184,23 +1121,11 @@ def test_waste_annotation_joins_across_a_casing_difference(monkeypatch):
     assert (payload["annotation_join"]["legacy_unresolved"] or 0) == 0
 
 
-def test_action_queue_refuses_to_silently_drop_a_duplicate_identity(monkeypatch):
-    """The queue must never quietly skip a repeat — that is how a variant's
-    spend went missing. A duplicate is an invariant break and raises."""
-    import services.search_term_evidence_service as svc
-    from api import server
-
-    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
-    real = svc.build_flagged_search_terms          # capture BEFORE patching
-
-    def _duplicated(window, **kw):
-        payload = real(window, **kw)
-        payload["rows"] = payload["rows"] + payload["rows"]   # forced break
-        return payload
-
-    monkeypatch.setattr(svc, "build_flagged_search_terms", _duplicated)
-    with pytest.raises(RuntimeError, match="duplicate durable"):
-        server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
+# PR-ADS-162G: test_action_queue_refuses_to_silently_drop_a_duplicate_identity is
+# removed with the queue builder it exercised. A duplicate identity in the
+# flagged population is still refused where the population is built
+# (test_identity_divergence_raises_instead_of_serving) and by the production
+# gate (scripts/audit_search_term_waste_truth.py, pre-dedup identity check).
 
 
 # =============================================================================
@@ -1230,8 +1155,6 @@ def test_flagged_with_no_reason_evidence_reports_mismatch(monkeypatch):
 
 
 def test_mismatch_exposes_no_kpi_row_or_action_count(monkeypatch):
-    from api import server
-
     _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
     payload = _flagged()
 
@@ -1245,9 +1168,8 @@ def test_mismatch_exposes_no_kpi_row_or_action_count(monkeypatch):
                    "review_state_status"):
             continue
         assert value in (None, False), f"{key} leaked a value on mismatch: {value!r}"
-
-    # And no action is manufactured from it.
-    assert server._build_waste_queue_items(None, 30, 100.0) == []  # noqa: SLF001
+    # PR-ADS-162G: the last assertion here was that the Action Queue built no
+    # item from a quarantined population. The queue is deleted.
 
 
 def test_mismatch_disables_filters_pagination_and_review_actions(monkeypatch):
@@ -1329,9 +1251,9 @@ def test_healthy_payload_is_marked_actionable(monkeypatch):
 # and kept terms into the Action Queue. An outage silently undid human
 # decisions.
 # After: review_state is null with an explicit `unavailable` status,
-# action_needed is null, Review Needed is withheld, review controls are
-# disabled, and the queue DISCLOSES the outage instead of returning an empty
-# list that reads as "no work".
+# action_needed is null, Review Needed is withheld and review controls are
+# disabled. (The queue also disclosed the outage instead of returning an empty
+# list, until the Action Queue was deleted in PR-ADS-162G.)
 
 def _outage(monkeypatch, agg, **kw):
     import db.search_term_review_repository as review_repo
@@ -1387,32 +1309,11 @@ def test_outage_disables_review_actions_and_the_review_filter(monkeypatch):
         _flagged(review_state="unreviewed")
 
 
-def test_outage_queue_discloses_rather_than_returning_an_empty_list(monkeypatch):
-    """An empty waste-action list would be read as zero outstanding work."""
-    from api import server
-
-    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
-    items = server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
-    assert len(items) == 1
-    item = items[0]
-    assert item["id"] == "waste-review-unavailable"
-    assert item["evidence"]["review_state_status"] == "unavailable"
-    assert item["evidence"]["actions_available"] is False
-    assert "NOT zero outstanding work" in item["detail"]
-    # It is a disclosure, not an action against a term.
-    assert item["entity_type"] == "review_store"
-
-
-def test_outage_never_reopens_a_resolved_or_kept_term(monkeypatch):
-    """The whole point: an unreadable store must not resurrect decided terms as
-    actionable queue items."""
-    from api import server
-
-    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
-    items = server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
-    # Exactly one disclosure item, and no per-term action for anything.
-    assert [i["entity_type"] for i in items] == ["review_store"]
-    assert not any(i["evidence"].get("term_identity") for i in items)
+# PR-ADS-162G: test_outage_queue_discloses_rather_than_returning_an_empty_list
+# and test_outage_never_reopens_a_resolved_or_kept_term are removed with the
+# queue. Their subject was the queue's disclosure item. On the page the outage
+# is still pinned above: null review state, Review Needed withheld, no
+# never_reviewed priority component, review actions and the filter disabled.
 
 
 def test_frontend_says_unavailable_not_unreviewed():

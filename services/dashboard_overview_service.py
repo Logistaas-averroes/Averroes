@@ -568,7 +568,7 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
                 # shows exactly these campaigns on the same business window).
                 # The #/waste page is ad-window search-term waste and cannot
                 # evidence this campaign-level signal; the Investigate decision
-                # card routes to the Action Queue.
+                # card routes to the same page as this signal.
                 "target_page": "roas-campaigns",
             }
 
@@ -760,8 +760,10 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 f"{'s' if waste['campaign_count'] != 1 else ''} has no SQL or "
                 "won-deal evidence in this window."
             ),
-            "target_page": "action-queue",
-            "target_label": "Open Action Queue",
+            # PR-ADS-162G: this card restates the biggest_waste signal, so it
+            # opens the page that signal names as its evidence.
+            "target_page": "roas-campaigns",
+            "target_label": "Open Campaign Revenue & Spend",
         })
     elif not sqls_available:
         cards.append({
@@ -789,8 +791,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "title": "Investigate",
             "headline": "No unexplained paid spend",
             "body": "Every campaign with spend has SQL or won-deal evidence in this window.",
-            "target_page": "action-queue",
-            "target_label": "Open Action Queue",
+            "target_page": "roas-campaigns",
+            "target_label": "Open Campaign Revenue & Spend",
         })
 
     blockers = []

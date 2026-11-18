@@ -12,8 +12,8 @@ APP_JS = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 # All required data-page route keys
 REQUIRED_ROUTES = [
     "dashboard",
-    "action-queue",
-    "reports",
+    # PR-ADS-162G: "action-queue" and "reports" were deleted (pages, routes and
+    # endpoints); see tests/test_pr_ads_162g_action_queue_reports_retired.py.
     "campaigns",
     "search-terms",
     "ngrams",
@@ -357,8 +357,9 @@ class TestPageExplanationContainers:
         # evidence page in PR-ADS-144 — methodology moved into the Help drawer,
         # so the page carries no inline explanation container (same precedent
         # as "deals" above and the ROAS pages in PR-ADS-110).
+        # "action-queue" and "reports" were deleted outright in PR-ADS-162G.
         key_pages = [
-            "dashboard", "action-queue", "reports", "campaigns",
+            "dashboard", "campaigns",
             "geo", "keywords",
             "gclid-attribution",
             "scheduler", "health", "backfill",

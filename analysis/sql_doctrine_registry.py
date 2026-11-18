@@ -454,25 +454,7 @@ CONSUMERS: list[dict] = [
        truth_status="sqls_not_closed_won None when unavailable",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
 
-    # ── Action queue / operational ──────────────────────────────────────────
-    _c("Action Queue — campaign items", "Queue inclusion/scoring on snapshot confirmed_sqls and FIX/CUT verdicts.",
-       endpoint="GET /api/action-queue", service_function="api.server._build_campaign_queue_items",
-       repository_source="inline SQL over campaigns snapshot", source_table=SNAPSHOT_TABLE,
-       sql_definition=SNAPSHOT_DEF, date_field=SNAPSHOT_DATE, dedup_key="DISTINCT ON (campaign_name)",
-       windows=["days lookback"], scope="other (snapshot)", classification=CLS_LEGACY,
-       code_location="api/server.py:_build_campaign_queue_items",
-       migration_notes="qualifies when sqls == 0 and spend > 0; score +30.",
-       truth_status="db_unavailable → empty queue with flag",
-       row=True, sorting=True, decision=True, operational=True),
-    _c("Action Queue — geo items", "Country queue items on raw leads confirmed_sqls (run_date).",
-       endpoint="GET /api/action-queue", service_function="api.server._build_geo_queue_items",
-       repository_source="inline SQL over leads + geo", source_table=LEGACY_TABLE,
-       sql_definition="SUM(CASE WHEN status_category = 'qualified' THEN 1 ELSE 0 END)",
-       date_field="run_date", dedup_key="CASE WHEN contact_id <> '' THEN contact_id ELSE CAST(id AS TEXT) END",
-       windows=["days lookback"], scope="all_source (country)", classification=CLS_LEGACY,
-       code_location="api/server.py:_build_geo_queue_items",
-       migration_notes="Same run_date population as the Geo page; not the Campaign Evidence population.",
-       truth_status="db_unavailable → empty", row=True, decision=True, operational=True),
+    # ── Operational ─────────────────────────────────────────────────────────
     _c("Lead Quality API (/api/leads)", "Legacy status buckets on run_date; no frontend caller.",
        endpoint="GET /api/leads", service_function="api.server.api_leads / _lead_quality_sql_reconciliation",
        repository_source="inline SQL over leads", source_table=LEGACY_TABLE,
@@ -514,8 +496,8 @@ CONSUMERS: list[dict] = [
     # ── Scheduled outputs ───────────────────────────────────────────────────
     _c("Weekly / monthly report pipeline (analysis.core → rule_advisor → email)",
        "Campaign truth confirmed_sqls, CPQL and FIX/HOLD/SCALE/CUT verdicts from a local "
-       "JSON contact pull, emailed via SendGrid and served at /reports/latest.",
-       endpoint="APScheduler weekly/monthly; POST /run/weekly, /run/monthly; GET /reports/latest",
+       "JSON contact pull, emailed via SendGrid.",
+       endpoint="APScheduler weekly/monthly; POST /run/weekly, /run/monthly",
        service_function="analysis.core.run_lead_quality / run_campaign_truth / determine_verdict; analysis.rule_advisor.generate_deterministic_report",
        repository_source="data/crm_contacts.json + outputs/*.json (files)", source_table="none (JSON)",
        sql_definition="mql_status in ['CLOSED - Sales Qualified', 'CLOSED - Deal Created'] (QUALIFIED)",
@@ -536,8 +518,11 @@ CONSUMERS: list[dict] = [
        source_table=SNAPSHOT_TABLE, sql_definition="copies confirmed_sqls; cpql = spend / sqls",
        date_field=SNAPSHOT_DATE, dedup_key="none", windows=["snapshot"], scope="other",
        classification=CLS_LEGACY, code_location="db/writers.py:write_campaigns",
-       migration_notes="Feeds the action queue (/api/summary and /api/dashboard/trends "
-                       "were retired in PR-ADS-162B; historical intelligence in PR-ADS-162D).",
+       migration_notes="No EVIDENCE reader remains (the action queue was deleted in "
+                       "PR-ADS-162G); the table is still a registered core freshness "
+                       "dataset (services/freshness_service.py, system status) "
+                       "(/api/summary and /api/dashboard/trends were retired in "
+                       "PR-ADS-162B; historical intelligence in PR-ADS-162D).",
        truth_status="cpql None when sqls == 0", row=True, cpql=True),
     _c("leads snapshot writer (db.writers.write_leads / _map_status_category)",
        "Derives status_category from mql_status and stores contact_created_at from createdate.",
@@ -713,8 +698,6 @@ _CAMP = "Dashboard Campaigns"
 _CTRY = "Dashboard Countries"
 _REV = "Dashboard Revenue"
 _DEALS = "Dashboard Deals"
-_AQC = "Action Queue — campaign items"
-_AQG = "Action Queue — geo items"
 _LEADS_API = "Lead Quality API (/api/leads)"
 _WORKBENCH = "Campaign identity workbench"
 _MAILCHIMP = "Mailchimp attribution audit"
@@ -1203,8 +1186,6 @@ RULES: list[dict] = [
     _r("api.geo", "api/server.py", CLS_LEGACY, _GEO, symbol="api_leads_country_summary"),
     _r("api.leads", "api/server.py", CLS_LEGACY, _LEADS_API,
        symbol=["api_leads", "_lead_quality_sql_reconciliation"]),
-    _r("api.aq.campaign", "api/server.py", CLS_LEGACY, _AQC, symbol="_build_campaign_queue_items"),
-    _r("api.aq.geo", "api/server.py", CLS_LEGACY, _AQG, symbol="_build_geo_queue_items"),
     _r("api.campaign_detail", "api/server.py", CLS_LEGACY, _CD, symbol="_build_campaign_detail"),
     _r("api.gclid", "api/server.py", CLS_LEGACY, _GCLID, symbol="api_gclid_attribution"),
     _r("api.keyword", "api/server.py", CLS_LEGACY, _KW,
@@ -1274,6 +1255,15 @@ RULES: list[dict] = [
        symbol=["_appendDrawerEvidenceSections", "openCampaignDrawer"]),
     _r("ui.geo", "static/app.js", CLS_LEGACY, _GEO, symbol=["loadGeo", "renderGeoMap", "renderGeoTable"]),
     _r("ui.overview", "static/app.js", CLS_MIXED, _OVW, symbol=["renderDashKpiRow", "dashSignalBody"]),
+    # DASH_DELTA_VALENCE — the Dashboard delta-chip valence map, keyed `sqls` —
+    # is a top-level literal, so the scanner attributes it to the function
+    # before it. Until PR-ADS-162G that was the Reports page's copyLatestReport,
+    # which bound a Dashboard literal to the report pipeline it never fed.
+    # Bound to the ONE pattern it exists for: without `pattern` the rule would
+    # pre-classify anything written inside renderPageDatasetFreshness (the
+    # freshness strip on every evidence page) as a Dashboard reader.
+    _r("ui.overview.delta_valence", "static/app.js", CLS_MIXED, _OVW,
+       symbol="renderPageDatasetFreshness", pattern="sqls_field_ref"),
     _r("ui.channels", "static/app.js", CLS_MIXED, _CHAN,
        symbol=["renderDashboardChannels", "renderChanKpiRow", "chanQualityBubbleSVG",
                "renderChanQualityPanel", "wireChanQualityHover", "renderChanPlatformMatrix",
@@ -1308,7 +1298,6 @@ RULES: list[dict] = [
                "renderFlaggedFilters", "renderFlaggedKPIs", "renderFlaggedTab", "renderFlaggedTable",
                "openFlaggedDrawer"]),
     _r("ui.gclid", "static/app.js", CLS_LEGACY, _GCLID, symbol="renderGclidAttributionTable"),
-    _r("ui.report", "static/app.js", CLS_LEGACY, _REPORT, symbol="copyLatestReport"),
     # PR-ADS-161E: the canonical reason labels (the CANONICAL_REASON_LABELS
     # literal follows `dashValue`, so the scanner attributes it there) and the
     # Deals tab's rate cell say an SQL-based rate is unavailable — they render
@@ -1447,14 +1436,6 @@ DECISION_SURFACES: list[dict] = [
      "code_location": "analysis/rule_advisor.py:_build_data_gaps",
      "sql_definition": "campaign_truth confirmed_sqls (JSON)", "scope": "per campaign label",
      "date_field": "none", "kind": "recommendation", "gated": "none", "evidence_kind": "row evidence"},
-    {"surface": "Action Queue campaign items (sqls == 0 and spend > 0 → +30)",
-     "code_location": "api/server.py:_build_campaign_queue_items",
-     "sql_definition": SNAPSHOT_DEF, "scope": "per campaign label", "date_field": SNAPSHOT_DATE,
-     "kind": "action-queue", "gated": "none", "evidence_kind": "row evidence"},
-    {"surface": "Action Queue geo items (spend > 0 and sqls == 0 → +20)",
-     "code_location": "api/server.py:_build_geo_queue_items",
-     "sql_definition": "SUM(CASE WHEN status_category = 'qualified' …)", "scope": "country (all_source)",
-     "date_field": "run_date", "kind": "action-queue", "gated": "none", "evidence_kind": "row evidence"},
     {"surface": "Dashboard trends alert 'spend rose without SQLs' + severity",
      "code_location": "api/server.py:_build_trend_alerts",
      "sql_definition": SNAPSHOT_DEF, "scope": "per campaign label", "date_field": SNAPSHOT_DATE,
@@ -1503,14 +1484,14 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
                 "windows by date_entered_sql. The same contact lands in different windows.",
      "code_location": "services/crm_funnel_reconciliation_service.py:compare_sql_counts"},
     {"id": "date.run_date_windows",
-     "summary": "Geo country summary, action-queue geo items and /api/leads window the leads "
+     "summary": "Geo country summary and /api/leads window the leads "
                 "table by run_date; Campaign Evidence windows the same table by "
                 "contact_created_at under the same Evidence Window label.",
      "code_location": "api/server.py:api_leads_country_summary"},
     {"id": "doctrine.third_snapshot_population",
      "summary": "campaigns.confirmed_sqls (analysis/core.py) counts mql_status literals from a "
-                "JSON pull with no date, dedup or exclusions; the action queue "
-                "reads it.",
+                "JSON pull with no date, dedup or exclusions; the weekly/monthly "
+                "report publishes it.",
      "code_location": "analysis/core.py:run_lead_quality"},
     {"id": "scope.keyword_attributable_two_definitions",
      "summary": "platform_sql_attribution keyword scope is criterion-level (campaign_id + "

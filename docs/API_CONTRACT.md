@@ -128,40 +128,6 @@ Return the most recent record from `runtime_logs/run_history.jsonl`.
 
 ---
 
-#### `GET /reports/latest`
-Metadata for the most recently modified file in `outputs/`.
-
-**Auth:** Auth
-**Response 200 (when report exists):**
-```json
-{
-  "report_type": "weekly",
-  "filename": "weekly_report_2026-04-28.md",
-  "generated_at": "2026-04-28T07:04:23Z",
-  "path": "outputs/weekly_report_2026-04-28.md",
-  "exists": true
-}
-```
-**Response 200 (when no report):**
-```json
-{ "report_type": null, "filename": null, "generated_at": null, "path": null, "exists": false }
-```
-
-**UI note (PR-ADS-035):** Used by the Reports page to display report metadata cards (file, generated date, source path, type/status). Read-only — does not trigger scheduler jobs, does not call Claude, does not generate new analysis.
-
----
-
-#### `GET /reports/latest/raw`
-Raw markdown content of the latest report. `text/plain` response.
-
-**Auth:** Auth
-**Response 200:** Plain markdown text (the report content)
-**Response 404:** `{ "detail": "No markdown report found" }`
-
-**UI note (PR-ADS-035):** Used by the Reports page to render the report body. The SPA renders the content as escaped text inside a `<pre>` element — markdown is **not** injected as raw HTML. The Reports page is a read-only viewer: it does not trigger scheduler jobs, does not call Claude, and does not generate new analysis. The report reflects the latest generated markdown file on disk, not a live re-analysis.
-
----
-
 #### `GET /scheduler/status`
 In-app scheduler state and next run times.
 
@@ -760,110 +726,6 @@ UI-safe display thresholds from `config/thresholds.yaml`.
 - `quality_score.strong_min` — quality score at or above this → strong badge
 - `quality_score.medium_min` — quality score at or above this (but below strong_min) → medium badge
 - `using_defaults` — present and `true` only when the YAML file could not be loaded
-
----
-
-#### `GET /api/action-queue?days=30`
-Ranked human-review queue based on campaign, waste, geo, keyword, and data-quality signals.
-
-**Auth:** Auth
-**Query params:** `days` (integer, default 30, max 365)
-**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
-**Sources:** `campaigns`, `waste_terms`, `geo`, `leads`, `keywords`, `runs` tables
-
-**Item types:**
-- `campaign_review` — campaigns with verdict FIX/CUT, zero SQLs with spend, or high junk rate
-- `waste_review` — top waste terms by spend that meet high-spend or CRM-confirmed threshold
-- `geo_review` — countries with high junk rate, zero SQLs with spend, or unknown country
-- `keyword_review` — keywords with spend above threshold and zero Google Ads conversions
-- `data_quality_review` — run failures or absence of recent weekly/monthly successful runs
-
-**Severity scoring (display-only — not automated recommendations):**
-
-Campaign:
-- +30 if SQLs = 0 and spend > 0
-- +25 if junk rate ≥ high_pct threshold (default 30%)
-- +20 if verdict = FIX
-- +30 if verdict = CUT
-- +15 if spend ≥ high_spend_usd threshold (default $100)
-- Capped at 100
-
-Waste:
-- Base 30 + up to +55 based on spend, CRM confirmed, and fraud/job/student/free category
-
-Geo:
-- Base 25 + up to +60 based on junk rate, zero SQLs with spend, unknown country
-
-Keyword:
-- Base 20 + up to +55 based on spend threshold, zero conversions, broad match type
-
-Data quality:
-- Base 40 + up to +60 based on latest run failure and absence of weekly/monthly runs
-
-**Severity labels:** `high` (score ≥ 75), `medium` (40–74), `low` (< 40)
-
-**Sorting:** Items sorted by `(-severity_score, type, entity_label)` for stable ordering.
-
-**Limit:** Maximum 30 items returned.
-
-**Important scope notes:**
-- Queue items are human-review prompts only — not automated action recommendations.
-- Severity is display-only.
-- No writes are performed by this endpoint.
-- No external API calls are made.
-- Keyword `evidence.google_ads_conversions` reflects Google Ads API platform conversions only, not HubSpot SQLs.
-
-**Response 200:**
-```json
-{
-  "days": 30,
-  "items": [
-    {
-      "id": "campaign-global-competitors-review",
-      "type": "campaign_review",
-      "severity": "high",
-      "severity_score": 92,
-      "title": "Campaign warrants review: global - competitors",
-      "detail": "Spend is $1200.50. Confirmed SQLs are 0. Junk rate is 42.0%. Verdict is FIX. Warrants review.",
-      "entity_label": "global - competitors",
-      "entity_type": "campaign",
-      "campaign_name": "global - competitors",
-      "source": "campaigns table",
-      "evidence": {
-        "spend_usd": 1200.50,
-        "confirmed_sqls": 0,
-        "junk_rate_pct": 42.0,
-        "verdict": "FIX"
-      },
-      "primary_link": {
-        "page": "campaigns",
-        "action": "open_campaign_drawer",
-        "campaign_name": "global - competitors"
-      }
-    }
-  ],
-  "summary": {
-    "total": 12,
-    "high": 3,
-    "medium": 6,
-    "low": 3
-  },
-  "data_quality": {
-    "status": "ok"
-  }
-}
-```
-
-**DB unavailable response:**
-```json
-{
-  "days": 30,
-  "items": [],
-  "summary": { "total": 0, "high": 0, "medium": 0, "low": 0 },
-  "data_quality": { "status": "db_unavailable" },
-  "db_unavailable": true
-}
-```
 
 ---
 
@@ -1700,8 +1562,8 @@ only ATTRIBUTES it, and always labels the count
   "campaign_name": "Gulf", "review_state": "exclude_candidate", "note": null }
 ```
 
-Records ONE human review decision against the canonical durable identity, so the
-Search Terms flagged view and the Action Queue read the same decision.
+Records ONE human review decision against the canonical durable identity, read
+back by the Search Terms flagged view.
 
 `exclude_candidate` is a **local recommendation**. It is NOT evidence that a
 Google Ads negative keyword was applied — Averroes has no write path to Google
@@ -2434,8 +2296,6 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/auth/me` | Auth | Current user |
 | GET | `/readiness` | Admin | System readiness |
 | GET | `/runs/latest` | Auth | Latest run record (JSONL) |
-| GET | `/reports/latest` | Auth | Latest report metadata |
-| GET | `/reports/latest/raw` | Auth | Latest report markdown |
 | GET | `/scheduler/status` | Auth | Scheduler state |
 | POST | `/run/daily` | Admin | Trigger daily |
 | POST | `/run/weekly` | Admin | Trigger weekly |
@@ -2449,7 +2309,6 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/keywords` | Auth | Google Ads API keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
-| GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
 | GET | `/api/search-terms/summary` | Auth | Aggregate summary counts for selected filter/window (search_terms table, no pagination) |

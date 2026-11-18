@@ -7,7 +7,8 @@ Tests cover:
   - PAGE_DATASET_MAP includes all major data pages.
   - Every dataset key in PAGE_DATASET_MAP is a known "source/dataset" string.
   - Derived pages (ngrams) map to google_ads_api/search_terms.
-  - Multi-dataset pages (action_queue) reference the expected composite keys.
+  - Multi-dataset pages (campaigns) reference the expected composite keys;
+    the action_queue and reports entries are retired (PR-ADS-162G).
   - "Unknown" state is described as freshness-unverified, never as "failed".
   - No unsafe action wording appears in the freshness display copy.
   - /api/datasets/freshness response includes dataset_key field.
@@ -57,7 +58,7 @@ EXPECTED_PAGES: set[str] = {
     "keywords",
     "deals",
     "gclid_attribution",
-    "action_queue",
+    # PR-ADS-162G: "action_queue" was here until the Action Queue page was deleted.
 }
 
 # Derived pages whose mapping must point exclusively at google_ads_api/search_terms
@@ -180,18 +181,24 @@ class TestDerivedPages:
 # ---------------------------------------------------------------------------
 
 class TestMultiDatasetPages:
-    """Action queue and similar pages must list multiple datasets."""
+    """Pages that depend on more than one dataset must list each of them."""
 
-    def test_action_queue_has_multiple_datasets(self):
-        assert "action_queue" in _PAGE_MAP, "action_queue not in PAGE_DATASET_MAP"
-        assert len(_PAGE_MAP["action_queue"]) > 1, (
-            "action_queue should reference multiple datasets"
-        )
+    def test_action_queue_and_reports_entries_are_retired(self):
+        """PR-ADS-162G: this was test_action_queue_has_multiple_datasets and
+        test_action_queue_includes_campaigns_and_contacts. The Action Queue and
+        Reports pages are deleted; a freshness mapping for a page that does not
+        exist would be a strip nothing renders."""
+        assert "action_queue" not in _PAGE_MAP
+        assert "reports" not in _PAGE_MAP
+        assert 'renderPageDatasetFreshness("action_queue")' not in _APP_JS_TEXT
 
-    def test_action_queue_includes_campaigns_and_contacts(self):
-        keys = _PAGE_MAP.get("action_queue", [])
-        assert "google_ads_api/campaigns" in keys, "action_queue must include google_ads_api/campaigns"
-        assert "hubspot/contacts" in keys, "action_queue must include hubspot/contacts"
+    def test_campaigns_lists_both_of_its_datasets(self):
+        """The multi-dataset page that remains (PR-ADS-143): the strip reflects
+        the worst of canonical spend and HubSpot contacts."""
+        keys = _PAGE_MAP.get("campaigns", [])
+        assert len(keys) > 1, "campaigns should reference multiple datasets"
+        assert "google_ads_api/canonical_spend" in keys
+        assert "hubspot/contacts" in keys
 
     def test_multi_dataset_summary_tracks_running_and_unknown(self):
         """Multi-dataset summary must include running and unknown counts, not just fresh/stale/failed."""

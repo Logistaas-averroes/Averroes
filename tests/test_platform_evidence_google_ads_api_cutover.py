@@ -223,7 +223,12 @@ class TestDatasetSourceMapping:
         assert block is not None, "PAGE_DATASET_MAP not found"
         # PR-ADS-146: the Keyword Evidence page depends on the DURABLE keyword_facts
         # dataset, not the legacy keywords snapshot.
-        page_datasets = ["campaigns", "search_terms", "keyword_facts", "geo"]
+        # PR-ADS-162G: the first entry was "campaigns" — the legacy campaigns
+        # snapshot dataset, which only the Action Queue and Reports pages mapped
+        # to. Both pages are deleted. The Campaigns page itself has mapped to
+        # the canonical daily-spend dataset since PR-ADS-143, so that is the
+        # google_ads_api key asserted for it now.
+        page_datasets = ["canonical_spend", "search_terms", "keyword_facts", "geo"]
         for ds in page_datasets:
             assert f"google_ads_api/{ds}" in block, (
                 f"PAGE_DATASET_MAP must map to google_ads_api/{ds}"

@@ -46,8 +46,8 @@ def test_help_drawer_css_exists():
 
 REQUIRED_HELP_PAGES = [
     "dashboard",
-    "action-queue",
-    "reports",
+    # PR-ADS-162G: "action-queue" and "reports" were deleted (pages, routes and
+    # endpoints); see tests/test_pr_ads_162g_action_queue_reports_retired.py.
     "campaigns",
     "search-terms",
     "keywords",
