@@ -2161,3 +2161,59 @@ assertions in `test_sidebar_navigation_structure.py`,
 `test_help_drawer_and_snapshot_history.py` and
 `test_empty_state_page_explanations.py` were turned into retirement
 assertions, as PR-ADS-153D did for Flagged Waste Terms.
+
+---
+
+## PR-ADS-162E — delete the legacy local-JSON ROAS chain
+
+**Why.** Since PR-ADS-161E this chain existed to withhold its own output. It
+computed revenue, ROAS, LTV/CAC and SCALE/HOLD/FIX/CUT verdicts from local JSON
+files; a daily job persisted them; and every route that served them replaced
+each figure with "withheld — not canonical". The Reports page showed the result
+as a table of dates beside the word "Withheld". One route still published
+numbers computed from it: the attribution confidence summary's tier counts.
+
+**Deleted.**
+
+| What | Detail |
+| --- | --- |
+| Modules | `analysis/roas_calculator.py`, `analysis/unit_economics.py`, `services/unit_economics_service.py`, `services/roas_snapshot_service.py`, `connectors/hubspot_churn.py`, `config/churn_input.yaml` |
+| Scripts | `scripts/smoke_test_roas.py`, `scripts/smoke_test_roas_snapshot.py` |
+| Routes | `GET /api/reports/roas/campaigns`, `/api/reports/roas/countries`, `/api/reports/roas/snapshots`, `/api/reports/roas/snapshots/latest`, `/api/attribution/confidence-summary` |
+| Job | the "daily ROAS snapshot" step of `scheduler/daily.py` (the job is now five steps) |
+| UI | the Revenue Snapshot History block on Reports; the Attribution Confidence card on GCLID Attribution; their loaders and styles |
+| Config | the `roas:` block of `config/thresholds.yaml` (its only reader was `roas_calculator`) |
+| Server helpers | `_withhold_legacy_roas_snapshot`, `_LEGACY_SNAPSHOT_METADATA`, `_LEGACY_REVENUE_WITHHELD` |
+
+**Kept.** `GET /api/reports/unit-economics` (canonical) is untouched.
+`analysis/attribution_confidence.py` stays: revenue rows still carry a
+confidence label. `analysis/attribution_matcher.py` stays: the revenue
+attribution service reads it. `LEGACY_REVENUE_WITHHELD_REASON` stays for the
+GCLID readiness diagnostic. The Reports page keeps its advisor-report viewer.
+
+**The reader-cutover audit** (`scripts/audit_customer_revenue_reader_cutover.py`).
+Four inventory rows for the deleted surfaces are removed, and `RETIRED_LEGACY`
+no longer names files that do not exist. The guard is kept and tightened:
+
+- `READER_ENTRY_POINTS` still names the chain's functions, so a module that
+  calls one again is a closed-won reader the inventory must name.
+- Check 16 used to read the two deprecated route bodies for a legacy
+  computation. It now fails if `api/server.py` names any of the chain's
+  functions or a `/api/reports/roas/` route anywhere.
+
+**Tests.** `tests/test_pr_ads_162e_legacy_roas_chain_retired.py` (10 tests, 14
+cases): the files are gone; no production module imports a deleted module
+(several were imported lazily, inside a function, where a leftover import is a
+crash waiting for its code path); each route is 404 on the running app and
+absent from the route table; the canonical unit-economics route still
+resolves; the daily job has no snapshot step; the UI has no loader, block or
+fetch left; the audit's structural checks pass on this tree, and go red when a
+legacy call is put back into the server text; the unread thresholds are gone.
+Existence assertions for the deleted block in four older test files became
+retirement assertions; `tests/test_roas_snapshot_service.py` is deleted with
+the service it tested.
+
+**Found by this slice's own test.** `test_08` ran the audit's wording check and
+caught a sentence written in PR-ADS-162D: the corrected Unit Economics help
+text named ROAS and CAC, which check 18 forbids in any UI text. It is reworded
+in 162D.

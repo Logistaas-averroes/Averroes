@@ -67,13 +67,13 @@ def test_roas_window_selects_are_business_windows_not_ad_windows():
 # ── Legacy endpoints deprecated, not competing truth (#6) ────────────────────
 
 
-def test_legacy_roas_endpoints_marked_deprecated():
+def test_legacy_roas_endpoints_are_deleted():
+    """PR-ADS-108 marked the legacy ROAS report routes deprecated; PR-ADS-161E
+    made them withhold every figure; PR-ADS-162E deleted them. A deprecated
+    route that returns nothing but "withheld" has no caller left to keep."""
     for fn in ("async def get_roas_campaigns(", "async def get_roas_countries("):
-        idx = SERVER.find(fn)
-        assert idx != -1, f"{fn} not found"
-        region = SERVER[idx:SERVER.find("@app.get", idx + 1)]
-        assert '"deprecated": True' in region, f"{fn} must return deprecated=True"
-        assert '"superseded_by": "/api/revenue-attribution"' in region
+        assert fn not in SERVER, fn
+    assert '"/api/reports/roas/' not in SERVER
 
 
 def test_frontend_only_uses_revenue_attribution_for_roas():

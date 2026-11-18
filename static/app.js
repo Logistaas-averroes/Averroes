@@ -1519,7 +1519,7 @@ function navigate(page, options) {
 function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboardTab();                       break;
-    case "reports":       loadReports(); loadRevenueSnapshotHistory(); break;
+    case "reports":       loadReports(); break;
     case "campaigns":     loadCampaigns();                          break;
     case "search-terms":  loadSearchTermsEvidence();                break;
     case "geo":           loadGeo();                                break;
@@ -1536,7 +1536,6 @@ function loadPage(page) {
       loadGclidCoverageForAttribution();
       loadGclidQuality();
       loadGclidReadiness();
-      loadAttributionConfidenceSummary();
       break;
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
@@ -16450,70 +16449,6 @@ async function loadGclidReadiness() {
   }
 }
 
-async function loadAttributionConfidenceSummary() {
-  const container = document.getElementById("attribution-confidence-summary");
-  if (!container) return;
-
-  container.innerHTML = '<p class="empty-state">Loading confidence summary…</p>';
-
-  try {
-    const data = await fetchJSON(`/api/attribution/confidence-summary?window=${getCurrentWindowParam()}`);
-    if (!data || data.error) {
-      container.innerHTML = '<p class="empty-state">Could not load attribution confidence.</p>';
-      return;
-    }
-
-    const overall = data.overall_confidence || "UNKNOWN";
-    const summary = data.summary || {};
-    const message = data.message || "";
-
-    const overallCls = overall === "HIGH" ? "confidence-level--high"
-      : overall === "MEDIUM" ? "confidence-level--medium"
-      : overall === "LOW" ? "confidence-level--low"
-      : "confidence-level--unknown";
-
-    const t1Pct = ((summary.tier_1_share || 0) * 100).toFixed(1);
-    const t2Pct = ((summary.tier_2_share || 0) * 100).toFixed(1);
-    const t3Pct = ((summary.tier_3_share || 0) * 100).toFixed(1);
-
-    container.innerHTML = `
-      <div class="confidence-cards">
-        <div class="confidence-card">
-          <div class="confidence-card__label">Overall Confidence</div>
-          <div class="confidence-card__value"><span class="confidence-level-badge ${overallCls}">${escapeHtml(overall)}</span></div>
-        </div>
-        <div class="confidence-card">
-          <div class="confidence-card__label">Campaign Rows</div>
-          <div class="confidence-card__value">${summary.campaign_rows || 0}</div>
-        </div>
-        <div class="confidence-card">
-          <div class="confidence-card__label">Country Rows</div>
-          <div class="confidence-card__value">${summary.country_rows || 0}</div>
-        </div>
-        <div class="confidence-card confidence-card--tier1">
-          <div class="confidence-card__label"><span class="attribution-badge attribution-badge--tier1">Exact GCLID</span></div>
-          <div class="confidence-card__value">${summary.tier_1_count || 0} <small>(${t1Pct}%)</small></div>
-          <div class="confidence-card__desc">Click-level match</div>
-        </div>
-        <div class="confidence-card confidence-card--tier2">
-          <div class="confidence-card__label"><span class="attribution-badge attribution-badge--tier2">Source Tag</span></div>
-          <div class="confidence-card__value">${summary.tier_2_count || 0} <small>(${t2Pct}%)</small></div>
-          <div class="confidence-card__desc">HubSpot paid-search/campaign tag</div>
-        </div>
-        <div class="confidence-card confidence-card--tier3">
-          <div class="confidence-card__label"><span class="attribution-badge attribution-badge--tier3">Estimate</span></div>
-          <div class="confidence-card__value">${summary.tier_3_count || 0} <small>(${t3Pct}%)</small></div>
-          <div class="confidence-card__desc">Fallback allocation — directional only</div>
-        </div>
-      </div>
-      <p class="confidence-message">${escapeHtml(message)}</p>
-    `;
-  } catch (err) {
-    console.error("[loadAttributionConfidenceSummary]", err);
-    container.innerHTML = '<p class="empty-state">Error loading confidence summary.</p>';
-  }
-}
-
 // ── ROAS & Revenue Pages (PR-ADS-080B) ────────────────────────────────────
 
 const VALID_ROAS_WINDOWS = ["7d", "14d", "30d", "60d", "90d", "365d"];
@@ -18621,160 +18556,4 @@ function _trapHelpDrawerFocus(e) {
     e.preventDefault();
     first.focus();
   }
-}
-
-// ── Revenue Snapshot History (PR-ADS-083A) ────────────────────────────────
-
-let snapshotHistoryStatus = "idle"; // idle | loading | ok | empty | error
-
-async function loadRevenueSnapshotHistory() {
-  const container = document.getElementById("snapshot-history-container");
-  if (!container) return;
-
-  snapshotHistoryStatus = "loading";
-  container.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue snapshots…</p>';
-
-  try {
-    const [latestResult, listResult] = await Promise.allSettled([
-      fetchJSON(`/api/reports/roas/snapshots/latest?window=${getCurrentWindowParam()}`),
-      fetchJSON(`/api/reports/roas/snapshots?window=${getCurrentWindowParam()}&limit=30`),
-    ]);
-
-    let latestData = null;
-    let listData = null;
-
-    if (latestResult.status === "fulfilled") {
-      latestData = latestResult.value;
-    } else if (!_isNotFoundError(latestResult.reason)) {
-      throw latestResult.reason;
-    }
-    if (listResult.status === "fulfilled") {
-      listData = listResult.value;
-    } else if (!_isNotFoundError(listResult.reason)) {
-      throw listResult.reason;
-    }
-
-    const snapshots = (listData && listData.snapshots) || [];
-
-    // PR-ADS-161E: persisted ROAS snapshots were computed from local JSON by
-    // the retired chain. The API withholds every outcome figure; the page says
-    // so and points at the canonical page — it never renders a stale number.
-    const withheld = [latestData, listData].find((x) => x && x.status === "withheld");
-    if (withheld) {
-      snapshotHistoryStatus = "ok";
-      const dates = snapshots.map((snap) => escapeHtml(snap.snapshot_date || "—")).join(", ");
-      container.innerHTML = `
-        <div class="empty-state-block empty-state--info">
-          <p class="empty-state__title">Snapshot revenue, ratios and verdicts: ${canonicalMetricHtml({ value: null, status: "withheld", reason: withheld.reason })}</p>
-          <p class="empty-state__body">These snapshots were computed from local data outside the canonical closed-won ledger, so their spend, revenue, ratios, LTV/CAC and verdict counts are not published. Use <a href="#/roas-campaigns">Campaign Revenue & Spend</a> for canonical figures.</p>
-          ${dates ? `<p class="empty-state__body">Snapshot dates on record: ${dates}</p>` : ""}
-        </div>`;
-      return;
-    }
-
-    if (!latestData && snapshots.length === 0) {
-      snapshotHistoryStatus = "empty";
-      container.innerHTML = `
-        <div class="empty-state-block empty-state--info">
-          <p class="empty-state__title">No revenue snapshots exist yet.</p>
-          <p class="empty-state__body"><strong>Next:</strong> Snapshots are generated daily by the legacy snapshot scheduler. Check Data Runs for scheduler status.</p>
-        </div>`;
-      return;
-    }
-
-    snapshotHistoryStatus = "ok";
-    let html = "";
-
-    // Latest snapshot card
-    if (latestData) {
-      const summary = latestData.summary || {};
-      const ue = latestData.unit_economics || {};
-      html += `
-        <div class="snapshot-latest-card">
-          <h3 class="snapshot-latest-card__title">Latest Snapshot</h3>
-          <div class="snapshot-latest-card__meta">
-            <span class="context-chip context-chip--source">Date: ${escapeHtml(latestData.snapshot_date || "—")}</span>
-            <span class="context-chip context-chip--depends">Window: ${escapeHtml(latestData.window || "60d")}</span>
-            <span class="context-chip context-chip--readonly">Generated: ${fmtDate(latestData.generated_at)}</span>
-          </div>
-          <div class="kpi-grid snapshot-kpi-grid">
-            <div class="kpi-card"><div class="kpi-card__label">Total Spend</div><div class="kpi-card__value">${fmtDollar(summary.total_spend)}</div></div>
-            <div class="kpi-card"><div class="kpi-card__label">ACV Revenue</div><div class="kpi-card__value">${fmtDollar(summary.total_acv_revenue)}</div></div>
-            <div class="kpi-card"><div class="kpi-card__label">LTV Revenue</div><div class="kpi-card__value">${fmtDollar(summary.total_ltv_revenue)}</div></div>
-          </div>
-          <div class="verdict-count-grid snapshot-verdict-grid">
-            <div class="verdict-count-card verdict-count-card--scale"><div class="verdict-count-card__num">${fmt(summary.scale_count)}</div><div class="verdict-count-card__label">SCALE</div></div>
-            <div class="verdict-count-card verdict-count-card--hold"><div class="verdict-count-card__num">${fmt(summary.hold_count)}</div><div class="verdict-count-card__label">HOLD</div></div>
-            <div class="verdict-count-card verdict-count-card--fix"><div class="verdict-count-card__num">${fmt(summary.fix_count)}</div><div class="verdict-count-card__label">FIX</div></div>
-            <div class="verdict-count-card verdict-count-card--cut"><div class="verdict-count-card__num">${fmt(summary.cut_count)}</div><div class="verdict-count-card__label">CUT</div></div>
-            <div class="verdict-count-card"><div class="verdict-count-card__num">${fmt(summary.insufficient_data_count)}</div><div class="verdict-count-card__label">INSUFFICIENT</div></div>
-          </div>`;
-
-      // LTV/CAC and payback if available
-      if (ue.ltv_cac_ratio !== undefined && ue.ltv_cac_ratio !== null) {
-        html += `<div class="snapshot-economics"><span><strong>LTV/CAC:</strong> ${Number(ue.ltv_cac_ratio).toFixed(2)}x</span>`;
-        if (ue.payback_months !== undefined && ue.payback_months !== null) {
-          html += ` <span><strong>Payback:</strong> ${Number(ue.payback_months).toFixed(1)} months</span>`;
-        }
-        html += `</div>`;
-      }
-
-      // Warnings
-      const warnings = latestData.warnings || [];
-      if (warnings.length > 0) {
-        html += `<div class="snapshot-warnings"><strong>⚠ Warnings:</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul></div>`;
-      }
-
-      html += `</div>`; // close snapshot-latest-card
-    }
-
-    // History table
-    if (snapshots.length > 0) {
-      html += `
-        <div class="panel" style="margin-top:var(--space-4)">
-          <div class="panel__header">Snapshot History (last ${snapshots.length} runs)</div>
-          <div class="panel__body panel__body--flush">
-            <div class="table-scroll">
-              <table class="data-table">
-                <thead><tr>
-                  <th>Date</th>
-                  <th>Window</th>
-                  <th>Spend</th>
-                  <th>ACV Revenue</th>
-                  <th>LTV Revenue</th>
-                  <th>SCALE</th>
-                  <th>HOLD</th>
-                  <th>FIX</th>
-                  <th>CUT</th>
-                </tr></thead>
-                <tbody>`;
-      for (const snap of snapshots) {
-        const s = snap.summary || {};
-        html += `<tr>
-          <td>${escapeHtml(snap.snapshot_date || "—")}</td>
-          <td>${escapeHtml(snap.window || "—")}</td>
-          <td>${fmtDollar(s.total_spend)}</td>
-          <td>${fmtDollar(s.total_acv_revenue)}</td>
-          <td>${fmtDollar(s.total_ltv_revenue)}</td>
-          <td>${fmt(s.scale_count)}</td>
-          <td>${fmt(s.hold_count)}</td>
-          <td>${fmt(s.fix_count)}</td>
-          <td>${fmt(s.cut_count)}</td>
-        </tr>`;
-      }
-      html += `</tbody></table></div></div></div>`;
-    }
-
-    container.innerHTML = html;
-  } catch (err) {
-    console.error("[loadRevenueSnapshotHistory]", err);
-    snapshotHistoryStatus = "error";
-    container.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue snapshots.</p>';
-  }
-}
-
-function _isNotFoundError(err) {
-  if (err?.status === 404) return true;
-  const msg = String(err?.message ?? err ?? "");
-  return msg === "HTTP 404" || /not found/i.test(msg);
 }
