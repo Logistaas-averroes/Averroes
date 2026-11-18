@@ -145,6 +145,10 @@ class TestSummaryShape:
             "hubspot/sql_coverage_gaps",
             # PR-ADS-161D2: every won deal's companies, right after the ledger.
             "hubspot/deal_company_associations",
+            # PR-ADS-163C: the check for contacts HubSpot no longer has
+            # (deleted or merged), which the modified-since contact sync
+            # cannot see. It runs right after that sync.
+            "hubspot/contact_reconciliation",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -830,6 +834,20 @@ def _patch_all_datasets_success(
     monkeypatch.setattr(
         "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
         _sql_gaps_stub)
+
+    # PR-ADS-163C: the removed-contact check. Patched at the service seam like
+    # every other step (the real one opens a database run record and then asks
+    # HubSpot which stored contacts still exist), and mirroring the source_pull
+    # failure mode so the all-fail scenario still drives it to failure. A
+    # healthy fixture describes a check that found every contact present.
+    def _contact_reconciliation_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"status": "success", "contacts_checked": 0, "missing": 0,
+                "removed": 0, "hubspot_writes_performed": False}
+    monkeypatch.setattr(
+        "services.hubspot_contact_reconciliation_service."
+        "run_contact_reconciliation", _contact_reconciliation_stub)
 
     def _fx_stub(*a, **kw):
         if source_pull:

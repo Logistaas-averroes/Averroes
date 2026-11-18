@@ -1889,6 +1889,341 @@ def normalize_contact_funnel_row(contact: dict) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# PR-ADS-163C — which stored contacts still exist in HubSpot
+# ---------------------------------------------------------------------------
+# The modified-since scan above can only see a contact that CHANGED. A contact
+# that was deleted, or merged into another, does not change: it stops being
+# returned, and nothing tells the sync so. This is the explicit question the
+# sync never asks — "do these ids still exist?" — and nothing else. Read-only:
+# the CRM search endpoint (one filter, one property) for every stored id, and
+# a direct read by id of the few contacts a run is about to remove.
+
+#: Ids asked for in one search. Equal to the page limit, so one batch is always
+#: one page and there is nothing to page through.
+CONTACT_EXISTENCE_BATCH_SIZE = 100
+
+#: Seconds slept between two searches. HubSpot's search endpoint allows about
+#: five requests a second per token; this keeps the check under four.
+CONTACT_EXISTENCE_PACING_SECONDS = 0.25
+
+#: After this many batches IN A ROW with no usable answer the check stops
+#: calling HubSpot and marks every remaining batch unknown. A dead token or a
+#: sustained rate limit would otherwise be retried for every one of ~220
+#: batches (a 429 alone is 14 seconds of backoff per batch).
+CONTACT_EXISTENCE_MAX_CONSECUTIVE_UNKNOWN = 3
+
+
+def _canonical_object_id(value) -> str | None:
+    """A HubSpot object id in its canonical decimal text, or None when the
+    value is not one. ``"0042"`` and ``42`` are both ``"42"``."""
+    text = str(value if value is not None else "").strip()
+    if not (text and text.isascii() and text.isdigit()):
+        return None
+    return str(int(text))
+
+
+def _existence_batch(client, batch: list, records_read: int) -> set:
+    """The ids of ``batch`` that HubSpot returned, or an exception.
+
+    The answer is used only when it can be read as the WHOLE answer: a
+    ``results`` list (``_legacy_search_page`` raises without one, and bounds
+    the 429 retries), HubSpot's own ``total`` equal to the number of results
+    and no larger than the batch, no further page, and every result an id that
+    was asked for, once. Anything else raises ``HubSpotPullIncompleteError``:
+    the caller marks the batch UNKNOWN. An unreadable answer is never an
+    answer of "none of these exist".
+    """
+    pull = "check_contacts_exist"
+
+    def _unusable(detail: str):
+        logger.error("%s: unusable answer for a batch of %d id(s): %s",
+                     pull, len(batch), detail)
+        return HubSpotPullIncompleteError(pull, records_read, None, detail)
+
+    page = _legacy_search_page(
+        pull, records_read,
+        lambda: client.crm.contacts.search_api.do_search(
+            public_object_search_request={
+                "filterGroups": [{"filters": [
+                    {"propertyName": "hs_object_id", "operator": "IN",
+                     "values": list(batch)},
+                ]}],
+                "properties": ["hs_object_id"],
+                "limit": CONTACT_EXISTENCE_BATCH_SIZE,
+            },
+            _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+        ),
+    )
+    results = page.results
+    total = getattr(page, "total", None)
+    if not isinstance(total, int) or isinstance(total, bool):
+        raise _unusable("the search response carries no `total`")
+    if total != len(results):
+        raise _unusable(
+            f"HubSpot counted {total} match(es) but returned {len(results)}")
+    if total > len(batch):
+        raise _unusable(
+            f"HubSpot counted {total} match(es) for {len(batch)} id(s) asked")
+    paging = getattr(page, "paging", None)
+    if paging is not None and getattr(paging, "next", None) is not None:
+        raise _unusable("the response announces another page")
+
+    # Ids are compared as the NUMBERS they are. HubSpot returns an object id
+    # in its canonical decimal form; comparing text would call a contact
+    # "not asked for" whenever the two spellings of one number differ, and
+    # one such id would make its whole batch unknown on every run.
+    asked = {_canonical_object_id(cid) for cid in batch}
+    returned: set = set()
+    for result in results:
+        record = result.to_dict() if hasattr(result, "to_dict") else result
+        rid = _canonical_object_id(record.get("id")) \
+            if isinstance(record, dict) else None
+        if rid is None:
+            raise _unusable("a result carries no contact id")
+        if rid not in asked:
+            # HubSpot answered a different question than the one asked. What
+            # that says about the ids that WERE asked is unknown.
+            raise _unusable("a result is a contact that was not asked for")
+        if rid in returned:
+            raise _unusable("the same contact was returned twice")
+        returned.add(rid)
+    return returned
+
+
+def check_contacts_exist(contact_ids, *, client=None, sleep=time.sleep) -> dict:
+    """Ask HubSpot which of ``contact_ids`` still exist. Read-only.
+
+    PR-ADS-163C. One CRM search per batch of at most
+    ``CONTACT_EXISTENCE_BATCH_SIZE`` ids (``hs_object_id IN <batch>``,
+    requesting ``hs_object_id`` only), paced by
+    ``CONTACT_EXISTENCE_PACING_SECONDS``.
+
+    Every id ends in exactly one of three lists::
+
+        existing   HubSpot returned it
+        missing    it was in a batch HubSpot answered, and was not returned
+        unknown    its batch had no usable answer, was never sent, or the id
+                   is not stored as a canonical HubSpot object id (not all
+                   digits, or digits with leading zeros) and cannot be asked
+                   about under the text it is stored as
+
+    ``missing`` is a statement about HubSpot. ``unknown`` is a statement about
+    this check, and a caller must never read it as ``missing``.
+
+    Also returned: ``batches`` / ``batches_answered`` / ``batches_unknown``,
+    ``unverifiable`` (the non-numeric ids, a subset of ``unknown``; when there
+    are any they count as one unknown batch), ``search_calls`` (batches sent,
+    not counting 429 retries), ``stopped_early`` and ``errors`` (at most five).
+
+    Raises only when no client can be built (``HUBSPOT_API_KEY`` unset).
+    NEVER writes to HubSpot.
+    """
+    ids, seen = [], set()
+    for raw in contact_ids or []:
+        cid = str(raw or "").strip()
+        if cid and cid not in seen:
+            seen.add(cid)
+            ids.append(cid)
+    # Only an id stored in its canonical form is asked about. `0042` is the
+    # number 42 to HubSpot, which would answer with `42`: an answer about a
+    # contact this table does not store under that text. It is reported
+    # unknown on its own — never missing, and without making the other 99 ids
+    # of its batch unknown with it.
+    askable = [cid for cid in ids if _canonical_object_id(cid) == cid]
+    unverifiable = [cid for cid in ids if _canonical_object_id(cid) != cid]
+    batches = [askable[i:i + CONTACT_EXISTENCE_BATCH_SIZE]
+               for i in range(0, len(askable), CONTACT_EXISTENCE_BATCH_SIZE)]
+
+    existing: list = []
+    missing: list = []
+    unknown: list = list(unverifiable)
+    errors: list = []
+    answered = 0
+    unknown_batches = 1 if unverifiable else 0
+    search_calls = 0
+    consecutive_unknown = 0
+    stopped_early = False
+    if unverifiable:
+        errors.append(f"{len(unverifiable)} stored contact id(s) are not "
+                      "canonical HubSpot object ids and could not be checked")
+
+    if batches:
+        client = client or get_client()
+    for index, batch in enumerate(batches):
+        if consecutive_unknown >= CONTACT_EXISTENCE_MAX_CONSECUTIVE_UNKNOWN:
+            # Not asked. Unknown, never missing.
+            stopped_early = True
+            unknown.extend(batch)
+            unknown_batches += 1
+            continue
+        if index and CONTACT_EXISTENCE_PACING_SECONDS > 0:
+            sleep(CONTACT_EXISTENCE_PACING_SECONDS)
+        search_calls += 1
+        try:
+            returned = _existence_batch(client, batch, len(existing))
+        except HubSpotPullIncompleteError as exc:
+            consecutive_unknown += 1
+            unknown.extend(batch)
+            unknown_batches += 1
+            if len(errors) < 5:
+                errors.append(exc.detail)
+            continue
+        consecutive_unknown = 0
+        answered += 1
+        existing.extend(cid for cid in batch if cid in returned)
+        missing.extend(cid for cid in batch if cid not in returned)
+
+    if stopped_early:
+        errors.append(
+            f"stopped after {CONTACT_EXISTENCE_MAX_CONSECUTIVE_UNKNOWN} "
+            "consecutive batches without a usable answer; the remaining "
+            "batches were not sent")
+    logger.info(
+        "check_contacts_exist: %d id(s), %d existing, %d missing, %d unknown "
+        "(%d of %d batch(es) answered)", len(ids), len(existing), len(missing),
+        len(unknown), answered, len(batches))
+    return {
+        "existing": existing,
+        "missing": missing,
+        "unknown": unknown,
+        "unverifiable": unverifiable,
+        "batches": len(batches) + (1 if unverifiable else 0),
+        "batches_answered": answered,
+        "batches_unknown": unknown_batches,
+        "search_calls": search_calls,
+        "stopped_early": stopped_early,
+        "errors": errors,
+    }
+
+
+#: The properties the direct read asks for. ``hs_merged_object_ids`` is the
+#: only evidence, in the response itself, that a different record returned
+#: for an id is that id's merge survivor.
+CONTACT_DIRECT_READ_PROPERTIES = ["hs_object_id", "hs_merged_object_ids"]
+
+DIRECT_READ_ABSENT = "absent"            # 404: HubSpot has no such contact
+DIRECT_READ_MERGED = "merged_away"       # returned its survivor, which names it
+DIRECT_READ_EXISTS = "exists"            # returned the contact itself
+DIRECT_READ_UNKNOWN = "unknown"          # anything else
+
+
+def _direct_read_contact(client, contact_id: str) -> tuple:
+    """Read ONE contact by id and say what that proves. ``(verdict, detail)``.
+
+    The second, independent read behind a removal (PR-ADS-163C review N1). The
+    search index can leave a live contact out of a well-formed answer; a read
+    of the object itself does not go through that index.
+
+    * a 404 → ``absent``. HubSpot answered: there is no such contact;
+    * a 200 carrying the SAME id → ``exists``;
+    * a 200 carrying a DIFFERENT id → ``merged_away`` only when that record's
+      ``hs_merged_object_ids`` names the id asked for. A different record that
+      does not say so proves nothing about the id, and is ``unknown``;
+    * a 429 is retried ``MAX_RETRIES`` times with backoff, then ``unknown``;
+      any other API or transport error, or a response with no id, is
+      ``unknown`` at once.
+
+    Read-only: ``basic_api.get_by_id``.
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            record = client.crm.contacts.basic_api.get_by_id(
+                contact_id=contact_id,
+                properties=CONTACT_DIRECT_READ_PROPERTIES,
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            )
+        except HUBSPOT_SDK_READ_ERRORS as exc:
+            if _is_not_found(exc):
+                return DIRECT_READ_ABSENT, None
+            if getattr(exc, "status", None) == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** attempt))
+                continue
+            return DIRECT_READ_UNKNOWN, _describe_hubspot_failure(exc)
+        payload = record.to_dict() if hasattr(record, "to_dict") else record
+        if not isinstance(payload, dict):
+            return DIRECT_READ_UNKNOWN, "the response is not a contact record"
+        returned = _canonical_object_id(payload.get("id"))
+        if returned is None:
+            return DIRECT_READ_UNKNOWN, "the response carries no contact id"
+        if returned == _canonical_object_id(contact_id):
+            return DIRECT_READ_EXISTS, None
+        merged = str((payload.get("properties") or {})
+                     .get("hs_merged_object_ids") or "")
+        merged_ids = {_canonical_object_id(part)
+                      for part in merged.replace(",", ";").split(";")}
+        if _canonical_object_id(contact_id) in merged_ids - {None}:
+            return DIRECT_READ_MERGED, f"merged into contact {returned}"
+        return DIRECT_READ_UNKNOWN, (
+            f"HubSpot returned contact {returned}, which does not name "
+            f"{contact_id} among its merged ids")
+    return DIRECT_READ_UNKNOWN, "retry budget exhausted"   # unreachable
+
+
+def confirm_contacts_absent(contact_ids, *, client=None,
+                            sleep=time.sleep) -> dict:
+    """Read each of ``contact_ids`` directly and report which are really gone.
+
+    PR-ADS-163C review N1. Called only for the contacts a run is about to
+    remove (at most the per-run limit), after the search has omitted each of
+    them twice. One ``GET /crm/v3/objects/contacts/{id}`` per contact, paced
+    like the search.
+
+    Every id ends in exactly one list::
+
+        absent        404 — confirmed gone
+        merged_away   its merge survivor was returned and names it — confirmed
+        existing      the contact itself was returned: the SEARCH was wrong
+        unknown       no usable answer; not confirmed, and not "existing"
+
+    After ``CONTACT_EXISTENCE_MAX_CONSECUTIVE_UNKNOWN`` unknown answers in a
+    row the remaining ids are not read and are unknown. Also returned:
+    ``direct_reads`` (ids actually read) and ``errors`` (at most five).
+
+    Raises only when no client can be built. NEVER writes to HubSpot.
+    """
+    ids, seen = [], set()
+    for raw in contact_ids or []:
+        cid = str(raw or "").strip()
+        if cid and cid not in seen:
+            seen.add(cid)
+            ids.append(cid)
+    out = {DIRECT_READ_ABSENT: [], DIRECT_READ_MERGED: [],
+           DIRECT_READ_EXISTS: [], DIRECT_READ_UNKNOWN: []}
+    errors: list = []
+    reads = 0
+    consecutive_unknown = 0
+    if ids:
+        client = client or get_client()
+    for cid in ids:
+        if (_canonical_object_id(cid) != cid
+                or consecutive_unknown
+                >= CONTACT_EXISTENCE_MAX_CONSECUTIVE_UNKNOWN):
+            out[DIRECT_READ_UNKNOWN].append(cid)
+            continue
+        if reads and CONTACT_EXISTENCE_PACING_SECONDS > 0:
+            sleep(CONTACT_EXISTENCE_PACING_SECONDS)
+        reads += 1
+        verdict, detail = _direct_read_contact(client, cid)
+        out[verdict].append(cid)
+        if verdict == DIRECT_READ_UNKNOWN:
+            consecutive_unknown += 1
+            if detail and len(errors) < 5:
+                errors.append(f"contact {cid}: {detail}")
+        else:
+            consecutive_unknown = 0
+    logger.info(
+        "confirm_contacts_absent: %d id(s): %d absent, %d merged away, "
+        "%d existing, %d unknown", len(ids), len(out[DIRECT_READ_ABSENT]),
+        len(out[DIRECT_READ_MERGED]), len(out[DIRECT_READ_EXISTS]),
+        len(out[DIRECT_READ_UNKNOWN]))
+    return {"absent": out[DIRECT_READ_ABSENT],
+            "merged_away": out[DIRECT_READ_MERGED],
+            "existing": out[DIRECT_READ_EXISTS],
+            "unknown": out[DIRECT_READ_UNKNOWN],
+            "direct_reads": reads, "errors": errors}
+
+
 def pull_closed_won_deals_with_sources_in_range(date_from: str, date_to: str) -> list:
     """Pull closed-won deals by closedate with ALL associated contacts' sources.
 

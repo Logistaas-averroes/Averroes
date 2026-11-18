@@ -70,7 +70,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -106,6 +106,7 @@ jobs:
             tests/test_pr_ads_162a_channel_funnel.py \
             tests/test_pr_ads_162c_system_page.py \
             tests/test_pr_ads_163b_freshness_row_counts.py \
+            tests/test_pr_ads_163c_removed_contacts.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -199,6 +200,12 @@ jobs:
                            # defect is what a real transaction does after an
                            # error, which no mock cursor reproduced.
                            "tests.test_pr_ads_163b_freshness_row_counts",
+                           # PR-ADS-163C. Its PG cases run the real sync,
+                           # funnel writer and readers against a fake HubSpot
+                           # that deletes contacts between runs, and prove
+                           # the two strikes, the move into the archive and
+                           # the refusal above the limit.
+                           "tests.test_pr_ads_163c_removed_contacts",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

@@ -4497,3 +4497,556 @@ def record_reader_reconciliation(*, observed_at, reconciliation_complete: bool,
     except Exception as exc:  # noqa: BLE001
         log.error("record_reader_reconciliation failed: %s", exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-163C — contacts deleted or merged away in HubSpot
+# ---------------------------------------------------------------------------
+# The contact sync is modified-since: it never learns that a contact stopped
+# existing. `services/hubspot_contact_reconciliation_service` asks HubSpot
+# which stored ids still exist; these are its only writes.
+#
+#   * A missing answer is a STRIKE (`hubspot_contact_absence`), never a
+#     removal. The strike is deleted when HubSpot returns the contact again.
+#   * A contact is removed only when the DATABASE finds it missing in the
+#     current run AND on a check at least `min_hours_between_strikes` earlier,
+#     its row was not ingested since this run began, it has no open
+#     post-boundary SQL incident, every batch of the run was answered, and the
+#     WHOLE standing backlog of contacts that qualify for removal — whichever
+#     run struck them — is under the configured limit. All of that is one
+#     statement: there is no count read first and acted on later.
+#   * Removal MOVES the row into `hubspot_contact_funnel_removed`. Nothing is
+#     dropped, and no reader of `hubspot_contact_funnel` needs to know.
+#
+# Local tables only. Nothing here calls or writes to HubSpot.
+
+REMOVAL_REASON_ABSENT = "absent_from_hubspot"
+
+RECONCILIATION_STATUSES = ("running", "success", "partial", "failed", "refused")
+
+#: Every column of `hubspot_contact_funnel`, in the order the archive stores
+#: them. Built from the writer's own column tuple, so a column added to the
+#: funnel writer is carried into the archive (or the move fails loudly because
+#: the archive lacks it) — it cannot be silently left behind.
+_CONTACT_FUNNEL_ARCHIVE_COLUMNS = (
+    ("id",) + _CONTACT_FUNNEL_COLUMNS
+    + ("first_ingested_at", "last_ingested_at", "sync_batch_id", "updated_at")
+)
+
+_CLASSIFICATION_ARCHIVE_COLUMNS = (
+    "id", "contact_key", "contact_id", "source_primary_raw",
+    "source_detail_raw", "acquisition_group", "classification_rule_version",
+    "contact_created_at", "status_category", "classified_at", "updated_at",
+)
+
+_RECONCILIATION_RUN_COUNTS = (
+    "contacts_stored", "contacts_checked", "batches", "batches_unknown",
+    "missing", "newly_missing", "returned", "would_remove", "removed",
+    "classification_rows_removed", "backlog_qualified", "held_open_incident",
+    "search_disagreements",
+)
+
+#: The counts `move_absent_contacts` writes onto the run row ITSELF, inside
+#: the transaction that moves the rows. `finish_contact_reconciliation_run`
+#: never overwrites one of them with NULL, so a removal that committed is on
+#: the run row even when the finishing write is lost.
+_RECONCILIATION_MOVE_COUNTS = (
+    "would_remove", "removed", "classification_rows_removed",
+    "backlog_qualified", "held_open_incident", "search_disagreements",
+)
+
+
+def start_contact_reconciliation_run(*, run_id=None) -> int:
+    """Open one `hubspot_contact_reconciliation_runs` row as ``running``.
+
+    Returns its id, or 0 when it could not be written — the caller must then
+    refuse to call HubSpot: a check with no durable record of having run
+    cannot record a strike against it.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO hubspot_contact_reconciliation_runs
+                           (run_id, started_at, status)
+                    VALUES (%s, clock_timestamp(), 'running')
+                    RETURNING id
+                    """,
+                    (run_id,),
+                )
+                row = cur.fetchone()
+        return int(row[0]) if row and row[0] else 0
+    except Exception as exc:  # noqa: BLE001
+        log.error("start_contact_reconciliation_run failed: %s", safe_db_error(exc))
+        return 0
+
+
+def finish_contact_reconciliation_run(reconciliation_run_id, *, status: str,
+                                      error: Optional[str] = None,
+                                      **counts) -> bool:
+    """Close a reconciliation run with its outcome. True only when the row was
+    updated. A status outside the vocabulary is recorded as ``failed``: an
+    unrecognised outcome is not evidence of success."""
+    if status not in RECONCILIATION_STATUSES or status == "running":
+        error = (f"unrecognised run status {status!r}; recorded as failed"
+                 + (f" ({error})" if error else ""))
+        status = "failed"
+    values = {k: counts.get(k) for k in _RECONCILIATION_RUN_COUNTS}
+    assignments = ", ".join(
+        (f"{k} = COALESCE(%({k})s, {k})" if k in _RECONCILIATION_MOVE_COUNTS
+         else f"{k} = %({k})s")
+        for k in _RECONCILIATION_RUN_COUNTS)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE hubspot_contact_reconciliation_runs
+                       SET finished_at = clock_timestamp(),
+                           status = %(status)s,
+                           error = %(error)s,
+                           {assignments}
+                     WHERE id = %(id)s
+                    """,
+                    {**values, "status": status,
+                     "error": (str(error)[:1000] if error else None),
+                     "id": reconciliation_run_id},
+                )
+                updated = cur.rowcount
+        return updated == 1
+    except Exception as exc:  # noqa: BLE001
+        log.error("finish_contact_reconciliation_run failed: %s", safe_db_error(exc))
+        return False
+
+
+def record_contact_absence(reconciliation_run_id, *, missing_ids,
+                           returned_ids, observed_at=None) -> dict:
+    """Record what one existence check found. One transaction.
+
+    ``missing_ids``   ids HubSpot was asked about and did not return: each gets
+                      a strike. Only ids STILL STORED in the funnel are struck —
+                      the insert selects from the funnel table — and only rows
+                      last ingested BEFORE this run started: a row the contact
+                      sync wrote while the check was running is evidence, newer
+                      than the check's answer, that the contact exists.
+    ``returned_ids``  ids HubSpot returned: any strike they carry is deleted
+                      (the contact came back).
+
+    An id in neither list — one whose batch had no usable answer — is not
+    touched: it keeps whatever strike it had and gains none.
+
+    ``observed_at`` is the instant of the check. Left None (production), the
+    database stamps ``clock_timestamp()``, which postdates the HubSpot read
+    because this runs after it; ``now()`` would be the transaction's start.
+
+    Returns ``{ok, missing, newly_missing, returned, table_rows, error}``
+    where the counts are what the database wrote, not the lengths of the lists,
+    and ``table_rows`` is the funnel's size in the same transaction.
+    """
+    missing = [str(c) for c in (missing_ids or []) if c]
+    returned = [str(c) for c in (returned_ids or []) if c]
+    result = {"ok": False, "missing": None, "newly_missing": None,
+              "returned": None, "table_rows": None, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {**result, "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH struck AS (
+                        INSERT INTO hubspot_contact_absence AS a
+                               (contact_id, first_missing_at, last_missing_at,
+                                checks, last_run_id)
+                        SELECT f.contact_id, t.at, t.at, 1, %(run)s
+                          FROM hubspot_contact_funnel f
+                         CROSS JOIN (SELECT COALESCE(%(at)s::timestamptz,
+                                                     clock_timestamp()) AS at) t
+                         WHERE f.contact_id = ANY(%(missing)s)
+                           AND (f.last_ingested_at IS NULL
+                                OR f.last_ingested_at < (
+                                    SELECT started_at
+                                      FROM hubspot_contact_reconciliation_runs
+                                     WHERE id = %(run)s))
+                        ON CONFLICT (contact_id) DO UPDATE SET
+                            last_missing_at = GREATEST(a.last_missing_at,
+                                                       EXCLUDED.last_missing_at),
+                            checks          = a.checks + 1,
+                            last_run_id     = EXCLUDED.last_run_id
+                        RETURNING checks
+                    )
+                    SELECT COUNT(*), COUNT(*) FILTER (WHERE checks = 1)
+                      FROM struck
+                    """,
+                    {"run": reconciliation_run_id, "at": observed_at,
+                     "missing": missing},
+                )
+                struck, newly = cur.fetchone()
+                cur.execute(
+                    "DELETE FROM hubspot_contact_absence "
+                    "WHERE contact_id = ANY(%s)",
+                    (returned,),
+                )
+                came_back = cur.rowcount
+                cur.execute("SELECT COUNT(*) FROM hubspot_contact_funnel")
+                table_rows = cur.fetchone()[0]
+        return {"ok": True, "missing": int(struck), "newly_missing": int(newly),
+                "returned": int(came_back), "table_rows": int(table_rows),
+                "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("record_contact_absence failed: %s", safe_db_error(exc))
+        return {**result, "error": safe_db_error(exc)}
+
+
+#: Who has been struck twice, who of them qualifies for removal, and who of
+#: THOSE this run may move. One definition, shared by the read that tells the
+#: service whom to confirm with HubSpot and by the statement that moves them:
+#: two copies would drift, and the confirmation would then be asked about one
+#: population and the removal decided over another. Parameters: ``run``,
+#: ``min_seconds``. Ends with a trailing comma, for the CTEs that follow.
+_ABSENCE_CTES = """
+WITH this_run AS (
+                        SELECT started_at
+                          FROM hubspot_contact_reconciliation_runs
+                         WHERE id = %(run)s
+                    ),
+                    struck_twice AS (
+                        SELECT a.contact_id, a.first_missing_at,
+                               a.last_missing_at, a.checks, a.last_run_id,
+                               f.last_ingested_at,
+                               EXISTS (
+                                   SELECT 1 FROM sql_post_boundary_incident i
+                                    WHERE i.contact_id = a.contact_id
+                                      AND i.status = 'open') AS held
+                          FROM hubspot_contact_absence a
+                          JOIN hubspot_contact_funnel f
+                            ON f.contact_id = a.contact_id
+                         WHERE a.checks >= 2
+                           AND a.last_missing_at - a.first_missing_at
+                               >= make_interval(secs => %(min_seconds)s)
+                    ),
+                    qualified AS (
+                        SELECT * FROM struck_twice WHERE NOT held
+                    ),
+                    this_run_struck AS (
+                        SELECT s.*
+                          FROM struck_twice s
+                          JOIN this_run r ON TRUE
+                         WHERE s.last_run_id = %(run)s
+                           AND (s.last_ingested_at IS NULL
+                                OR s.last_ingested_at < r.started_at)
+                    ),
+                    eligible AS (
+                        SELECT * FROM this_run_struck WHERE NOT held
+                    ),
+"""
+
+
+def fetch_removal_candidates(reconciliation_run_id, *,
+                             min_hours_between_strikes: float) -> dict:
+    """The contacts this run could move, for the direct-read confirmation.
+
+    Exactly ``eligible`` in :data:`_ABSENCE_CTES`: struck by this run and on a
+    check at least ``min_hours_between_strikes`` earlier, the row not ingested
+    since the run started, no open post-boundary incident. This read decides
+    nothing: it only names whom to ask HubSpot about. The move re-derives the
+    same set in its own statement and takes the confirmation as a further
+    restriction on it.
+
+    ``{ok, contact_ids, error}``; ``ok=False`` means the read failed, never
+    "nobody".
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "contact_ids": None,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    _ABSENCE_CTES.rstrip().rstrip(",")
+                    + " SELECT contact_id FROM eligible ORDER BY contact_id",
+                    {"run": reconciliation_run_id,
+                     "min_seconds": float(min_hours_between_strikes) * 3600.0})
+                ids = [r[0] for r in cur.fetchall()]
+        return {"ok": True, "contact_ids": ids, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_removal_candidates failed: %s", safe_db_error(exc))
+        return {"ok": False, "contact_ids": None, "error": safe_db_error(exc)}
+
+
+def move_absent_contacts(reconciliation_run_id, *,
+                         min_hours_between_strikes: float,
+                         max_removals: int, max_fraction: float,
+                         every_batch_answered: bool = False,
+                         confirmed_absent_ids=None,
+                         seen_existing_ids=None,
+                         window_days: float = 7,
+                         max_window_removals: int = 100,
+                         max_window_fraction: float = 0.02) -> dict:
+    """Move the contacts HubSpot has stopped returning out of the funnel.
+
+    Who qualifies, the safety valve and the move are ONE statement, so they are
+    decided by the database over one snapshot:
+
+    * ``qualified`` — the standing BACKLOG: every stored contact with at least
+      two strikes ``min_hours_between_strikes`` apart, WHICHEVER run recorded
+      them, and no open post-boundary SQL incident;
+    * ``eligible`` — the part of it this run may move: struck again by THIS
+      run (``last_run_id``), and its funnel row last ingested before this run
+      started (a row the contact sync wrote during the check proves the
+      contact exists, whatever the check answered);
+    * the valve — if the BACKLOG numbers more than ``max_removals``, or more
+      than ``max_fraction`` of the stored contacts, NOTHING moves. It counts
+      the backlog, not this run's share of it: a degraded HubSpot answered a
+      few batches at a time would otherwise be drained in slices that each fit
+      under the limit (PR-ADS-163C review F1);
+    * ``every_batch_answered`` — False (the default: the caller must assert
+      it) moves nothing. A run that could not check every contact cannot know
+      how large the disappearance is;
+    * ``confirmed_absent_ids`` — only an eligible contact whose id is in this
+      list is moved: the ids a DIRECT READ of the object returned 404 for (or
+      proved merged away). None or empty moves nothing. The search index
+      omitting a live contact twice is not enough to remove it (review N1);
+    * ``seen_existing_ids`` — ids the direct read FOUND although the search
+      had omitted them. Their strikes are deleted in this transaction, before
+      anything is counted, and the number is recorded as
+      ``search_disagreements``;
+    * the trailing window — removals already archived in the last
+      ``window_days`` plus what this run would move must not exceed
+      ``max_window_removals`` nor ``max_window_fraction`` of the table, or
+      NOTHING moves. The per-run valve alone lets a small persistent loss
+      through every other day for ever;
+    * the move — ``DELETE … RETURNING`` feeding the ``INSERT`` into
+      ``hubspot_contact_funnel_removed``, every funnel column carried.
+
+    A contact with an OPEN row in ``sql_post_boundary_incident`` is HELD: it
+    is not moved and keeps its strikes. Both incident resolvers read the
+    funnel row, so removing it would leave the incident open for ever and the
+    SQL coverage gate permanently broken. Held contacts are counted
+    (``held_open_incident``), not hidden.
+
+    The removed contacts' ``contact_source_classification`` rows are moved the
+    same way and their strikes deleted, and the counts are written onto the
+    run row, all in the same transaction: the whole removal commits or none of
+    it does, and a committed removal is never missing from its run row. A
+    removed contact carries no strike — restored in HubSpot and ingested again,
+    it starts clean.
+
+    Returns ``{ok, refused, refusal_reason, would_remove, confirmed_absent,
+    backlog_qualified, held_open_incident, search_disagreements,
+    removed_in_window, table_rows, removed, classification_rows_removed,
+    error}``; the counts are the database's own. ``would_remove`` is this
+    run's eligible contacts whether or not they were moved;
+    ``confirmed_absent`` is how many of them the direct read confirmed.
+    """
+    # A non-positive window or limit would disable the cumulative cap. The
+    # config loader clamps these; the writer refuses them outright so that no
+    # other caller can turn the cap off.
+    if not (window_days > 0 and max_window_removals >= 0
+            and max_window_fraction >= 0 and max_removals >= 0
+            and max_fraction >= 0):
+        raise ValueError("move_absent_contacts: limits must be non-negative "
+                         "and window_days positive")
+
+    funnel_cols = ", ".join(_CONTACT_FUNNEL_ARCHIVE_COLUMNS)
+    funnel_src = ", ".join(f"f.{c}" for c in _CONTACT_FUNNEL_ARCHIVE_COLUMNS)
+    class_cols = ", ".join(_CLASSIFICATION_ARCHIVE_COLUMNS)
+    class_src = ", ".join(f"c.{c}" for c in _CLASSIFICATION_ARCHIVE_COLUMNS)
+    params = {
+        "run": reconciliation_run_id,
+        "min_seconds": float(min_hours_between_strikes) * 3600.0,
+        "max_removals": int(max_removals),
+        "max_fraction": float(max_fraction),
+        "reason": REMOVAL_REASON_ABSENT,
+        "all_answered": bool(every_batch_answered),
+        "confirmed": [str(c) for c in (confirmed_absent_ids or []) if c],
+        "window_seconds": float(window_days) * 86400.0,
+        "max_window": int(max_window_removals),
+        "max_window_fraction": float(max_window_fraction),
+    }
+    seen_existing = [str(c) for c in (seen_existing_ids or []) if c]
+    result = {"ok": False, "refused": False, "refusal_reason": None,
+              "would_remove": None, "confirmed_absent": None,
+              "backlog_qualified": None, "held_open_incident": None,
+              "search_disagreements": None, "removed_in_window": None,
+              "table_rows": None, "removed": None,
+              "classification_rows_removed": None, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {**result, "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                # The direct read found these although the search omitted
+                # them: they exist. Their strikes go first, so nothing below
+                # counts them.
+                cur.execute(
+                    "DELETE FROM hubspot_contact_absence "
+                    "WHERE contact_id = ANY(%s)", (seen_existing,))
+                disagreements = cur.rowcount
+                cur.execute(
+                    f"""
+                    {_ABSENCE_CTES}
+                    confirmed AS (
+                        SELECT * FROM eligible
+                         WHERE contact_id = ANY(%(confirmed)s)
+                    ),
+                    gate AS (
+                        SELECT n.would_remove, n.backlog, n.held, n.table_rows,
+                               n.confirmed, n.recent,
+                               n.backlog <= %(max_removals)s
+                                   AS within_limit,
+                               n.backlog
+                                   <= n.table_rows * %(max_fraction)s::numeric
+                                   AS within_fraction,
+                               n.recent + n.confirmed <= %(max_window)s
+                                   AND n.recent + n.confirmed
+                                       <= n.table_rows
+                                          * %(max_window_fraction)s::numeric
+                                   AS within_window
+                          FROM (SELECT (SELECT COUNT(*) FROM eligible)
+                                           AS would_remove,
+                                       (SELECT COUNT(*) FROM confirmed)
+                                           AS confirmed,
+                                       (SELECT COUNT(*)
+                                          FROM hubspot_contact_funnel_removed
+                                         WHERE removed_at >= clock_timestamp()
+                                               - make_interval(
+                                                   secs => %(window_seconds)s))
+                                           AS recent,
+                                       (SELECT COUNT(*) FROM qualified)
+                                           AS backlog,
+                                       (SELECT COUNT(*) FROM this_run_struck
+                                         WHERE held) AS held,
+                                       (SELECT COUNT(*)
+                                          FROM hubspot_contact_funnel)
+                                           AS table_rows) n
+                    ),
+                    moved AS (
+                        DELETE FROM hubspot_contact_funnel f
+                         USING confirmed e, gate g
+                         WHERE f.contact_id = e.contact_id
+                           AND g.within_limit
+                           AND g.within_fraction
+                           AND g.within_window
+                           AND %(all_answered)s
+                        RETURNING {funnel_src},
+                                  e.first_missing_at AS absence_first_missing_at,
+                                  e.last_missing_at  AS absence_last_missing_at,
+                                  e.checks           AS absence_checks
+                    ),
+                    archived AS (
+                        INSERT INTO hubspot_contact_funnel_removed (
+                            {funnel_cols},
+                            removed_at, removal_reason, reconciliation_run_id,
+                            first_missing_at, last_missing_at, absence_checks)
+                        SELECT {funnel_cols},
+                               clock_timestamp(), %(reason)s, %(run)s,
+                               absence_first_missing_at,
+                               absence_last_missing_at, absence_checks
+                          FROM moved
+                        RETURNING contact_id
+                    )
+                    SELECT g.would_remove, g.backlog, g.held, g.table_rows,
+                           g.within_limit, g.within_fraction,
+                           g.within_window, g.confirmed, g.recent,
+                           (SELECT COUNT(*) FROM archived)
+                      FROM gate g
+                    """,
+                    params,
+                )
+                (would_remove, backlog, held, table_rows, within_limit,
+                 within_fraction, within_window, confirmed, recent,
+                 removed) = cur.fetchone()
+
+                cur.execute(
+                    f"""
+                    WITH moved AS (
+                        DELETE FROM contact_source_classification c
+                         USING hubspot_contact_funnel_removed r
+                         WHERE r.reconciliation_run_id = %(run)s
+                           AND (c.contact_id = r.contact_id
+                                OR c.contact_key = r.contact_id)
+                        RETURNING {class_src}
+                    ),
+                    archived AS (
+                        INSERT INTO contact_source_classification_removed (
+                            {class_cols},
+                            removed_at, removal_reason, reconciliation_run_id)
+                        SELECT {class_cols},
+                               clock_timestamp(), %(reason)s, %(run)s
+                          FROM moved
+                        RETURNING id
+                    )
+                    SELECT COUNT(*) FROM archived
+                    """,
+                    params,
+                )
+                classification_removed = cur.fetchone()[0]
+
+                # A removed contact keeps no strike: restored and ingested
+                # again, it must be found missing twice more before it can go.
+                cur.execute(
+                    """
+                    DELETE FROM hubspot_contact_absence a
+                     USING hubspot_contact_funnel_removed r
+                     WHERE r.reconciliation_run_id = %(run)s
+                       AND a.contact_id = r.contact_id
+                    """,
+                    params,
+                )
+
+                # The outcome goes onto the run row HERE, with the move: if
+                # the finishing write is lost, the removal is still recorded
+                # on the run that made it.
+                cur.execute(
+                    """
+                    UPDATE hubspot_contact_reconciliation_runs
+                       SET would_remove = %s, removed = %s,
+                           classification_rows_removed = %s,
+                           backlog_qualified = %s, held_open_incident = %s,
+                           search_disagreements = %s
+                     WHERE id = %s
+                    """,
+                    (would_remove, removed, classification_removed, backlog,
+                     held, disagreements, reconciliation_run_id),
+                )
+        refused = not (within_limit and within_fraction and within_window)
+        reason = None
+        if refused and within_limit and within_fraction:
+            reason = (
+                f"{recent} contacts were removed in the last "
+                f"{float(window_days):g} days and this run would remove "
+                f"{confirmed} more: over the limit of "
+                f"{int(max_window_removals)}, or of "
+                f"{float(max_window_fraction):.2%} of the {table_rows} stored "
+                f"contacts, for that period")
+        elif refused:
+            parts = []
+            if not within_limit:
+                parts.append(f"over the limit of {int(max_removals)}")
+            if not within_fraction:
+                parts.append(
+                    f"over {float(max_fraction):.2%} of the {table_rows} "
+                    "stored contacts")
+            reason = (f"{backlog} stored contacts now qualify for removal "
+                      f"({would_remove} of them in this run): "
+                      + " and ".join(parts))
+        return {"ok": True, "refused": refused, "refusal_reason": reason,
+                "would_remove": int(would_remove),
+                "confirmed_absent": int(confirmed),
+                "backlog_qualified": int(backlog),
+                "held_open_incident": int(held),
+                "search_disagreements": int(disagreements),
+                "removed_in_window": int(recent),
+                "table_rows": int(table_rows),
+                "removed": int(removed),
+                "classification_rows_removed": int(classification_removed),
+                "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("move_absent_contacts failed: %s", safe_db_error(exc))
+        return {**result, "error": safe_db_error(exc)}

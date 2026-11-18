@@ -2262,6 +2262,137 @@ CREATE TABLE IF NOT EXISTS platform_certification_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_platform_certification_runs_started
   ON platform_certification_runs(started_at DESC);
+
+-- ── PR-ADS-163C — contacts deleted or merged away in HubSpot ───────────────
+-- `hubspot_contact_funnel` is filled by a modified-since sync, and a contact
+-- that is DELETED or MERGED AWAY in HubSpot is never "modified": its row
+-- stayed and was counted by every funnel and cohort read (2026-11-18: 30 such
+-- rows; contacts created in October 2026 numbered 564 here and 557 in
+-- HubSpot). Removal needs an explicit existence check, and these four tables
+-- are what that check is allowed to remember and do.
+
+-- One row per existence-check run. `running` is a run that has not finished
+-- (or died); it is never read as a success.
+CREATE TABLE IF NOT EXISTS hubspot_contact_reconciliation_runs (
+  id                          SERIAL PRIMARY KEY,
+  run_id                      INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  started_at                  TIMESTAMPTZ NOT NULL,
+  finished_at                 TIMESTAMPTZ,
+  status                      TEXT NOT NULL,   -- running|success|partial|failed|refused
+  contacts_stored             INTEGER,         -- stored contact ids read at the start
+  contacts_checked            INTEGER,         -- ids in batches HubSpot answered
+  batches                     INTEGER,
+  batches_unknown             INTEGER,         -- batches with no usable answer
+  missing                     INTEGER,         -- checked ids HubSpot did not return
+  newly_missing               INTEGER,         -- of those, first strike this run
+  returned                    INTEGER,         -- strikes cleared: the contact came back
+  would_remove                INTEGER,         -- this run's eligible contacts
+  removed                     INTEGER,         -- rows the database moved
+  classification_rows_removed INTEGER,
+  backlog_qualified           INTEGER,         -- ALL contacts qualifying, any run (the valve's count)
+  held_open_incident          INTEGER,         -- kept: open post-boundary SQL incident
+  search_disagreements        INTEGER,         -- search omitted them, a direct read found them
+  error                       TEXT,
+  created_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_hubspot_contact_reconciliation_runs_started
+  ON hubspot_contact_reconciliation_runs(started_at DESC);
+
+-- A stored contact HubSpot did not return. ONE missing answer is a strike,
+-- not a removal: the row is deleted again the moment HubSpot returns the
+-- contact. `last_run_id` is the run that last found it missing, so a removal
+-- can require "missing again in THIS run".
+CREATE TABLE IF NOT EXISTS hubspot_contact_absence (
+  contact_id        TEXT PRIMARY KEY,
+  first_missing_at  TIMESTAMPTZ NOT NULL,
+  last_missing_at   TIMESTAMPTZ NOT NULL,
+  checks            INTEGER NOT NULL DEFAULT 1,
+  last_run_id       INTEGER NOT NULL
+                    REFERENCES hubspot_contact_reconciliation_runs(id)
+);
+
+-- Where a removed contact's row goes: every column of `hubspot_contact_funnel`
+-- with the value it had, plus why and when it left. Rows are MOVED here, never
+-- flagged in place — some thirty queries read the funnel table and a flag
+-- would have to be honoured by every one of them. Deliberately NO unique key
+-- on contact_id: a contact restored in HubSpot is ingested again as a normal
+-- funnel row and can be removed a second time.
+-- tests/test_pr_ads_163c_removed_contacts.py::test_22 fails if this table and
+-- `hubspot_contact_funnel` stop having the same columns. A column added to
+-- the funnel later must be added here twice: in this CREATE, and as
+-- `ALTER TABLE … ADD COLUMN IF NOT EXISTS` for databases that already have it.
+CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_removed (
+  removal_id                BIGSERIAL PRIMARY KEY,
+  id                        INTEGER NOT NULL,       -- the funnel row's own id
+  contact_id                TEXT NOT NULL,
+  created_at                TIMESTAMPTZ,
+  last_modified_at          TIMESTAMPTZ,
+  lifecycle_stage           TEXT,
+  lead_status               TEXT,
+  mql_status                TEXT,
+  mql_status_category       TEXT,
+  date_entered_lead         TIMESTAMPTZ,
+  date_entered_mql          TIMESTAMPTZ,
+  date_entered_sql          TIMESTAMPTZ,
+  date_entered_opportunity  TIMESTAMPTZ,
+  date_entered_customer     TIMESTAMPTZ,
+  latest_stage_entry_at     TIMESTAMPTZ,
+  hs_analytics_source       TEXT,
+  hs_analytics_source_data_1 TEXT,
+  hs_analytics_source_data_2 TEXT,
+  hs_latest_source          TEXT,
+  hs_latest_source_data_1   TEXT,
+  hs_latest_source_data_2   TEXT,
+  hs_analytics_first_url    TEXT,
+  ip_country                TEXT,
+  country                   TEXT,
+  company                   TEXT,
+  owner_id                  TEXT,
+  gclid                     TEXT,
+  has_gclid                 BOOLEAN,
+  source_system             TEXT,
+  lifecycle_rule_version    TEXT,
+  mql_rule_version          TEXT,
+  first_ingested_at         TIMESTAMPTZ,
+  last_ingested_at          TIMESTAMPTZ,
+  sync_batch_id             INTEGER,
+  updated_at                TIMESTAMPTZ,
+  -- why it left
+  removed_at                TIMESTAMPTZ NOT NULL,
+  removal_reason            TEXT NOT NULL,          -- 'absent_from_hubspot'
+  reconciliation_run_id     INTEGER NOT NULL
+                            REFERENCES hubspot_contact_reconciliation_runs(id),
+  first_missing_at          TIMESTAMPTZ,
+  last_missing_at           TIMESTAMPTZ,
+  absence_checks            INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_hcf_removed_contact
+  ON hubspot_contact_funnel_removed(contact_id);
+CREATE INDEX IF NOT EXISTS idx_hcf_removed_run
+  ON hubspot_contact_funnel_removed(reconciliation_run_id);
+
+-- The same, for the removed contact's `contact_source_classification` rows
+-- (they feed the Leads counts on Revenue by Source).
+CREATE TABLE IF NOT EXISTS contact_source_classification_removed (
+  removal_id                  BIGSERIAL PRIMARY KEY,
+  id                          INTEGER NOT NULL,
+  contact_key                 TEXT NOT NULL,
+  contact_id                  TEXT,
+  source_primary_raw          TEXT,
+  source_detail_raw           TEXT,
+  acquisition_group           TEXT NOT NULL,
+  classification_rule_version TEXT NOT NULL,
+  contact_created_at          TIMESTAMPTZ,
+  status_category             TEXT,
+  classified_at               TIMESTAMPTZ,
+  updated_at                  TIMESTAMPTZ,
+  removed_at                  TIMESTAMPTZ NOT NULL,
+  removal_reason              TEXT NOT NULL,
+  reconciliation_run_id       INTEGER NOT NULL
+                              REFERENCES hubspot_contact_reconciliation_runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_csc_removed_contact
+  ON contact_source_classification_removed(contact_id);
 """
 
 

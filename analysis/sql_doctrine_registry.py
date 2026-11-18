@@ -703,6 +703,9 @@ _READER_CUTOVER = ("PR-ADS-161E reader contract — SQL-to-customer, revenue-per
                    "reads and publishes no SQL")
 _SQL_PUBLICATION = ("PR-ADS-161A-1 canonical SQL publication contract "
                     "(the only production-facing publication verdict)")
+_REMOVED_CONTACTS = ("PR-ADS-163C removed-contact check (asks HubSpot which stored "
+                     "contact ids still exist and moves the rest out of the "
+                     "funnel; reads and publishes no SQL)")
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
 _LEGACY_ENGINE = "Legacy contact-outcome contract (canonical_contact_outcome_service)"
 _FUNNEL_ENGINE = "Canonical CRM funnel contract (canonical_crm_funnel_service)"
@@ -910,6 +913,17 @@ RULES: list[dict] = [
        symbol="normalize_contact_funnel_row"),
     _r("sync.funnel", "services/hubspot_contact_funnel_sync_service.py", CLS_CANONICAL, _SYNC,
        symbol=["build_coverage", "run_contact_funnel_sync"]),
+    # PR-ADS-163C: the removed-contact check keeps the canonical contact store
+    # equal to HubSpot's: it reads stored contact IDS through the funnel
+    # repository and moves whole rows out. It reads no stage date, counts no
+    # SQL and publishes nothing. The System page reads only the check's own
+    # run record.
+    _m("removedcontacts.svc.module",
+       "services/hubspot_contact_reconciliation_service.py", CLS_CANONICAL,
+       _REMOVED_CONTACTS, ["lifecycle_funnel_service_ref"]),
+    _r("removedcontacts.overview", "services/system_overview_service.py",
+       CLS_DIAGNOSTIC, _REMOVED_CONTACTS,
+       symbol=["contact_reconciliation_block"]),
     _r("recovery", "services/lifecycle_history_recovery_service.py", CLS_CANONICAL, _RECOVERY,
        # PR-ADS-159 §1b adds `diagnose`: the read-only comparison of the batch
        # and individual HubSpot history reads. It recovers nothing and writes

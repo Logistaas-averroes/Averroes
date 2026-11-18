@@ -656,6 +656,62 @@ def fetch_contact_funnel_sync_state(*, scope: str = "contacts") -> dict:
         return _unavailable(row=None)
 
 
+# ── PR-ADS-163C — contacts HubSpot no longer has, read side ────────────────
+
+def fetch_stored_contact_ids() -> dict:
+    """Every contact id in the canonical funnel, in id order.
+
+    The population the existence check asks HubSpot about. ``available=False``
+    means the table could not be READ — never "there are no contacts".
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(contact_ids=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT contact_id FROM {FUNNEL_TABLE} ORDER BY contact_id")
+                ids = [r[0] for r in cur.fetchall()]
+        return {"available": True, "contact_ids": ids}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_stored_contact_ids failed: %s", exc)
+        return _unavailable(contact_ids=None)
+
+
+def fetch_latest_contact_reconciliation() -> dict:
+    """The newest existence-check run and the strikes currently pending.
+
+    ``{available, row, pending_strikes}``. ``row`` is None when no run has ever
+    been recorded; ``pending_strikes`` counts stored contacts HubSpot did not
+    return on their last check and that have not been removed.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(row=None, pending_strikes=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, run_id, started_at, finished_at, status,
+                           contacts_stored, contacts_checked, batches,
+                           batches_unknown, missing, newly_missing, returned,
+                           would_remove, removed, classification_rows_removed,
+                           backlog_qualified, held_open_incident,
+                           search_disagreements, error
+                      FROM hubspot_contact_reconciliation_runs
+                     ORDER BY started_at DESC, id DESC
+                     LIMIT 1
+                    """)
+                rows = _rows_as_dicts(cur)
+                cur.execute("SELECT COUNT(*) FROM hubspot_contact_absence")
+                pending = cur.fetchone()[0]
+        return {"available": True, "row": rows[0] if rows else None,
+                "pending_strikes": pending}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_latest_contact_reconciliation failed: %s", exc)
+        return _unavailable(row=None, pending_strikes=None)
+
+
 DEFAULT_RECONCILIATION_MAX_AGE_HOURS = 36
 
 

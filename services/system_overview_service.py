@@ -19,6 +19,11 @@ One read for an operator who is not an engineer:
 
    Every source carries one ``status``; only ``current`` is healthy.
 3. **CRM data to fix** — the block the certification stored, passed through.
+4. **Removed contacts** — the latest check for contacts HubSpot no longer has
+   (``hubspot_contact_reconciliation_runs``, PR-ADS-163C), as recorded: its
+   status and its own reason text, when it ran, how many contacts it checked,
+   would remove and removed, the backlog, held contacts, search disagreements
+   and pending strikes. Facts only; no verdict is derived from them here.
 
 Read-only: SELECTs on the local database. No HubSpot or Google Ads call.
 """
@@ -215,6 +220,44 @@ _SOURCES = (("hubspot_contacts", "HubSpot contacts", _contacts_source),
             ("google_ads_spend", "Google Ads spend", _spend_source))
 
 
+# ── removed contacts (PR-ADS-163C) ────────────────────────────────────────
+
+def contact_reconciliation_block() -> dict:
+    """The latest check for contacts HubSpot no longer has, as recorded.
+
+    Plain facts from ``hubspot_contact_reconciliation_runs``: no verdict is
+    derived here and no page publishes a figure from it. ``available`` False
+    means the record could not be read; ``status`` None with ``available``
+    True means no check has ever run.
+    """
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+    out = {"available": False, "status": None, "reason": None,
+           "started_at": None, "finished_at": None, "contacts_checked": None,
+           "batches_unknown": None, "would_remove": None, "removed": None,
+           "backlog_qualified": None, "held_open_incident": None,
+           "search_disagreements": None, "pending_strikes": None}
+    read = repo.fetch_latest_contact_reconciliation()
+    if not read.get("available"):
+        return out
+    out.update(available=True, pending_strikes=read.get("pending_strikes"))
+    row = read.get("row")
+    if not row:
+        return out
+    out.update(status=row.get("status"),
+               started_at=_iso(row.get("started_at")),
+               finished_at=_iso(row.get("finished_at")),
+               contacts_checked=row.get("contacts_checked"),
+               batches_unknown=row.get("batches_unknown"),
+               removed=row.get("removed"),
+               # Why a run that is not `success` is not: the run's own text.
+               reason=row.get("error"),
+               would_remove=row.get("would_remove"),
+               backlog_qualified=row.get("backlog_qualified"),
+               held_open_incident=row.get("held_open_incident"),
+               search_disagreements=row.get("search_disagreements"))
+    return out
+
+
 def build_system_overview(now: datetime | None = None) -> dict:
     """The ``/api/system/overview`` payload. Never raises."""
     now = now or datetime.now(tz=timezone.utc)
@@ -226,7 +269,14 @@ def build_system_overview(now: datetime | None = None) -> dict:
             log.warning("[system_overview] %s failed: %s", name, exc)
             sources.append({"key": key, "label": label,
                             "status": SOURCE_UNAVAILABLE})
+    try:
+        reconciliation = contact_reconciliation_block()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[system_overview] contact reconciliation unreadable: %s", exc)
+        reconciliation = {"available": False}
     return {"generated_at": now.isoformat(),
             "certification": certification_block(read_latest_certification(), now),
             "sources": sources,
+            # PR-ADS-163C: the latest removed-contact check, facts only.
+            "contact_reconciliation": reconciliation,
             "external_calls_performed": False}

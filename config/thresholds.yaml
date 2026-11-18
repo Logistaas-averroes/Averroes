@@ -81,6 +81,31 @@ sync:
       hubspot_contacts: 14
       hubspot_deals: 30
 
+contact_reconciliation:
+  # PR-ADS-163C — the daily check that removes contacts deleted or merged away
+  # in HubSpot (the modified-since contact sync never sees a deletion). It
+  # runs inside the daily incremental sync, right after the contact sync.
+  #
+  # Safety valve: if the contacts that qualify for removal — ALL of them,
+  # whichever run found them missing — number more than this, or more than
+  # this share of the stored contacts, nothing is removed and the run is
+  # recorded as `refused`. A mass disappearance is far more likely to be our
+  # error or a HubSpot incident than the truth. A run that finds this many
+  # contacts missing for the FIRST time is recorded `partial`.
+  max_removals_per_run: 50
+  max_removal_fraction: 0.01
+  # A contact is removed only after HubSpot failed to return it on two checks
+  # at least this many hours apart. The check runs daily, so: the second day.
+  min_hours_between_strikes: 20
+  # Cumulative limit. The removals of the last `removal_window_days` days plus
+  # what a run would remove must stay within this many contacts AND this
+  # share of the stored contacts, or the run removes nothing (`refused`). The
+  # per-run limit alone would let a small persistent loss through every other
+  # day without end.
+  removal_window_days: 7
+  max_removals_per_window: 100
+  max_removal_window_fraction: 0.02
+
 # UI-safe display thresholds — consumed by GET /api/config/ui-thresholds
 # These values drive frontend visual classification only.
 # Do not change analysis thresholds above.

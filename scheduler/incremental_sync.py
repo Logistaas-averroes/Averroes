@@ -218,6 +218,10 @@ LABEL_DEAL_COMPANY_ASSOCIATIONS = (
 LABEL_SOURCE_CLASSIFICATION = (
     f"{SOURCE_CLASSIFICATION_SOURCE}/{SOURCE_CLASSIFICATION_DATASET}")
 LABEL_GCLID_MATCHES = f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"
+#: PR-ADS-163C. The existence check stamps no `sync_batches` row and registers
+#: no freshness dataset: it records its runs in its own table
+#: (`hubspot_contact_reconciliation_runs`).
+LABEL_CONTACT_RECONCILIATION = "hubspot/contact_reconciliation"
 LABEL_KEYWORD_FACTS = f"{KEYWORD_FACTS_SOURCE}/{KEYWORD_FACTS_DATASET}"
 LABEL_SEARCH_TERMS = f"{SEARCH_TERMS_SOURCE}/{SEARCH_TERMS_DATASET}"
 
@@ -402,6 +406,9 @@ def run_daily_incremental_sync(
       - hubspot/contacts    (explicit date range via createdate filter)
       - hubspot/contact_funnel — CANONICAL all-source lifecycle spine,
                                watermarked on lastmodifieddate (PR-ADS-153B)
+      - hubspot/contact_reconciliation — moves out contacts HubSpot no
+                               longer has (deleted or merged), which the
+                               modified-since sync cannot see (PR-ADS-163C)
       - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
       - hubspot/deal_ledger, hubspot/source_classification
@@ -502,6 +509,21 @@ def run_daily_incremental_sync(
     # writer of hubspot_contact_funnel; the legacy `leads` snapshot above keeps
     # serving pre-PR-ADS-153C pages until they migrate.
     datasets["hubspot/contact_funnel"] = _sync_contact_funnel(
+        run_id=run_id, errors=errors,
+    )
+
+    # ── hubspot/contact_reconciliation — PR-ADS-163C ────────────────────────
+    # The sync above is modified-since: a contact DELETED or MERGED AWAY in
+    # HubSpot is never "modified", so its row stayed and every funnel and
+    # cohort read went on counting it. This asks HubSpot which stored contacts
+    # still exist and moves out the ones it has failed to return on two checks
+    # at least 20 hours apart.
+    #
+    # It runs HERE — after the contact sync and before the first step that
+    # reads the funnel — so the gap detection below and every page built from
+    # today's data see the funnel without them. Read-only against HubSpot;
+    # local writes only. Its failure is an error on the run, never an abort.
+    datasets[LABEL_CONTACT_RECONCILIATION] = _sync_contact_reconciliation(
         run_id=run_id, errors=errors,
     )
 
@@ -1191,6 +1213,57 @@ def _sync_contact_funnel(*, run_id, errors: list) -> dict:
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_contact_reconciliation(*, run_id, errors: list) -> dict:
+    """Remove contacts HubSpot no longer has from the canonical funnel.
+
+    PR-ADS-163C. Delegates entirely to the owning service, which never raises,
+    records its own run row and reports one of four statuses. Only ``success``
+    is green:
+
+    ``partial``  strikes were recorded but the run is not clean: a batch had
+                 no usable answer from HubSpot (then nothing is removed), a
+                 contact is held on an open post-boundary SQL incident, or more
+                 contacts went missing for the first time than the limits allow;
+    ``refused``  the safety valve stopped the removal: the backlog of contacts
+                 that qualify is over the configured limit, which needs a
+                 person to look before anything is removed;
+    ``failed``   nothing could be learned or recorded.
+
+    Each of those is an error on the run (so the run is ``partial`` and says
+    why) and none of them stops the steps after it.
+    """
+    from services.hubspot_contact_reconciliation_service import (  # noqa: PLC0415
+        run_contact_reconciliation,
+    )
+
+    try:
+        result = run_contact_reconciliation(run_id=run_id)
+    except Exception as exc:  # noqa: BLE001
+        err = f"{LABEL_CONTACT_RECONCILIATION}: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {"status": "failed", "error": str(exc)[:500],
+                "hubspot_writes_performed": False,
+                # Unknown, never zero: a check that did not run removed
+                # nothing it can vouch for and confirmed nobody.
+                "contacts_checked": None, "removed": None}
+
+    status = result.get("status")
+    if status != "success":
+        detail = result.get("refusal_reason") or result.get("error") \
+            or "no detail recorded"
+        err = (f"{LABEL_CONTACT_RECONCILIATION}: run ended '{status}' — "
+               f"{detail}")
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+    else:
+        log.info(
+            "[incremental_sync] %s: checked=%s missing=%s removed=%s",
+            LABEL_CONTACT_RECONCILIATION, result.get("contacts_checked"),
+            result.get("missing"), result.get("removed"))
+    return result
 
 
 def _detect_sql_coverage_gaps(*, run_id, errors: list) -> dict:
