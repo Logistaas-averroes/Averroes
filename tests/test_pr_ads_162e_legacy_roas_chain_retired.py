@@ -113,8 +113,10 @@ def test_06_the_ui_has_no_snapshot_history_or_confidence_card():
                  "_isNotFoundError"):
         assert gone not in JS, gone
         assert gone not in HTML, gone
-    # Reports still loads its report viewer; GCLID still loads its readiness.
-    assert 'case "reports":       loadReports(); break;' in JS
+    # GCLID still loads its readiness. (This also pinned the Reports page's
+    # loader; that page was deleted in PR-ADS-162G, so it is pinned absent.)
+    assert 'case "reports"' not in JS
+    assert "loadReports" not in JS
     assert "loadGclidReadiness();" in JS
 
 

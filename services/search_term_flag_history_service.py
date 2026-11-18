@@ -22,7 +22,7 @@ the annotation insert. That would be wrong: ``waste_terms`` stores a campaign
 NAME and no campaign id, whereas the durable identity is built from the
 canonical campaign KEY (the Google Ads campaign id wherever it is known). History
 written from a raw name would produce identities that never match the ones the
-flagged view and the Action Queue compute — a silent, permanent join failure.
+flagged view computes — a silent, permanent join failure.
 
 So history is derived from the canonical flagged population itself. Whatever
 identity the page shows is exactly the identity recorded, by construction.

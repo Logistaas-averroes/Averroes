@@ -5,8 +5,11 @@ scripts/audit_search_term_waste_truth.py
 PR-ADS-153D §47 — READ-ONLY production validation for the consolidated
 search-term waste experience.
 
-This is a MERGE GATE, not a report. It exits non-zero whenever the surfaces
-cannot be reconciled, so a deploy check or CI job can depend on it:
+This is a MERGE GATE, not a report. It exits non-zero on any failure
+condition listed below, so a deploy check or CI job can depend on it. It
+reconciles COUNTS (rows, identities, the KPI term count, the pagination
+total); it does not reconcile KPI spend or review-needed totals against the
+rows:
 
     python -m scripts.audit_search_term_waste_truth --window 30d
     echo $?          # 0 = reconciled, 1 = validation failed, 2 = usage error
@@ -19,12 +22,17 @@ Failure conditions (each one exits 1)
 -------------------------------------
   * duplicate ``term_identity`` in the COMPLETE flagged population;
   * row count, KPI count and pagination total disagreeing;
-  * the page and the Action Queue disagreeing on a term's spend or reason;
   * ``truth_state = mismatch``;
   * canonical facts unavailable, or the local review store unavailable;
   * flag history never persisted (the production writer is not running);
-  * the queue reporting unavailable while presenting as empty;
   * any database error.
+
+PR-ADS-162G: the Action Queue page and ``GET /api/action-queue`` were deleted,
+and with them this audit's second half, which rebuilt the queue's waste items
+and reconciled them against the flagged view (queue/page spend and reason,
+duplicate queue identities, a review-store outage presenting as an empty
+queue). Search Terms → Flagged is now the only surface for this population, so
+every check about that population itself is unchanged.
 
 Guarantees
 ----------
@@ -237,8 +245,8 @@ def _flag_history_state() -> dict:
 def _flagged_population(window: str) -> dict:
     """The COMPLETE flagged population, paged through before any deduplication.
 
-    Auditing after the Action Queue has already collapsed duplicates would hide
-    exactly the defect this gate exists to catch.
+    Auditing a deduplicated copy of the population would hide exactly the
+    defect this gate exists to catch.
     """
     from services.search_term_evidence_service import build_flagged_search_terms
 
@@ -263,30 +271,6 @@ def _flagged_population(window: str) -> dict:
     return {"payload": first, "rows": rows, "complete": True}
 
 
-def _queue_items(window_days: int) -> dict:
-    """Active search-term waste actions, straight from the queue builder."""
-    from api.server import _build_waste_queue_items  # noqa: PLC0415
-
-    try:
-        items = _build_waste_queue_items(None, window_days, 100.0)
-    except Exception as exc:  # noqa: BLE001
-        return {"available": False, "error": str(exc)}
-
-    disclosure = [i for i in items if i.get("entity_type") == "review_store"]
-    actions = [i for i in items if i.get("entity_type") != "review_store"]
-    identities = [(i.get("evidence") or {}).get("term_identity") for i in actions]
-    seen, duplicates = set(), []
-    for ident in identities:
-        if ident in seen:
-            duplicates.append(ident)
-        seen.add(ident)
-    return {"available": True, "count": len(actions),
-            "duplicate_identities": duplicates,
-            "unique_identities": len(seen),
-            "unavailable_disclosure": bool(disclosure),
-            "items": actions}
-
-
 # ── Validation ───────────────────────────────────────────────────────────────
 def _validate(data: dict, findings: _Findings) -> None:
     canonical = data["canonical"]
@@ -294,7 +278,6 @@ def _validate(data: dict, findings: _Findings) -> None:
     payload = flagged.get("payload") or {}
     kpis = payload.get("kpis") or {}
     rows = flagged.get("rows") or []
-    queue = data["queue"]
     history = data["flag_history"]
     proof = data["snapshot_proof"]
 
@@ -358,40 +341,6 @@ def _validate(data: dict, findings: _Findings) -> None:
             findings.fail("flagged rows (%s) != unique identities (%s)"
                           % (len(rows), unique))
 
-    # ── page vs queue ──
-    if not queue.get("available"):
-        findings.fail("Action Queue could not be built: %s"
-                      % queue.get("error", "unknown"))
-    else:
-        if queue.get("duplicate_identities"):
-            findings.fail("%d duplicate durable identity/identities in the "
-                          "Action Queue" % len(queue["duplicate_identities"]))
-        if queue.get("unavailable_disclosure") and queue.get("count"):
-            findings.fail("Action Queue reports review state unavailable AND "
-                          "also emitted per-term actions — these are mutually "
-                          "exclusive")
-        if payload.get("review_state_available") is False \
-                and not queue.get("unavailable_disclosure"):
-            findings.fail("review store unavailable but the Action Queue "
-                          "presents as empty — an empty list reads as zero work")
-
-        by_identity = {r.get("term_identity"): r for r in rows}
-        for item in queue.get("items") or []:
-            ev = item.get("evidence") or {}
-            row = by_identity.get(ev.get("term_identity"))
-            if row is None:
-                findings.fail("queue item %s references a term_identity absent "
-                              "from the flagged page" % item.get("id"))
-                continue
-            if ev.get("spend_usd") != row.get("spend_usd"):
-                findings.fail("queue/page spend disagree for %r: %s vs %s"
-                              % (row.get("search_term"), ev.get("spend_usd"),
-                                 row.get("spend_usd")))
-            if ev.get("flag_reason") != row.get("flag_reason"):
-                findings.fail("queue/page flag reason disagree for %r: %s vs %s"
-                              % (row.get("search_term"), ev.get("flag_reason"),
-                                 row.get("flag_reason")))
-
     # ── flag history persistence ──
     if not history.get("available"):
         findings.fail("flag history could not be read: %s"
@@ -407,10 +356,9 @@ def _validate(data: dict, findings: _Findings) -> None:
 
 
 def collect(window: str) -> dict:
-    from analysis.evidence_windows import resolve_evidence_window
     from services.campaign_evidence_service import _window_bounds
 
-    resolved = resolve_evidence_window(window)
+    # Raises EvidenceWindowError for an unknown window.
     start, end, _ = _window_bounds(window, None)
 
     return {
@@ -421,7 +369,6 @@ def collect(window: str) -> dict:
         "flagged": _flagged_population(window),
         "snapshot_proof": _snapshot_proof(start, end),
         "flag_history": _flag_history_state(),
-        "queue": _queue_items(resolved["days"] or 365),
     }
 
 
@@ -468,7 +415,6 @@ def main() -> int:
     kpis = payload.get("kpis") or {}
     rows = flagged.get("rows") or []
     proof = data["snapshot_proof"]
-    queue = data["queue"]
     history = data["flag_history"]
 
     print("=" * 72)
@@ -545,19 +491,7 @@ def main() -> int:
         print("  campaign-attributable ≤ Google Ads-source ≤ all-source lifecycle SQLs.")
 
     # ── 5 ────────────────────────────────────────────────────────────────────
-    _section("5. ACTION QUEUE (one durable term → one action)")
-    if not queue.get("available"):
-        print(f"  Unavailable — {queue.get('error', 'queue could not be built')}")
-    else:
-        print(f"    {'active waste actions':<30} {_fmt(queue.get('count')):>16}")
-        print(f"    {'unique durable identities':<30} {_fmt(queue.get('unique_identities')):>16}")
-        print(f"    {'duplicate identities':<30} {_fmt(len(queue.get('duplicate_identities') or [])):>16}")
-        if queue.get("unavailable_disclosure"):
-            print("    review state UNAVAILABLE — the queue discloses this rather")
-            print("    than presenting an empty list that reads as zero work.")
-
-    # ── 6 ────────────────────────────────────────────────────────────────────
-    _section("6. FLAG HISTORY PERSISTENCE (production write path)")
+    _section("5. FLAG HISTORY PERSISTENCE (production write path)")
     if not history.get("available"):
         print(f"  Unavailable — {history.get('error', 'unknown')}")
     else:
@@ -571,8 +505,8 @@ def main() -> int:
     for note in findings.notes:
         print(f"  note: {note}")
     if findings.ok:
-        print("  PASS — page rows, KPIs, pagination, review state, flag history")
-        print("  and the Action Queue reconcile.")
+        print("  PASS — page rows, KPIs, pagination, review state and flag history")
+        print("  reconcile.")
     else:
         print(f"  FAIL — {len(findings.failures)} validation failure(s):")
         for failure in findings.failures:

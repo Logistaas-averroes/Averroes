@@ -2253,3 +2253,186 @@ unchanged. Three older tests that named the old groups
 its rule (Leads sits in the sales group; the four ad-platform pages sit
 together; GCLID Attribution is not in the sales group). Verified in a browser:
 seven pages opened from the regrouped menu with no script error.
+
+---
+
+## PR-ADS-162G — delete the Action Queue and Reports pages
+
+**Why.** Owner decision ("delete action queue and reports"). 162F had left the
+question open and parked both pages under Google Ads. Neither could be rebuilt
+by relabelling:
+
+- **Action Queue** ranked review items from the legacy `campaigns` snapshot
+  (`confirmed_sqls` copied from an undated, undeduplicated JSON pull — the
+  third SQL definition), from raw `leads` rows windowed on `run_date`, and from
+  the legacy `keywords` snapshot. It was Google-Ads-only. Its one canonical
+  input, flagged search terms, is the Search Terms → Flagged view.
+- **Reports** displayed the latest generated markdown file: the weekly/monthly
+  advisor report, whose SCALE/HOLD/FIX/CUT verdicts and CPQL come from that
+  same third definition and are reconciled against no page.
+
+**Deleted.**
+
+| What | Detail |
+| --- | --- |
+| Pages | `#/action-queue` and `#/reports`: sidebar entries, page sections, `PAGES` keys, explanation / help / dataset / dependency map entries, page state, loaders, renderers, filter and button wiring |
+| Routes | `GET /api/action-queue`, `GET /reports/latest`, `GET /reports/latest/raw` |
+| Server code | `api_action_queue`, `_build_campaign_queue_items`, `_build_waste_queue_items`, `_build_geo_queue_items`, `_build_keyword_queue_items`, `_build_data_quality_items`, `_queue_severity_label`, `_queue_id`, the `_QUEUE_*` constants, `_evidence_window_for_days` (its only caller was the queue), `reports_latest`, `reports_latest_raw`, `_latest_report_path`, and three imports nothing else used |
+| JS helper | `fetchText` (its only caller was the report viewer) |
+| Styles | the Reports and Action Queue blocks of `static/styles.css` (every class checked unused first) |
+| Registry | the two Action Queue consumers, rules `api.aq.campaign`, `api.aq.geo` and `ui.report`, and two decision surfaces in `analysis/sql_doctrine_registry.py` |
+| Deploy check | the `/reports/latest` and `/reports/latest/raw` probes in `scripts/verify_live_deployment.py` |
+| Docs | their sections and rows in `docs/API_CONTRACT.md`, `docs/24_UI_NAVIGATION_MODEL.md` and `docs/DEPLOYMENT.md` |
+
+An old bookmark to either page lands on the Dashboard (the router sends any
+key outside `PAGES` there). Neither key was kept as a redirect: no page is the
+equivalent of either.
+
+**Kept, and why.**
+
+- **The report generation pipeline** — `scheduler/weekly.py`,
+  `scheduler/monthly.py`, `analysis/core.py`, `analysis/rule_advisor.py`,
+  `analysis/advisor.py`, `POST /run/weekly`, `POST /run/monthly`. Out of scope
+  for this slice. The jobs still run, still write `outputs/*.md` and still
+  email the report; only the in-app viewer is gone. See Follow-up.
+- **The high-spend fallback.** `_QUEUE_HIGH_SPEND_USD_DEFAULT` lived in the
+  Action Queue block but is read by `/api/waste` and
+  `/api/search-term-evidence/flagged`. It stays, renamed
+  `_FLAGGED_HIGH_SPEND_USD_DEFAULT`.
+- **The focused-term deep link** (`#/search-terms?tab=flagged&term=…`). The
+  queue item was the only thing in the app that generated it, but it is a URL:
+  a saved or shared link still sets it, and two 153D tests pin its encoding.
+  The mechanism is unchanged; its notice now reads "Filtered to … by the link
+  that opened this view" instead of naming the Action Queue.
+
+**Dashboard cards.** Two Overview decision cards opened the Action Queue.
+
+| Card | Was | Now | Why |
+| --- | --- | --- | --- |
+| Investigate — "Paid spend without SQL proof" | `action-queue`, "Open Action Queue" | `roas-campaigns`, "Open Campaign Revenue & Spend" | The card restates the `biggest_waste` signal: campaigns with spend and no SQL or won deal. That signal already named Campaign Revenue & Spend as its evidence. |
+| Investigate — "No unexplained paid spend" | `action-queue`, "Open Action Queue" | `roas-campaigns`, "Open Campaign Revenue & Spend" | The same campaign rows, with nothing to flag; the sibling card "Paid spend cannot be fully judged" already opened this page. |
+
+No card content changed. The Dashboard help text no longer sends the reader to
+the Action Queue, and three Search Terms strings that named it are reworded or
+removed.
+
+**The search-term waste audit** (`scripts/audit_search_term_waste_truth.py`).
+Its second half rebuilt the queue's waste items through the deleted server
+builder and reconciled them with the flagged view: queue/page spend and reason,
+duplicate queue identities, and a review-store outage presenting as an empty
+queue. That half is removed, with its output section. Left in place it would
+have raised on import of the deleted builder, which `main()` reports as a
+failed audit on every run. Every check about the flagged population itself is
+unchanged: canonical fact and annotation availability, `truth_state`, complete
+read, review-store availability, missing and duplicate identities over the
+complete pre-dedup population, row / KPI / pagination reconciliation, and flag
+history persistence.
+
+**The doctrine registry.** `ui.report` was bound to `copyLatestReport`, but the
+occurrence it classified was the Dashboard's delta-valence map
+(`sqls: "up-good"`): a top-level literal the scanner attributes to the function
+before it. Deleting that function left the literal unclassified. It is now
+bound to the Dashboard Overview consumer as `ui.overview.delta_valence`, where
+it belongs. The `_REPORT` consumer and its `analysis/core.py` /
+`analysis/rule_advisor.py` rules are untouched.
+
+**Tests.** `tests/test_pr_ads_162g_action_queue_reports_retired.py` (16 tests, 33 cases): no route key, section, sidebar entry, map entry, loader, state,
+style or wiring remains for either page; the three endpoints are 404 on the
+running app and absent from the route table; no UI text names the Action Queue
+or links to either page; **every `target_page` any dashboard service can emit
+is a real page** (read from the AST of all `services/dashboard_*_service.py`
+against the `PAGES` list parsed from `app.js`, failing on a target it cannot
+read, with a counterfactual that goes red on the old `action-queue` target);
+an old bookmark resolves to the Dashboard; all 18 remaining sidebar pages
+route; the doctrine inventory has nothing unclassified; the report pipeline and
+its registry consumer are still there; the waste audit keeps every flagged
+check; the reader-cutover audit's structural checks, including the UI wording
+check, pass. Sixteen of the eighteen cases fail on the pre-change tree; the two
+that pass there are the "kept" guards.
+
+Older tests:
+
+- `test_pr_ads_162f_sidebar_groups.py` — the exact sidebar is 18 pages, and
+  Google Ads holds four.
+- `test_sidebar_navigation_structure.py`, `test_empty_state_page_explanations.py`,
+  `test_help_drawer_and_snapshot_history.py` — the two pages leave the required
+  page lists.
+- `test_dataset_freshness_ui_contract.py` — the two `action_queue` mapping
+  tests become one retirement assertion, plus the same multi-dataset rule on
+  Campaigns, which still has two datasets.
+- `test_pr_ads_162e_legacy_roas_chain_retired.py` — the Reports loader it
+  pinned present is pinned absent.
+- `test_pr_ads_134_dashboard_overview.py` — the Investigate target and label.
+- `test_pr_ads_153d_waste_consolidation.py` — eleven tests whose whole subject was
+  the queue item are removed, each named in a comment where it stood, and
+  replaced by one retirement test. Four tests that used the queue as a second
+  surface keep every assertion about the page; the priority test reads the same
+  reasons from the flagged row the queue copied them from.
+- `test_pr_ads_153d_pg_integration.py` — two end-to-end tests keep their page
+  half and replace the queue half with a retirement assertion or the page row's
+  own `action_needed`. The seven audit gate tests are unchanged and still pass.
+- `test_platform_evidence_google_ads_api_cutover.py` — the freshness map was
+  required to name the legacy `google_ads_api/campaigns` dataset, which only
+  the two deleted pages mapped to. It now requires the key the Campaigns page
+  has used since PR-ADS-143, `google_ads_api/canonical_spend`.
+- `test_pr_ads_156_evidence_freshness.py::test_28c` — it counts the readers of
+  the legacy `keywords` snapshot in `api/server.py` to prove the scheduled
+  legacy writes are still needed. One of the two it counted was the queue's
+  keyword builder. The bound is now `>= 1`, pinned to the aggregated keyword
+  endpoint; zero is still what re-opens the question.
+
+**Follow-up.**
+
+1. **Report generation still runs and still emails.** `scheduler/weekly.py`
+   and `scheduler/monthly.py` build the advisor report
+   (`run_lead_quality`, `run_campaign_truth`, `compute_ngram_findings`,
+   `generate_*_report`) and `scheduler/delivery.py` sends it by SendGrid when
+   its keys are set. No page shows it any more. It is the remaining owner of
+   the third SQL definition. The owner has ordered Reports deleted; removing
+   the generation and the email is the next slice.
+2. **Those two jobs are NOT only report code.** They are the only writers of
+   inputs live pages read, and these steps must be kept (or moved) when the
+   report steps are cut:
+   - `run_waste_detection` + `write_waste_terms` — the flagged state on
+     Search Terms → Flagged;
+   - `record_flag_history` (weekly only) — first/latest flagged dates, and the
+     waste-truth audit fails without it;
+   - `write_geo`, `write_keywords`, the GCLID coverage snapshot and GCLID
+     match — the Countries page, Dashboard keyword themes and GCLID pages.
+   Removing the jobs outright would also leave the `weekly` / `monthly`
+   monitoring cadences warning forever.
+3. **The legacy `campaigns` snapshot has no EVIDENCE reader left** (the
+   queue's campaign builder was the last), but it is still a registered core
+   freshness dataset: `services/freshness_service.py`, `/api/datasets/freshness`,
+   the status war room and `system_status_service.CORE_DATASETS` count its
+   rows. `db.writers.write_campaigns` must not be cut before the dataset is
+   unregistered there, or System Status reports a stale core dataset.
+4. The legacy `keywords` snapshot keeps one in-product reader: the Dashboard
+   Campaigns keyword themes (`fetch_keyword_theme_snapshot`).
+   `GET /api/keywords` also reads it and has no caller in the UI — an orphan
+   endpoint for a later slice. An audit count and the freshness row count read
+   it too.
+5. Text that still describes the two pages and was left alone in this slice:
+   comments in `scheduler/weekly.py` and the `search_term_review` DDL comment
+   in `db/schema.py`; `analysis/legacy_source_guard.py`'s note on the
+   `write_keywords` allowlist ("four live consumers" — one remains);
+   `docs/38`, `docs/44`, `docs/PR_TEMPLATE.md` and `docs/DEPLOYMENT.md`
+   passages; and the `view_reports` permission in `api/auth.py`, which nothing
+   uses now. `docs/34` §16 is corrected in this slice.
+6. The waste-truth audit reconciles counts only. Without the queue's second
+   read it holds no spend assertion; summing row spend against the KPI is the
+   cheap addition for a later slice.
+
+**Independent truth review (before the first push).** The
+`averroes-truth-auditor` found no blocker and ten corrections, applied here:
+the follow-up list above was rewritten (the `campaigns` snapshot is still a
+registered freshness dataset; the weekly and monthly jobs are the only writers
+of live flagged-view inputs; the report is still emailed); `docs/34` §16
+listed two deleted checks; the new registry rule for the Dashboard valence
+literal is bound to its one pattern, with a test that it binds exactly one
+occurrence; the "kept checks" test now runs the real `_validate` and breaks
+one input per check (the string-presence version passed with every check
+disabled); the Dashboard target test no longer waves through a computed local
+named `target_page`; the legacy-keyword-consumer test asserts the Dashboard
+call site and names `/api/keywords` as an orphan; and the audit's summary
+sentence says it reconciles counts, not spend.

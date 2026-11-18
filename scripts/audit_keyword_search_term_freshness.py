@@ -576,9 +576,10 @@ def _search_term_data_facts(cur, cert_from, cert_to, customer_ids=None) -> dict:
 def _legacy_facts(cur) -> dict:
     """Legacy rows and tables, reported rather than assumed absent.
 
-    The legacy `keywords` snapshot still has LIVE non-evidence consumers
-    (campaign drill-down previews, keyword themes, the keyword-review queue), so
-    its rows existing is not a violation. What WOULD be a violation is a
+    The legacy `keywords` snapshot still has a LIVE non-evidence consumer
+    (the Dashboard keyword themes; the campaign drill-down preview migrated in
+    PR-ADS-157), so its rows existing is not a violation. What WOULD be a
+    violation is a
     production path reading them as evidence, and that is checked in source by
     the shared guard rather than here — this reports the shape of what is there.
     """

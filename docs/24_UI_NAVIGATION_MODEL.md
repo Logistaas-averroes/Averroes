@@ -20,14 +20,16 @@
 | Group | Purpose | Pages |
 |-------|---------|-------|
 | **Overview** | Where to start | Dashboard, Channels |
-| **Google Ads** | Everything about that one ad platform (Google Ads API). Action Queue and Reports sit here because they are built on Google Ads data only | Campaigns, Search Terms, Keyword Evidence, Countries, Action Queue, Reports |
+| **Google Ads** | Everything about that one ad platform (Google Ads API) | Campaigns, Search Terms, Keyword Evidence, Countries |
 | **Sales Results** | Leads, deals and revenue from HubSpot | Leads, Deals, Revenue by Source, Campaign Revenue & Spend, Country Revenue & Spend, Unit Economics |
 | **Admin** | System, with the technical pages folded under "Advanced tools" | System; Advanced tools: Data Runs, GCLID Attribution, System Status, Revenue Health, Admin Backfill |
 
 > PR-ADS-162F renamed the groups ("Command Center", "Platform Evidence" and
 > "CRM & Revenue" before it) and moved Channels, Action Queue and Reports.
-> Route keys are unchanged. The exact order is pinned by
-> `tests/test_pr_ads_162f_sidebar_groups.py`.
+> PR-ADS-162G then deleted the Action Queue and Reports pages outright (routes
+> `action-queue` and `reports`, their endpoints and their code): an old
+> bookmark to either lands on the Dashboard. No other route key changed. The
+> exact order is pinned by `tests/test_pr_ads_162f_sidebar_groups.py`.
 
 ---
 
@@ -59,8 +61,6 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 | Menu Label | Route Key | Section |
 |-----------|-----------|---------|
 | Dashboard | `dashboard` | Command Center |
-| Action Queue | `action-queue` | Command Center |
-| Reports | `reports` | Command Center |
 | Campaigns | `campaigns` | Platform Evidence |
 | Search Terms | `search-terms` | Platform Evidence |
 | Keywords | `keywords` | Platform Evidence |
@@ -102,8 +102,8 @@ CRM & Revenue:
 **Flagged Waste Terms** is retired as a standalone destination. Its nav item,
 page markup and loader are deleted; `#/waste` redirects to
 `#/search-terms?tab=flagged`, carrying the old page's intent rather than merely
-its URL. Investigation lives in Search Terms → Flagged; the actionable subset
-lives in the Action Queue.
+its URL. Investigation lives in Search Terms → Flagged. (The actionable subset
+was also listed on the Action Queue until that page was deleted in PR-ADS-162G.)
 
 **N-Grams / Patterns** has one normal home — Search Terms → Patterns. `#/ngrams`
 already redirected there and still does; there is no everyday nav item for it.
@@ -169,4 +169,4 @@ Planned for subsequent PRs:
 - Sidebar collapse/expand toggle for smaller screens
 - Page-level breadcrumbs
 - Keyboard shortcut navigation (Cmd+K style)
-- Badge counts on Action Queue and Review items
+- Badge counts on Review items

@@ -137,8 +137,6 @@ def check_protected_endpoints_require_auth(base: str, timeout: int, debug: bool)
     """Verify that protected endpoints return 401 when unauthenticated."""
     protected = [
         "/runs/latest",
-        "/reports/latest",
-        "/reports/latest/raw",
         "/scheduler/status",
         "/readiness",
     ]

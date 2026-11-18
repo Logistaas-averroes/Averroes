@@ -4,13 +4,14 @@
 nothing. The groups are now:
 
 * **Overview** — the Dashboard and the all-channel funnel;
-* **Google Ads** — everything that is about that one ad platform, including
-  the Action Queue and Reports, which are built on Google Ads data only;
+* **Google Ads** — everything that is about that one ad platform (the Action
+  Queue and Reports sat here until both pages were deleted in PR-ADS-162G);
 * **Sales Results** — leads, deals and revenue from HubSpot;
 * **Admin** — System, with the technical pages folded under Advanced tools.
 
-No page was added, removed or renamed, and no route key changed: this is
-order and labels only.
+No page was added, removed or renamed by 162F, and no route key changed: it
+was order and labels only. PR-ADS-162G then removed two pages, which is why the
+exact list below is 18 long, not 20.
 """
 from __future__ import annotations
 
@@ -23,8 +24,7 @@ JS = (ROOT / "static/app.js").read_text(encoding="utf-8")
 
 EXPECTED = [
     ("Overview", ["dashboard", "channels"]),
-    ("Google Ads", ["campaigns", "search-terms", "keywords", "geo",
-                    "action-queue", "reports"]),
+    ("Google Ads", ["campaigns", "search-terms", "keywords", "geo"]),
     ("Sales Results", ["leads", "deals", "revenue-by-source", "roas-campaigns",
                        "roas-countries", "unit-economics"]),
     ("Admin", ["system", "scheduler", "gclid-attribution", "health",
@@ -61,7 +61,7 @@ def test_03_no_page_was_added_or_lost_and_every_one_still_routes():
     pages = set(re.findall(r'"([a-z0-9-]+)"', re.search(
         r"const PAGES = \[(.*?)\];", JS, re.S).group(1)))
     nav = [p for _, ps in _groups() for p in ps]
-    assert len(nav) == len(set(nav)) == 20
+    assert len(nav) == len(set(nav)) == 18
     assert set(nav) <= pages
     for page in nav:
         assert f'id="page-{page}"' in HTML, page

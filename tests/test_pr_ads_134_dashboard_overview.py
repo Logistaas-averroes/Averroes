@@ -639,8 +639,17 @@ def test_decision_cards_link_to_evidence_pages(monkeypatch):
     out = _overview(monkeypatch)
     targets = {c["type"]: c["target_page"] for c in out["decision_cards"]}
     assert targets["scale"] == "roas-campaigns"
-    assert targets["investigate"] in ("action-queue", "revenue-health")
+    # PR-ADS-162G: the Action Queue page is deleted. The Investigate card
+    # restates the campaign-level biggest_waste signal, so it opens the page
+    # that signal already named as its evidence.
+    assert targets["investigate"] in ("roas-campaigns", "revenue-health")
     assert targets["unavailable"] == "revenue-health"
+    investigate = next(c for c in out["decision_cards"] if c["type"] == "investigate")
+    if investigate["target_page"] == "roas-campaigns":
+        assert investigate["target_label"] == "Open Campaign Revenue & Spend"
+    assert all(c["target_page"] != "action-queue" for c in out["decision_cards"])
+    assert all("Action Queue" not in c.get("target_label", "")
+               for c in out["decision_cards"])
 
 
 def test_withheld_lead_metrics_degrade_watch_and_waste_honestly(monkeypatch):
@@ -868,8 +877,11 @@ def test_signals_and_cards_link_to_evidence_pages():
     assert 'href="#/${escapeHtml(c.target_page)}"' in cards
     # Service-side targets are the real evidence pages.
     for target in ('"roas-campaigns"', '"roas-countries"', '"revenue-by-source"',
-                   '"action-queue"', '"revenue-health"'):
+                   '"revenue-health"'):
         assert target in SERVICE
+    # PR-ADS-162G: the Action Queue page is deleted — no card may point at it.
+    assert '"action-queue"' not in SERVICE
+    assert "Action Queue" not in SERVICE
 
 
 def test_error_loading_empty_states_exist():

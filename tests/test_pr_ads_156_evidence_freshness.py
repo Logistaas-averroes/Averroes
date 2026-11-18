@@ -776,14 +776,29 @@ def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
     count is now two in `api/server.py`, not three. That is a migration, not a
     regression, and the writes still stay for the remaining consumers.
 
-    The assertion is `>= 2` rather than `== 2` on purpose: this test exists to
+    The assertion was `>= 2` rather than `== 2` on purpose: this test exists to
     prove the legacy writes are still NEEDED, and a hard equality would fail
     the next time a consumer is migrated, which is the direction of travel.
-    Dropping to zero is the condition that should re-open the question, and
-    `>= 2` still catches it.
+    Dropping to zero is the condition that should re-open the question.
+
+    PR-ADS-162G DELETED THE THIRD — the keyword-review action queue went with
+    the Action Queue page — so the count is now ONE in `api/server.py` (the
+    aggregated keyword endpoint), and the bound is `>= 1`.
+
+    That endpoint is an ORPHAN: nothing in `static/` calls `/api/keywords`, so
+    it does not by itself prove the writes are needed. The one in-product
+    reader left is the keyword-theme snapshot behind the Dashboard Campaigns
+    tab, and it is asserted at its CALL SITE below — a function that merely
+    exists in the repository proves nothing if the Dashboard stops calling it.
+    When that call goes, this test fails, and that is the moment to stop the
+    legacy writes.
     """
     api_src = (_ROOT / "api" / "server.py").read_text(encoding="utf-8")
-    assert api_src.count("FROM keywords") >= 2
+    assert api_src.count("FROM keywords") >= 1
+    # The one that remains is the aggregated endpoint — not a leftover queue.
+    assert "FROM keywords" in api_src.split('@app.get("/api/keywords")')[1].split(
+        "\n@app.")[0]
+    assert "_build_keyword_queue_items" not in api_src
 
     # And the migrated consumer is genuinely gone from the drawer builder.
     from tests.test_pr_ads_157_campaign_evidence_certification import _function_code
@@ -791,6 +806,15 @@ def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
     assert "FROM keywords" not in builder
     revenue_repo = (_ROOT / "db" / "revenue_repository.py").read_text(encoding="utf-8")
     assert "fetch_keyword_theme_snapshot" in revenue_repo
+    # The live reader, at its call site (PR-ADS-162G).
+    campaigns_tab = _function_code(
+        _ROOT / "services" / "dashboard_campaigns_service.py",
+        "build_dashboard_campaigns")
+    assert "repo.fetch_keyword_theme_snapshot()" in campaigns_tab
+    # `/api/keywords` has no caller in the UI: an orphan, not a consumer.
+    import re as _re
+    app_js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert _re.search(r"/api/keywords(?![-\w])", app_js) is None
 
     # Keyword EVIDENCE is not one of them.
     kw_evidence = (_ROOT / "services" / "keyword_evidence_service.py").read_text(

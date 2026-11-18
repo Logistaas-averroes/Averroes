@@ -165,7 +165,7 @@ class SearchTermIdentityError(RuntimeError):
 
     An internal invariant break, never a user input error: it means the
     aggregation grain and the durable identity grain have diverged, so page
-    rows, KPI counts and Action Queue items can no longer be reconciled. Raised
+    rows and KPI counts can no longer be reconciled. Raised
     rather than served, because serving it means publishing numbers that
     contradict each other.
     """
@@ -1711,7 +1711,7 @@ def _flagged_row(unit: dict, aliases_by_id: dict, review: dict | None,
         # None — never a fabricated timestamp.
         "first_flagged_at": review.get("first_flagged_at"),
         "latest_flagged_at": review.get("latest_flagged_at"),
-        # Local review decision, shared verbatim with the Action Queue.
+        # Local review decision.
         **review_state_payload(state, available=review_available),
         "review_note": review.get("review_note") if review_available else None,
         "reviewed_at": review.get("reviewed_at") if review_available else None,
@@ -1882,8 +1882,7 @@ def build_flagged_search_terms(
     # The flagged population: durable evidence only.
     flagged_units = [u for u in units if _unit_state(u) == STATE_FLAGGED]
 
-    # Durable local decisions, joined by canonical identity — the SAME join the
-    # Action Queue uses, so the two surfaces cannot disagree.
+    # Durable local decisions, joined by canonical identity.
     reviews, review_available = _fetch_reviews_for_units(flagged_units)
 
     rows_all = [_flagged_row(u, pop["aliases_by_id"],
@@ -1893,9 +1892,8 @@ def build_flagged_search_terms(
 
     # HARD INVARIANT (PR-ADS-153D §9). One row per durable identity, always.
     # If the aggregation grain ever drifts from the identity grain again, the
-    # table, the KPI count and the Action Queue silently disagree — the table
-    # shows N rows, the KPI counts the identities, and the queue keeps one item
-    # carrying one variant's spend. Fail loudly here instead.
+    # table and the KPI count silently disagree — the table shows N rows and
+    # the KPI counts the identities. Fail loudly here instead.
     if len(rows_all) != len({r["term_identity"] for r in rows_all}):
         raise SearchTermIdentityError(
             "flagged population has %d rows but %d durable identities — the "
@@ -1983,13 +1981,12 @@ def _quarantined_flagged_payload(base, pop, truth_state, echo_filters,
     """A mismatch response: diagnosis only, never decision metrics.
 
     Every KPI is null and no row is returned, so there is nothing for the normal
-    UI to render and nothing for the Action Queue to action. The `quarantine`
-    block names what broke and lists the affected terms for an operator, in a
-    shape the KPI/table renderers do not read.
+    UI to render. The `quarantine` block names what broke and lists the affected
+    terms for an operator, in a shape the KPI/table renderers do not read.
 
     ``actionable`` is False so every downstream consumer — filters, pagination,
-    review buttons, queue construction — can refuse in one check rather than
-    each inventing its own rule.
+    review buttons — can refuse in one check rather than each inventing its own
+    rule.
     """
     units = pop.get("units") or []
     flagged = [u for u in units if _unit_state(u) == STATE_FLAGGED]
@@ -2054,9 +2051,8 @@ def _fetch_reviews_for_units(units: list) -> tuple[dict, bool]:
     Existing decisions are therefore neither reopened nor treated as
     ``unreviewed``. Defaulting an unreadable store to ``unreviewed`` would
     silently resurrect terms a human had already resolved or kept, and inventing
-    ``keep`` would silently drop outstanding work — the Action Queue instead
-    emits one explicit disclosure item saying the review store could not be
-    read.
+    ``keep`` would silently drop outstanding work — the flagged view instead
+    says the review store could not be read.
     """
     try:
         from db import search_term_review_repository as review_repo  # noqa: PLC0415

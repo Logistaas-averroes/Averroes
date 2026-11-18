@@ -52,8 +52,6 @@ Render.com
        ├── GET  /readiness           — Structured readiness check (requires admin)
        ├── GET  /scheduler/status    — In-app scheduler state (requires auth)
        ├── GET  /runs/latest         — Latest run history record (requires auth)
-       ├── GET  /reports/latest      — Latest report metadata (requires auth)
-       ├── GET  /reports/latest/raw  — Raw report content (requires auth)
        ├── POST /run/daily           — Trigger daily pulse (requires admin)
        ├── POST /run/weekly          — Trigger weekly report (requires admin)
        └── POST /run/monthly         — Trigger monthly report (requires admin)
@@ -100,8 +98,6 @@ All services are defined in `render.yaml` at the repo root.
 | `GET /readiness` | Admin | Structured check — dirs, config files, docs, core imports |
 | `GET /scheduler/status` | Any auth | In-app scheduler state and next run times (read-only) |
 | `GET /runs/latest` | Any auth | Latest record from `runtime_logs/run_history.jsonl` |
-| `GET /reports/latest` | Any auth | Metadata for the most recent file in `outputs/` |
-| `GET /reports/latest/raw` | Any auth | Raw markdown content of the latest report |
 | `POST /run/daily` | Admin (cookie or Bearer) | Trigger daily pulse scheduler |
 | `POST /run/weekly` | Admin (cookie or Bearer) | Trigger weekly report scheduler |
 | `POST /run/monthly` | Admin (cookie or Bearer) | Trigger monthly report scheduler |
@@ -125,7 +121,6 @@ curl http://localhost:8000/health
 curl http://localhost:8000/readiness
 curl http://localhost:8000/scheduler/status
 curl http://localhost:8000/runs/latest
-curl http://localhost:8000/reports/latest
 
 # Test authorized run (returns structured JSON)
 curl -X POST http://localhost:8000/run/daily \
@@ -527,7 +522,6 @@ The dashboard is served at `/` and provides:
 
 - **System status cards** — health, readiness, latest run, latest report.
 - **Latest Run panel** — reads from `/runs/latest`.
-- **Latest Report panel** — reads from `/reports/latest`; raw report viewer calls `/reports/latest/raw`.
 - **Manual Run Controls** — buttons for Daily, Weekly, Monthly. Require `ADMIN_API_TOKEN`.
 - **Doctrine reminder** — Phase 1 read-only status always visible.
 

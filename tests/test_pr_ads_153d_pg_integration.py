@@ -495,7 +495,7 @@ def test_review_store_unavailable_is_not_reported_as_no_reviews(pg, monkeypatch)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# §41 / §44 — End-to-end: flagged view and queue over real facts
+# §41 / §44 — End-to-end: flagged view over real facts (the queue: PR-ADS-162G)
 # ═════════════════════════════════════════════════════════════════════════════
 def _flagged(window="all_time"):
     from services.search_term_evidence_service import build_flagged_search_terms
@@ -515,7 +515,11 @@ def test_flagged_view_reads_deduplicated_canonical_facts(pg):
     assert payload["canonical_fact_source"]["table"] == "search_terms"
 
 
-def test_flagged_view_and_queue_agree_after_repeated_sync(pg):
+def test_flagged_view_is_one_row_after_repeated_sync_and_the_queue_is_gone(pg):
+    """PR-ADS-162G: this was test_flagged_view_and_queue_agree_after_repeated_sync.
+    Its second half compared the Action Queue's waste item with the page row;
+    the queue and its builder are deleted, so that half is now the retirement
+    assertion. The page half is unchanged."""
     from api import server
 
     for _ in range(3):
@@ -528,29 +532,29 @@ def test_flagged_view_and_queue_agree_after_repeated_sync(pg):
     rows = payload["rows"]
     assert len(rows) == 1
 
-    items = server._build_waste_queue_items(None, 365, 100.0)  # noqa: SLF001
-    assert len(items) == 1
-    assert items[0]["evidence"]["term_identity"] == rows[0]["term_identity"]
-    assert items[0]["evidence"]["spend_usd"] == rows[0]["spend_usd"]
+    assert not hasattr(server, "_build_waste_queue_items")
+    assert "/api/action-queue" not in {r.path for r in server.app.routes}
 
 
-def test_resolved_term_leaves_the_queue_and_stays_on_the_page(pg):
-    from api import server
+def test_resolved_term_stays_on_the_page_with_no_action_left(pg):
+    """PR-ADS-162G: this was test_resolved_term_leaves_the_queue_and_stays_on_the_page.
+    The queue half (one item before the decision, none after) went with the
+    Action Queue; the page half is unchanged, and the "before" state is now
+    read from the page row instead of from a queue item."""
     from db import search_term_review_repository as repo
 
     _write_facts([_fact(spend=200.0)])
     _flag_all_waste()
 
-    before = server._build_waste_queue_items(None, 365, 100.0)  # noqa: SLF001
+    before = _flagged()["rows"]
     assert len(before) == 1
+    assert before[0]["action_needed"] is True
 
     repo.upsert_review_decision(
-        campaign_key=(_flagged()["rows"][0]["campaign_key"]),
+        campaign_key=before[0]["campaign_key"],
         search_term="freight forwarder jobs", review_state="resolved")
 
-    after = server._build_waste_queue_items(None, 365, 100.0)  # noqa: SLF001
-    assert after == [], "a resolved term must not remain actionable"
-    # But it is still visible and auditable on the page.
+    # Still visible and auditable on the page, with no action left on it.
     rows = _flagged()["rows"]
     assert len(rows) == 1
     assert rows[0]["review_state"] == "resolved"
@@ -822,6 +826,8 @@ def test_history_is_not_recorded_from_a_quarantined_population(pg):
 # queue had already silently collapsed duplicate identities.
 # After: it audits the COMPLETE flagged population pre-dedup and exits non-zero
 # on every reconciliation failure — including with --json.
+# (PR-ADS-162G deleted the Action Queue and the audit's queue half; every test
+# below is about the flagged population and is unchanged.)
 
 def _run_audit(window="all_time", *, json_mode=False):
     """Invoke the audit exactly as a deploy check would, capturing its exit."""

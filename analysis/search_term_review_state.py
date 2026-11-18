@@ -3,9 +3,9 @@ analysis/search_term_review_state.py
 
 PR-ADS-153D — ONE durable local review vocabulary for search terms.
 
-Shared verbatim by the Search Terms flagged view and the Action Queue. There is
-no second review-state system: both surfaces read and write the same
-``search_term_review`` row, keyed by the canonical durable identity.
+Used by the Search Terms flagged view. There is no second review-state system:
+every reader and the one writer use the same ``search_term_review`` row, keyed
+by the canonical durable identity.
 
 The states
 ----------
@@ -72,9 +72,9 @@ REVIEW_STATE_HELP = {
     STATE_RESOLVED: "Review complete — no further action.",
 }
 
-# States that still require human attention, so still belong in the Action Queue.
-# `keep` and `resolved` are finished decisions and are removed from the queue;
-# `monitor` stays visible because the reviewer explicitly asked to keep watching.
+# States that still require human attention (``action_needed`` on a flagged row).
+# `keep` and `resolved` are finished decisions and leave no action;
+# `monitor` stays actionable because the reviewer explicitly asked to keep watching.
 ACTIONABLE_REVIEW_STATES = frozenset({
     STATE_UNREVIEWED,
     STATE_MONITOR,
