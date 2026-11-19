@@ -21,6 +21,7 @@ import os
 import sys
 
 import pytest
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -212,7 +213,10 @@ def _geo(monkeypatch, *, geo_total, canonical_total=69991.91, breakdown=None):
         "available": True, "chunks": [
             {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
              "status": "verified", "rows_written": 13516,
-             "cost_micros_total": 5_000_000, "country_count": 191}]})
+             "cost_micros_total": 5_000_000, "country_count": 191,
+             # PR-ADS-167A: production stamps every chunk with its fetch time;
+             # fetched now, it settles every day that has ended.
+             "fetched_at": datetime.now(tz=timezone.utc)}]})
     default_breakdown = {
         "available": True,
         "daily": [

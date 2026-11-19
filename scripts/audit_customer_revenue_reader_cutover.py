@@ -651,8 +651,31 @@ def _metric_dicts(payload):
             yield path, d
 
 
+#: PR-ADS-167A — pages whose window ends at yesterday when it includes today
+#: (owner decision 2026-11-20). Their figures are judged against the canonical
+#: verdict for THOSE days (``load_won_deals(..., through=...)``), not the
+#: window that includes today.
+SETTLED_DAY_PAGES = frozenset({"revenue_decision_mart_country",
+                               "dashboard_countries"})
+
+
+def settled_publication(key: str, now) -> dict | None:
+    """The canonical publication over the settled-day window of ``key``, or
+    None when that window is the full one (closed)."""
+    from services import canonical_revenue_service as crs  # noqa: PLC0415
+    from services.canonical_contract import (  # noqa: PLC0415
+        resolve_settled_window, settled_revenue_bounds,
+    )
+    settled = resolve_settled_window(key, now=now)
+    if not settled.get("through_reason"):
+        return None
+    base = crs.load_won_deals(key, now=now, bounds=settled_revenue_bounds(settled))
+    return base.get("publication") or {}
+
+
 def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
-                  mart: dict | None, *, now, pages: dict | None = None) -> dict:
+                  mart: dict | None, *, now, pages: dict | None = None,
+                  page_pubs: dict | None = None) -> dict:
     from services import canonical_revenue_service as crs  # noqa: PLC0415
 
     pub = truth_w.get("publication") or {}
@@ -742,7 +765,8 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
         page_leak_checks(a, key, "revenue_decision_mart", pub, mart, placement)
         _ratio_name_check(a, f"{key} revenue_decision_mart", mart)
     for name, payload in (pages or {}).items():
-        page_leak_checks(a, key, name, pub, payload, placement)
+        page_leak_checks(a, key, name, (page_pubs or {}).get(name) or pub,
+                         payload, placement)
         _ratio_name_check(a, f"{key} {name}", payload)
     return {"window": key, "publication": {m: pub.get(m) for m in
                                            ("closed_won_deals", "revenue_usd",
@@ -1190,8 +1214,12 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                         mart = payload
                     else:
                         built[name] = payload
+            settled_pub = (settled_publication(key, now)
+                           if any(n in SETTLED_DAY_PAGES for n in built) else None)
             report["windows"].append(window_checks(
-                a, key, universe, by_key[key], base, mart, now=now, pages=built))
+                a, key, universe, by_key[key], base, mart, now=now, pages=built,
+                page_pubs=({n: settled_pub for n in built if n in SETTLED_DAY_PAGES}
+                           if settled_pub is not None else None)))
         after = _write_fingerprint()
     # 16 — measured, not declared: the closed-won tables are byte-identical.
     report["database_writes_performed"] = (

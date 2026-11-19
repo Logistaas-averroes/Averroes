@@ -107,6 +107,127 @@ def resolve_canonical_window(window: str, now: datetime | None = None,
     return resolve_window_in_zone(window, zone, now=now)
 
 
+# ── Settled-day windows (PR-ADS-167A, owner decision 2026-11-20) ─────────────
+#
+# Country Revenue & Spend, its mart country view, Dashboard Countries and the
+# geo reconciliation panel divide closed-won revenue by country spend. Country
+# spend for a day is complete only once the day has ended in the account time
+# zone and the morning sync has re-read it (the settle rule in
+# ``google_ads_spend_service``), so a window that includes today can never hold
+# complete country spend. The owner's decision: for THESE consumers only, a
+# window that includes today ENDS AT YESTERDAY (account-local). Its deals are
+# read over the same ACCOUNT-LOCAL days as its settled spend
+# (:func:`settled_revenue_bounds`). Closed windows (Last Quarter) are unchanged
+# — their deals keep the business windows' UTC-midnight bounds. Every other revenue page keeps its window, so these pages may
+# differ from them by today's deals; the window block says so.
+
+#: ``through_reason`` of a window that was ended at yesterday because today is
+#: not settled. The only value; ``None`` means the window is unchanged.
+THROUGH_TODAY_NOT_SETTLED = "today_not_settled"
+
+
+def _fmt_day(d) -> str:
+    """``19 Nov 2026`` — the page's wording, independent of the locale."""
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
+              "Oct", "Nov", "Dec")
+    return f"{d.day} {months[d.month - 1]} {d.year}"
+
+
+def end_at_settled_day(resolved: dict) -> dict:
+    """``resolved`` (a business window resolved on the account day) ended at
+    the last settled day: yesterday for an open window, unchanged when closed.
+
+    Pure. The start never moves — an open window is the same window, minus
+    today. ``window_range`` states what was measured: ``start``, ``through``
+    (inclusive), ``through_reason`` and the disclosure the page shows. On the
+    first day of a quarter or year the open window has no settled day yet:
+    ``through`` is the day before ``start`` and ``empty`` is True; every
+    consumer then publishes nothing (``NO_SETTLED_DAY_IN_WINDOW``).
+    """
+    from datetime import date, timedelta  # noqa: PLC0415
+
+    out = dict(resolved)
+    start = out.get("start_date")
+    if out.get("is_closed_window"):
+        out["through_reason"] = None
+        out["window_range"] = {"start": start, "through": out.get("end_date"),
+                               "through_reason": None, "empty": False,
+                               "disclosure": None}
+        return out
+    today = date.fromisoformat(str(out["end_date"]))
+    through = today - timedelta(days=1)
+    empty = bool(start) and through < date.fromisoformat(str(start))
+    disclosure = (
+        (f"No completed day in this window yet — today ({_fmt_day(today)}) is "
+         "not included until tomorrow morning's sync.") if empty else
+        (f"Through {_fmt_day(through)} — today is not included until tomorrow "
+         "morning's sync."))
+    disclosure += (" Other revenue pages, such as Deals, already count deals "
+                   "closed today.")
+    out.update({
+        "end_date": through.isoformat(),
+        "account_today": today.isoformat(),
+        "through_reason": THROUGH_TODAY_NOT_SETTLED,
+        "window_range": {"start": start, "through": through.isoformat(),
+                         "through_reason": THROUGH_TODAY_NOT_SETTLED,
+                         "empty": empty, "disclosure": disclosure},
+    })
+    return out
+
+
+def resolve_settled_window(window: str, now: datetime | None = None,
+                           account_time_zone: str | None = None) -> dict:
+    """THE window of the settled-day consumers: :func:`resolve_canonical_window`
+    ended at yesterday when it includes today (:func:`end_at_settled_day`)."""
+    return end_at_settled_day(resolve_canonical_window(
+        window, now=now, account_time_zone=account_time_zone))
+
+
+#: Every metric of a settled-day consumer over an EMPTY settled window (the
+#: first day of a quarter or year: no day has ended yet) is unavailable with
+#: this reason — never a "verified" zero over no day at all.
+NO_SETTLED_DAY_IN_WINDOW = "no_settled_day_in_window"
+
+
+def _account_midnight_utc(day, zone_name) -> datetime:
+    """Midnight starting ``day`` in the account zone, as a UTC instant."""
+    from datetime import date  # noqa: PLC0415
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    from analysis.account_time import ACCOUNT_TZ  # noqa: PLC0415
+
+    d = date.fromisoformat(str(day))
+    try:
+        tz = ZoneInfo(zone_name or ACCOUNT_TZ)
+    except Exception:  # noqa: BLE001 — unknown zone: the account default
+        tz = ZoneInfo(ACCOUNT_TZ)
+    return datetime(d.year, d.month, d.day, tzinfo=tz).astimezone(timezone.utc)
+
+
+def settled_revenue_bounds(resolved: dict) -> tuple | None:
+    """THE revenue bounds of a settled-day window: ``(start, end)`` as UTC
+    instants, half-open, on the ACCOUNT calendar — the same days the settled
+    spend covers.
+
+    ``start`` is account-local midnight of ``start_date`` (None for All Time);
+    ``end`` (exclusive) is account-local midnight of ``account_today``, i.e.
+    the end of yesterday. On an empty window ``end == start``. None when the
+    window was not cut (closed windows keep the business windows' own bounds).
+    Every settled consumer and both audits read deals through this one
+    function (``load_won_deals(..., bounds=...)``), so they compare the same
+    instants.
+    """
+    if not resolved.get("through_reason"):
+        return None
+    zone = resolved.get("timezone")
+    start = (_account_midnight_utc(resolved["start_date"], zone)
+             if resolved.get("start_date") else None)
+    end = _account_midnight_utc(resolved["account_today"], zone)
+    if (resolved.get("window_range") or {}).get("empty") and start is not None:
+        end = start
+    return start, end
+
+
 def truth_contract(*, data_source: str, window: str,
                    truth_status: str = TRUTH_READY,
                    now: datetime | None = None,

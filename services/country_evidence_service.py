@@ -43,17 +43,17 @@ the window is ``unavailable`` / ``account_time_zone_unknown``.
 Consequence, stated on the page: spend is available from the morning sync
 onward, and reads "Unavailable" between account-midnight and that sync.
 
-The day arithmetic is the shared ``analyze_coverage`` (the function
-``analyze_geo_coverage`` wraps), fed the ledger's chunks clipped to the days
-each one settles. The gap codes are the geo service's own.
+The rule is the shared ``google_ads_spend_service.analyze_settled_coverage``
+(PR-ADS-167A moved it there from this module), which Country Revenue & Spend
+and the geo reconciliation panel apply too. The gap codes are the geo
+service's own.
 
 It is NOT Country Revenue & Spend's gate. That page divides revenue by this
 spend, so it ALSO requires complete campaign-spend coverage, FX coverage and a
 geo↔campaign reconciliation within tolerance. This page divides by nothing and
 requires geo coverage only, so the two can differ: a window whose geo total
-does not reconcile to campaign spend is published here and blocked there. And
-that page judges coverage on chunk status alone — it does not apply the
-fetched-after-the-day-ended rule (reported in docs/09; not changed here).
+does not reconcile to campaign spend is published here and blocked there. Both
+apply the same fetched-after-the-day-ended rule (PR-ADS-167A).
 
 The window
 ----------
@@ -61,8 +61,8 @@ N account-local days ending YESTERDAY in the Google Ads account time zone, not
 today: today is a day still in progress. Yesterday is "the last complete day"
 only once it has been re-read after it ended — which is what the gate above
 checks; the window bound alone does not make it complete.
-(Campaign Evidence and Country Revenue & Spend end their windows today; that
-is unchanged here and listed as a follow-up in docs/09.)
+(Country Revenue & Spend's business windows end today; since PR-ADS-167A such a
+window is ``window_includes_day_in_progress`` there, never complete.)
 
 ``all_time`` has no requested lower bound. The coverage analysis then starts at
 the earliest VERIFIED chunk, and the row read is bounded to that same certified
@@ -94,10 +94,15 @@ display text in the browser:
 * blank and placeholder values ("Other", "N/A", "(unknown)") are ONE row, "No
   country recorded". It is not an unmatched country and is not counted as one;
 * a ``0`` is published only for a country that RESOLVED, in a COVERED window,
-  with no spend row, when the window ALSO holds no unresolved spend. While it
-  does, that spend may be this country's, so the row is ``unavailable`` /
-  ``spend_location_unresolved``. A country WITH a spend row is unaffected: a
-  country's spend lives under one criterion, and that criterion resolved.
+  with no spend row, when no spend in the window can be its own. Spend whose
+  criterion no stored row names can only be a country no criterion carries:
+  Google keys one country under one criterion. So (PR-ADS-167A) the zero stands
+  when every unresolved criterion in the window is code-less everywhere AND
+  the country's code is carried on record by exactly one criterion that
+  carries nothing else (``repo.fetch_geo_code_carriers``). A country never seen
+  in geo spend, or any spend-less country while a criterion in the window
+  carries two codes, is ``unavailable`` / ``spend_location_unresolved`` while
+  there is unresolved spend. A country WITH a spend row is unaffected.
 
 The market registry ``country_identity.SUPPORTED_COUNTRIES`` (96 codes), which
 the revenue pages group on, is not used here and is not changed.
@@ -112,6 +117,8 @@ Read-only. No Google Ads or HubSpot call.
 """
 
 from __future__ import annotations
+
+import contextlib
 
 import logging
 from datetime import date, datetime, timedelta
@@ -136,14 +143,18 @@ R_ACCOUNT_NOT_CONFIGURED = "google_ads_customer_id_not_configured"
 R_FX_RATE_MISSING = "fx_rate_missing"
 R_COUNTRY_NOT_MATCHED = "country_not_matched"
 R_NO_COUNTRY_RECORDED = "no_country_recorded"
+# The settle reasons are the shared rule's own codes (PR-ADS-167A), so this page
+# and Country Revenue & Spend name one condition one way.
+from services.google_ads_spend_service import (  # noqa: E402
+    COVERAGE_GAP_DAY_NOT_REREAD as R_DAY_NOT_REREAD,
+    COVERAGE_GAP_REREAD_FAILED as R_REREAD_FAILED,
+    COVERAGE_GAP_TZ_UNKNOWN as R_ACCOUNT_TZ_UNKNOWN,
+)
 #: Every day has a verified chunk, but the newest day(s) were last fetched
-#: while still in progress: what is stored for them is a partial day.
-R_DAY_NOT_REREAD = "spend_not_reread_since_day_ended"
-#: The same, and a sync that would have re-read those days FAILED: waiting for
-#: "the morning sync" is the wrong advice, it already ran.
-R_REREAD_FAILED = "spend_reread_failed"
-#: The account's time zone is not on record, so "the day ended" has no meaning.
-R_ACCOUNT_TZ_UNKNOWN = "account_time_zone_unknown"
+#: while still in progress (``R_DAY_NOT_REREAD``) — or, ``R_REREAD_FAILED``, a
+#: sync that would have re-read them FAILED, so waiting for "the morning sync"
+#: is the wrong advice. ``R_ACCOUNT_TZ_UNKNOWN``: the account's time zone is
+#: not on record, so "the day ended" has no meaning.
 #: A country with no spend row, in a window that holds spend Google reported
 #: against a location no stored row names: that spend may be this country's.
 R_SPEND_LOCATION_UNRESOLVED = "spend_location_unresolved"
@@ -205,52 +216,14 @@ def window_bounds(days: int | None, now: datetime | None = None, tz=None) -> tup
     return start, end
 
 
-def settled_through(fetched_at, tz) -> date | None:
-    """The last day a chunk fetched at ``fetched_at`` holds COMPLETELY.
-
-    A day is complete in a fetch only if the fetch happened at or after the
-    end of that day in the account time zone ``tz``. So a chunk fetched on
-    local date D settles every day up to D-1 and nothing later — whatever
-    ``chunk_end`` says. None when the fetch time or the zone is unknown: such
-    a chunk settles nothing.
-    """
-    if fetched_at is None or tz is None:
-        return None
-    if not isinstance(fetched_at, datetime):
-        try:
-            fetched_at = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-    if fetched_at.tzinfo is None:
-        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-    return fetched_at.astimezone(tz).date() - timedelta(days=1)
-
-
-def settled_chunks(chunks: list, tz) -> list:
-    """The ledger's chunks, each VERIFIED one clipped to the days it settles.
-
-    A verified chunk whose fetch settled none of its days is dropped — it is
-    not a failure and must not be reported as one; it simply proves nothing
-    about complete days yet. Non-verified chunks pass through unchanged.
-    """
-    out = []
-    for chunk in chunks or []:
-        if chunk.get("status") != "verified":
-            out.append(chunk)
-            continue
-        through = settled_through(chunk.get("fetched_at"), tz)
-        try:
-            cs = date.fromisoformat(str(chunk.get("chunk_start")))
-            ce = date.fromisoformat(str(chunk.get("chunk_end")))
-        except (TypeError, ValueError):
-            continue
-        if through is None:
-            continue
-        ce = min(ce, through)
-        if ce < cs:
-            continue
-        out.append({**chunk, "chunk_end": ce.isoformat()})
-    return out
+# PR-ADS-167A: the settle rule lives in ONE place,
+# ``services.google_ads_spend_service`` (``settled_through``, ``settled_chunks``,
+# ``analyze_settled_coverage``), so Country Revenue & Spend and the geo
+# reconciliation panel apply exactly the rule this page applies. Re-exported
+# under the names this module has always published.
+from services.google_ads_spend_service import (  # noqa: E402
+    settled_chunks, settled_through,
+)
 
 
 def _covered_span(start: date | None, end: date, analysis: dict) -> tuple:
@@ -272,11 +245,12 @@ def _covered_span(start: date | None, end: date, analysis: dict) -> tuple:
     return first, last
 
 
-def _coverage_verdict(start: date | None, end: date, customer_id, tz) -> dict:
+def _coverage_verdict(start: date | None, end: date, customer_id, tz,
+                      now: datetime | None = None) -> dict:
     """The coverage verdict for ``[start, end]``, from the geo coverage ledger."""
     from db import revenue_repository as repo  # noqa: PLC0415
     from services import google_ads_geo_sync_service as geo  # noqa: PLC0415
-    from services.google_ads_spend_service import analyze_coverage  # noqa: PLC0415
+    from services.google_ads_spend_service import analyze_settled_coverage  # noqa: PLC0415
 
     base = {
         "requested_from": start.isoformat() if start else None,
@@ -298,14 +272,10 @@ def _coverage_verdict(start: date | None, end: date, customer_id, tz) -> dict:
         if not ledger.get("available"):
             return {**base, "status": COVERAGE_UNAVAILABLE,
                     "reason": geo.GEO_GAP_GEO_COVERAGE_UNREADABLE}
-        chunks = ledger.get("chunks") or []
         # Complete days only: each verified chunk counts for the days that had
-        # ended when it was fetched.
-        analysis = analyze_coverage(start, end, settled_chunks(chunks, tz))
-        # The same question on chunk status alone, only to NAME the gap: if
-        # this says "complete" and the line above does not, every day has a
-        # verified chunk and the newest ones are partial.
-        by_status = analyze_coverage(start, end, chunks)
+        # ended when it was fetched — the shared rule (PR-ADS-167A).
+        analysis = analyze_settled_coverage(start, end, ledger.get("chunks") or [], tz,
+                                            now=now)
     except Exception as exc:  # noqa: BLE001 — unknown, never "covered"
         log.error("[country-evidence] geo coverage read failed: %s", exc)
         return {**base, "status": COVERAGE_UNAVAILABLE,
@@ -322,28 +292,10 @@ def _coverage_verdict(start: date | None, end: date, customer_id, tz) -> dict:
     }
     if analysis.get("complete") and first is not None:
         return {**verdict, "status": COVERAGE_COVERED, "reason": None}
-    if by_status.get("complete"):
-        reason = R_DAY_NOT_REREAD
-        # Every day has a verified chunk; the newest are part-days. If a sync
-        # that covered those days has FAILED since, say that: the re-read was
-        # attempted and did not happen.
-        missing = set()
-        for gap in analysis.get("missing_ranges") or []:
-            d, last_day = date.fromisoformat(gap["start"]), date.fromisoformat(gap["end"])
-            while d <= last_day:
-                missing.add(d)
-                d += timedelta(days=1)
-        for chunk in chunks:
-            if chunk.get("status") == "verified":
-                continue
-            try:
-                cs = date.fromisoformat(str(chunk.get("chunk_start")))
-                ce = date.fromisoformat(str(chunk.get("chunk_end")))
-            except (TypeError, ValueError):
-                continue
-            if any(cs <= d <= ce for d in missing):
-                reason = R_REREAD_FAILED
-                break
+    if analysis.get("unsettled_reason"):
+        # Every day has a verified chunk; the newest are part-days (or a sync
+        # that should have re-read them failed). The shared rule names which.
+        reason = analysis["unsettled_reason"]
     elif analysis.get("failed_chunks") and not analysis.get("missing_days"):
         reason = geo.GEO_GAP_GEO_CHUNKS_FAILED
     else:
@@ -520,54 +472,86 @@ def build_country_evidence(*, days: int | None, window_key: str,
     tz_name, tz = account_zone()
     start, end = window_bounds(days, now, tz)
     customer_id = geo.configured_customer_id()
-    coverage = _coverage_verdict(start, end, customer_id, tz)
+    coverage = _coverage_verdict(start, end, customer_id, tz, now)
     covered = coverage["status"] == COVERAGE_COVERED
 
-    spend_rows: list = []
-    spend: dict = {}
-    unresolved_criteria: list = []
-    conflicting_criteria: list = []
-    if covered:
-        # The row read is bounded to the CERTIFIED range. For a fixed window
-        # that is the requested range; for all_time it is the earliest
-        # verified day — never "no lower bound".
-        row_start = start or date.fromisoformat(coverage["covered_from"])
-        spend = repo.fetch_geo_daily_spend_by_country(row_start, end, customer_id)
-        if not spend.get("available"):
-            # The ledger says the days were fetched; the rows could not be
-            # read back. That is unknown — not covered-and-empty.
-            coverage = {**coverage, "status": COVERAGE_UNAVAILABLE,
-                        "reason": geo.GEO_GAP_GEO_ROWS_UNREADABLE}
-            covered = False
-        else:
-            spend_rows = spend.get("rows") or []
-            identities = repo.fetch_geo_criterion_identities(
-                [r.get("country_criterion_id") for r in spend_rows])
-            if not identities.get("available"):
-                # Which country each criterion is could not be read. Naming
-                # the rows from their own (possibly blank) codes instead would
-                # be the defect this read exists to close.
+    # PR-ADS-167A: the geo reads below share one snapshot when covered.
+    with contextlib.ExitStack() as geo_reads:
+        spend_rows: list = []
+        spend: dict = {}
+        unresolved_criteria: list = []
+        conflicting_criteria: list = []
+        if covered:
+            # The row read is bounded to the CERTIFIED range. For a fixed window
+            # that is the requested range; for all_time it is the earliest
+            # verified day — never "no lower bound".
+            row_start = start or date.fromisoformat(coverage["covered_from"])
+            # PR-ADS-167A: spend rows, identities and carriers from ONE snapshot
+            # (``repo.geo_read_snapshot``), so a sync committing between them
+            # cannot turn an "Unavailable" into a false $0.
+            geo_reads.enter_context(repo.geo_read_snapshot())
+            spend = repo.fetch_geo_daily_spend_by_country(row_start, end, customer_id)
+            if not spend.get("available"):
+                # The ledger says the days were fetched; the rows could not be
+                # read back. That is unknown — not covered-and-empty.
                 coverage = {**coverage, "status": COVERAGE_UNAVAILABLE,
                             "reason": geo.GEO_GAP_GEO_ROWS_UNREADABLE}
-                covered, spend_rows = False, []
+                covered = False
             else:
-                spend_rows, unresolved_criteria, conflicting_criteria = (
-                    identify_spend_rows(spend_rows, identities["identities"]))
+                spend_rows = spend.get("rows") or []
+                identities = repo.fetch_geo_criterion_identities(
+                    [r.get("country_criterion_id") for r in spend_rows])
+                if not identities.get("available"):
+                    # Which country each criterion is could not be read. Naming
+                    # the rows from their own (possibly blank) codes instead would
+                    # be the defect this read exists to close.
+                    coverage = {**coverage, "status": COVERAGE_UNAVAILABLE,
+                                "reason": geo.GEO_GAP_GEO_ROWS_UNREADABLE}
+                    covered, spend_rows = False, []
+                else:
+                    spend_rows, unresolved_criteria, conflicting_criteria = (
+                        identify_spend_rows(spend_rows, identities["identities"]))
 
-    joined = _join(spend_rows, list(lead_rows or []) if leads_available else [])
-    # Spend in this window that belongs to no named country. While there is
-    # any, a country with NO spend row is not a measured zero: that spend may
-    # be its own. (A country WITH a row is complete — a country's spend lives
-    # under one criterion, and that criterion resolved.)
-    loose = joined.get("spend:unresolved")
-    unresolved_usd = None
-    unresolved_spend_present = False
-    if loose is not None and loose["_spend_parts"]:
-        if loose["_spend_published"]:
-            unresolved_usd = round(loose["_spend_usd"], 2)
-            unresolved_spend_present = loose["_spend_usd"] != 0
-        else:
-            unresolved_spend_present = True      # amount unknown: not "none"
+        joined = _join(spend_rows, list(lead_rows or []) if leads_available else [])
+        # Spend in this window that belongs to no named country. While there is
+        # any, a country with NO spend row is not a measured zero: that spend may
+        # be its own. (A country WITH a row is complete — a country's spend lives
+        # under one criterion, and that criterion resolved.)
+        loose = joined.get("spend:unresolved")
+        unresolved_usd = None
+        unresolved_spend_present = False
+        if loose is not None and loose["_spend_parts"]:
+            if loose["_spend_published"]:
+                unresolved_usd = round(loose["_spend_usd"], 2)
+                unresolved_spend_present = loose["_spend_usd"] != 0
+            else:
+                unresolved_spend_present = True      # amount unknown: not "none"
+        # PR-ADS-167A — which spend-less countries that loose spend CANNOT be.
+        # Google keys one country under one criterion. A location no stored row
+        # names is therefore not a country whose code another criterion carries on
+        # record. So a resolved country with no spend row is still a measured $0
+        # while unresolved spend is in the window, if and only if:
+        #   (a) the window is covered (checked above: `covered`);
+        #   (b) every unresolved criterion in the window is code-less EVERYWHERE —
+        #       none is a criterion whose rows disagree (that one IS some country);
+        #   (c) the country's code is carried on record by exactly one criterion,
+        #       and that criterion carries no other code. A country never seen in
+        #       geo spend at all (leads, no Google spend ever) could be the loose
+        #       location, so it stays unavailable while there is loose spend.
+        # The evidence read failing is "carried by nothing": fail closed.
+        carried: set = set()
+        if covered and unresolved_spend_present and not conflicting_criteria:
+            candidates = sorted({
+                row["country_code"] for row in joined.values()
+                if row["country_resolved"] and row["country_code"]
+                and not row["_spend_parts"]})
+            if candidates:
+                found = repo.fetch_geo_code_carriers(candidates)
+                if found.get("available"):
+                    for code, holders in (found.get("carriers") or {}).items():
+                        if len(holders) == 1 and holders[0].get("codes") == [code]:
+                            carried.add(code)
+    withheld_zero: list = []
     rows = []
     for row in joined.values():
         parts, usd = row.pop("_spend_parts"), row.pop("_spend_usd")
@@ -583,12 +567,16 @@ def build_country_evidence(*, days: int | None, window_key: str,
             spend_usd, status, reason = None, "unavailable", R_FX_RATE_MISSING
         elif parts:
             spend_usd, status, reason = round(usd, 2), "published", None
-        elif row["country_resolved"] and unresolved_spend_present:
+        elif (row["country_resolved"] and unresolved_spend_present
+              and row["country_code"] not in carried):
             spend_usd, status, reason = (None, "unavailable",
                                          R_SPEND_LOCATION_UNRESOLVED)
+            withheld_zero.append(row["country"])
         elif row["country_resolved"]:
-            # A resolved country, every day of the window settled, no spend row
-            # and no spend without a country: the one case that is a measured
+            # A resolved country, every day of the window settled, no spend row,
+            # and no spend in the window that could be its own — either none
+            # without a country, or only spend against locations that cannot
+            # be this country (its code is another criterion's): a measured
             # zero.
             spend_usd, status, reason = 0.0, "published", None
         elif no_country:
@@ -627,7 +615,12 @@ def build_country_evidence(*, days: int | None, window_key: str,
             "criteria": len(unresolved_criteria),
             "conflicting_criteria": len(conflicting_criteria),
             "spend_usd": unresolved_usd if covered else None,
-            "blocks_zero": bool(covered and unresolved_spend_present),
+            # True when it withholds at least one country's zero. The names are
+            # the countries it affects (PR-ADS-167A): only those never seen in
+            # Google Ads geo spend, or every spend-less country when a criterion
+            # in the window carries two codes.
+            "blocks_zero": bool(covered and withheld_zero),
+            "zero_withheld_countries": sorted(withheld_zero) if covered else [],
         },
         "spend_status": "published" if covered else "unavailable",
         "leads_status": "published" if leads_available else "unavailable",

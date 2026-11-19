@@ -3236,8 +3236,14 @@ def upsert_geo_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int
                     ON CONFLICT (customer_id, country_criterion_id, campaign_id, spend_date)
                     DO UPDATE SET
                         currency_code        = EXCLUDED.currency_code,
-                        country_code         = EXCLUDED.country_code,
-                        country_name         = EXCLUDED.country_name,
+                        -- PR-ADS-167A: a payload with no country (a failed
+                        -- lookup) never blanks a code already stored.
+                        country_code         = COALESCE(NULLIF(BTRIM(EXCLUDED.country_code), ''),
+                                                        google_ads_geo_daily_spend.country_code),
+                        country_name         = CASE
+                            WHEN NULLIF(BTRIM(EXCLUDED.country_code), '') IS NULL
+                            THEN google_ads_geo_daily_spend.country_name
+                            ELSE EXCLUDED.country_name END,
                         cost_micros          = EXCLUDED.cost_micros,
                         sync_run_id          = EXCLUDED.sync_run_id,
                         source_query_version = EXCLUDED.source_query_version,
@@ -3285,7 +3291,10 @@ def replace_geo_daily_spend_chunk(customer_id: str, chunk_start, chunk_end,
     genuinely becomes empty. That is precisely the case the merge-only writer
     could not express.
 
-    Returns ``{"replaced": bool, "deleted": int, "written": int}``. Raises
+    Returns ``{"replaced": bool, "deleted": int, "written": int,
+    "codes_preserved": int}`` — the last counts rows that arrived with no
+    country and were given the code their criterion carries on record
+    (PR-ADS-167A). Raises
     :class:`GeoRangeReplacementError` on any failure — this writer deliberately
     does NOT swallow errors, because a silent zero here is what let a stale range
     be certified.
@@ -3330,6 +3339,35 @@ def replace_geo_daily_spend_chunk(customer_id: str, chunk_start, chunk_end,
             # exception, so the delete and the insert are one unit: the range is
             # never observed emptied-but-not-refilled.
             with conn.cursor() as cur:
+                # PR-ADS-167A: never write NULL over a stored code. A row the
+                # caller could not name (the country lookup failed) takes the
+                # code its criterion carries on record — read HERE, before the
+                # range is deleted, in the same transaction, by the one rule
+                # every reader uses (exactly one code; none or two name
+                # nothing). Without this a failed lookup blanked every row of
+                # the re-read range, and a criterion whose only rows were in
+                # it lost its country for good.
+                unnamed = sorted({p[2] for p in prepared
+                                  if p[2] and not str(p[3] or "").strip()})
+                preserved = 0
+                if unnamed:
+                    from db.geo_identity_sql import (  # noqa: PLC0415
+                        criterion_identity_sql, resolved_code,
+                    )
+                    cur.execute(criterion_identity_sql("%s"), (unnamed,))
+                    known = {}
+                    for row in cur.fetchall():
+                        code = resolved_code(row[1])
+                        if code:
+                            known[str(row[0])] = (code, row[2])
+                    filled = []
+                    for p in prepared:
+                        if p[2] in known and not str(p[3] or "").strip():
+                            code, name = known[p[2]]
+                            p = p[:3] + (code, name) + p[5:]
+                            preserved += 1
+                        filled.append(p)
+                    prepared = filled
                 cur.execute(
                     """
                     DELETE FROM google_ads_geo_daily_spend
@@ -3359,7 +3397,8 @@ def replace_geo_daily_spend_chunk(customer_id: str, chunk_start, chunk_end,
                         """,
                         prepared,
                     )
-        return {"replaced": True, "deleted": int(deleted), "written": len(prepared)}
+        return {"replaced": True, "deleted": int(deleted), "written": len(prepared),
+                "codes_preserved": preserved}
     except GeoRangeReplacementError:
         raise
     except Exception as exc:  # noqa: BLE001

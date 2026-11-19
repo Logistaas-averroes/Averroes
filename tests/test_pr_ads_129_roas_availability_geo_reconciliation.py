@@ -278,7 +278,10 @@ def _geo_recon(monkeypatch, *, geo_total, canonical_total=69720.093979, chunks=N
         "available": True, "chunks": [
             {"chunk_start": "2020-01-01", "chunk_end": "2030-12-31",
              "status": "verified", "rows_written": 13516,
-             "cost_micros_total": 0, "country_count": 191}]})
+             "cost_micros_total": 0, "country_count": 191,
+             # PR-ADS-167A: production stamps every chunk with its fetch
+             # time; fetched now, it settles every day that has ended.
+             "fetched_at": datetime.now(tz=timezone.utc)}]})
     if patch_after is not None:
         patch_after()  # override one input to isolate a single gate condition
     from services.google_ads_geo_sync_service import build_geo_reconciliation

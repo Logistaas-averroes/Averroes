@@ -49,6 +49,8 @@ _PROVEN = {
     "geo_readable": True,
     "geo_coverage_readable": True,
     "geo_coverage_complete": True,
+    # PR-ADS-167A: required, no default. None: nothing unsettled to name.
+    "geo_coverage_settle_gap": None,
     "geo_failed_chunks": [],
     "missing_geo_dates": [],
     "campaigns_missing_geo": [],

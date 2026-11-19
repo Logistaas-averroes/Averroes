@@ -1055,8 +1055,14 @@ def test_f3f1_13_country_sql_readiness_needs_lead_proof_and_country_coverage(
     consumers = parity._build_consumers("current_quarter", NOW)
     assert parity._coverage_proven(consumers, spec)[0] is True
 
+    # PR-ADS-167A: the current quarter includes today, so Dashboard Countries
+    # measures it through yesterday and DECLARES so; its evidence is the
+    # settled reference over the same days, not the campaign mart's window.
+    assert consumers["dashboard/countries"]["payload"]["window"]["through_reason"] \
+        == "today_not_settled"
+    mart = consumers[parity.CONSUMER_SETTLED_REFERENCE]["payload"]
+
     # Lead population unproven → not proven, whatever geo says.
-    mart = consumers["revenue_decision_mart"]["payload"]
     mart["readiness"]["lead_metrics_status"] = "db_empty"
     proven, detail = parity._coverage_proven(consumers, spec)
     assert proven is False and "lead population" in detail

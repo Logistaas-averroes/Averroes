@@ -226,8 +226,8 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   window mid-month — and the Countries page printed that as Spend `$0` under
   "Fresh with data". A page figure over a window comes from a daily canonical
   table AND its coverage ledger (`services/country_evidence_service.py`
-  feeds `analyze_coverage` the ledger's chunks, which must certify every
-  day), and an uncovered window
+  judges the ledger's chunks with `analyze_settled_coverage`, which must
+  certify every day), and an uncovered window
   renders "Unavailable" with the covered range — never `$0`, never the sum of
   the days that happen to be present.
 
@@ -240,9 +240,44 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   (`repo.fetch_account_time_zone`, never a constant; unknown is unavailable).
   The window ends yesterday, is published from the morning sync onward, and
   is "Unavailable" before it; say that, do not promise it is always
-  available. (`analyze_geo_coverage` / `analyze_coverage`
-  themselves still judge on status alone — a known gap for Country Revenue &
-  Spend and Campaign Evidence.)
+  available.
+
+  The rule lives ONCE (PR-ADS-167A): `google_ads_spend_service.
+  analyze_settled_coverage`, applied to geo by `analyze_published_geo_coverage`
+  for every surface that publishes country spend (Countries, the revenue
+  attribution contract behind Country Revenue & Spend / the mart / Dashboard
+  Countries, the geo reconciliation panel). Today is never settled. Owner
+  decision (2026-11-20): for THOSE country consumers only, a window that
+  includes today ENDS AT YESTERDAY (account-local) — one rule,
+  `canonical_contract.end_at_settled_day` / `resolve_settled_window`; the
+  mart's country view (`SETTLED_DAY_VIEWS`) builds `build_revenue_attribution(
+  ..., settled_days=True)`. Deals come from the reader contract with
+  `load_won_deals(..., bounds=settled_revenue_bounds(...))`: account-local
+  midnight of the first day to account-local midnight of today — the SAME
+  days as the settled spend. Never resolve the window key on the UTC day and
+  narrow it (that published Q3's deals under an empty Q4 window at 00:30 BST),
+  never a page-side filter. The window block declares it (`through_reason:
+  today_not_settled`, `window_range` with "Through <date> — today is not
+  included until tomorrow morning's sync."). A window with no completed day
+  (`window_range.empty`) publishes nothing: every metric is unavailable with
+  `no_settled_day_in_window`, never a "verified" zero. Closed windows are
+  unchanged (their deals keep the UTC-midnight business bounds: an hour off
+  their London spend days under BST — a documented gap), and every other
+  revenue page keeps today, so the country pages may differ from them by
+  today's deals, and say so. Before the morning sync yesterday is not
+  settled: country spend is withheld (`spend_not_reread_since_day_ended`) and
+  Dashboard Countries withholds the KPIs AND every row's and the residual's
+  same figures — rows that sum to a withheld total publish it. The parity
+  audit compares a consumer that declares that window with the settled window
+  it resolves itself (and with the settled reference
+  `revenue_decision_mart/country` for coverage proof and SQL conservation) —
+  never with a window one day longer, and an undeclared shorter window is
+  still a mismatch. Do not "fix" any of this by judging
+  today on chunk status, or by ending other pages' windows. `analyze_geo_coverage` /
+  `analyze_coverage` still mean "was every day FETCHED?" — the sync's and the
+  repair job's question; never publish from them. Campaign spend coverage
+  (campaign ROAS, the Dashboard) and Campaign Evidence (no coverage gate at
+  all) do not apply the rule yet — known gaps in `docs/09`.
 
   Do not fix a stale-snapshot page with a disclosure or a wider staleness
   threshold. Known remaining offenders are listed in `docs/09`.
@@ -264,15 +299,25 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   one "No country recorded" row.
 
   **A geo row's own `country_code` can be blank for a country that has one.**
-  The sync stores NULL when its lookup fails that day and overwrites a code
-  already stored; the chunk is still `verified`. Read a criterion's code from
-  ANY stored row of that criterion (`fetch_geo_criterion_identities`): one
-  code resolves, none or two that disagree do not, and nothing is guessed
-  (not even Google's 2000 + ISO-numeric convention). A country with no spend
-  row is `$0` only in a covered window that holds NO unresolved spend;
-  otherwise it is "Unavailable — some spend in this window has no country".
-  A country with a row is complete. `fmtDollar` prints `$0` for 39 cents:
-  beside a rule that `$0` is measured, render "<$1".
+  Rows written before PR-ADS-167A by a sync whose lookup failed are NULL, and
+  a location first seen on a day the lookup fails still is. Read a
+  criterion's code from ANY stored row of that criterion — the one statement
+  `db/geo_identity_sql.py`, used by every reader and by the writer: one code
+  resolves, none or two that disagree do not, and nothing is guessed (not
+  even Google's 2000 + ISO-numeric convention). Never `MAX(country_code)`.
+  The sync names criteria from storage first, asks Google only about the
+  rest, never writes NULL over a stored code, and a failed lookup makes the
+  run `partial` (`country_lookup_failed`) — the chunk stays `verified`
+  because the spend is real.
+
+  A country with no spend row is `$0` in a covered window when no spend in it
+  can be its own: no unresolved spend, OR every unresolved criterion is
+  code-less everywhere and the country's code is carried on record by exactly
+  one criterion that carries nothing else (`fetch_geo_code_carriers`; one
+  country, one criterion). A country never seen in geo spend stays
+  "Unavailable — some spend in this window has no country" while there is
+  any. A country with a row is complete. `fmtDollar` prints `$0` for 39
+  cents: beside a rule that `$0` is measured, render "<$1".
 
 - **Never read a SQL total from `analysis/lifecycle_sql_coverage.py`.** Its
   `window_coverage()` answers only "could a complete total exist for this

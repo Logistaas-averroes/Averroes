@@ -5461,6 +5461,11 @@ function renderDashboardCountries() {
   }
 
   const d = dashCountries;
+  if (windowHasNoSettledDay(d.window)) {
+    // PR-ADS-167A: nothing measured yet — the disclosure, not the cards.
+    root.innerHTML = renderNoSettledDayCard(d.window);
+    return;
+  }
   root.innerHTML = `
     <div class="dash-tab-intro dash-anim">
       <h2 class="dash-tab-intro__title">Countries &amp; Markets</h2>
@@ -5526,15 +5531,27 @@ function ctryNativeBig(native) {
   return escapeHtml(`${sym}${body}`);
 }
 
+// PR-ADS-167A: why the country spend card is empty, from the reason code the
+// page's own metric contract carries (e.g. before the morning sync re-reads
+// yesterday). Open windows end yesterday, so after that sync it is not shown.
+function ctrySpendWithheldText(d) {
+  const code = (((d && d.metric_truth) || {}).country_attributed_spend_usd || {}).unavailable_reason;
+  const why = code ? GEO_COVERAGE_REASONS[code] : null;
+  return why ? `Country spend withheld — ${why}` : "Country spend withheld";
+}
+
 function renderCtryKpiRow(d) {
   const k = d.kpis || {};
   const pc = d.period_change || {};
   const native = k.verified_spend_native || {};
   const nativeVal = ctryNativeBig(native);
   const cur = escapeHtml(native.currency || "GBP");
+  // PR-ADS-167A: with no native figure either, the reason is not FX.
   const usdSub = (k.verified_spend_usd !== null && k.verified_spend_usd !== undefined)
     ? `${cur} native · ${escapeHtml(fmtMoney(k.verified_spend_usd))} USD`
-    : `${cur} native · USD unavailable (FX)`;
+    : (native.amount === null || native.amount === undefined)
+      ? escapeHtml(ctrySpendWithheldText(d))
+      : `${cur} native · USD unavailable (FX)`;
 
   const cards = [
     {
@@ -10725,7 +10742,9 @@ const GEO_COVERAGE_REASONS = {
   spend_not_reread_since_day_ended: "yesterday's spend has not been re-read since the day ended",
   // The same, but a sync covering those days has already run and FAILED.
   spend_reread_failed: "the sync that should have re-read yesterday's spend failed",
+  window_includes_day_in_progress: "the window includes today, whose spend is still arriving",
   account_time_zone_unknown: "the Google Ads account's time zone is not on record, so it cannot be told when each day ended",
+  no_settled_day_in_window: "this window has no completed day yet",
   geo_coverage_has_failed_chunks: "a sync of part of this window failed and has not been repeated",
   geo_coverage_ledger_unreadable: "the record of which days were synced could not be read",
   geo_rows_unreadable: "the synced country spend could not be read",
@@ -10806,7 +10825,7 @@ function geoSpendCell(row) {
   if (row.spend_status !== "published" || row.spend_usd === null || row.spend_usd === undefined) {
     const why = GEO_ROW_SPEND_REASONS[row.spend_reason];
     const title = row.spend_reason === "spend_location_unresolved"
-      ? "No spend is recorded against this country, but some of this window's spend was reported by Google Ads without a country (the unresolved location row). That spend may be this country's, so this is not a zero."
+      ? "No spend is recorded against this country, and some of this window's spend was reported by Google Ads without a country (the unresolved location row). Nothing on record shows that spend belongs to another country — Google Ads has not reported this country under a location of its own — so it may be this country's, and this is not a zero."
       : row.spend_reason === "country_not_matched"
       ? "This lead country is not a country name the system recognises, so it cannot be matched to Google Ads spend. It may be a spelling of a country listed above."
       : row.spend_reason === "no_country_recorded"
@@ -10899,13 +10918,31 @@ async function loadGeo() {
   // Spend Google reported against a location nothing on record names. The
   // total includes it; a country with no spend of its own cannot be called
   // zero while it is there.
+  // PR-ADS-167A: the notice names the countries it affects. Google keys one
+  // country under one location, so that spend cannot be a country another
+  // location already carries — only a country never seen in Google Ads spend
+  // (or every country, when a location is on record under two countries).
   const loose = data.unresolved_spend || {};
-  if (noticeEl && verdict.published && loose.blocks_zero) {
+  const looseHasSpend = loose.criteria > 0
+    && (loose.spend_usd === null || loose.spend_usd === undefined || loose.spend_usd !== 0);
+  if (noticeEl && verdict.published && (loose.blocks_zero || looseHasSpend)) {
     const amount = (loose.spend_usd !== null && loose.spend_usd !== undefined)
       ? `${geoFmtSpend(loose.spend_usd)} of this window's spend`
       : "Some of this window's spend";
     const where = loose.criteria === 1 ? "one location" : `${loose.criteria} locations`;
-    noticeEl.textContent = `${amount} was reported by Google Ads against ${where} with no country on record. It is in the total and in the "(unresolved location)" row. A country with no spend of its own reads "Unavailable" rather than zero, because that spend may be its own. Countries that show a figure are not affected.`;
+    const names = Array.isArray(loose.zero_withheld_countries) ? loose.zero_withheld_countries : [];
+    const shown = names.length > 8
+      ? `${names.slice(0, 8).join(", ")} and ${names.length - 8} more`
+      : names.join(", ");
+    let effect;
+    if (!loose.blocks_zero || !names.length) {
+      effect = "It cannot be the spend of any country listed here: each of them is reported by Google Ads under a location of its own. No country's figure is affected.";
+    } else if (loose.conflicting_criteria > 0) {
+      effect = `A location on record under two different countries is among them, so a country with no spend of its own cannot be called zero: ${shown} ${names.length === 1 ? "reads" : "read"} "Unavailable". Countries that show a figure are not affected.`;
+    } else {
+      effect = `It cannot be the spend of a country Google Ads reports under a location of its own, so those countries' figures, zeros included, stand. It could be the spend of a country never seen in Google Ads spend: ${shown} ${names.length === 1 ? "reads" : "read"} "Unavailable" rather than zero.`;
+    }
+    noticeEl.textContent = `${amount} was reported by Google Ads against ${where} with no country on record. It is in the total and in the "(unresolved location)" row. ${effect}`;
     noticeEl.hidden = false;
   }
 
@@ -16826,13 +16863,48 @@ function formatWindowRange(win) {
   return `${start} → ${end}`;
 }
 
+// PR-ADS-167A (owner decision 2026-11-20): Country Revenue & Spend and
+// Dashboard Countries end a window that includes today at YESTERDAY, for
+// revenue and spend alike. The backend says so in `window.window_range`
+// (through_reason "today_not_settled") with the sentence the page shows;
+// this renders it verbatim, beside the range — never a silent shorter window.
+function windowThroughNote(win) {
+  const wr = win && win.window_range;
+  if (!wr || wr.through_reason !== "today_not_settled") return "";
+  return wr.disclosure || "";
+}
+
+// An open window with no completed day yet (the first day of a quarter or
+// year): every metric is unavailable (`no_settled_day_in_window`).
+function windowHasNoSettledDay(win) {
+  const wr = win && win.window_range;
+  return Boolean(wr && wr.through_reason === "today_not_settled" && wr.empty === true);
+}
+
+function renderNoSettledDayCard(win) {
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">${escapeHtml((win && win.label) || "This window")}</div>
+      <h3>No completed day yet</h3>
+      <p>${escapeHtml(windowThroughNote(win))}</p>
+    </div>`;
+}
+
 function renderWindowRange(elId, win) {
   const el = document.getElementById(elId);
   if (!el) return;
   if (!win) { el.textContent = ""; el.removeAttribute("title"); return; }
   const label = win.label ? `${win.label}: ` : "";
-  el.textContent = `${label}${formatWindowRange(win)}`;
-  el.title = win.is_closed_window ? "Completed period" : "Period in progress";
+  const note = windowThroughNote(win);
+  if (windowHasNoSettledDay(win)) {
+    // Never a reversed range ("2026-10-01 → 2026-09-30"): the disclosure only.
+    el.textContent = `${label}${note}`;
+    el.title = "Period in progress — no completed day yet";
+    return;
+  }
+  el.textContent = `${label}${formatWindowRange(win)}${note ? ` · ${note}` : ""}`;
+  el.title = win.is_closed_window ? "Completed period"
+    : note ? "Period in progress — ends yesterday" : "Period in progress";
 }
 
 // True when this response is still the newest for its page AND its resolved
@@ -18079,6 +18151,12 @@ function renderRoasCountriesPage() {
 
   const data = roasCountryMart;
   if (!data) { tableBody.innerHTML = renderMartUnavailable(); return; }
+  // PR-ADS-167A: no completed day in the window yet — nothing was measured,
+  // so no card and no table: the disclosure only.
+  if (windowHasNoSettledDay(data.window)) {
+    tableBody.innerHTML = renderNoSettledDayCard(data.window);
+    return;
+  }
 
   // Blocked: the MART says revenue truth is not decision-ready (lead grain /
   // revenue integration). The frontend does not decide this.

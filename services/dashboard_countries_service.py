@@ -1085,7 +1085,12 @@ def _assemble(window: str, now: datetime | None) -> dict:
     # in the explicit residual bucket — they are never dropped to make the named
     # country rows reconcile, and a won deal with no advertising attribution is
     # still part of the business.
-    canonical = canonical_revenue.load_won_deals(window, now=now)
+    # PR-ADS-167A: the SAME days as the mart country view and the geo spend
+    # above — an open window ends at yesterday (``through_reason``), for the
+    # deals proving each country exactly as for its spend.
+    canonical = canonical_revenue.load_won_deals(
+        window, now=now,
+        bounds=canonical_contract.settled_revenue_bounds(window_block))
     deal_proof_available = bool(canonical.get("available"))
     deal_rows = (canonical_revenue.canonical_deal_rows(
         canonical, revenue_scope.SCOPE_ALL_SOURCE)
@@ -1182,6 +1187,64 @@ def _assemble(window: str, now: datetime | None) -> dict:
     }
 
 
+#: Row status when its figures are withheld for the window.
+STATUS_COUNTRY_FIGURES_WITHHELD = "Country figures withheld"
+
+
+def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
+                                 spend_truth: dict) -> tuple:
+    """PR-ADS-167A — withheld means absent, for the totals AND their parts.
+
+    When geo is not ready (any gap the shared gate names: yesterday not yet
+    re-read before the morning sync, no settled day in the window, an
+    unreconciled or uncovered window …) the KPI totals of spend, revenue,
+    closed-won deals and SQLs are withheld. Each country row and the residual
+    then withhold the same figures with the same reason: rows that add back
+    up to a withheld total would publish it. Native spend stays only where the
+    KPI keeps it — when the geo COVERAGE is complete (an FX-only gap: "native
+    spend is shown instead").
+    """
+    if spend_truth.get("country_roas_unblockable") or spend_truth.get("geo_ready"):
+        return kpis, rows, residual
+    # Row / residual figures that are statements about country-attributed
+    # geography: spend, revenue, the deal count and its proof, customers, and
+    # the SQL split whose partition geo decides.
+    row_geo_figures = ("spend_usd", "won_revenue_usd", "closed_won_deals",
+                       "customers", "sqls", "period_revenue_per_ad_spend")
+    reason = next(iter(spend_truth.get("country_gap_codes") or []),
+                  None) or "country_geo_not_ready"
+    keep_native = spend_truth.get("geo_coverage_status") == "complete"
+    kpis = {**kpis, "verified_spend_usd": None, "won_revenue_usd": None,
+            "closed_won_deals": None, "sqls": None}
+    if not keep_native and isinstance(kpis.get("verified_spend_native"), dict):
+        kpis["verified_spend_native"] = {**kpis["verified_spend_native"],
+                                         "amount": None}
+    for k in ("countries_with_closed_won_deals", "residual_closed_won_deals",
+              "residual_revenue_usd", "geo_period_revenue_per_ad_spend"):
+        if k in kpis:
+            kpis[k] = None
+    if reason == canonical_contract.NO_SETTLED_DAY_IN_WINDOW:
+        # No completed day: the window's own deal / revenue verdicts are not
+        # "published zeros" either.
+        kpis["revenue_metric"] = cwt.metric(None, cwt.UNAVAILABLE, reason)
+        kpis["deals_metric"] = cwt.metric(None, cwt.UNAVAILABLE, reason)
+    out_rows = []
+    for r in rows or []:
+        row = {**r, **{k: None for k in row_geo_figures},
+               "metrics": None, "deals": [], "period_ratio_available": False,
+               "status": STATUS_COUNTRY_FIGURES_WITHHELD,
+               "withheld_reason": reason}
+        if not keep_native:
+            row["spend_native"] = None
+        out_rows.append(row)
+    residual = {**(residual or {}), "closed_won_deals": None,
+                "won_revenue_usd": None, "sqls": None, "spend_usd": None,
+                "withheld_reason": reason}
+    if not keep_native:
+        residual["spend_native"] = None
+    return kpis, out_rows, residual
+
+
 def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     """Previous-period deltas via a shifted country assembly. Never a fake 0%."""
     ref = _previous_window_reference(window, now)
@@ -1195,7 +1258,10 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
         logger.warning("Dashboard countries previous-period build failed: %s", exc)
         return {"available": False, "label": label, "note": note, "metrics": {},
                 "reason": "Previous period unavailable."}
-    pk = prev["kpis"]
+    # PR-ADS-167A: the previous period withholds by the same rule — a delta
+    # against a withheld figure is no comparison, not a comparison with it.
+    pk = _withhold_when_geo_not_ready(prev["kpis"], prev["country_rows"],
+                                      prev["residual"], prev["spend_truth"])[0]
     metrics = {
         "won_revenue_usd": _delta_metric(kpis.get("won_revenue_usd"), pk.get("won_revenue_usd")),
         "closed_won_deals": _delta_metric(kpis.get("closed_won_deals"), pk.get("closed_won_deals")),
@@ -1228,6 +1294,10 @@ def build_dashboard_countries(window: str = "current_quarter",
     kpis = core["kpis"]
     deal_proof_available = core["deal_proof_available"]
     _revenue_connected = bool(readiness.get("canonical_revenue_available"))
+    # PR-ADS-167A: withheld means absent — before anything (leaderboard,
+    # regional mix, decision cards, deltas) is derived from the figures.
+    kpis, country_rows, residual = _withhold_when_geo_not_ready(
+        kpis, country_rows, residual, spend_truth)
 
     period_change = _build_period_change(window, ref_now, kpis)
     regional_mix = _build_regional_mix(country_rows, core["country_roas_unblockable"])
@@ -1259,6 +1329,31 @@ def build_dashboard_countries(window: str = "current_quarter",
     _country_revenue_verdict = core.get("country_revenue_verdict") or {}
     _country_total_ok = bool(_country_revenue_ready
                              and _country_revenue_verdict.get("publishable"))
+    # PR-ADS-167A — withheld means absent. Every figure below is a statement
+    # about country-attributed geography. When geo is not ready the page
+    # declared them `not_ready` and published them anyway: spend, revenue, the
+    # deal count, and the SQL split whose partition geo decides. Open windows
+    # end yesterday on this page (owner decision 2026-11-20), so after the
+    # morning sync they are ready; before it — yesterday not yet re-read — and
+    # for any other geo gap, the cross-page parity audit and the contract test
+    # (`test_f3_15`) would report it. They are absent instead.
+    # Native spend is the one figure an FX-only gap leaves usable (the gate's
+    # own wording: "native spend is shown instead"); it is withheld only when
+    # the geo COVERAGE itself is not complete.
+    _geo_gap_reason = next(iter(spend_truth.get("country_gap_codes") or []),
+                           None) or "country_geo_not_ready"
+    # PR-ADS-167A: over a window with no completed day EVERY metric names that.
+    _no_day = (_geo_gap_reason if _geo_gap_reason
+               == canonical_contract.NO_SETTLED_DAY_IN_WINDOW else None)
+    if not _geo_ready:
+        # The figures were withheld above (`_withhold_when_geo_not_ready`).
+        # Say why, in the gate's own words — not "requires verified FX".
+        _why = (geo_gate.describe_geo_gap(spend_truth.get("country_gap_codes"))
+                or "Country-attributed spend is withheld: geo coverage is not ready.")
+        unavailable = [u for u in unavailable
+                       if u.get("metric") not in ("verified_spend_usd", "sqls")]
+        unavailable += [{"metric": "verified_spend_usd", "reason": _why},
+                        {"metric": "sqls", "reason": _why}]
     _mt = canonical_contract.metric_truth_block(core["window_block"], [
         # The total: ready only when geo coverage is placed AND every
         # country-attributed won deal has a proven amount. Withheld carries the
@@ -1273,7 +1368,7 @@ def build_dashboard_countries(window: str = "current_quarter",
          # verdict is fine but geo coverage is not placed, the reason is the geo
          # gate's — never left blank, which is what forced the audit's generic
          # catch-all in production.
-         "unavailable_reason": (None if _country_total_ok else (
+         "unavailable_reason": (None if _country_total_ok else _no_day or (
              _country_revenue_verdict.get("reason")
              or canonical_revenue.REASON_COVERAGE_NOT_PROVEN)),
          "violation_codes": ([] if _country_total_ok
@@ -1287,7 +1382,7 @@ def build_dashboard_countries(window: str = "current_quarter",
          "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
          "scope": "country_attributed_revenue",
          "truth_status": _country_revenue_status,
-         "unavailable_reason": (None if _country_revenue_ready else (
+         "unavailable_reason": (None if _country_revenue_ready else _no_day or (
              core.get("revenue_unavailable_reason") if not deal_proof_available
              else REASON_REVENUE_NOT_CONNECTED if not _revenue_connected
              else canonical_revenue.REASON_COVERAGE_NOT_PROVEN)),
@@ -1306,6 +1401,8 @@ def build_dashboard_countries(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if (_geo_ready and kpis.get("verified_spend_usd") is not None)
                           else canonical_contract.TRUTH_NOT_READY),
+         # PR-ADS-167A: a withheld figure names why.
+         "unavailable_reason": (None if _geo_ready else _geo_gap_reason),
          "customer_id": spend_truth.get("customer_id")},
         # PR-ADS-154C-F3: this page's SQL headline is the REAL-COUNTRY total —
         # 14 against the mart's 16 in the production quarter — because the SQLs
@@ -1326,6 +1423,7 @@ def build_dashboard_countries(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
                           else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if _geo_ready else _geo_gap_reason),
          "customer_id": spend_truth.get("customer_id")},
         {"metric": "country_unattributed_residual_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
@@ -1333,6 +1431,7 @@ def build_dashboard_countries(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if residual.get("sqls") is not None
                           else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if _geo_ready else _geo_gap_reason),
          "customer_id": spend_truth.get("customer_id")},
     ])
 

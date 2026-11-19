@@ -117,26 +117,73 @@ def fetch_geo_country_codes(criterion_ids) -> dict:
     return _f(criterion_ids)
 
 
-def _resolve_country_metadata(rows: list) -> None:
+def _resolve_country_metadata(rows: list) -> dict:
     """Attach country_code + country_name to canonical geo rows in place.
 
-    Resolves the distinct criterion ids via geo_target_constant so the canonical
-    geo table itself carries the country identity that feeds named ROAS by
-    Country rows. Resolution failure is non-fatal: rows keep an unresolved
-    country (never blocks the spend write).
+    PR-ADS-167A. Two sources, in this order:
+
+    1. **What is already stored.** A criterion whose stored rows carry exactly
+       one code (``db.geo_identity_sql``, the rule every reader applies) takes
+       that code. The criterion id is Google's own id for the location, so this
+       is stored evidence about the same place — and Google is not asked again.
+    2. **Google's geo_target_constant lookup**, for the criteria storage cannot
+       name only.
+
+    A failed lookup no longer passes silently. The rows are still returned —
+    the spend is real and is written — but the outcome says the lookup failed,
+    and the caller reports the run ``partial``, never ``success``. (Before this,
+    every row of the re-read range was stored with no code, the chunk
+    ``verified`` and the run ``success``, and the writer then deleted the codes
+    already stored for those days.) A criterion Google ANSWERED for without a
+    country is not a failure: it is what Google says about that location.
+
+    Returns ``{criteria, from_storage, looked_up, lookup_failed, lookup_error,
+    storage_readable, unresolved}`` — ``unresolved`` names the criteria left
+    with no code.
     """
-    ids = {r.get("country_criterion_id") for r in rows if r.get("country_criterion_id")}
+    ids = sorted({str(r.get("country_criterion_id")).strip() for r in rows
+                  if str(r.get("country_criterion_id") or "").strip()})
+    outcome = {"criteria": len(ids), "from_storage": 0, "looked_up": 0,
+               "lookup_failed": False, "lookup_error": None,
+               "storage_readable": True, "unresolved": []}
     if not ids:
-        return
-    try:
-        resolved = fetch_geo_country_codes(sorted(ids)) or {}
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[geo_sync] country-code resolution failed: %s", exc)
-        resolved = {}
+        return outcome
+    from db.geo_identity_sql import resolved_code  # noqa: PLC0415
+
+    known: dict = {}
+    stored = repo.fetch_geo_criterion_identities(ids)
+    if stored.get("available"):
+        for cid, ident in (stored.get("identities") or {}).items():
+            code = resolved_code(ident.get("codes"))
+            if code:
+                known[str(cid)] = {"country_code": code, "name": ident.get("name")}
+    else:
+        # Storage could not be read: every criterion goes to Google. Not an
+        # error in itself — if Google answers, the rows are named.
+        outcome["storage_readable"] = False
+    unknown = [cid for cid in ids if cid not in known]
+    outcome["from_storage"] = len(ids) - len(unknown)
+    resolved: dict = {}
+    if unknown:
+        outcome["looked_up"] = len(unknown)
+        try:
+            resolved = fetch_geo_country_codes(unknown) or {}
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            log.warning("[geo_sync] country-code lookup failed for %d criteria: %s",
+                        len(unknown), exc)
+            outcome["lookup_failed"] = True
+            outcome["lookup_error"] = str(exc)[:300]
+            resolved = {}
+    unresolved = set()
     for r in rows:
-        meta = resolved.get(str(r.get("country_criterion_id"))) or {}
+        cid = str(r.get("country_criterion_id") or "").strip()
+        meta = known.get(cid) or resolved.get(cid) or {}
         r["country_code"] = meta.get("country_code")
         r["country_name"] = meta.get("name")
+        if cid and not str(r["country_code"] or "").strip():
+            unresolved.add(cid)
+    outcome["unresolved"] = sorted(unresolved)
+    return outcome
 
 
 def _micros_to_native(micros) -> float:
@@ -166,6 +213,13 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     """
     account_time_zone = repo.fetch_account_time_zone()
     resolved, start, end = _window_bounds(window, now, account_time_zone)
+    # PR-ADS-167A (owner decision 2026-11-20): this panel explains the Country
+    # Revenue & Spend page, so it measures the page's days — an open window
+    # ends at yesterday (account-local), a closed one is unchanged. The ONE
+    # rule: canonical_contract.end_at_settled_day.
+    from services.canonical_contract import end_at_settled_day  # noqa: PLC0415
+    resolved = end_at_settled_day(resolved)
+    end = date.fromisoformat(resolved["end_date"])
     date_from = resolved.get("start_date")
     date_to = resolved.get("end_date")
 
@@ -203,7 +257,10 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     # it is the only thing that can tell "never fetched" from "fetched, and the
     # geography genuinely carried no spend". An empty geo table cannot answer
     # that question about itself, and asking it to was the original defect.
-    geo_ledger = analyze_geo_coverage(customer_id, start, end)
+    # PR-ADS-167A: the PUBLISHED verdict — a verified chunk counts only for the
+    # days that had ended when it was fetched. This panel's
+    # `country_roas_unblockable` is the same verdict the revenue pages gate on.
+    geo_ledger = analyze_published_geo_coverage(customer_id, start, end, now=now)
     geo_coverage_readable = bool(geo_ledger.get("available"))
     geo_coverage_complete = bool(geo_ledger.get("complete"))
     geo_failed_chunks = geo_ledger.get("failed_chunks") or []
@@ -338,6 +395,7 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         geo_readable=geo_readable,
         geo_coverage_readable=geo_coverage_readable,
         geo_coverage_complete=geo_coverage_complete,
+        geo_coverage_settle_gap=geo_ledger.get("unsettled_reason"),
         geo_failed_chunks=geo_failed_chunks,
         missing_geo_dates=breakdown.get("missing_geo_dates") or [],
         campaigns_missing_geo=breakdown.get("campaigns_missing_geo") or [],
@@ -349,11 +407,27 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     # unblockable on one surface and not on the other. Both are now the shared
     # predicate over the shared status.
     country_roas_unblockable = country_geo_ready(country_spend_status)
+    # PR-ADS-167A: a settled-day window with no completed day measures
+    # nothing — every figure is unavailable, never a "reconciled" zero.
+    empty_window = bool((resolved.get("window_range") or {}).get("empty"))
+    if empty_window:
+        country_spend_status = GEO_STATUS_UNAVAILABLE
+        country_gap_codes = [GEO_GAP_NO_SETTLED_DAY]
+        country_roas_unblockable = False
+        status = "unavailable"
+        canonical_total = geo_total = variance = variance_pct = None
+        geo_verified_zero = False
+        geo_coverage_complete = False
+        residual = {**residual, "eligible": False, "residual_native": None,
+                    "residual_pct": None}
 
     return {
         "window": window,
         "date_from": date_from,
         "date_to": date_to,
+        # PR-ADS-167A: the days measured, and why the window ends where it does.
+        "through_reason": resolved.get("through_reason"),
+        "window_range": resolved.get("window_range"),
         "account_time_zone": account_time_zone,
         "currency_code": currency_code,
         "customer_id": customer_id,
@@ -399,6 +473,9 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         # country genuinely spent nothing".
         "geo_coverage_available": geo_coverage_readable,
         "geo_coverage_complete": geo_coverage_complete,
+        # PR-ADS-167A: why a fully-fetched window is still not complete (it
+        # includes today, or yesterday was not re-read after it ended).
+        "geo_coverage_unsettled_reason": geo_ledger.get("unsettled_reason"),
         # True only when the query succeeded, the ledger proves the whole range
         # was fetched, and the answer was genuinely nothing. Publishing it makes
         # "there was no spend here" auditably different from "we do not know".
@@ -631,6 +708,47 @@ def analyze_geo_coverage(customer_id: str, start: date | None, end: date) -> dic
     return result
 
 
+def analyze_published_geo_coverage(customer_id: str, start: date | None, end: date,
+                                   now: datetime | None = None) -> dict:
+    """Geo coverage for a surface that PUBLISHES country spend (PR-ADS-167A).
+
+    :func:`analyze_geo_coverage` answers "was every day fetched?", which is what
+    the sync must ask of its own ledger before it claims success. A page that
+    publishes a figure must ask whether every day is held COMPLETELY: a verified
+    chunk counts only for the days that had ended, in the account time zone,
+    when it was fetched (``google_ads_spend_service.analyze_settled_coverage``,
+    the one implementation of that rule). So a window that includes today is
+    never complete, and yesterday is complete only once it was re-read after it
+    ended.
+
+    The zone is the one the sync itself reads (``repo.fetch_account_time_zone``).
+    With none on record nothing is settled and ``unsettled_reason`` is
+    ``account_time_zone_unknown``. ``available: False`` means the ledger (or the
+    zone) could not be read — unknown, never "covered".
+    """
+    from services.google_ads_spend_service import (  # noqa: PLC0415
+        analyze_settled_coverage, zone_or_none,
+    )
+
+    empty = {"available": False, "complete": False, "missing_days": None,
+             "missing_ranges": [], "failed_chunks": [], "verified_chunks": [],
+             "settled": True, "complete_by_status": False, "unsettled_reason": None}
+    try:
+        tz_name = repo.fetch_account_time_zone()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[geo] account time zone unreadable: %s", exc)
+        return {**empty, "reason": GEO_GAP_GEO_COVERAGE_UNREADABLE}
+    ledger = repo.fetch_geo_coverage(customer_id, start, end)
+    if not ledger.get("available"):
+        return {**empty,
+                "reason": ledger.get("reason") or "geo_coverage_ledger_unavailable"}
+    result = analyze_settled_coverage(start, end, ledger.get("chunks", []),
+                                      zone_or_none(tz_name), now=now)
+    result["available"] = True
+    result["account_time_zone"] = tz_name
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # THE geo readiness gate (PR-ADS-153F)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -684,6 +802,22 @@ GEO_GAP_GEO_CHUNKS_FAILED = "geo_coverage_has_failed_chunks"
 # PR-ADS-154B §2: the two sides were not measured at the same scope, so whatever
 # they say about each other is not a finding about the data.
 GEO_GAP_NOT_LIKE_FOR_LIKE = "comparison_not_like_for_like"
+# PR-ADS-167A: every day was fetched, but not every day is held COMPLETELY
+# (``analyze_published_geo_coverage``). The codes are the shared settle rule's
+# own, so every surface names one condition one way.
+from services.google_ads_spend_service import (  # noqa: E402
+    COVERAGE_GAP_DAY_IN_PROGRESS as GEO_GAP_DAY_IN_PROGRESS,
+    COVERAGE_GAP_DAY_NOT_REREAD as GEO_GAP_DAY_NOT_REREAD,
+    COVERAGE_GAP_REREAD_FAILED as GEO_GAP_REREAD_FAILED,
+    COVERAGE_GAP_TZ_UNKNOWN as GEO_GAP_ACCOUNT_TZ_UNKNOWN,
+)
+#: PR-ADS-167A: a settled-day window with no completed day (today is the
+#: first day of the quarter or year). Nothing is measured; every country
+#: figure is unavailable. ``canonical_contract.NO_SETTLED_DAY_IN_WINDOW``.
+GEO_GAP_NO_SETTLED_DAY = "no_settled_day_in_window"
+#: The settle codes a gate accepts in place of `geo_coverage_incomplete`.
+GEO_SETTLE_GAPS = frozenset({GEO_GAP_DAY_IN_PROGRESS, GEO_GAP_DAY_NOT_REREAD,
+                             GEO_GAP_REREAD_FAILED, GEO_GAP_ACCOUNT_TZ_UNKNOWN})
 
 
 def resolve_country_spend_status(*, reconciled, residual_eligible,
@@ -693,6 +827,7 @@ def resolve_country_spend_status(*, reconciled, residual_eligible,
                                  geo_readable,
                                  geo_coverage_readable,
                                  geo_coverage_complete,
+                                 geo_coverage_settle_gap,
                                  geo_failed_chunks,
                                  missing_geo_dates,
                                  campaigns_missing_geo,
@@ -741,6 +876,12 @@ def resolve_country_spend_status(*, reconciled, residual_eligible,
     ``missing_geo_dates`` to empty would let a caller reach an accepted state by
     asserting ``residual_eligible=True`` without ever having looked.
 
+    ``geo_coverage_settle_gap`` (PR-ADS-167A) is the published coverage
+    verdict's ``unsettled_reason`` (None when the window is complete or a day
+    was never fetched): every day was fetched, but not every day is held
+    completely — the window includes today, or yesterday was not re-read after
+    it ended. It only NAMES an incomplete window; it cannot complete one.
+
     ``comparison_like_for_like`` (PR-ADS-154B §2) asserts that the two totals
     were measured over the same account, currency and window. It is a
     precondition, not a result: when it is False the totals may differ purely
@@ -764,7 +905,11 @@ def resolve_country_spend_status(*, reconciled, residual_eligible,
     if not geo_coverage_readable:
         gaps.append(GEO_GAP_GEO_COVERAGE_UNREADABLE)
     elif not geo_coverage_complete:
-        gaps.append(GEO_GAP_GEO_COVERAGE_INCOMPLETE)
+        # PR-ADS-167A: every day fetched, not every day complete — say which,
+        # rather than "never synced, run the backfill". An unrecognised code is
+        # not a reason: the generic gap stands (fail closed on the wording too).
+        gaps.append(geo_coverage_settle_gap if geo_coverage_settle_gap in GEO_SETTLE_GAPS
+                    else GEO_GAP_GEO_COVERAGE_INCOMPLETE)
     if geo_failed_chunks:
         gaps.append(GEO_GAP_GEO_CHUNKS_FAILED)
 
@@ -847,17 +992,39 @@ GEO_GAP_MESSAGES = {
     GEO_GAP_TOTALS_DIFFER:
         "Geo period revenue / ad spend requires Google Ads geographic spend that reconciles with the "
         "canonical campaign spend — it does not for this window.",
+    GEO_GAP_DAY_IN_PROGRESS:
+        "Geo period revenue / ad spend is withheld — this window includes today, and today's country "
+        "spend is still arriving. Only a window that ends before today can hold complete country spend.",
+    GEO_GAP_DAY_NOT_REREAD:
+        "Geo period revenue / ad spend is withheld — the newest day of this window was last synced while "
+        "it was still in progress. The morning sync re-reads it.",
+    GEO_GAP_REREAD_FAILED:
+        "Geo period revenue / ad spend is withheld — the newest day of this window was last synced while "
+        "it was still in progress, and the sync that should have re-read it failed.",
+    GEO_GAP_ACCOUNT_TZ_UNKNOWN:
+        "Geo period revenue / ad spend is withheld — the Google Ads account's time zone is not on record, "
+        "so it cannot be told when each day ended.",
+    GEO_GAP_NO_SETTLED_DAY:
+        "Country figures are unavailable — this window has no completed day yet (today is its first "
+        "day). They publish after tomorrow morning's sync.",
 }
 
 _GEO_GAP_PRIORITY = (
     # First: if the two sides are not comparable, nothing below is worth saying.
     GEO_GAP_NOT_LIKE_FOR_LIKE,
+    # PR-ADS-167A: a window with no completed day measures nothing (the panel
+    # and the mart set this code alone).
+    GEO_GAP_NO_SETTLED_DAY,
     GEO_GAP_CAMPAIGN_SPEND_UNREADABLE,
     GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE,
     GEO_GAP_GEO_ROWS_UNREADABLE,
     GEO_GAP_GEO_COVERAGE_UNREADABLE,
     GEO_GAP_GEO_COVERAGE_INCOMPLETE,
     GEO_GAP_GEO_CHUNKS_FAILED,
+    GEO_GAP_ACCOUNT_TZ_UNKNOWN,
+    GEO_GAP_REREAD_FAILED,
+    GEO_GAP_DAY_NOT_REREAD,
+    GEO_GAP_DAY_IN_PROGRESS,
     GEO_GAP_MISSING_DATES,
     GEO_GAP_CAMPAIGN_WITHOUT_GEO,
     GEO_GAP_FX_COVERAGE_INCOMPLETE,
@@ -1186,7 +1353,19 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
                 seen_countries.add(r.get("country_criterion_id"))
             # Resolve criterion ids -> country code/name so the canonical geo table
             # itself carries the country identity that feeds named country rows.
-            _resolve_country_metadata(rows)
+            # PR-ADS-167A: stored codes first; a failed lookup for the rest is
+            # reported (the run is `partial`), never passed off as a clean run.
+            identity = _resolve_country_metadata(rows)
+            chunk["country_identity"] = {
+                k: identity[k] for k in ("criteria", "from_storage", "looked_up",
+                                         "lookup_failed", "unresolved")}
+            lookup_error = None
+            if identity["lookup_failed"]:
+                lookup_error = (
+                    f"{chunk_key}: country lookup failed — "
+                    f"{len(identity['unresolved'])} of {identity['criteria']} "
+                    f"location(s) stored with no country code: "
+                    f"{identity['lookup_error']}")
             chunk["rows"] = len(rows)
             chunk["cost_micros"] = micros
             if not dry_run:
@@ -1220,16 +1399,26 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
                 summary["rows_deleted"] = summary.get("rows_deleted", 0) + int(
                     replaced.get("deleted") or 0)
                 # Only NOW is the chunk provably covered.
+                # The SPEND of the range is fully fetched and written, so the
+                # chunk is `verified` — coverage is a statement about spend. A
+                # failed country lookup is recorded on it and on the run (below),
+                # not by withholding spend that is real.
                 if not db_writers.upsert_geo_coverage(
                         customer_id, cursor.isoformat(), chunk_to.isoformat(),
                         "verified", rows_written=written, cost_micros_total=micros,
                         country_count=len({r.get("country_criterion_id")
                                            for r in rows if r.get("country_criterion_id")}),
+                        error_message=lookup_error,
                         source_query_version=payload.get("source_query_version"),
                         sync_run_id=job_id):
                     raise GeoPersistenceError("geo coverage-ledger upsert failed")
+                chunk["codes_preserved"] = int(replaced.get("codes_preserved") or 0)
             summary["geo_cost_micros"] += micros
             summary["chunks_verified"] += 1
+            if lookup_error:
+                chunk["country_lookup"] = "failed"
+                summary["country_lookups_failed"] = summary.get("country_lookups_failed", 0) + 1
+                errors.append(lookup_error)
         except GeoLeaseLostError:
             # Never recorded as a chunk failure: this range now belongs to
             # another worker, and writing ANY coverage row for it — even
@@ -1260,6 +1449,12 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
     status = "failed" if (errors and not (summary["chunks_verified"] or summary["chunks_skipped"])) \
         else ("partial" if errors else "success")
     reason = None
+    if (status == "partial" and summary.get("country_lookups_failed")
+            and not summary["chunks_failed"]):
+        # PR-ADS-167A: every chunk's spend landed; some locations were stored
+        # with no country because the lookup failed. Partial — never success,
+        # and never `failed`: the spend is real and covered.
+        reason = "country_lookup_failed"
 
     # Coverage is re-read from the LEDGER, not inferred from this run's counters:
     # a run that skipped every chunk because they were already verified is

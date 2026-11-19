@@ -910,6 +910,8 @@ _PROVEN = {
     "geo_readable": True,
     "geo_coverage_readable": True,
     "geo_coverage_complete": True,
+    # PR-ADS-167A: required, no default. None: nothing unsettled to name.
+    "geo_coverage_settle_gap": None,
     "geo_failed_chunks": [],
     "missing_geo_dates": [],
     "campaigns_missing_geo": [],
@@ -1367,7 +1369,7 @@ def test_26b_the_geo_writer_touches_only_local_canonical_tables():
 # never-synced one — which is the defect the ledger was built to remove.
 
 def _recon(monkeypatch, *, canonical_total, geo_available=True, geo_has_rows=False,
-           geo_total=0.0, coverage=None):
+           geo_total=0.0, coverage=None, window="ytd"):
     """Drive `build_geo_reconciliation` over one explicit evidence set."""
     repo = geo.repo
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
@@ -1387,14 +1389,17 @@ def _recon(monkeypatch, *, canonical_total, geo_available=True, geo_has_rows=Fal
     monkeypatch.setattr(repo, "fetch_geo_reconciliation_breakdown", lambda s, e: {
         "available": True, "daily": [], "by_campaign": [],
         "unmapped_geo_native": 0.0, "campaign_rows_counted": 0})
+    # PR-ADS-167A: production stamps every chunk with when it was fetched; a
+    # chunk fetched now settles every day that has ended.
+    from datetime import datetime as _dt, timezone as _tz
     verified = [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
                  "status": "verified", "rows_written": 0, "cost_micros_total": 0,
-                 "country_count": 0}]
+                 "country_count": 0, "fetched_at": _dt.now(tz=_tz.utc)}]
     monkeypatch.setattr(repo, "fetch_geo_coverage", lambda c, s, e: {
         "available": True,
         "chunks": (verified if coverage is None else coverage)}
         if coverage != "unreadable" else {"available": False, "chunks": []})
-    return geo.build_geo_reconciliation("ytd")
+    return geo.build_geo_reconciliation(window)
 
 
 def test_f1_1_verified_coverage_plus_zero_on_both_sides_is_a_measured_zero(monkeypatch):
@@ -1449,6 +1454,27 @@ def test_f1_4_positive_campaign_spend_against_a_verified_zero_stays_blocked(monk
     assert out["geo_ready"] is False
 
 
+def test_f1_6_an_open_window_ends_yesterday_and_is_not_complete_before_it_is_re_read(
+        monkeypatch):
+    """PR-ADS-167A (owner decision 2026-11-20). YTD includes today, so the
+    panel measures it through yesterday: the proven zero above (test_f1_1) is
+    over those days. A ledger last fetched before yesterday ended does not
+    hold yesterday completely: not ready, with the settle reason."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    out = _recon(monkeypatch, canonical_total=0.0)
+    assert out["through_reason"] == "today_not_settled"
+    assert out["date_to"] == out["window_range"]["through"]
+    two_days_ago = _dt.now(tz=_tz.utc) - _td(days=2)
+    stale = [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
+              "status": "verified", "rows_written": 0, "cost_micros_total": 0,
+              "country_count": 0, "fetched_at": two_days_ago}]
+    out = _recon(monkeypatch, canonical_total=0.0, coverage=stale)
+    assert out["geo_verified_zero"] is False
+    assert out["geo_ready"] is False
+    assert out["geo_coverage_unsettled_reason"] == geo.GEO_GAP_DAY_NOT_REREAD
+    assert geo.GEO_GAP_DAY_NOT_REREAD in out["geo_gap_codes"]
+
+
 def test_f1_5_readability_is_about_the_query_not_about_the_rows():
     """`geo_readable` must not be computed from `has_rows` anywhere."""
     body = _GEO_SRC[_GEO_SRC.index("def build_geo_reconciliation"):]
@@ -1477,7 +1503,8 @@ def test_f2_1_the_gate_has_no_permissive_defaults():
     mandatory = ("campaign_spend_readable", "campaign_coverage_complete",
                  "fx_complete", "geo_readable", "geo_coverage_readable",
                  "geo_coverage_complete", "geo_failed_chunks",
-                 "missing_geo_dates", "campaigns_missing_geo")
+                 "missing_geo_dates", "campaigns_missing_geo",
+                 "geo_coverage_settle_gap")             # PR-ADS-167A
     for name in mandatory:
         param = sig.parameters[name]
         assert param.kind is inspect.Parameter.KEYWORD_ONLY, name
@@ -1507,7 +1534,9 @@ def test_f2_3_every_production_caller_passes_the_complete_evidence_set():
                 # PR-ADS-154B §2 — were the two totals even measured at the same
                 # scope? A caller that omits it now raises at the call site; this
                 # says so in review instead.
-                "comparison_like_for_like"}
+                "comparison_like_for_like",
+                # PR-ADS-167A — why a fully fetched window is not complete.
+                "geo_coverage_settle_gap"}
     seen = 0
     for src in (_GEO_SRC, _MART_SRC):
         for node in ast.walk(ast.parse(src)):

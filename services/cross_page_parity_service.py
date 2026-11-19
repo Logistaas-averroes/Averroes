@@ -58,8 +58,11 @@ from services.canonical_contract import (
     SOURCE_CANONICAL_SPEND,
     SOURCE_REVENUE_BY_SOURCE,
     SOURCE_REVENUE_DECISION_MART,
+    THROUGH_TODAY_NOT_SETTLED,
     TRUTH_READY,
     resolve_canonical_window,
+    resolve_settled_window,
+    settled_revenue_bounds,
 )
 
 log = logging.getLogger(__name__)
@@ -247,6 +250,16 @@ def _classify_unavailable(readings: list, metric_key: str):
     return ("unavailable", V_SOURCE_UNAVAILABLE,
             f"no consumer published {metric_key}, and none declared a reason")
 
+#: PR-ADS-167A — the settled-day REFERENCE: the decision mart's country view.
+#: Owner decision 2026-11-20: the country consumers (Country Revenue & Spend,
+#: Dashboard Countries) end a window that includes today at YESTERDAY. They
+#: cannot be compared with consumers whose window ends today, and must not be
+#: silently. This reference is the same canonical contract over the settled
+#: window, so the country consumers' coverage proof and the SQL conservation
+#: rule are evaluated over the SAME days they measured. It certifies no
+#: identity of its own (it is not in METRIC_IDENTITIES).
+CONSUMER_SETTLED_REFERENCE = "revenue_decision_mart/country"
+
 #: Identities that partition a whole. Registering the split is not enough — if
 #: the parts do not add back to the total, one of the three is wrong and the
 #: audit cannot tell which, so it says so rather than certifying all three.
@@ -257,6 +270,13 @@ CONSERVATION_RULES = [
     {
         "total": "campaign_attributable_sqls",
         "parts": ["country_attributed_sqls", "country_unattributed_residual_sqls"],
+        # PR-ADS-167A: the parts come from Dashboard Countries. When it declares
+        # a settled-day window (it ends at yesterday), the total is read from
+        # the settled reference over the SAME days — never from consumers whose
+        # window includes today, which would break conservation by a day of
+        # SQLs, or hide a real break behind one.
+        "parts_consumer": "dashboard/countries",
+        "settled_total": (CONSUMER_SETTLED_REFERENCE, "summary.sqls"),
         "reason": (
             "Every campaign-attributable SQL is either assigned to a real "
             "canonical country or held in the governed residual. The residual is "
@@ -789,10 +809,19 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
     An unrecognised proof kind is NOT proven. A permissive default here would
     certify any future identity that forgot to name its evidence.
     """
+    proof = spec.get("coverage_proof")
     mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
+    # PR-ADS-167A: a COUNTRY identity's coverage is proven over the days its
+    # consumer measured. When that consumer declares a settled-day window, the
+    # proof is the settled reference's (same canonical contract, same days),
+    # not the campaign mart's window that includes today.
+    if proof in (PROOF_GEO_SPEND, PROOF_COUNTRY_REVENUE, PROOF_COUNTRY_SQLS) \
+            and any(_declares_settled_window(
+                (consumers.get(c) or {}).get("payload"))
+                for c, _p in spec.get("consumers") or []):
+        mart = (consumers.get(CONSUMER_SETTLED_REFERENCE) or {}).get("payload") or {}
     spend_truth = mart.get("spend_truth") or {}
     summary = mart.get("summary") or {}
-    proof = spec.get("coverage_proof")
 
     def _country_ok() -> tuple[bool, str]:
         country = spend_truth.get("country_spend_status")
@@ -879,6 +908,12 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
     return False, f"no recognised coverage proof for this identity ({proof!r})"
 
 
+def _declares_settled_window(payload) -> bool:
+    """Does this consumer say its window ends at yesterday (PR-ADS-167A)?"""
+    w = (payload or {}).get("window") if isinstance(payload, dict) else None
+    return isinstance(w, dict) and w.get("through_reason") == THROUGH_TODAY_NOT_SETTLED
+
+
 def _window_signature(payload: dict, window: str) -> tuple:
     """The (start, end, timezone) a consumer used, plus a problem description.
 
@@ -934,6 +969,8 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
         "dashboard/deals": lambda: build_dashboard_deals(window=window, now=now),
         "revenue_decision_mart": lambda: build_revenue_decision_mart(
             window=window, view="campaign", now=now),
+        CONSUMER_SETTLED_REFERENCE: lambda: build_revenue_decision_mart(
+            window=window, view="country", now=now),
     }
 
     built: dict = {}
@@ -961,6 +998,14 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
     # PR-ADS-154C-F1: a consumer that omits its window used to contribute no
     # signature at all, so a single remaining signature read as unanimity. One
     # page silently dropping its window looked exactly like every page agreeing.
+    # PR-ADS-167A: a consumer that DECLARES a settled-day window (it ends at
+    # yesterday because today is not settled) is not compared with the others —
+    # that one-day difference is the owner's decision, and comparing it would
+    # report a deliberate difference as a defect. It is compared, instead, with
+    # the settled window the audit resolves itself from the same key and
+    # instant: a declaration the audit cannot reproduce (wrong days, or a
+    # closed window claiming to be cut) is a window mismatch.
+    settled = resolve_settled_window(window, now=now)
     window_rows = []
     signatures: dict = {}
     for name, entry in consumers.items():
@@ -968,18 +1013,45 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         if payload is None:
             continue                       # already reported as V_CONSUMER_FAILED
         sig, problem = _window_signature(payload, window)
+        is_settled = _declares_settled_window(payload)
         window_rows.append({
             "consumer": name,
             "window_start": sig[0] if sig else None,
             "window_end": sig[1] if sig else None,
             "timezone": sig[2] if sig else None,
+            "through_reason": (THROUGH_TODAY_NOT_SETTLED if is_settled else None),
             "problem": problem,
         })
-        if sig:
-            signatures.setdefault(sig, []).append(name)
-        else:
+        if not sig:
             violations.append({"code": V_WINDOW_MISSING, "consumer": name,
                                "detail": problem})
+        elif is_settled:
+            expected = (settled.get("start_date"), settled.get("end_date"))
+            # Dates are not enough: a consumer declaring the right days but
+            # reading deals on the UTC calendar would pass (review round 1's
+            # MAJOR stayed hidden that way). Its published instants must be
+            # THE settled revenue bounds too.
+            want = settled_revenue_bounds(settled) if settled.get("through_reason") else None
+            want_utc = (None if want is None else
+                        (want[0].isoformat() if want[0] else None, want[1].isoformat()))
+            w = payload.get("window") or {}
+            got_utc = (w.get("start_utc"), w.get("end_utc_exclusive"))
+            if want_utc is not None and got_utc != want_utc:
+                violations.append({
+                    "code": V_WINDOW_MISMATCH, "metric": None, "consumer": name,
+                    "detail": (f"{name} declares a settled-day window whose "
+                               f"instants {list(got_utc)} are not the settled "
+                               f"revenue bounds {list(want_utc)} for {window!r}")})
+            if not settled.get("through_reason") or sig[:2] != expected:
+                violations.append({
+                    "code": V_WINDOW_MISMATCH, "metric": None, "consumer": name,
+                    "detail": (f"{name} declares a settled-day window "
+                               f"{list(sig[:2])}, but the settled window for "
+                               f"{window!r} is {list(expected)} "
+                               f"(through_reason="
+                               f"{settled.get('through_reason')!r})")})
+        else:
+            signatures.setdefault(sig, []).append(name)
     if len(signatures) > 1:
         violations.append({
             "code": V_WINDOW_MISMATCH, "metric": None,
@@ -1175,8 +1247,22 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         part_entries = [by_key.get(p) for p in rule["parts"]]
         values = [None if e is None else e.get("value")
                   for e in [total_entry, *part_entries]]
+        total_source = "metric_identity"
+        parts_payload = (consumers.get(rule.get("parts_consumer")) or {}).get("payload")
+        if rule.get("settled_total") and _declares_settled_window(parts_payload):
+            # PR-ADS-167A: the parts measured the settled-day window; the total
+            # is the settled reference's figure over the same days, published
+            # only while that reference's own window is the settled one.
+            ref_name, ref_path = rule["settled_total"]
+            ref = (consumers.get(ref_name) or {}).get("payload") or {}
+            same_days = (_declares_settled_window(ref)
+                         and _window_signature(ref, window)[0]
+                         == _window_signature(parts_payload, window)[0])
+            values[0] = _dig(ref, ref_path) if same_days else None
+            total_source = f"{ref_name}:{ref_path}"
         row = {"total": rule["total"], "parts": rule["parts"],
                "total_value": values[0], "part_values": values[1:],
+               "total_source": total_source,
                "reason": rule["reason"]}
         if any(v is None for v in values):
             # Not a violation: a withheld component cannot disprove conservation,
@@ -1248,6 +1334,10 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         "window_start": resolved.get("start_date"),
         "window_end": resolved.get("end_date"),
         "timezone": resolved.get("timezone"),
+        # PR-ADS-167A: the window the settled-day consumers must declare.
+        "settled_window": {"start_date": settled.get("start_date"),
+                           "end_date": settled.get("end_date"),
+                           "through_reason": settled.get("through_reason")},
         "ok": ok,
         "consumers_inspected": sorted(consumers),
         # What "inspected" is worth, per consumer. `consumers_inspected` alone

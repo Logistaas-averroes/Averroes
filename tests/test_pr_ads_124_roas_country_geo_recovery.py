@@ -309,6 +309,11 @@ def test_geo_sync_run_is_dry_by_default_and_skips_writes(monkeypatch):
     monkeypatch.setattr(svc, "fetch_geo_daily", lambda a, b: {"rows": [
         {"customer_id": "1", "country_criterion_id": "2826", "campaign_id": "9",
          "spend_date": a, "cost_micros": 1_000_000}]})
+    # PR-ADS-167A: Google answers the country lookup, as it does in
+    # production. (Unpatched, the real connector cannot load here; that used
+    # to be swallowed, and is now — correctly — a `partial` run.)
+    monkeypatch.setattr(svc, "fetch_geo_country_codes",
+                        lambda ids: {"2826": {"country_code": "GB", "name": "United Kingdom"}})
     res = svc.run_google_ads_geo_sync(window="ytd", dry_run=True,
                                       now=_at("2026-06-30"))
     assert res["dry_run"] is True
@@ -353,8 +358,16 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
     geo_cov = (geo_coverage if geo_coverage is not None
                else [{"chunk_start": "2026-01-01", "chunk_end": "2026-06-30",
                       "status": "verified", "rows_written": 130,
-                      "cost_micros_total": 10_000_000_000, "country_count": 2}])
+                      "cost_micros_total": 10_000_000_000, "country_count": 2,
+                      # PR-ADS-167A: production stamps every chunk with when
+                      # it was fetched — here the morning after the range
+                      # ended, so every day of it is settled.
+                      "fetched_at": "2026-07-01T06:02:00+00:00"}])
     try:
+        # PR-ADS-167A: the published geo verdict reads the account time zone
+        # (production: Europe/London) to tell when each day ended.
+        monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone",
+                            lambda: "Europe/London")
         monkeypatch.setattr("db.revenue_repository.fetch_geo_coverage",
                             lambda c, s, e: {"available": True, "chunks": list(geo_cov)})
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda s, e: spend)
@@ -419,13 +432,32 @@ def test_country_roas_available_when_geo_reconciles(monkeypatch):
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
                    geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
                    revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY)
-    out = build("ytd", now=_at("2026-06-30"))
+    # PR-ADS-167A (owner decision 2026-11-20): the country consumers' window.
+    # YTD includes today, so it ends yesterday (29 June) for revenue and spend
+    # alike, and that morning's fetch settles it.
+    morning = [{"chunk_start": "2026-01-01", "chunk_end": "2026-06-30",
+                "status": "verified", "rows_written": 130,
+                "cost_micros_total": 10_000_000_000, "country_count": 2,
+                "fetched_at": "2026-06-30T06:02:00+00:00"}]
+    _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
+                   geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
+                   revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY,
+                   geo_coverage=morning)
+    out = build("ytd", now=_at("2026-06-30"), settled_days=True)
+    assert out["window"]["end_date"] == "2026-06-29"
+    assert out["window"]["through_reason"] == "today_not_settled"
     sh = out["source_health"]
     assert sh["country_spend_reconciled"] is True
     assert sh["country_roas_available"] is True
     assert out["country_spend_available"] is True
     assert out["geo_country_mapping_status"] == "available"
     assert len(out["countries"]) >= 1
+    # The default contract (`/api/revenue-attribution`) keeps the window that
+    # includes today, and today is not complete: withheld, with the reason.
+    open_ = build("ytd", now=_at("2026-06-30"))["source_health"]
+    assert open_["country_spend_reconciled"] is True
+    assert open_["country_roas_available"] is False
+    assert open_["geo_coverage_unsettled_reason"] == "window_includes_day_in_progress"
 
 
 # Reviewer-required: the canonical geo table feeds the ROAS by Country rows.
@@ -464,7 +496,8 @@ def test_country_rows_sum_to_reconciled_geo_total(monkeypatch):
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
                    geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
                    revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY)
-    out = build("ytd", now=_at("2026-06-30"))
+    # PR-ADS-167A: the country consumers' window (YTD through yesterday).
+    out = build("ytd", now=_at("2026-06-30"), settled_days=True)
     # Country spend is USD reporting (FX complete); the visible rows sum to the
     # canonical geo total expressed in USD (8890 + 3810 = 12700) — same source.
     total = round(sum(float(c.get("spend") or 0) for c in out["countries"]), 2)
@@ -478,7 +511,8 @@ def test_no_geo_data_remains_blocked_never_zero(monkeypatch):
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
                    geo_daily=geo_daily, country_rows=[], revenue_rows=_REVENUE_ROWS,
                    geo_country=None, legacy_spend=[])
-    out = build("ytd", now=_at("2026-06-30"))
+    # PR-ADS-167A: the country consumers' window (YTD through yesterday).
+    out = build("ytd", now=_at("2026-06-30"), settled_days=True)
     sh = out["source_health"]
     assert sh["country_roas_available"] is False     # blocked
     assert out["geo_country_mapping_status"] == "no_geo_data"
@@ -500,7 +534,7 @@ def test_no_geo_data_remains_blocked_never_zero(monkeypatch):
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
                    geo_daily=geo_daily, country_rows=[], revenue_rows=_REVENUE_ROWS,
                    geo_country=None, legacy_spend=[], geo_coverage=[])
-    unproven = build("ytd", now=_at("2026-06-30"))
+    unproven = build("ytd", now=_at("2026-06-30"), settled_days=True)
     assert unproven["source_health"]["country_geo_verified_zero"] is False
     assert unproven["source_health"].get("geo_country_source") == "legacy_geo_table"
     assert unproven["source_health"]["country_roas_available"] is False
