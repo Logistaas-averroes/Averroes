@@ -122,7 +122,26 @@ EVENT_LABELS = {
     EVENT_MQL: "MQLs",
     EVENT_SQL: "SQLs",
     EVENT_OPPORTUNITY: "Opportunities",
-    EVENT_CUSTOMER: "Lifecycle Customers",
+    # PR-ADS-166A: named for what it counts. This event is a contact's
+    # lifecycle stage being changed to Customer — a CRM edit, bulk updates of
+    # old contacts included — and was read as customers won under its old
+    # label "Lifecycle Customers" (219 against 8 won deals in Q3 2026). A
+    # customer is a company on a won deal and comes only from the closed-won
+    # reader contract. Never label this event "Customers".
+    EVENT_CUSTOMER: "Moved to Customer stage",
+}
+
+#: What one period's count of an event SAYS, where "<label> entered during
+#: this period" would not read as a sentence.
+EVENT_ACTIVITY_LABELS = {
+    EVENT_CUSTOMER: "Contacts moved to the Customer stage during this period",
+}
+
+#: The event as the TARGET of a conversion ("… went on to enter <this>"). A
+#: conversion into the Customer stage is a stage move, never a customer
+#: conversion.
+EVENT_TARGET_LABELS = {
+    EVENT_CUSTOMER: "Customer stage",
 }
 
 # Ordered funnel progression used for cohort-safe conversion steps.

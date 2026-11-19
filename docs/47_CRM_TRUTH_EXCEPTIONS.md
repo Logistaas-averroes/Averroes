@@ -217,3 +217,5 @@ Outages get no link. Non-admins see the status and reason, but no link. See
 `docs/48_CUSTOMER_REVENUE_READER_CUTOVER.md` §5.
 
 **Company names are not shown.** Association ingestion stores ids only.
+(Since PR-ADS-166A company names are read into `hubspot_company_name` and
+shown in the Leads page's won-customers list; this workbench still shows ids.)

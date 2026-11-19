@@ -219,12 +219,18 @@ def test_1_stage_entry_counts_are_published_without_forcing_a_descent(monkeypatc
     assert activity["basis"] == "stage_entry_events"
     # Every card names the question its number answers, using the canonical
     # event label rather than a second display vocabulary.
+    #
+    # PR-ADS-166A changed the fifth expectation. The stage was labelled
+    # "Lifecycle Customers" and was read as customers won (219 stage moves
+    # against 8 won deals in Q3 2026); the canonical label is now "Moved to
+    # Customer stage" and its activity wording comes from
+    # `crm_lifecycle.EVENT_ACTIVITY_LABELS`, still the canonical vocabulary.
     assert [s["activity_label"] for s in activity["stages"]] == [
         "Leads entered during this period",
         "MQLs entered during this period",
         "SQLs entered during this period",
         "Opportunities entered during this period",
-        "Lifecycle Customers entered during this period",
+        "Contacts moved to the Customer stage during this period",
     ]
     assert [s["label"] for s in activity["stages"]] == [
         funnel.EVENT_LABELS[e] for e in _EVENTS]

@@ -4091,3 +4091,208 @@ and in `.github/workflows/pr-ads-153d-checks.yml`.
     `docs/07`, `docs/24`, `docs/31` and earlier sections of this file still
     describe `POST /run/weekly`, the weekly job, the Unit Economics page and
     the old `/api/geo` response.
+
+---
+
+## PR-ADS-166A — Leads page: contact names, customer names, and what "Customers" means
+
+**Owner report (2026-11-19).** "The Leads page is amazing; maybe add customer
+name and contact name to it; something is wrong, it says 208 customers for
+last quarter."
+
+**Production facts.** For Q3 2026 about 219 contacts entered the HubSpot
+Customer lifecycle stage. 206 of them have an OFFLINE original source and 182
+were created before the quarter: the team updated old records in bulk. In the
+same quarter 8 deals were closed-won. The page's number was a correct count of
+stage changes. The word above it, "Customers", was wrong.
+
+Doctrine: `docs/49_LEADS_CUSTOMER_STAGE_AND_NAMES.md`.
+
+### A. The number
+
+- The stage count is now called **"Moved to Customer stage in HubSpot"** on
+  the funnel strip, the tab ("Moved to Customer stage") and the table. Its
+  help line: "Counts contacts whose HubSpot lifecycle stage changed to
+  Customer in this period, including old contacts updated by the team. It is
+  not new customers."
+- The same event is renamed at its source, `analysis/crm_lifecycle.EVENT_LABELS`
+  ("Lifecycle Customers" → **"Moved to Customer stage"**), so the Overview
+  page's Lifecycle Activity and Lifecycle Cohort panels and the API say it
+  too. The activity card reads "Contacts moved to the Customer stage during
+  this period", and a conversion into the stage names its target "Customer
+  stage".
+- Beside it the page shows **"Customers won"**: distinct HubSpot companies
+  with a closed-won deal closed in the period, with the closed-won deal count
+  as a second line. Both come from the closed-won reader contract
+  (`canonical_revenue_service.load_won_deals`, inside one snapshot) through
+  the new `build_customers_won` in
+  `services/canonical_crm_funnel_service.py` and
+  `GET /api/crm-funnel/customers-won`. It republishes
+  `{value, status, reason}` and decides nothing.
+- The two figures are never added, and neither is worked out from the other.
+  Each says what it is: the stage count carries
+  `metric_family: lifecycle_stage_events`, `window_basis:
+  date_entered_customer` (every event block of `/api/crm-funnel` now carries
+  both keys); customers won carries `metric_family: closed_won_customers`,
+  `window_basis: deal_close_date`, `dedup_key: hubspot_company_id`.
+- When customers cannot be published the page shows "Withheld" or
+  "Unavailable" and the reason, never a dash, a 0 or the stage count. An
+  admin also gets "View blockers".
+- **Refused rather than approximated.** Customers won is "Unavailable" when a
+  Scope or Source filter is on (those filters classify contacts, not deals),
+  and for any window that is not a business window. The page only sends
+  business windows today.
+- **The list of won customers.** When the customer count is published, the
+  block has "Show the N customers won": company name, closed-won deals,
+  latest close date. When the count is withheld or unavailable the payload
+  has no list at all. If the list would not have exactly the published number
+  of entries it is left out and the page says "The list of customers could
+  not be built for this period."
+- The Leads block is registered in `services/cross_page_parity_service.py`
+  as a consumer of the `customers` and `closed_won_deals` identities, so the
+  parity audit compares it with the Deals page, the Overview and the mart.
+- The reader is in `INVENTORY` of
+  `scripts/audit_customer_revenue_reader_cutover.py`, and the new route and
+  that inventory row are registered in `analysis/sql_doctrine_registry.py`.
+  The reader sits in the funnel service file, not a file of its own, because
+  that audit's base-revision test reads every inventoried file from the
+  PR-ADS-161E tree. It reads nothing from the funnel.
+
+### B. Names
+
+**What was stored before this PR.**
+
+| Item | Stored? | Where |
+| --- | --- | --- |
+| Contact first / last name | No | nowhere |
+| Company typed on the contact | Yes | `hubspot_contact_funnel.company`, written by the contact funnel sync |
+| Name of the HubSpot company on a won deal | No | `hubspot_deal_company_association` holds company ids only |
+
+**Contact names.** Stored in `hubspot_contact_funnel.first_name`,
+`last_name`, `names_read_at` and `names_last_asked_at` (also on the archive
+table `hubspot_contact_funnel_removed`). All reads are read-only. Email is
+never requested; a name field that holds an email is stored as HubSpot sent
+it and is not displayed.
+
+- The daily contact sync now also asks HubSpot for `firstname` and
+  `lastname`. That covers new and changed contacts.
+- A new step in the daily incremental sync, `hubspot/contact_names`, reads
+  the names of contacts already stored, by id, newest contact first, 100 per
+  HubSpot call, at most 3000 contacts per run
+  (`name_backfill.max_contacts_per_run` in `config/thresholds.yaml`). About
+  21,700 stored contacts take about eight daily runs.
+- `names_read_at` is stamped only for a contact HubSpot returned. A contact
+  HubSpot was asked for and did not return gets `names_last_asked_at` instead
+  and is asked again at most once every 7 days. A contact in a batch that
+  failed gets no stamp and is asked again next run.
+- A read is retried on 429, 5xx, a timeout or a transport error. Any other
+  4xx (403 for a missing scope) is not retried, stops the step, and puts the
+  HTTP status in the step's error text. The HubSpot SDK has a separate
+  exception class per object type; contacts and companies are both caught.
+- A later answer with no name does not blank a stored name. A different name
+  replaces it.
+
+**What the page says.**
+
+| Case | Text |
+| --- | --- |
+| Name stored | the name |
+| Names read, HubSpot has none | "Name not recorded" |
+| The name field holds an email or no letters | "Name not shown" |
+| HubSpot was asked and did not return the contact | "Not returned by HubSpot" |
+| Never asked | "Name not loaded yet" |
+| Any stored contact never asked for | under the Contact header: "Names are being loaded from HubSpot: N of M contacts read so far." |
+
+The company, the email and the contact id are never shown in the name's
+place. A missing company reads "Company not recorded". The search box matches
+company or a displayed name; it does not match a name-field value that is not
+shown.
+
+**Company names.** A new table, `hubspot_company_name`, holds the HubSpot
+`name` of each company that appears on a deal-to-company association. A new
+step, `hubspot/company_names`, reads them by id: never-read companies first,
+then those last read more than 7 days ago. A failed read writes nothing, so
+the last good name stays. In the won-customers list an unnamed entry reads
+"Company name not loaded yet", "Company not returned by HubSpot", "Company
+has no name in HubSpot" or "Company name unavailable".
+
+The **Company** column on contact rows did not change: it is the text typed
+on the HubSpot contact.
+
+**Step status.** Each name step is `success` when every batch it asked for
+was answered, `partial` when some were not, and `failed` when the queue could
+not be read or no batch was answered. `partial` is an error on the daily run
+and is not turned into either neighbour.
+
+**HubSpot calls.** While contacts are loading: up to 30 extra calls a day for
+about eight days. After that the contact step makes no call on a normal day;
+contacts HubSpot does not return are asked again once a week, one call per
+100. The company step makes one call per 100 companies about once a week. The contact sync
+makes the same number of calls as before.
+
+**Who can see names.** `GET /api/crm-funnel/contacts` and
+`GET /api/crm-funnel/customers-won` require a signed-in user of any role
+(`require_auth`), as the contact rows did for company, country, source and
+status. The app has two roles, `admin` and `viewer`.
+
+### Tests
+
+`tests/test_pr_ads_166a_leads_page_names_and_customers.py` — 32 cases, 11 on
+a real PostgreSQL cluster (in CI's PostgreSQL step and its did-run list). The
+page's own JavaScript functions are run in `node`, the Overview's two
+lifecycle panels included, from a real overview payload. The fake HubSpot for
+the name loads answers some batches, fails one, leaves one id out and returns
+an empty name for another.
+
+Existing tests changed:
+
+- `test_leads_page_consumes_only_the_canonical_crm_funnel_family`: the
+  endpoint allow-list gained `/api/crm-funnel/customers-won`.
+- The tests that list the daily sync's datasets gained the two name steps,
+  and `tests/conftest.py`'s eager-import list gained the new db module.
+- `test_pr_ads_155_f2…::test_1`: the fifth activity label changed from
+  "Lifecycle Customers entered during this period" to "Contacts moved to the
+  Customer stage during this period", because the label itself changed.
+- `test_pr_ads_154c_cross_page_parity.py`: the production-shaped fixture and
+  the expected consumer set for `customers` gained the Leads block.
+
+### Known gaps
+
+1. **Names appear over about a week.** Until the load finishes, older
+   contacts read "Name not loaded yet". The header says how far it has got.
+2. **A contact HubSpot does not return** reads "Not returned by HubSpot" and
+   is asked again weekly until PR-ADS-163C's check removes it. Whether the
+   live batch endpoint leaves such ids out of its answer (a 207, which the
+   SDK returns) or answers 404 naming them was not checked against HubSpot;
+   both shapes are handled.
+3. **A name cleared in HubSpot stays in the platform** until a new one is
+   typed, for contacts and companies. That is the price of not letting an
+   empty answer blank a name.
+4. **A company renamed in HubSpot shows its old name for up to 7 days.**
+5. **"Company" on a contact row is the text typed on the contact**, not a
+   HubSpot company record. Contact rows are not linked to company records.
+6. **Customers won does not follow the Scope and Source filters.** It says so
+   and shows no number or list.
+7. **The two figures use each family's own window edges for the same named
+   period.** Customers won leaves out a deal closing later today. They were
+   not reconciled to the instant.
+8. **Whether names should be admin-only is the owner's call.** They follow
+   the existing gate for contact rows.
+9. **A non-ASCII name-field value made only of punctuation** is not displayed
+   but is still matched by the search box (PostgreSQL's letter test here is
+   locale-independent and coarser than Python's).
+   The search also matches the stored text, so a name stored with two
+   spaces inside it is found by typing two spaces, while the page shows one.
+10. **`hubspot_company_name` has no `ALTER` path.** Its columns changed during
+    review. That is safe only because no earlier version of this PR was ever
+    deployed: a database that somehow had the first version of the table
+    would keep it.
+11. **Older documents still say "Lifecycle Customer".** `docs/33` §5 carries a
+    note; `docs/05` and `docs/37` were not rewritten.
+12. **The name steps are not on the System page** and have no freshness
+   status. Their outcome is in the daily run's dataset report and errors.
+13. **Not checked against production.** No production database or HubSpot
+    call was made from this PR. The Q3 figures are from the owner's read-only
+    checks. Whether Q3 customers publish in production, how many companies
+    are on won deals, and whether the HubSpot token may read company names
+    are not known here.

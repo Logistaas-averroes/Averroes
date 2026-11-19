@@ -1910,7 +1910,7 @@ const DASH_DONUT_COLORS = {
 };
 // Ordinal ramp for the funnel stages (validated with --ordinal). Five steps:
 // the lifecycle cohort has five stages (Lead → MQL → SQL → Opportunity →
-// Lifecycle Customer) and each needs its own rung.
+// the Customer stage) and each needs its own rung.
 const DASH_FUNNEL_RAMP = ["#6db8f8", "#3f9df0", "#1a80cf", "#0b5f92", "#08425f"];
 
 // Metric valence for delta chips: up is good for revenue/pipeline, neutral for
@@ -2126,6 +2126,12 @@ const CANONICAL_REASON_LABELS = {
   acquisition_membership_unresolved: "a won deal's acquisition contact is unresolved",
   campaign_identity_unavailable: "campaign identity is unavailable",
   canonical_closed_won_population_unavailable: "the closed-won population is unavailable",
+  // PR-ADS-166A: why the Leads page has no "Customers won" figure.
+  customers_won_needs_a_business_window: "customers won is only defined for a business window",
+  customers_won_not_split_by_contact_source:
+    "customers won is not split by contact source — clear the Scope and Source filters",
+  customers_won_unreadable: "the customers-won figure could not be loaded",
+  customers_won_window_mismatch: "the customers-won figure answered a different period",
   // PR-ADS-164A: the two fail-closed reasons a page gives when it cannot use
   // the verdict it was sent (see closedWonBlockedMetric).
   closed_won_verdict_missing: "the server sent no usable publication verdict for these deals",
@@ -7218,15 +7224,55 @@ function wireCampaignEvidenceControls() {
 // lifecycle stage-ENTRY event on its own event date; nothing here is derived
 // from legacy `status_category`, and contact-creation date is never a fallback.
 
+// PR-ADS-166A — the two "customer" figures on this page, each under its own
+// name. They are different metrics and are never added, subtracted or shown as
+// one another.
+const LEADS_STAGE_MOVE_LABEL = "Moved to Customer stage in HubSpot";
+const LEADS_STAGE_MOVE_HELP =
+  "Counts contacts whose HubSpot lifecycle stage changed to Customer in this period, "
+  + "including old contacts updated by the team. It is not new customers.";
+const LEADS_CUSTOMERS_WON_LABEL = "Customers won";
+const LEADS_CUSTOMERS_WON_HELP =
+  "Distinct companies with a closed-won deal closed in this period.";
+const LEADS_CUSTOMERS_WON_FAMILY = "closed_won_customers";
+// Four different claims about a contact with no name shown, never merged:
+//   not_recorded    — HubSpot was asked and holds no name for this contact;
+//   not_displayable — HubSpot holds a value in the name field (an email, or
+//                     nothing with a letter in it) that is not shown as a name;
+//   not_returned    — HubSpot was asked for this contact and did not return it;
+//   not_loaded      — the platform has not asked for this contact's name yet.
+const LEADS_NAME_NOT_RECORDED = "Name not recorded";
+const LEADS_NAME_NOT_LOADED = "Name not loaded yet";
+const LEADS_NAME_STATES = {
+  not_recorded: { text: LEADS_NAME_NOT_RECORDED,
+    title: "HubSpot holds no first or last name for this contact" },
+  not_displayable: { text: "Name not shown",
+    title: "HubSpot holds a value in the name field that is not shown as a name" },
+  not_returned: { text: "Not returned by HubSpot",
+    title: "HubSpot was asked for this contact and did not return it — it may have been deleted or merged" },
+  not_loaded: { text: LEADS_NAME_NOT_LOADED,
+    title: "This contact's name has not been read from HubSpot yet" },
+};
+const LEADS_WON_LIST_NOT_BUILT = "The list of customers could not be built for this period.";
+const LEADS_COMPANY_NAME_LABELS = {
+  not_loaded: "Company name not loaded yet",
+  not_returned: "Company not returned by HubSpot",
+  no_name_in_hubspot: "Company has no name in HubSpot",
+  unavailable: "Company name unavailable",
+};
+const LEADS_COMPANY_NOT_RECORDED = "Company not recorded";
+
 const LEADS_STAGES = [
   { event: "lead",        label: "Leads",              tab: "Leads" },
   { event: "mql",         label: "MQLs",               tab: "MQLs" },
   { event: "sql",         label: "SQLs",               tab: "SQLs" },
   { event: "opportunity", label: "Opportunities",      tab: "Opportunities" },
-  // Tab reads "Customers" for brevity; the metric is always disclosed as
-  // HubSpot LIFECYCLE customers so it can never be mistaken for closed-won
-  // revenue customers (PR-ADS-153E owns that reconciliation).
-  { event: "customer",    label: "Lifecycle Customers", tab: "Customers" },
+  // PR-ADS-166A: this stage is named for what it counts — contacts whose
+  // lifecycle stage was changed to Customer — on the strip, the tab and the
+  // table. It was "Lifecycle Customers" under a tab reading "Customers", and
+  // was read as customers won (219 stage moves against 8 won deals in Q3 2026).
+  // Customers won is a separate figure: see leadsCustomerFiguresHtml.
+  { event: "customer",    label: LEADS_STAGE_MOVE_LABEL, tab: "Moved to Customer stage" },
 ];
 
 const LEADS_VIEW_OVERVIEW = "overview";
@@ -7272,6 +7318,7 @@ let _leadsStatus = "";
 let _leadsQuery = "";
 let _leadsPage = 1;
 let _leadsFunnel = null;
+let _leadsCustomersWon = null;
 let _leadsPendingStatus = null;
 
 /** Carry a retired page's filter intent into Leads (e.g. In Progress Leads). */
@@ -7315,11 +7362,15 @@ async function leadsLoadFunnel() {
     scope: _leadsScope,
   });
   if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
-  try {
-    _leadsFunnel = await fetchJSON(`/api/crm-funnel?${params.toString()}`);
-  } catch (_) {
-    _leadsFunnel = null;
-  }
+  // Customers won is asked for the SAME window and filters, from its own
+  // contract. A failed read is null here and renders as Unavailable with a
+  // reason — it never falls back to the stage-move count.
+  const [funnel, won] = await Promise.all([
+    fetchJSON(`/api/crm-funnel?${params.toString()}`).catch(() => null),
+    fetchJSON(`/api/crm-funnel/customers-won?${params.toString()}`).catch(() => null),
+  ]);
+  _leadsFunnel = funnel;
+  _leadsCustomersWon = won;
 
   const rangeEl = document.getElementById("leads-range");
   if (rangeEl && _leadsFunnel && _leadsFunnel.window) {
@@ -7329,6 +7380,146 @@ async function leadsLoadFunnel() {
 
   if (truth) truth.innerHTML = leadsTruthStateHtml(_leadsFunnel);
   if (strip) strip.innerHTML = leadsFunnelStripHtml(_leadsFunnel);
+  const figures = document.getElementById("leads-customer-figures");
+  if (figures) figures.innerHTML = leadsCustomerFiguresHtml(_leadsFunnel, _leadsCustomersWon);
+}
+
+/**
+ * PR-ADS-166A — the stage-move count and customers won, side by side.
+ *
+ * Two metrics from two contracts:
+ *   - `funnel.events.customer` — lifecycle_stage_events, by date_entered_customer;
+ *   - `won.customers`          — closed_won_customers, by deal close date,
+ *                                the reader contract's {value, status, reason}.
+ * Neither is ever computed from the other. A customers-won payload that is
+ * missing, is not that metric family, or answers a different window than the
+ * funnel beside it is rendered Unavailable with the reason.
+ */
+function leadsCustomersWonMetrics(funnel, won) {
+  const blocked = (reason) => {
+    const m = { value: null, status: "unavailable", reason };
+    return { customers: m, deals: m };
+  };
+  if (!won) return blocked("customers_won_unreadable");
+  if (won.metric_family !== LEADS_CUSTOMERS_WON_FAMILY) return blocked("closed_won_verdict_missing");
+  const asked = (won.requested || {}).window_key;
+  const shown = ((funnel || {}).window || {}).window_key;
+  if (funnel && shown && asked !== shown) return blocked("customers_won_window_mismatch");
+  const usable = (m) => (m && m.status) ? m : blocked("closed_won_verdict_missing").customers;
+  return { customers: usable(won.customers), deals: usable(won.closed_won_deals) };
+}
+
+function leadsCustomerFiguresHtml(funnel, won) {
+  const available = funnel && funnel.available !== false;
+  const mismatch = ((funnel || {}).reconciliation || {}).status === "mismatch";
+  const block = ((funnel && funnel.events) || {}).customer || {};
+  const moves = (!available || mismatch) ? null : block.count;
+  // dashValue: null is "Unavailable", a real 0 is "0".
+  const movesHtml = dashValue(moves === undefined ? null : moves, fmtCount);
+
+  const m = leadsCustomersWonMetrics(funnel, won);
+  const opts = { windowType: "business", windowKey: ((won || {}).requested || {}).window_key };
+  return `<div class="leads-customer-figures" role="group" aria-label="Customer figures for this period">
+      <div class="leads-customer-figure" data-leads-figure="stage_moves">
+        <div class="dash-funnel__stage-label">${escapeHtml(LEADS_STAGE_MOVE_LABEL)}</div>
+        <div class="dash-funnel__stage-value">${movesHtml}</div>
+        <p class="leads-customer-figure__help">${escapeHtml(LEADS_STAGE_MOVE_HELP)}</p>
+      </div>
+      <div class="leads-customer-figure" data-leads-figure="customers_won">
+        <div class="dash-funnel__stage-label">${escapeHtml(LEADS_CUSTOMERS_WON_LABEL)}</div>
+        <div class="dash-funnel__stage-value">${canonicalMetricHtml(m.customers, fmtCount, opts)}</div>
+        <p class="leads-customer-figure__help">${escapeHtml(LEADS_CUSTOMERS_WON_HELP)}
+          Closed-won deals in this period: ${canonicalMetricHtml(m.deals, fmtCount, opts)}</p>
+        ${leadsWonCustomersHtml(won, m.customers)}
+      </div>
+    </div>`;
+}
+
+/**
+ * A contact's name from HubSpot, or the words saying why there is none.
+ * Each status says its own words (LEADS_NAME_STATES). A status this page does
+ * not know — or none — is the weakest claim: not loaded yet.
+ */
+function leadsNameState(row) {
+  const status = row ? row.contact_name_status : null;
+  return (typeof status === "string" && Object.prototype.hasOwnProperty.call(LEADS_NAME_STATES, status))
+    ? LEADS_NAME_STATES[status] : LEADS_NAME_STATES.not_loaded;
+}
+
+function leadsContactNameHtml(row) {
+  const status = row ? row.contact_name_status : null;
+  const name = status === "recorded" ? String(row.contact_name || "").trim() : "";
+  if (name) return `<strong>${escapeHtml(name)}</strong>`;
+  const state = leadsNameState(row);
+  return `<span class="muted" title="${escapeHtml(state.title)}">${escapeHtml(state.text)}</span>`;
+}
+
+/**
+ * The note under the Contact column header while names are still loading.
+ * Driven by the database counts in `names_progress`; shown for as long as any
+ * stored contact has NEVER been asked for, however many already are. A contact
+ * HubSpot was asked for and did not return is not "still loading", so the note
+ * clears when the load is truly done. Unknown counts say so.
+ */
+function leadsNamesProgressNote(progress) {
+  const p = progress || {};
+  const known = p.available === true && Number.isFinite(p.read)
+    && Number.isFinite(p.total) && Number.isFinite(p.never_asked);
+  if (!known) return "Names are being loaded from HubSpot: progress is unavailable.";
+  if (p.never_asked <= 0) return "";
+  return `Names are being loaded from HubSpot: ${Number(p.read).toLocaleString()} of ${Number(p.total).toLocaleString()} contacts read so far.`;
+}
+
+/**
+ * The won customers of the period, as a list — ONLY when the customer count is
+ * published and the list has exactly that many entries. Withheld means absent:
+ * no list, no partial list, no placeholder rows.
+ */
+function leadsWonCustomersHtml(won, customers) {
+  const m = customers || {};
+  const rows = won && Array.isArray(won.won_customers) ? won.won_customers : null;
+  if (m.status !== "published" || !(m.value > 0)) return "";
+  if (!rows || rows.length !== m.value) {
+    // Published customers with no list that matches the count: say so.
+    return `<p class="leads-customer-figure__help">${escapeHtml(LEADS_WON_LIST_NOT_BUILT)}</p>`;
+  }
+  const body = rows.map((r) => {
+    const name = r.company_name_status === "named" ? String(r.company_name || "").trim() : "";
+    const cell = name
+      ? `<strong>${escapeHtml(name)}</strong>`
+      : `<span class="muted">${escapeHtml(LEADS_COMPANY_NAME_LABELS[r.company_name_status] || LEADS_COMPANY_NAME_LABELS.not_loaded)}</span>`;
+    const closed = r.latest_close_date ? escapeHtml(String(r.latest_close_date).slice(0, 10)) : `<span class="muted">Unavailable</span>`;
+    return `<tr><td>${cell}</td><td>${dashValue(r.closed_won_deals, fmtCount)}</td><td>${closed}</td></tr>`;
+  }).join("");
+  return `<details class="leads-won-customers">
+      <summary>Show the ${fmtCount(rows.length)} ${rows.length === 1 ? "customer" : "customers"} won</summary>
+      <table class="data-table">
+        <thead><tr><th title="The name of the HubSpot company on the won deal">Customer</th><th>Closed-won deals</th><th>Latest close date</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </details>`;
+}
+
+function leadsNamesNoteHtml(progress) {
+  const note = leadsNamesProgressNote(progress);
+  return note ? `<small class="metric-reason leads-names-note">${escapeHtml(note)}</small>` : "";
+}
+
+/** The Company field typed on the HubSpot contact — not a deal's company record. */
+function leadsCompanyHtml(row) {
+  const company = String((row && row.company) || "").trim();
+  return company
+    ? escapeHtml(company)
+    : `<span class="muted">${LEADS_COMPANY_NOT_RECORDED}</span>`;
+}
+
+/** Plain-text heading for a contact (drawer title): name, else company. */
+function leadsContactHeading(row) {
+  const status = row ? row.contact_name_status : null;
+  const name = status === "recorded" ? String(row.contact_name || "").trim() : "";
+  const company = String((row && row.company) || "").trim();
+  if (name && company) return `${name} — ${company}`;
+  return name || company || leadsNameState(row).text;
 }
 
 /**
@@ -7545,7 +7736,7 @@ function leadsRenderOverview() {
   const rows = LEADS_STAGES.map((stage) => {
     const block = events[stage.event] || {};
     const disclosure = stage.event === "customer"
-      ? "HubSpot lifecycle customers — NOT closed-won revenue customers."
+      ? escapeHtml(LEADS_STAGE_MOVE_HELP)
       : escapeHtml(block.definition || "");
     return `<tr>
       <td><strong>${escapeHtml(stage.label)}</strong></td>
@@ -7656,7 +7847,8 @@ async function leadsRenderContacts(event) {
 
   const tbody = rows.map((r, i) => {
     return `<tr class="clickable-row" data-leads-row="${i}" tabindex="0">
-      <td><strong>${escapeHtml(r.company || "—")}</strong></td>
+      <td>${leadsContactNameHtml(r)}</td>
+      <td>${leadsCompanyHtml(r)}</td>
       <td>${escapeHtml(r.event_date || "—")}</td>
       <td>${escapeHtml(r.lifecycle_stage_label || "—")}</td>
       <td>${escapeHtml(LEADS_STATUS_LABELS[r.mql_status_category] || r.mql_status_category || "—")}</td>
@@ -7671,7 +7863,8 @@ async function leadsRenderContacts(event) {
 
   body.innerHTML = `<table class="data-table">
     <thead><tr>
-      <th>Company</th>
+      <th title="The contact's first and last name in HubSpot">Contact${leadsNamesNoteHtml(payload.names_progress)}</th>
+      <th title="The Company field on the HubSpot contact">Company</th>
       <th title="The selected stage-entry event date">${escapeHtml(stage.label)} date</th>
       <th title="Current lifecycle stage — may be later than the selected event">Current stage</th>
       <th>Working status</th>
@@ -7780,7 +7973,7 @@ function leadsOpenDrawer(row, stage) {
   }
 
   const html = `
-    <h3>${escapeHtml(row.company || "Contact")}</h3>
+    <h3>${escapeHtml(leadsContactHeading(row))}</h3>
     <p class="grace-note">Selected event: <strong>${escapeHtml(stage.label)}</strong> on
       ${escapeHtml(row.event_date || "—")} · Current lifecycle:
       <strong>${escapeHtml(row.lifecycle_stage_label || "—")}</strong></p>
@@ -7794,6 +7987,8 @@ function leadsOpenDrawer(row, stage) {
       <tr><td>MQL status</td><td>${escapeHtml(row.mql_status || "—")}</td></tr>
       <tr><td>Working category</td><td>${escapeHtml(LEADS_STATUS_LABELS[row.mql_status_category] || row.mql_status_category || "—")}</td></tr>
       <tr><td>Owner</td><td>${escapeHtml(row.owner_id || "—")}</td></tr>
+      <tr><td>Contact name</td><td>${leadsContactNameHtml(row)}</td></tr>
+      <tr><td title="The Company field on the HubSpot contact">Company</td><td>${leadsCompanyHtml(row)}</td></tr>
       <tr><td>HubSpot contact ID</td><td><code>${escapeHtml(row.contact_id || "—")}</code></td></tr>
     </tbody></table>
 
@@ -7816,7 +8011,7 @@ function leadsOpenDrawer(row, stage) {
   if (!overlay || !drawer || !bodyEl) return;
   overlay.hidden = false; overlay.setAttribute("aria-hidden", "false");
   drawer.hidden = false;
-  if (titleEl) titleEl.textContent = row.company || "Contact";
+  if (titleEl) titleEl.textContent = leadsContactHeading(row);
   bodyEl.innerHTML = html;
   overlay.onclick = closeLeadsDrawer;
   const closeBtn = document.getElementById("leads-drawer-close-btn");

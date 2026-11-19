@@ -3060,7 +3060,8 @@ Key blocks:
 
 Every SQL count change is explained by exactly two causes: a **date shift** or a
 **population** difference. **No email address is ever returned** — contact id and
-company only.
+company only. (This is the audit route. Since PR-ADS-166A the contact rows of
+`GET /api/crm-funnel/contacts` also carry `contact_name`; see `docs/49_*`.)
 
 ---
 

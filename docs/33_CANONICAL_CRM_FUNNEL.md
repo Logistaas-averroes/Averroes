@@ -143,6 +143,10 @@ real, provable zero.
 
 ## 5. Lifecycle Customer ≠ Revenue Customer
 
+> **PR-ADS-166A:** this event is now labelled **"Moved to Customer stage"**
+> on every surface (`analysis/crm_lifecycle.EVENT_LABELS`). "Lifecycle
+> Customer" below is the historical name for the same event. See `docs/49_*`.
+
 Two distinct concepts, always named explicitly:
 
 | Concept | Definition | Owner |
@@ -284,7 +288,9 @@ date · `CLOSED - Deal Created` without Opportunity · `CLOSED - Sales Qualified
 without SQL · unmapped status · no verdict · legacy row without HubSpot identity ·
 free-text pollution.
 
-No email address is ever returned — contact id and company only.
+No email address is ever returned — contact id and company only. (Since
+PR-ADS-166A the Leads contact rows from `/api/crm-funnel/contacts` also carry
+the contact's first and last name; see `docs/49_*`. The audit route does not.)
 
 ---
 

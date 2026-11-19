@@ -222,6 +222,10 @@ LABEL_GCLID_MATCHES = f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"
 #: no freshness dataset: it records its runs in its own table
 #: (`hubspot_contact_reconciliation_runs`).
 LABEL_CONTACT_RECONCILIATION = "hubspot/contact_reconciliation"
+# PR-ADS-166A: the two read-only name loads. Like the reconciliation above
+# they are steps with an outcome, not canonical datasets with freshness.
+LABEL_CONTACT_NAMES = "hubspot/contact_names"
+LABEL_COMPANY_NAMES = "hubspot/company_names"
 LABEL_KEYWORD_FACTS = f"{KEYWORD_FACTS_SOURCE}/{KEYWORD_FACTS_DATASET}"
 LABEL_SEARCH_TERMS = f"{SEARCH_TERMS_SOURCE}/{SEARCH_TERMS_DATASET}"
 
@@ -527,6 +531,17 @@ def run_daily_incremental_sync(
         run_id=run_id, errors=errors,
     )
 
+    # ── hubspot/contact_names — PR-ADS-166A ─────────────────────────────────
+    # The contact sync above brings names only for contacts that changed. This
+    # reads the names of the contacts already stored, by id, newest first, a
+    # capped number per run (config: name_backfill.max_contacts_per_run). It
+    # runs after the reconciliation so a contact removed today is not read.
+    # Read-only against HubSpot; its failure is an error on the run, never an
+    # abort.
+    datasets[LABEL_CONTACT_NAMES] = _sync_names(
+        label=LABEL_CONTACT_NAMES, runner="run_contact_name_backfill",
+        errors=errors)
+
     # ── PR-ADS-160 §5 — post-boundary SQL gap detection ─────────────────────
     # Runs immediately AFTER the contact sync, over the contacts it just wrote.
     # Before this, a newly qualified contact with no SQL-entry timestamp joined
@@ -575,6 +590,14 @@ def run_daily_incremental_sync(
     datasets[LABEL_DEAL_COMPANY_ASSOCIATIONS] = _sync_deal_company_associations(
         run_id=run_id, errors=errors,
     )
+
+    # ── hubspot/company_names — PR-ADS-166A. What to CALL the companies the
+    # associations above name by id. Read-only against HubSpot; writes only
+    # `hubspot_company_name`. It decides nothing about who is a customer, and
+    # its failure leaves the last good names in place.
+    datasets[LABEL_COMPANY_NAMES] = _sync_names(
+        label=LABEL_COMPANY_NAMES, runner="run_company_name_sync",
+        errors=errors)
 
     # ── hubspot/source_classification — keep acquisition-source classification
     # current (PR-ADS-117): classify newly-created contacts (all sources) and
@@ -1263,6 +1286,47 @@ def _sync_contact_reconciliation(*, run_id, errors: list) -> dict:
             "[incremental_sync] %s: checked=%s missing=%s removed=%s",
             LABEL_CONTACT_RECONCILIATION, result.get("contacts_checked"),
             result.get("missing"), result.get("removed"))
+    return result
+
+
+def _sync_names(*, label: str, runner: str, errors: list) -> dict:
+    """Run one PR-ADS-166A name load and record exactly what it reported.
+
+    Delegates to ``services.hubspot_name_backfill_service``, which never
+    raises and reports ``success`` / ``partial`` / ``failed``. Only ``success``
+    is green. ``partial`` stays ``partial`` — it is an error on the run, with
+    the reason, and is never rewritten to either neighbour. An unrecognised
+    status is not evidence of success.
+    """
+    try:
+        from services import hubspot_name_backfill_service as names  # noqa: PLC0415
+        result = getattr(names, runner)()
+    except Exception as exc:  # noqa: BLE001
+        err = f"{label}: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {"status": "failed", "error": str(exc)[:500],
+                "hubspot_writes_performed": False,
+                # Unknown, never zero.
+                "selected": None, "written": None}
+
+    status = result.get("status")
+    if status not in ("success", "partial", "failed"):
+        result = {**result, "status": "failed",
+                  "error": f"unrecognised status {status!r}"}
+        status = "failed"
+    if status != "success":
+        err = (f"{label}: run ended '{status}' — "
+               f"{result.get('error') or 'no detail recorded'} "
+               f"(batches answered {result.get('batches_answered')} of "
+               f"{result.get('batches_requested')})")
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+    else:
+        log.info("[incremental_sync] %s: selected=%s returned=%s "
+                 "not_returned=%s written=%s", label, result.get("selected"),
+                 result.get("returned"), result.get("not_returned"),
+                 result.get("written"))
     return result
 
 

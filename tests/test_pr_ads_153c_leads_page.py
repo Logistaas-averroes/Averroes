@@ -589,6 +589,9 @@ def test_leads_page_consumes_only_the_canonical_crm_funnel_family():
     assert endpoints <= {
         "/api/crm-funnel", "/api/crm-funnel/contacts",
         "/api/crm-funnel/operational-status",
+        # PR-ADS-166A: "Customers won" beside the stage-move count — the
+        # closed-won reader contract, republished under the same family.
+        "/api/crm-funnel/customers-won",
     }, endpoints
 
 

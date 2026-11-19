@@ -15,6 +15,7 @@ import urllib3
 import hubspot
 from hubspot.crm.contacts import ApiException
 from hubspot.crm.deals import ApiException as DealsApiException
+from hubspot.crm.companies import ApiException as CompaniesApiException
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -59,7 +60,13 @@ class HubSpotSearchIncompleteError(Exception):
 #: common base: ``hubspot.crm.deals`` raises its own class, which
 #: ``except ApiException`` (the contacts class imported above) does not catch.
 #: The legacy pulls call both APIs, so they catch both.
-HUBSPOT_API_EXCEPTIONS = (ApiException, DealsApiException)
+#:
+#: PR-ADS-166A (review round 2). ``hubspot.crm.companies`` is a third package
+#: with a third class. The company name read caught only the contacts class,
+#: so a 403 from the companies API was retried three times and never stopped
+#: the run, and a 404 naming the missing ids was never read as an answer.
+HUBSPOT_API_EXCEPTIONS = (ApiException, DealsApiException,
+                          CompaniesApiException)
 
 #: What the SDK lets through from the transport: a refused connection, a reset
 #: or a timeout (``MaxRetryError``, ``ReadTimeoutError`` …) escapes as the raw
@@ -255,6 +262,10 @@ CONTACT_FUNNEL_PROPERTIES = [
     "country",
     "company",
     "hubspot_owner_id",
+    # PR-ADS-166A — the contact's own name, so the Leads page can say who a
+    # row is. Read-only, like every property here. `email` stays absent.
+    "firstname",
+    "lastname",
 ]
 
 # HubSpot's CRM search API refuses to page beyond 10,000 results for one query.
@@ -1231,7 +1242,8 @@ def fetch_lifecycle_stage_history_single(contact_id, *, client=None) -> dict:
 #: values plus the HISTORY of both the stage and the direct property, so the
 #: audit can say not only whether HubSpot holds an SQL date but WHEN HubSpot
 #: set it — which is what separates "we never re-read it" from "we read it and
-#: dropped it". No name, email, company or other personal property is asked for.
+#: dropped it". No name, email, company or other personal property is asked for
+#: BY THIS READ (the contact sync reads names since PR-ADS-166A).
 COMPARISON_CURRENT_PROPERTIES = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY,
                                  HUBSPOT_SQL_ENTRY_PROPERTY,
                                  "lastmodifieddate"]
@@ -1813,6 +1825,9 @@ def normalize_contact_funnel_row(contact: dict) -> dict | None:
         free-text fallback.
       * Unknown lifecycle stages are preserved verbatim, never guessed.
       * No email address is read or returned.
+      * ``first_name`` / ``last_name`` are the HubSpot ``firstname`` /
+        ``lastname`` properties verbatim (PR-ADS-166A). A blank one is None —
+        nothing else (company, email, id) is ever put in its place.
     """
     from analysis.crm_lifecycle import (  # noqa: PLC0415
         LIFECYCLE_RULE_VERSION, normalize_lifecycle_stage,
@@ -1879,6 +1894,8 @@ def normalize_contact_funnel_row(contact: dict) -> dict | None:
         "country": _prop("country"),
         "company": _prop("company"),
         "owner_id": _prop("hubspot_owner_id"),
+        "first_name": _prop("firstname"),
+        "last_name": _prop("lastname"),
 
         "gclid": gclid,
         "has_gclid": bool(gclid),
@@ -1887,6 +1904,182 @@ def normalize_contact_funnel_row(contact: dict) -> dict | None:
         "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
         "mql_rule_version": MQL_STATUS_RULE_VERSION,
     }
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-166A — names by id (read-only batch reads, 100 objects per call)
+# ---------------------------------------------------------------------------
+#: HubSpot's batch read accepts at most 100 inputs when no history is asked.
+NAME_BATCH_LIMIT = 100
+#: Pause between name batch reads, so ~30 calls do not burst the rate limit.
+NAME_READ_PACING_SECONDS = 0.2
+CONTACT_NAME_PROPERTIES = ["firstname", "lastname"]
+COMPANY_NAME_PROPERTIES = ["name"]
+
+
+def _name_batch_body(module: str, ids, properties):
+    inputs = [{"id": i} for i in ids]
+    try:
+        import importlib  # noqa: PLC0415
+        model = importlib.import_module(module).BatchReadInputSimplePublicObjectId
+    except Exception:  # noqa: BLE001 — pragma: no cover
+        return {"inputs": inputs, "properties": list(properties)}
+    return model(inputs=inputs, properties=list(properties))
+
+
+class HubSpotNameReadRefused(HubSpotRetryableError):
+    """A name read HubSpot REFUSED (a 4xx other than 429): a missing scope, a
+    bad token, a malformed request. It will not change on retry, and the next
+    batch would be refused the same way. ``status`` is the HTTP status."""
+
+    def __init__(self, message: str, status):
+        super().__init__(message)
+        self.status = status
+
+
+def _not_found_ids(payload, asked: set) -> set:
+    """Ids a batch-read answer NAMES as not found, restricted to those asked.
+
+    HubSpot reports objects it cannot return in ``errors`` (category
+    ``OBJECT_NOT_FOUND``, ``context.ids``) as the body of a 404 when it
+    returned none of them.
+    """
+    if not isinstance(payload, dict):
+        return set()
+    blocks = list(payload.get("errors") or [])
+    if payload.get("category"):
+        blocks.append(payload)
+    found: set = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("category") or "").upper() != "OBJECT_NOT_FOUND":
+            continue
+        ids = (block.get("context") or {}).get("ids") or []
+        found.update(str(i).strip() for i in ids)
+    return found & asked
+
+
+def _name_backoff(attempt: int) -> None:
+    time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+
+
+def _read_names_batch(batch_api, body, ids, what: str) -> dict:
+    """One batch read. ``{id: properties}`` for the ASKED ids HubSpot returned.
+
+    An id HubSpot did not return (deleted, merged, invisible) is absent from
+    the result — it is not an object with no name. That includes an answer of
+    404 that NAMES requested ids as not found: the batch was answered, and
+    those ids were not returned. (A 207 is not an error to the SDK: it is
+    RETURNED, as a result list beside its errors, and handled like any other
+    answer — ids it does not list were not returned.)
+
+    ``except HUBSPOT_API_EXCEPTIONS``, not ``except ApiException``: the SDK
+    has one exception class PER package with no common base, and this
+    function reads contacts AND companies. Classifying by ``status`` only
+    works if the exception is caught at all.
+
+    Retried with bounded backoff, as the association read is: 429, any 5xx, a
+    timeout or a transport error. Not retried: any other 4xx, which raises
+    ``HubSpotNameReadRefused`` with the status. Every failure raises
+    ``HubSpotRetryableError`` — a failed read is never an empty answer.
+    """
+    import json as _json  # noqa: PLC0415
+
+    asked = set(ids)
+    last = "unknown failure"
+    response = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = batch_api.read(
+                batch_read_input_simple_public_object_id=body)
+            break
+        except HUBSPOT_API_EXCEPTIONS as exc:
+            status = getattr(exc, "status", None)
+            last = _describe_hubspot_failure(exc)
+            if status == 404:
+                try:
+                    payload = _json.loads(getattr(exc, "body", None) or "null")
+                except (TypeError, ValueError):
+                    payload = None
+                if _not_found_ids(payload, asked):
+                    # Answered: these ids do not exist for us. Whatever the
+                    # body did return is kept.
+                    response = type("Answered", (), {
+                        "results": list((payload or {}).get("results") or [])})()
+                    break
+            if status == 429 or (isinstance(status, int) and status >= 500):
+                if attempt < MAX_RETRIES:
+                    _name_backoff(attempt)
+                    continue
+                break
+            raise HubSpotNameReadRefused(
+                f"HubSpot {what} name read refused ({last})", status) from exc
+        except Exception as exc:  # noqa: BLE001 — timeout, transport
+            last = _describe_hubspot_failure(exc)
+            if attempt < MAX_RETRIES:
+                _name_backoff(attempt)
+                continue
+            break
+    if response is None:
+        raise HubSpotRetryableError(
+            f"HubSpot {what} name read failed after {MAX_RETRIES} attempts "
+            f"({last})")
+    results = getattr(response, "results", None)
+    if not isinstance(results, (list, tuple)):
+        raise HubSpotRetryableError(
+            f"HubSpot {what} name read returned no result list")
+    out: dict = {}
+    for result in results:
+        record = _as_record(result)
+        object_id = str(record.get("id") or "").strip()
+        if object_id in asked:
+            out[object_id] = record.get("properties") or {}
+    return out
+
+
+def _clean_name(value):
+    text = " ".join(str(value).split()) if value is not None else ""
+    return text or None
+
+
+def _checked_ids(ids, what: str) -> list:
+    ids = list(dict.fromkeys(str(i).strip() for i in ids or []
+                             if str(i or "").strip()))
+    if len(ids) > NAME_BATCH_LIMIT:
+        raise ValueError(f"at most {NAME_BATCH_LIMIT} {what} per name read; "
+                         f"got {len(ids)}")
+    return ids
+
+
+def read_contact_names(contact_ids, *, client=None) -> dict:
+    """READ-ONLY: ``{contact_id: {"first_name", "last_name"}}`` for the asked
+    contacts HubSpot returned (a blank name is None). At most 100 ids."""
+    ids = _checked_ids(contact_ids, "contacts")
+    if not ids:
+        return {}
+    client = client or get_client()
+    found = _read_names_batch(
+        client.crm.contacts.batch_api,
+        _name_batch_body("hubspot.crm.contacts", ids, CONTACT_NAME_PROPERTIES),
+        ids, "contact")
+    return {cid: {"first_name": _clean_name(props.get("firstname")),
+                  "last_name": _clean_name(props.get("lastname"))}
+            for cid, props in found.items()}
+
+
+def read_company_names(company_ids, *, client=None) -> dict:
+    """READ-ONLY: ``{company_id: name-or-None}`` for the asked companies
+    HubSpot returned. At most 100 ids."""
+    ids = _checked_ids(company_ids, "companies")
+    if not ids:
+        return {}
+    client = client or get_client()
+    found = _read_names_batch(
+        client.crm.companies.batch_api,
+        _name_batch_body("hubspot.crm.companies", ids, COMPANY_NAME_PROPERTIES),
+        ids, "company")
+    return {cid: _clean_name(props.get("name")) for cid, props in found.items()}
 
 
 # ---------------------------------------------------------------------------

@@ -447,7 +447,7 @@ def run(business_window: str = "current_quarter", *, now=None) -> dict:
             ),
             "canonical_funnel": "HubSpot lifecycle stage-entry evidence",
             "lifecycle_customer_vs_revenue_customer": (
-                "Lifecycle Customer is a CRM stage event. Revenue Customer is "
+                "Moved to Customer stage is a CRM stage event. Revenue Customer is "
                 "closed-won deal truth and is defined separately in PR-ADS-153E."
             ),
         },

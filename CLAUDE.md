@@ -326,6 +326,20 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   request's verdict. Closed-won deals are not published on Campaign Evidence
   (`docs/44` §5); never call deals customers.
 
+- **"Moved to Customer stage" is a lifecycle event, never a customer**
+  (PR-ADS-166A, `docs/49_*`). The Leads page's stage count
+  (`hubspot_contact_funnel.date_entered_customer`) counts contacts whose
+  HubSpot lifecycle stage was changed, old contacts edited in bulk included:
+  219 for Q3 2026 against 8 won deals. Never label it "Customers", add it to,
+  or derive it from a customer figure. "Customers won" comes only from the
+  reader contract (`build_customers_won` → `load_won_deals`); its
+  `won_customers` list exists only when the count is published. The event's
+  one label is `crm_lifecycle.EVENT_LABELS` ("Moved to Customer stage"), on
+  the Overview panels too; a conversion into it reads "→ Customer stage".
+  For names: both stamps NULL means *not loaded yet*, `names_read_at` set with
+  a NULL name means *HubSpot has none*, `names_last_asked_at` alone means
+  *not returned by HubSpot* — never queue or label on `first_name IS NULL`.
+
 - **A post-boundary incident closes only on stored exact evidence, decided by
   the database.** Both resolvers (`apply_post_boundary_sql_evidence`,
   `resolve_post_boundary_incidents`) close a row only where the same statement

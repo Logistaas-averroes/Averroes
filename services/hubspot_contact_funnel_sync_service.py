@@ -244,6 +244,10 @@ def run_contact_funnel_sync(
                 if row is None:
                     rejected_no_identity += 1
                     continue
+                # PR-ADS-166A: this scan asked for firstname / lastname
+                # (CONTACT_FUNNEL_PROPERTIES), so HubSpot has answered for
+                # this contact's names — whatever the answer was.
+                row["names_read_at"] = now
                 normalised.append(row)
 
             # 1. persist, 2. VERIFY the write was proven, 3. only then move on.

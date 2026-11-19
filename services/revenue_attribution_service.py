@@ -2066,7 +2066,7 @@ def _deal_detail_row(r: dict) -> dict:
         # unavailable rather than filled with a deal name.
         "company_name": None,
         "company_record_id": None,
-        "main_contact_name": None,          # contact name is not stored
+        "main_contact_name": None,          # not joined here (names live on hubspot_contact_funnel since PR-ADS-166A)
         "main_contact_record_id": r.get("primary_contact_id") or None,
         "deal_name": r.get("deal_name") or None,
         "deal_record_id": r.get("deal_id") or None,
@@ -2165,7 +2165,7 @@ def _country_deal_detail_row(r: dict) -> dict:
         # See `_deal_detail_row`: the ledger has the deal's name, not a company.
         "company_name": None,
         "company_record_id": None,
-        "main_contact_name": None,          # contact name is not stored
+        "main_contact_name": None,          # not joined here (names live on hubspot_contact_funnel since PR-ADS-166A)
         "main_contact_record_id": r.get("primary_contact_id") or None,
         "deal_name": r.get("deal_name") or None,
         "deal_record_id": r.get("deal_id") or None,

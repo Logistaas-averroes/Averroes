@@ -111,6 +111,7 @@ jobs:
             tests/test_pr_ads_163b_freshness_row_counts.py \
             tests/test_pr_ads_163c_removed_contacts.py \
             tests/test_pr_ads_165a_countries_pg_integration.py \
+            tests/test_pr_ads_166a_leads_page_names_and_customers.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -213,6 +214,11 @@ jobs:
                            # PR-ADS-165A. The Countries page over the real
                            # geo sync, coverage ledger and spend rows.
                            "tests.test_pr_ads_165a_countries_pg_integration",
+                           # PR-ADS-166A. Its PG cases run the real contact
+                           # sync, funnel writer and Leads readers: names are
+                           # stored, survive a sparse payload, and an existing
+                           # database gains the columns on both tables.
+                           "tests.test_pr_ads_166a_leads_page_names_and_customers",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

@@ -6058,6 +6058,18 @@ body.is-revenue-page #monitoring-banner {
 }
 .dash-funnel__stage-value .dash-unavailable { font-size: 15px; }
 .dash-funnel__stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+/* PR-ADS-166A — Leads: stage moves and customers won, two separate figures. */
+.leads-customer-figures { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-4) 0; }
+.leads-customer-figure {
+  flex: 1 1 280px; padding: var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-alt);
+}
+.leads-customer-figure__help { font-size: 12px; color: var(--text-muted); margin: 6px 0 0; line-height: 1.4; }
+.leads-customer-figure__help .metric-reason { display: inline; }
+.leads-won-customers { margin-top: var(--space-3); }
+.leads-won-customers > summary { cursor: pointer; font-size: 12px; font-weight: 600; }
+.leads-names-note { text-transform: none; letter-spacing: 0; }
 .dash-funnel__conv {
   align-self: center;
   font-size: 12px;

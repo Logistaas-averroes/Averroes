@@ -106,6 +106,23 @@ contact_reconciliation:
   max_removals_per_window: 100
   max_removal_window_fraction: 0.02
 
+name_backfill:
+  # PR-ADS-166A — the daily, read-only load of names from HubSpot, inside the
+  # daily incremental sync.
+  #
+  # Contacts: the modified-since sync brings names for new and changed
+  # contacts. The ones already stored are read by id, newest contact first,
+  # at most this many per run (100 per HubSpot call, so 3000 = 30 calls).
+  # About 21,700 stored contacts clear in roughly eight runs.
+  max_contacts_per_run: 3000
+  # Companies on a won deal: at most this many names read per run, never-read
+  # first, then those last read more than `company_reread_days` ago.
+  max_companies_per_run: 1000
+  company_reread_days: 7
+  # A contact HubSpot was asked for and did not return (deleted, merged,
+  # invisible to the token) is asked again at most once in this many days.
+  not_returned_retry_days: 7
+
 # UI-safe display thresholds — consumed by GET /api/config/ui-thresholds
 # These values drive frontend visual classification only.
 # Do not change analysis thresholds above.

@@ -732,7 +732,9 @@ def test_10b_the_report_keys_are_the_labels(monkeypatch):
                  # PR-ADS-161D2: deal→company associations run here too.
                  "_sync_deal_company_associations",
                  # PR-ADS-163C: the removed-contact check runs here too.
-                 "_sync_contact_reconciliation"):
+                 "_sync_contact_reconciliation",
+                 # PR-ADS-166A: the two name loads run here too.
+                 "_sync_names"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     keys = set(sync.run_daily_incremental_sync(run_reason="test")["datasets"])
@@ -866,7 +868,9 @@ def test_a4_a_successful_run_record_proceeds_and_emits_the_canonical_type(monkey
                  # PR-ADS-161D2: deal→company associations run here too.
                  "_sync_deal_company_associations",
                  # PR-ADS-163C: the removed-contact check runs here too.
-                 "_sync_contact_reconciliation"):
+                 "_sync_contact_reconciliation",
+                 # PR-ADS-166A: the two name loads run here too.
+                 "_sync_names"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     out = sync.run_daily_incremental_sync(run_reason="test")
