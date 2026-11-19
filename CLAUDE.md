@@ -354,6 +354,35 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   must honour the filter, report `total` and change its data during the scan,
   or it cannot see this class of bug.
 
+- **A modified-since sync never sees a deletion or a merge** (PR-ADS-163C).
+  A contact deleted in HubSpot, or merged into another, is not "modified": it
+  stops being returned and its row stays in `hubspot_contact_funnel`, counted
+  by every funnel and cohort read (30 rows on 2026-11-18). Removal is: search
+  → two strikes → direct read → limits → move. **Search**
+  (`check_contacts_exist`, `hs_object_id IN` batches of 100, ids compared as
+  numbers): unknown is not missing — a batch with no usable answer strikes
+  nobody, and a run with any unanswered batch removes NOTHING. **Two
+  strikes:** missing on two checks at least 20 hours apart, the second in the
+  current run, the row not ingested since that run started. **Direct read**
+  (`confirm_contacts_absent`, `get_by_id`): a search index can omit a LIVE
+  contact on every run, so nothing is removed on the search's word alone —
+  only a 404 by id (or a merge survivor that names the id) confirms; a
+  contact the read finds has its strike cleared and makes the run `partial`.
+  **Limits, counted over the backlog and over time:** the valve counts EVERY
+  contact that qualifies, whichever run struck it (50, or 1% of the table),
+  and the last 7 days' removals plus this run's are capped too (100, or 2%);
+  over either, nothing moves and the run is `refused`. That many FIRST
+  strikes in one run is `partial`. **A move decided by the database:** all of
+  it is one statement in `db.writers.move_absent_contacts`, the confirmed ids
+  a parameter — never flag a row in place (thirty queries read that table)
+  and never act on a count read earlier. **Held:** a contact with an open
+  `sql_post_boundary_incident` is not removed (the resolvers read its funnel
+  row), is not weighed by the valve, and stays counted until the incident is
+  resolved; never add a closing status for it. A column added to
+  `hubspot_contact_funnel` must be added to the archive table too
+  (`test_pr_ads_163c_removed_contacts.py::test_22`). The legacy `leads`
+  table, lifecycle history and boundary tables are not covered.
+
 - **A HubSpot pull that hits an API or transport error, an exhausted retry or
   a malformed response raises; it does not return what it has** (PR-ADS-163A).
   The legacy contact pulls in `connectors/hubspot_pull.py` logged an API error

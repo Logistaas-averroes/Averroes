@@ -3225,3 +3225,339 @@ fixed character spans were widened where a renderer grew (113, 133).
    about Google Ads spend and FX coverage.
 5. The fail-closed rule lives in `static/app.js` and its tests; no
    `scripts/audit_*` gate enforces it in production.
+
+## PR-ADS-163C — contacts deleted or merged in HubSpot leave the funnel
+
+**Why.** The canonical contact table `hubspot_contact_funnel` is filled by a
+modified-since sync (`hubspot_contact_funnel_sync_service`,
+`iter_contacts_modified_since`). A contact that is deleted in HubSpot, or
+merged into another, is never "modified": it stops being returned, and nothing
+tells the sync so. Its row stayed and was counted by every funnel and cohort
+read. Measured against production and HubSpot on 2026-11-18:
+
+- contacts created in October 2026: 564 in the table, 557 in HubSpot. The 7
+  extra ids return nothing from a HubSpot search on `hs_object_id`;
+- table-wide, 30 stored contacts no longer exist in HubSpot (all 30 confirmed
+  absent by a search on their ids). 26 were created in the last 180 days; one
+  carries SQL evidence;
+- reached-SQL and reached-Opportunity for that October cohort otherwise match
+  HubSpot exactly (70 and 46), so the error was the population, not the stages;
+- the same 30 contacts have 30 rows in `contact_source_classification` (the
+  "Leads" counts on Revenue by Source) and 98 rows in the legacy `leads` table.
+
+**What runs now.** One step in the daily incremental sync,
+`hubspot/contact_reconciliation`, right after the contact sync and before the
+post-boundary gap detection (the first step that reads the funnel). In one
+line: search → two strikes → direct read confirmation → backlog and
+trailing-window limits → move.
+
+**The residual, stated plainly.** A contact is removed only when HubSpot's
+search omitted it on two checks at least 20 hours apart — the second in a run
+where HubSpot answered every batch — AND a
+direct read of that contact by id returned 404 (or returned its merge
+survivor naming it). What remains is HubSpot answering 404 for a contact that
+exists.
+
+1. **Ask.** `connectors.hubspot_pull.check_contacts_exist` reads every stored
+   contact id and asks HubSpot which still exist: one CRM search per batch of
+   at most 100 ids, one filter (`hs_object_id IN <batch>`), `limit` 100, only
+   `hs_object_id` requested, 0.25 s between calls, the 30 s request timeout and
+   `_legacy_search_page`'s bounded 429 retry. Read-only: no other endpoint.
+2. **Three answers, not two.** An id HubSpot returned is *existing*. An id in a
+   batch HubSpot answered and did not return is *missing*. An id whose batch
+   had no usable answer is *unknown* and is left exactly as it was. A batch is
+   usable only when the response has a `results` list, HubSpot's `total`
+   equals the number of results and is no larger than the batch, there is no
+   further page, and every result is an id that was asked for, once. Ids are
+   compared as numbers. A stored id that is not canonical (not all digits, or
+   digits with leading zeros) is never sent and is unknown on its own. After
+   three unanswered batches in a row the remaining batches are not sent.
+3. **Strike.** Each missing id gets a row in `hubspot_contact_absence`
+   (`first_missing_at`, `last_missing_at`, `checks`, `last_run_id`), unless
+   its funnel row was ingested after this run started. Each returned id has
+   its row deleted: it came back.
+4. **Confirm.** Every contact this run could remove is read directly by id
+   (`confirm_contacts_absent`: `basic_api.get_by_id`, read-only, 30 s
+   timeout, 429 retried three times, 0.25 s apart, at most the per-run limit
+   of 50 reads). The search index can leave a live contact out of a
+   well-formed answer on every run; the object read does not use it.
+   - a 404 confirms the contact is gone;
+   - the contact itself returned means it EXISTS: the search was wrong. Its
+     strike is deleted, the run counts it in `search_disagreements` and is
+     `partial` with that reason;
+   - a different record returned confirms a merge only if that record's
+     `hs_merged_object_ids` names the id asked for; otherwise it is unknown;
+   - an error, a timeout or an exhausted 429 is unknown. An unconfirmed
+     contact stays, keeps its strikes, makes the run `partial` and does not
+     block the others.
+
+   If more contacts are eligible than one run may remove, none is read: the
+   valve refuses that run whatever HubSpot says.
+5. **Move.** A contact leaves only when ALL of these hold, decided by the
+   database in one statement:
+   - it was struck by the current run and on a check at least 20 hours
+     earlier;
+   - its funnel row was last ingested before this run started. A row the
+     contact sync wrote while the check was running is newer evidence than
+     the check's answer;
+   - it has no open row in `sql_post_boundary_incident` (see "Held" below);
+   - every batch of this run was answered. A run with an unanswered batch
+     records strikes for the answered ones, reports `would_remove`, removes
+     nothing and ends `partial`;
+   - the direct read confirmed it (the confirmed ids are a parameter of the
+     statement; everything else is still decided in SQL);
+   - both limits pass.
+
+   The row is moved into `hubspot_contact_funnel_removed` (every funnel
+   column, plus `removed_at`, `removal_reason = 'absent_from_hubspot'`, the
+   run and the strike history). Its `contact_source_classification` rows move
+   to `contact_source_classification_removed`, its strike is deleted and the
+   counts are written onto the run row, all in the same transaction.
+6. **Refuse, per run.** The valve counts the whole standing backlog: every
+   stored contact with two strikes 20 hours apart and no open incident,
+   whichever run struck it (`backlog_qualified`). If that is more than
+   `contact_reconciliation.max_removals_per_run` (50), or more than
+   `max_removal_fraction` (1%) of the table, nothing moves and the run is
+   `refused`. The strikes stay. It is not a count of what this run would
+   remove: counted that way, a degraded HubSpot answered a few batches a day
+   was drained in slices that each fit under the limit.
+7. **Refuse, over a trailing window.** The removals already archived in the
+   last `removal_window_days` (7) plus what this run would move must not
+   exceed `max_removals_per_window` (100) nor `max_removal_window_fraction`
+   (2%) of the table; over either, nothing moves and the run is `refused`.
+   The per-run limit alone lets a small persistent loss through every other
+   day without end.
+8. **Warn on day one.** A run that strikes more contacts for the first time
+   than the per-run limits allow is `partial` with the reason. Nothing is
+   removed on a first strike; the warning is not left for the refusal a day
+   later.
+
+`would_remove` is the run's eligible contacts after the direct read cleared
+the ones it found; `confirmed_absent` in the run result is how many of them
+the read confirmed.
+
+**Held.** A contact HubSpot no longer returns that has an OPEN
+post-boundary SQL incident is not removed. Both incident resolvers
+(`apply_post_boundary_sql_evidence`, `resolve_post_boundary_incidents`) read
+the contact's funnel row; with the row gone the incident could never close and
+`audit_sql_coverage_gate`'s `no_open_post_boundary_gaps` would stay broken for
+ever. No closing status was added (a new status would silently stop
+blocking). The consequence is stated, not hidden: **a held contact stays in
+the funnel and stays counted by every funnel and cohort read until its
+incident is resolved**, it keeps its strikes, the run reports
+`held_open_incident` and is `partial` on every run while any contact is held.
+Held contacts are NOT part of `backlog_qualified`: they cannot be removed, so
+they are not weighed by the valve. The consequence: if eight contacts vanish
+and four are held, the valve sees four, and with a limit of five the other
+four are removed although eight disappeared at once; if the four incidents
+are later closed by hand, those four go too. The first-strike warning (step
+8) does count all eight on day one.
+A deleted contact's incident cannot resolve by itself, because the exact SQL
+date it waits for can no longer arrive from HubSpot; closing it is a manual
+decision this slice does not make.
+
+Every run is a row in `hubspot_contact_reconciliation_runs` (`started_at`,
+`finished_at`, `status`, `contacts_stored`, `contacts_checked`, `batches`,
+`batches_unknown`, `missing`, `newly_missing`, `returned`, `would_remove`,
+`removed`, `classification_rows_removed`, `backlog_qualified`,
+`held_open_incident`, `search_disagreements`, `error`). The row is opened before HubSpot is called; if
+it cannot be written, HubSpot is not called. The removal counts are written by
+the move's own transaction, so a removal that committed is on its run row even
+if the write that closes the run is lost (the row then stays `running`).
+
+| Status | Meaning | On the incremental run |
+| --- | --- | --- |
+| `success` | every batch answered; strikes and removals recorded | green |
+| `partial` | strikes recorded, but not clean: a batch had no usable answer (then nothing is removed), a contact is held on an open incident, the direct read found a contact the search omitted or could not confirm one, or more first strikes than the limits | error, run `partial` |
+| `refused` | a limit stopped the removal: the backlog of qualifying contacts is over the per-run limit, or the trailing window's removals would pass its limit | error, run `partial` |
+| `failed` | no run record, unreadable ids, no batch answered, or a write failed | error, run `partial` |
+
+A run still `running` in the table is one that did not finish.
+
+**Why a move and not a flag.** About thirty queries in some twenty files read
+`hubspot_contact_funnel`. A `removed` flag would have to be honoured by every
+one of them, and a reader that missed it would keep counting the contact with
+nothing to say so. Moving the row needs no reader to change. Nothing is
+dropped: the archive holds the row as it was.
+
+**Why two strikes.** One search answer is one observation of a search index.
+A batch that comes back well-formed and empty (`results: []`, `total: 0`) is
+indistinguishable from 100 real deletions. Two checks at least 20 hours apart,
+with the second in the current run, means one odd answer strikes a contact
+and the next good one clears it; it never removes it. A contact whose batch
+was not answered in the current run is not removed on old strikes either.
+
+**Why the database decides.** Who qualifies, the valve and the move are one
+SQL statement (`db.writers.move_absent_contacts`): a `gate` CTE counts the
+backlog and the table, and the `DELETE … RETURNING` feeding the archive
+`INSERT` is conditional on it. There is no count read by Python and acted on
+later, and the counts reported are the statement's own. Strike instants are
+the database's `clock_timestamp()`, taken after the HubSpot read; the
+ingest-time guard compares two database clocks (`last_ingested_at` and the run
+row's `started_at`).
+
+**A contact that comes back.** The archive has no unique key on `contact_id`
+and nothing references it. A contact restored in HubSpot and seen by the
+modified-since sync is ingested as an ordinary new funnel row. It carries no
+strike (the strike was deleted with the removal), so it would have to be
+found missing twice more to be removed again; the archive then holds both
+removals.
+
+**System page.** `/api/system/overview` carries `contact_reconciliation`: the
+latest run's status and its own reason text (why it is `partial` or
+`refused`), start, finish, contacts checked, unknown batches, `would_remove`,
+removed, `backlog_qualified`, `held_open_incident`, `search_disagreements`,
+plus the number of pending strikes. Facts only; the page does not render them
+yet and no figure page changed.
+
+**Calls and time.** For about 22,000 stored contacts a daily run makes 220
+search calls and sleeps 219 × 0.25 s ≈ 55 s, plus request time, and at most
+50 direct reads (one per contact it is about to remove; about 12 s of pacing
+at the limit, normally a handful). A 429 adds at most 14 s of backoff per
+batch or read, and three failures in a row end the calling.
+
+**Verified against HubSpot, read-only, on 2026-11-19** (by the coordinator,
+not by this code's tests): a search with `hs_object_id IN` and 100 values is
+accepted and returned `total: 100`; no stored contact id is non-canonical;
+none of the 30 absent contacts has an open post-boundary incident or is a
+member of the coverage boundary.
+
+**Tests.** `tests/test_pr_ads_163c_removed_contacts.py`, 64 cases, 41 of them
+on a real PostgreSQL cluster with the real schema, funnel writer, sync
+service, keyset iterator and readers. The fake HubSpot serves both the sync's
+`lastmodifieddate` scan and the `hs_object_id IN` check from one set of
+contacts that the tests change between runs; it honours the filters, matches
+ids as numbers, reports `total`, answers a read by id from the objects (not
+from the search index), and records and refuses any call that is neither. The module is in CI's PostgreSQL step and its did-run list.
+
+- **Before the fix.** On the parent commit `test_30` — two real
+  `run_daily_incremental_sync` runs a day apart after HubSpot deletes three of
+  300 contacts, then the real channel-funnel read — fails with
+  `assert 300 == 297`. It uses only code that existed before.
+- **Guards.** Fifty-five mutations, each removing or weakening one guard,
+  were applied one at a time to a copy of the tree and the module re-run;
+  each failed at least one case. Three of the first review's mutations
+  survived their first attempt (the move's own ingest-time guard, the 1% arm
+  of the first-strike warning, and held contacts counting against the
+  limit); `test_52b`, `test_12` and `test_53b` were added for them.
+- **Time.** The service takes the instant of the check as an argument so the
+  20 hours are testable; production passes none and the database stamps
+  `clock_timestamp()` (`test_21`). The scheduler takes no clock, so the
+  scheduler cases (`test_30`, `test_31`, `test_33`) move the recorded strikes
+  21 hours back between two runs.
+
+**Independent review of the first version.** The first commit of this slice
+was reviewed with executable probes and corrected before merge. What was
+wrong, and the case that now fails without the fix:
+
+| Finding | What the first version did | Now | Case |
+| --- | --- | --- | --- |
+| F1 | the valve counted only contacts struck by the current run, and a run with unanswered batches removed the answered share: a degraded index answered one batch a day lost live contacts in slices under the limit | the valve counts the whole backlog; a run with an unanswered batch removes nothing | `test_50`, `test_51`, `test_13`, `test_33` |
+| F2 | a contact restored and re-ingested by the sync between the check's answer and the move was removed | a row ingested since the run started is neither struck nor moved | `test_52`, `test_52b` |
+| F3 | a contact with an open post-boundary incident was removed, leaving the incident unresolvable | held, counted, run `partial` | `test_53` |
+| F4 | 100 first strikes in one run was `success` | `partial` over the same limits | `test_12`, `test_12b` |
+| F5 | a stored id with leading zeros was sent, HubSpot's canonical answer was "not asked for", and its whole batch was unknown on every run | ids compared as numbers; the non-canonical id alone is unknown | `test_08`, `test_09` |
+| F7 | a lost finishing write left a committed removal on a `running` row with NULL counts | the move writes its counts onto the run row in its own transaction | `test_54` |
+
+**Second review.** The corrected version was reviewed again.
+
+| Finding | What that version did | Now | Case |
+| --- | --- | --- | --- |
+| N1 | a search index omitting the same few live contacts on every fully answered run lost them every other day as `success`, with no cumulative limit; a refused backlog that shrank under the limit was removed | direct read confirmation before any removal; trailing-window cap | `test_61`, `test_62`, `test_63`, `test_64`, `test_66`, `test_60`, `test_67` |
+| C2 | a contact the sync saw during the check but could not write (rejected as stale) was removed | the direct read finds it | `test_65` |
+| N3 | a `refused` or `partial` run did not say why on the overview payload | reason text and the four counts carried | `test_42` |
+
+`test_33[partial]` and `test_13` asserted in the first version that a partial
+run removes the contacts of its answered batches. Those assertions encoded F1
+and were changed to assert the opposite.
+
+Existing tests touched, both by adding the new step to a fixture that lists
+every step of the incremental sync — the edit PR-ADS-156, 160 and 161D2 made
+in the same places. No assertion was removed or loosened.
+
+- `tests/test_daily_incremental_sync.py`: `_patch_all_datasets_success` stubs
+  the check at its service seam like every other step, and
+  `test_datasets_keys_present` expects `hubspot/contact_reconciliation`.
+- `tests/test_pr_ads_154_incremental_sync_hotfix.py`: the two healthy-run
+  step lists name `_sync_contact_reconciliation`.
+
+Without those edits seven tests failed, all the same way: a healthy-run
+fixture met a step it did not describe, which with no database records
+`failed` ("run record could not be created") and makes the run `partial`.
+Two of the seven (`test_pr_ads_160` 93 and 95) stub steps by the `_sync_`
+prefix; the step is named to match and they needed no edit. One
+(`test_pr_ads_163a` 28) uses the shared helper above.
+
+**NOT covered.**
+
+1. **The legacy `leads` table.** The 98 rows of the removed contacts stay and
+   keep feeding the pre-153C pages that read `leads`. An admin
+   `POST /api/audit/sql-truth/repair-classification?apply=true` re-derives the
+   classification cache from `leads` and would re-insert the removed
+   contacts' classification rows.
+2. **Lifecycle history, recovery, incident and boundary tables.**
+   `hubspot_lifecycle_stage_history`, the recovery state,
+   `sql_post_boundary_incident` and the immutable `sql_coverage_boundary*`
+   tables are not written. A contact with an OPEN incident is held in the
+   funnel (see "Held"). A removed contact that is a member of the immutable
+   coverage boundary stays in `sql_coverage_boundary_contact`; what the
+   boundary's membership checks make of that was not traced.
+3. **Deals and companies.** Out of scope. A won deal whose stored association
+   (`hubspot_deal_contact_association`) still names a removed contact loses
+   that contact's row in the closed-won acquisition read
+   (`funnel_row_present = false`), which makes the deal's acquisition state
+   unresolved rather than wrong. Not measured for the 30.
+4. **No freshness dataset.** The check is not registered in
+   `DATASET_FRESHNESS_CONFIG` or the canonical freshness statuses (a
+   nine-place change). A check that stops running is visible only as a stale
+   `started_at` on the System overview payload and as an error on the
+   incremental run; nothing withholds a figure because of it.
+5. **A merged contact keeps only the survivor's row.** The merged-away id is
+   removed; whatever HubSpot folded into the survivor arrives through the
+   survivor's own modification. Nothing here links the two ids. Whether a
+   search on a merged-away id always returns nothing was observed for these
+   ids, not established as HubSpot behaviour; a response that returns a
+   different id than was asked makes the batch unknown.
+6. **A restored contact that HubSpot does not mark modified** is not seen by
+   the sync and stays out of the funnel until something modifies it. Its
+   classification row stays in the archive unless it was created in the last
+   14 days (the daily classification window).
+7. **A legitimate removal over the limit** (a CRM clean-up of more than 50
+   contacts, or of more than 1% of the table) is refused every day until the
+   limit in `config/thresholds.yaml` is raised. There is no one-off approval,
+   and no page shows a `refused` run: it is an error on the incremental run
+   and a row in the runs table. Because the valve counts the backlog, strikes
+   on contacts whose batch is never answered again also count against it
+   until those contacts are answered.
+8. **A table under 100 contacts** can never remove one: one contact is over
+   1%. A stored id that is not a canonical object id is never sent to HubSpot
+   and makes every run `partial`, so nothing is removed while one exists.
+9. Only the incremental sync runs the check. The manual
+   `POST /api/crm-funnel/sync` and the other schedulers do not.
+10. The System page does not render the new block.
+
+**Not reached by the review or by these tests (unverified).**
+
+- HubSpot's real behaviour beyond the three facts above: the search rate
+  limit, whether a search on a merged-away id can return the survivor,
+  whether restoring a contact changes `lastmodifieddate`, how long a search
+  index can lag or be partially lost, and — the one the removal now rests on
+  — what a read by id returns for a MERGED-AWAY id: that it returns the
+  survivor, and that the survivor's `hs_merged_object_ids` lists the merged
+  id in a `;`-separated form, is assumed, not observed. If it does not, a
+  merged contact is never confirmed, is never removed, and every run that
+  meets it is `partial`: wrong in the safe direction. Everything here was run
+  against a fake.
+- The other certification audits. Only the SQL coverage gate's incident
+  check was examined against a removal; `audit_platform_certification`'s
+  other audits were not run over a database with removed contacts.
+- The `leads` / `repair-classification` path (item 1): that an applied repair
+  re-inserts a removed contact's classification row was read from the code,
+  not executed.
+
+**Verified against HubSpot, read-only, 2026-11-19.** A direct read of two of
+the absent ids returned a DIFFERENT, surviving contact whose
+`hs_merged_object_ids` listed the asked id, `;`-separated (for example
+`865430158531;91109773542`): they were merged, not deleted. A direct read of a
+live contact returned it under its own id. So the merge rule matches the real
+API, and some of the 30 absent contacts are merges.
