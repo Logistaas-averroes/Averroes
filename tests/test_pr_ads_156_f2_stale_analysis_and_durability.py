@@ -57,7 +57,8 @@ _needs_pg = pytest.mark.skipif(
     not _have_postgres(),
     reason="PostgreSQL server binaries / unprivileged postgres user unavailable")
 
-_SCHEDULERS = ("scheduler/weekly.py", "scheduler/monthly.py")
+# PR-ADS-165A: "scheduler/weekly.py" was listed here; the weekly job is deleted.
+_SCHEDULERS = ("scheduler/monthly.py",)
 _AUDIT_MODULE = "scripts.audit_keyword_search_term_freshness"
 
 #: A junk term with enough spend to clear the $5 floor, so if a stale snapshot

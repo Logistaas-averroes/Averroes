@@ -480,3 +480,133 @@ __all__ = [
     "country_key", "display_label", "code_for_key", "country_name_for_code",
     "get_country_code",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Complete ISO resolution (PR-ADS-165A) — SEPARATE from the market registry
+# ─────────────────────────────────────────────────────────────────────────────
+# Everything above resolves against SUPPORTED_COUNTRIES, a supported-MARKET
+# registry of 96 codes, and the revenue pages group on it. It is unchanged:
+# widening it would move rows between "valid" and "unknown" on Country Revenue
+# & Spend and Dashboard Countries, which is a publication change this slice
+# does not make.
+#
+# The Google Ads → Countries page needs a different answer. Its spend arrives
+# with the ISO code Google assigned (162 distinct codes in production) and its
+# leads carry free-text country names — "nigeria", "libyan arab jamahiriya".
+# Through the market registry most of that page read "(unresolved location)"
+# or "not matched". These functions resolve against the COMPLETE ISO 3166-1
+# table in ``analysis.iso_countries`` instead. They are deliberately separate
+# names: nothing above calls them and they call nothing above but
+# ``_RESIDUAL_LABELS``.
+
+import unicodedata as _unicodedata
+
+from analysis.iso_countries import (  # noqa: E402
+    AMBIGUOUS_COUNTRY_NAMES, ISO_COUNTRY_NAMES, ISO_COUNTRY_NAME_ALIASES,
+    USER_ASSIGNED_COUNTRY_CODES,
+)
+
+#: Text a source stores when it has NO country: not a country that failed to
+#: match, but the absence of one. Grouped as one row, never counted as an
+#: unmatched country.
+NO_COUNTRY_PLACEHOLDERS = frozenset({
+    "", "unknown", "other", "others", "n a", "na", "none", "null", "nil",
+    "not set", "not specified", "not provided", "not available", "unspecified",
+    "no country", "tbd", "tbc", "undefined", "unresolved location", "xx",
+    "zz",
+})
+
+
+def normalize_country_text(value) -> str:
+    """The lookup form of free-text country evidence.
+
+    Casefolded; accents removed (``Türkiye`` -> ``turkiye``, ``Côte`` ->
+    ``cote``); ``&`` read as ``and``; every other punctuation mark and
+    separator a space; a leading ``the`` dropped; whitespace collapsed.
+    Locale-independent. ``"Korea, Republic of"`` and ``"korea republic of"``
+    are one key; so are ``"U.S.A."`` and ``"usa"``.
+    """
+    if value is None:
+        return ""
+    text = _unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not _unicodedata.combining(ch))
+    text = text.casefold().replace("&", " and ")
+    text = "".join(ch if ch.isalnum() else " " for ch in text)
+    words = text.split()
+    if words[:1] == ["the"] and len(words) > 1:
+        words = words[1:]
+    return " ".join(words)
+
+
+def _build_iso_name_table() -> dict[str, str]:
+    table: dict[str, str] = {}
+
+    def add(name: str, code: str) -> None:
+        key = normalize_country_text(name)
+        if not key:
+            return
+        other = table.get(key)
+        if other is not None and other != code:  # pragma: no cover - by test
+            raise ValueError(f"country name {name!r} maps to {other} and {code}")
+        table[key] = code
+
+    for code, label in ISO_COUNTRY_NAMES.items():
+        add(label, code)
+    # Kosovo: not an ISO assignment, but the code Google Ads reports it under.
+    for code, label in USER_ASSIGNED_COUNTRY_CODES.items():
+        add(label, code)
+    for alias, code in ISO_COUNTRY_NAME_ALIASES.items():
+        if code not in ISO_COUNTRY_NAMES:  # pragma: no cover - guarded by test
+            raise ValueError(f"alias {alias!r} points at unknown code {code!r}")
+        add(alias, code)
+    # Every name the market registry already resolves resolves here to the
+    # same code, so the two tables can never disagree about a spelling.
+    for norm, code in COUNTRY_ALIASES.items():
+        if len(norm) > 2 or norm in ("uk", "us"):
+            add(norm, code)
+    for name in AMBIGUOUS_COUNTRY_NAMES:
+        table.pop(normalize_country_text(name), None)
+    return table
+
+
+#: Normalized country name/alias -> ISO alpha-2, over the complete ISO table.
+ISO_NAME_TO_CODE: dict[str, str] = _build_iso_name_table()
+
+
+def is_no_country_placeholder(value) -> bool:
+    """True when ``value`` says "no country recorded" rather than naming one."""
+    norm = normalize_country_text(value)
+    return norm in NO_COUNTRY_PLACEHOLDERS or normalize_label(value) in _RESIDUAL_LABELS
+
+
+def is_iso_country_code(value) -> bool:
+    """True when ``value`` is an assigned ISO 3166-1 alpha-2 code."""
+    return isinstance(value, str) and value.strip().upper() in ISO_COUNTRY_NAMES
+
+
+def resolve_iso_country_text(value) -> str | None:
+    """ISO alpha-2 for free-text country evidence, or None.
+
+    For NAMES. A two-letter token is not treated as a code: in a CRM country
+    field ``CA`` is Canada or California and ``IN`` is India or Indiana, so
+    only the established abbreviations in the alias table (``UK``, ``US``)
+    resolve. A source that supplies a real ISO code should use it directly
+    (see :func:`is_iso_country_code`), not pass it through here.
+
+    None for a placeholder, an ambiguous name ("Congo") and anything that is
+    not a country name ("California", "Dubai"). Never a guess, never a prefix
+    or fuzzy match.
+    """
+    norm = normalize_country_text(value)
+    if not norm or norm in NO_COUNTRY_PLACEHOLDERS:
+        return None
+    return ISO_NAME_TO_CODE.get(norm)
+
+
+def iso_country_label(code) -> str | None:
+    """English display name for an ISO alpha-2 code (or `XK`), else None."""
+    if not code:
+        return None
+    code = str(code).strip().upper()
+    return ISO_COUNTRY_NAMES.get(code) or USER_ASSIGNED_COUNTRY_CODES.get(code)

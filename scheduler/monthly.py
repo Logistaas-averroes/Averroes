@@ -3,8 +3,15 @@ Monthly data refresh
 Runs on the 1st of each month at 08:00 Asia/Amman (05:00 UTC) from the in-app
 scheduler.
 Orchestrates: google_ads_source → hubspot_pull → durable writes → waste
-detection → GCLID match.
+detection → flag history → GCLID match.
 No business logic lives here. This module only sequences the steps.
+
+PR-ADS-165A: the weekly job is retired, and this is now the ONLY scheduled
+writer of the legacy geo / keywords snapshots, the waste annotations, the
+search-term flag history and the GCLID coverage snapshot. Those datasets are
+therefore at most one month old by design (see
+`services.freshness_service.MONTHLY_REFRESH_STALE_DAYS`). The flag-history
+step moved here from the weekly job, which was its only caller.
 
 PR-ADS-162H: this job no longer produces a report. It used to end by building
 the advisor report (lead quality → campaign truth → n-grams → markdown) and
@@ -360,10 +367,12 @@ def run_monthly_report():
                         "the canonical sync did not persist rows this run")
 
         # Write waste terms to database.
-        # PR-ADS-153F: wrapped in a real `(analysis, waste_terms)` sync batch —
-        # see the matching comment in scheduler/weekly.py. The freshness config
-        # for this dataset has always existed; until now nothing stamped the key
-        # it reads, so it could only ever report "never run".
+        # PR-ADS-153F: wrapped in a real `(analysis, waste_terms)` sync batch.
+        # `waste_terms` has always had a durable table and a real writer, but
+        # nothing stamped an `(analysis, waste_terms)` batch — so its freshness
+        # entry matched no sync_state row and the dataset reported "never run"
+        # forever while the table filled up normally. A freshness row without
+        # a writer is not evidence; this makes the writer real.
         waste_batch_id = db_writers.start_sync_batch(
             source="analysis", dataset="waste_terms", sync_type="monthly",
             run_id=run_id,
@@ -401,6 +410,42 @@ def run_monthly_report():
     except Exception as e:
         log.error(f"Step 3/4 FAILED: Waste detection error — {e}")
         return _failed(run_record, run_id, "Step 3/4: Waste detection", str(e))
+
+    # PR-ADS-153D: durable flag HISTORY. PR-ADS-165A moved this step here from
+    # the retired weekly job, which was its only scheduled caller — without it
+    # `search_term_review.first_flagged_at` / `latest_flagged_at` would never
+    # be written again and Search Terms → Flagged would show "first flagged: —"
+    # for every term the step above flags.
+    #
+    # It runs AFTER the annotations land, so the canonical flagged population
+    # it reads already reflects this run's classification. History is derived
+    # from that population rather than from waste_terms directly, because
+    # waste_terms has no campaign_id — identities built from a raw campaign
+    # name would never match the ones the Search Terms page computes.
+    #
+    # Local database only, read 200 rows a page: no Google Ads, HubSpot or
+    # Mailchimp call, and no human review decision is ever modified by an
+    # observation. Each observation is dated by the term's last SOURCE date,
+    # not by this run's clock, so replaying it over unchanged evidence writes
+    # nothing new.
+    try:
+        from services.search_term_flag_history_service import (  # noqa: PLC0415
+            record_flag_history,
+        )
+        history = record_flag_history()
+        if not history.get("available"):
+            log.warning("flag history not recorded: %s", history.get("reason"))
+            note_step_failure(
+                step_failures, "record_flag_history",
+                history.get("reason") or "flag history unavailable")
+        else:
+            log.info("recorded flag history for %d term(s)",
+                     history.get("written", 0))
+    except Exception as hist_exc:  # noqa: BLE001
+        # Never FAIL the run over an audit-trail write — but a run that did
+        # not record it did not finish, and says so (`partial`).
+        log.error("flag history step failed: %s", hist_exc)
+        note_step_failure(step_failures, "record_flag_history", hist_exc)
 
     # Step 4: GCLID match + DB persistence
     #

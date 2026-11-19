@@ -4,12 +4,15 @@
 # ever carried a check run or status context — every merge decision rested on a
 # suite result pasted into a description by hand.
 #
-# Two known tests (tests/test_search_terms_followup_fixes.py, the two
-# empty-search-term scheduler cases) fail on `main` in a sandboxed environment
-# because they reach the Google Ads connector. They are DESELECTED from the
+# One known test (tests/test_search_terms_followup_fixes.py, the daily
+# empty-search-term scheduler case) fails on `main` in a sandboxed environment
+# because it reaches the Google Ads connector. It is DESELECTED from the
 # blocking job — so a green check means "this branch introduced no failures" —
-# and then run in a separate, clearly-labelled non-blocking job so their state
+# and then run in a separate, clearly-labelled non-blocking job so its state
 # stays visible instead of being quietly dropped.
+#
+# PR-ADS-165A: there were two. The weekly case was deleted with the weekly job
+# it drove (scheduler/weekly.py), so it is no longer deselected here.
 
 name: Tests
 
@@ -107,6 +110,7 @@ jobs:
             tests/test_pr_ads_162c_system_page.py \
             tests/test_pr_ads_163b_freshness_row_counts.py \
             tests/test_pr_ads_163c_removed_contacts.py \
+            tests/test_pr_ads_165a_countries_pg_integration.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -206,6 +210,9 @@ jobs:
                            # the two strikes, the move into the archive and
                            # the refusal above the limit.
                            "tests.test_pr_ads_163c_removed_contacts",
+                           # PR-ADS-165A. The Countries page over the real
+                           # geo sync, coverage ledger and spend rows.
+                           "tests.test_pr_ads_165a_countries_pg_integration",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
@@ -247,8 +254,7 @@ jobs:
       - name: Full suite (known-failing-on-main deselected)
         run: |
           python -m pytest -q \
-            --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty" \
-            --deselect "tests/test_search_terms_followup_fixes.py::test_weekly_empty_search_terms_marks_success_not_success_empty"
+            --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty"
 
   known-failing:
     name: Known-failing on main (informational, non-blocking)
@@ -265,15 +271,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
-      # Informational ONLY. These reach the Google Ads connector and fail on
-      # main too, so their result is reported in this log but never gates the
+      # Informational ONLY. The daily case reaches the Google Ads connector and
+      # fails on main too, so its result is reported in this log but never gates the
       # PR — a red check here would be indistinguishable from a real regression.
       # `continue-on-error` sits on the STEP so the job itself reports success
       # while the outcome stays visible.
-      - name: Run the two tests that also fail on main
+      - name: Run the test that also fails on main
         continue-on-error: true
         run: |
-          echo "These reach the Google Ads connector and fail on main in a"
+          echo "The daily case reaches the Google Ads connector and fails on main in a"
           echo "sandboxed environment. Reported, not hidden — and NOT counted"
           echo "as evidence that this branch is green."
           python -m pytest tests/test_search_terms_followup_fixes.py -q

@@ -299,8 +299,13 @@ def test_evidence_loaders_use_window_param():
     load_funnel = APP_JS.split("async function leadsLoadFunnel(")[1].split("\n}")[0]
     assert "window: getRoasBusinessWindow()" in load_funnel
     assert 'window_type: "business"' in load_funnel
-    assert "/api/geo?${evWindow}" in APP_JS
-    assert "/api/leads/country-summary?${evWindow}" in APP_JS
+    # PR-ADS-165A: the Countries page fetched /api/geo and
+    # /api/leads/country-summary and joined them in the browser by country
+    # text. The server joins them now (on the canonical country identity), so
+    # the page sends its evidence window to ONE endpoint; the lead summary
+    # endpoint still exists and still takes the window (EVIDENCE_ENDPOINTS).
+    assert "/api/geo?${evidenceWindowQuery()}" in APP_JS
+    assert "/api/leads/country-summary" not in APP_JS
     # Search-terms family sends window= in its param builders.
     assert 'params.set("window", getEvidenceWindow())' in APP_JS
     # evidenceWindowQuery serializes to a window= param.

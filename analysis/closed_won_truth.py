@@ -814,7 +814,6 @@ R_CUSTOMERS_WITHHELD = "customer_count_withheld"
 R_SPEND_UNAVAILABLE = "google_ads_usd_spend_unavailable"
 R_NO_SPEND_IN_WINDOW = "no_google_ads_spend_in_window"
 R_NO_CUSTOMERS_IN_WINDOW = "no_customers_in_window"
-R_SCOPE_INCOMPATIBLE = "numerator_and_denominator_scopes_differ"
 #: A rate whose numerator is close-date won deals / customers and whose
 #: denominator is acquisition-cohort SQLs or leads: two different populations.
 R_SQL_TO_CUSTOMER_INCOMPATIBLE = (
@@ -925,18 +924,17 @@ def _period(value) -> dict:
 
 
 def derive_period_revenue_per_ad_spend(revenue: dict, spend_usd, *,
-                                       spend_reason=None,
-                                       scope_compatible: bool = True) -> dict:
+                                       spend_reason=None) -> dict:
     """Period revenue ÷ ad spend: revenue from deals CLOSED in the window over
     the same window's Google Ads USD spend.
 
     A non-cohort operational ratio, NOT ROAS: in a long B2B sales cycle a deal
     closed this period may come from spend in an earlier one. Published only
-    when the revenue metric is published, the USD spend is known and positive,
-    and the numerator's scope is one Google Ads spend can have produced.
+    when the revenue metric is published and the USD spend is known and
+    positive. The caller is responsible for passing spend only beside a
+    population Google Ads spend can have produced (PR-ADS-165A removed the
+    ``scope_compatible`` flag with its last caller, the Unit Economics page).
     """
-    if not scope_compatible:
-        return metric(None, UNAVAILABLE, R_SCOPE_INCOMPATIBLE)
     if (revenue or {}).get("status") != PUBLISHED:
         return _blocked("revenue_usd", revenue, R_REVENUE_WITHHELD)
     if spend_usd is None:
@@ -947,8 +945,7 @@ def derive_period_revenue_per_ad_spend(revenue: dict, spend_usd, *,
 
 
 def derive_period_spend_per_customer_won(customers: dict, spend_usd, *,
-                                         spend_reason=None,
-                                         scope_compatible: bool = True) -> dict:
+                                         spend_reason=None) -> dict:
     """Spend per customer won this period: the window's Google Ads USD spend ÷
     the distinct proven companies whose deals CLOSED in the window.
 
@@ -957,8 +954,6 @@ def derive_period_spend_per_customer_won(customers: dict, spend_usd, *,
     spend. Withheld whenever the customer count is withheld; never divides by
     won deals.
     """
-    if not scope_compatible:
-        return metric(None, UNAVAILABLE, R_SCOPE_INCOMPATIBLE)
     if (customers or {}).get("status") != PUBLISHED:
         return _blocked("customers", customers, R_CUSTOMERS_WITHHELD)
     if spend_usd is None:

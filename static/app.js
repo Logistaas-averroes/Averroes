@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "unit-economics", "revenue-health", "revenue-by-source", "channels", "system"];
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "revenue-health", "revenue-by-source", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -146,7 +146,9 @@ const PAGE_DATASET_MAP = {
   campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"],
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
-  geo:               ["google_ads_api/geo"],
+  // PR-ADS-165A: the page reads canonical daily country spend, not the
+  // legacy `geo` snapshot (written monthly), so its strip keys on that.
+  geo:               ["google_ads_api/canonical_geo"],
   keywords:          ["google_ads_api/keyword_facts"],
   // PR-ADS-153C: the canonical Leads page reads the CRM funnel spine.
   leads:             ["hubspot/contact_funnel", "hubspot/lifecycle_events"],
@@ -178,7 +180,7 @@ const PAGE_EXPLANATIONS = {
     purpose: "Selected-window campaign evidence — genuine window totals for spend, leads, SQLs, junk and CPQL, with a factual outcome status per campaign.",
     source: "Canonical Google Ads campaign spend (native GBP + FX-safe USD) reconciled with deduplicated HubSpot lead-quality outcomes for the selected window. All-time returns genuine cumulative totals, not a scheduler snapshot.",
     dependsOn: ["canonical_spend", "leads"],
-    emptyMeans: "No canonical spend or HubSpot lead evidence exists for the selected window. Run the daily/weekly scheduler or check System Status.",
+    emptyMeans: "No canonical spend or HubSpot lead evidence exists for the selected window. Run the daily incremental sync or check System Status.",
     nextAction: "Check System Status → Google Ads API / Campaigns."
   },
   "search-terms": {
@@ -200,10 +202,10 @@ const PAGE_EXPLANATIONS = {
   geo: {
     title: "Country Performance",
     purpose: "Geographic intelligence — performance and quality by country.",
-    source: "Google Ads API geo data.",
-    dependsOn: ["geo"],
-    emptyMeans: "No Google Ads API geo data has been synced yet for this window. Run the weekly/monthly scheduler or check System Status.",
-    nextAction: "Check System Status → Google Ads API / Geo."
+    source: "Google Ads API country spend from the daily sync, in USD at each day's FX rate.",
+    dependsOn: ["canonical_geo"],
+    emptyMeans: "Spend reads Unavailable until every day of the selected window has been re-read after it ended — each morning before the daily sync, and all day if that sync fails; the page says which days are complete. An empty table means either no leads and no spend in the window, or that the lead figures could not be read; the table says which.",
+    nextAction: "Check System Status → Google Ads API / canonical geo. The daily incremental sync refreshes it."
   },
   keywords: {
     title: "Keyword Evidence",
@@ -273,17 +275,9 @@ const PAGE_EXPLANATIONS = {
     title: "Country Revenue & Spend",
     purpose: "Revenue attribution by country over business windows — where SQLs, customers, and closed-won revenue come from.",
     source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
-    dependsOn: ["hubspot/deals", "google_ads_api/geo"],
+    dependsOn: ["hubspot/deals", "google_ads_api/canonical_geo"],
     emptyMeans: "No attributed revenue found for this business window. Spend may exist without a HubSpot closed-won match, or attribution may be missing/low confidence for these countries.",
     nextAction: "Check that geo spend and HubSpot deal data are synced for the selected window."
-  },
-  "unit-economics": {
-    title: "Unit Economics",
-    purpose: "Executive SaaS economics — LTV/CAC, payback, and profitability verdicts.",
-    source: "Revenue Truth Layer.",
-    dependsOn: ["hubspot/deals", "google_ads_api/canonical_spend"],
-    emptyMeans: "Not enough closed-won volume to compute unit economics.",
-    nextAction: "Ensure sufficient deal volume exists in the selected window."
   }
 };
 
@@ -324,9 +318,9 @@ const PAGE_HELP_CONTENT = {
   },
   geo: {
     what: "Country-level ad performance and HubSpot lead quality shown side by side. Identify which countries produce quality leads vs. waste.",
-    source: "Google Ads API geo reports merged with HubSpot lead quality by country.",
-    howToUse: "Compare spend, lead count, and junk rate across countries. Look for high-spend countries with poor lead quality.",
-    doNotAssume: "Country attribution uses Google Ads geographic reporting. It does not use IP geolocation or GCLID-level precision.",
+    source: "Google Ads API daily country spend (USD, converted at each day's FX rate) merged with HubSpot lead quality by country. Spend is for the selected number of days through yesterday, and is shown only once every one of those days has been re-read after it ended — so it is available from the morning sync onward and reads Unavailable before it, with the days that are complete. Clicks and conversions by country are not shown — the daily country table holds spend only.",
+    howToUse: "Read spend and lead quality side by side, as two separate facts about each country. Look at where spend goes, and separately at which countries' leads are junk.",
+    doNotAssume: "Spend and leads cover different periods (spend through yesterday, leads through today by run date) and different things (where ads were shown, and the country on the HubSpot contact), so do not compute a cost per lead from them. Country attribution uses Google Ads geographic reporting, not IP geolocation or GCLID-level precision.",
     checkNext: "Country Revenue & Spend for revenue attribution at the country level."
   },
   leads: {
@@ -348,14 +342,14 @@ const PAGE_HELP_CONTENT = {
     source: "HubSpot CRM deals synced via the HubSpot connector.",
     howToUse: "Review deal values by campaign to understand revenue attribution. Filter by stage or time window.",
     doNotAssume: "Deal attribution uses HubSpot's native campaign field. It does not re-attribute deals using click-level GCLID data (that requires GCLID bridge).",
-    checkNext: "Campaign Revenue & Spend for campaign-level profitability, or Unit Economics for LTV/CAC."
+    checkNext: "Campaign Revenue & Spend for campaign-level profitability."
   },
   "roas-campaigns": {
     what: "Campaign revenue and spend — shows which campaigns win closed-won deals and revenue (HubSpot) against Google Ads API spend in the same window. Period Revenue / Ad Spend is a non-cohort operational ratio: closed-won outcomes may originate from earlier advertising periods. Customers are distinct proven HubSpot companies, never a deal count.",
     source: "HubSpot closed-won deal revenue + Google Ads API campaign spend. This does NOT use Google Ads conversion value.",
     howToUse: "Compare campaigns by won revenue, Period Revenue / Ad Spend, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
     doNotAssume: "This is HubSpot revenue truth, not Google Ads conversion tracking. Revenue comes from actual closed-won deals, not estimated conversion values. INSUFFICIENT_DATA means not enough signal to judge.",
-    checkNext: "Unit Economics for portfolio-level LTV/CAC, or Country Revenue & Spend for geographic breakdown."
+    checkNext: "Country Revenue & Spend for geographic breakdown."
   },
   "roas-countries": {
     what: "Country-level revenue and spend — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
@@ -371,15 +365,8 @@ const PAGE_HELP_CONTENT = {
     doNotAssume: "This is a readiness/confidence audit only. It does NOT implement actual GCLID bridge attribution, OCT upload, or offline conversion tracking. It measures how ready the data is for those future capabilities.",
     checkNext: "Country Revenue & Spend to see how estimates will improve with better coverage, or System Status for GCLID pipeline health."
   },
-  "unit-economics": {
-    what: "Closed-won deals, customers, revenue and average deal value for the business, plus Period Revenue / Ad Spend and Spend per Customer Won This Period for the advertising scope. Those two are non-cohort operational ratios: closed-won outcomes may originate from earlier advertising periods. Acquisition-cohort cost and return ratios, LTV ratios and payback are shown as Unavailable with the reason.",
-    source: "Canonical HubSpot deal ledger + canonical Google Ads spend.",
-    howToUse: "Read the business totals first, then the advertising scope. Use the period ratios as operating signals, not as cohort economics.",
-    doNotAssume: "Lifetime value and payback are not shown: recurring revenue per deal is not held in the canonical ledger. The period ratios compare this period's closed revenue with this period's spend; they are not a return on the spend that acquired those customers.",
-    checkNext: "Campaign Revenue & Spend for campaign-level detail."
-  },
   scheduler: {
-    what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for daily/weekly/monthly jobs.",
+    what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for the daily, monthly, incremental-sync and certification jobs.",
     source: "Internal scheduler and run tracking. Ad-platform datasets (campaigns, search terms, keywords, geo) sync from the Google Ads API; lead/deal data syncs from HubSpot. Source labels: Google Ads API, HubSpot, GCLID Attribution, and Windsor legacy.",
     howToUse: "Check that jobs ran recently and completed successfully. Use manual triggers (admin only) to force a run if needed.",
     doNotAssume: "A successful run does not guarantee data quality — it means the job completed without errors. Check specific pages for data validation.",
@@ -415,7 +402,7 @@ const PAGE_DEPENDENCIES = {
   campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
-  geo:                     ["google_ads_api/geo"],
+  geo:                     ["google_ads_api/canonical_geo"],
   keywords:                ["google_ads_api/keyword_facts"],
   leads:                   ["hubspot/contacts"],
   deals:                   ["hubspot/deals"],
@@ -425,8 +412,7 @@ const PAGE_DEPENDENCIES = {
   health:                  [],
   backfill:                [],
   "roas-campaigns":          ["hubspot/deals", "google_ads_api/canonical_spend"],
-  "roas-countries":          ["hubspot/deals", "google_ads_api/geo"],
-  "unit-economics":          ["hubspot/deals", "google_ads_api/canonical_spend"],
+  "roas-countries":          ["hubspot/deals", "google_ads_api/canonical_geo"],
 };
 
 // ── Session state ──────────────────────────────────────────────────────────
@@ -955,7 +941,7 @@ function updateWindowControls(days) {
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === days);
   });
-  // Sync any local ROAS/unit-economics window dropdowns to match global
+  // Sync any local ROAS window dropdowns to match global
   document.querySelectorAll("[data-sync-window-select]").forEach((select) => {
     select.value = `${days}d`;
   });
@@ -1479,7 +1465,6 @@ function loadPage(page) {
     case "backfill":      loadBackfillStatus(); break;
     case "roas-campaigns":  loadRoasCampaigns();  break;
     case "roas-countries":  loadRoasCountries();  break;
-    case "unit-economics":  loadUnitEconomics();  break;
     case "revenue-health":  loadRevenueHealth();  break;
     case "revenue-by-source": loadRevenueBySource(); break;
     case "channels":        loadChannels();        break;
@@ -1648,7 +1633,7 @@ async function loadMonitoringStatus() {
 // data fetched by loadDataFreshness().  sectionKey matches the data-section
 // attribute on the placeholder <p id="run-meta-{sectionKey}">.
 //
-// Sections that depend on weekly/monthly data (campaigns, waste, keywords,
+// Sections that depend on monthly data (campaigns, waste, keywords,
 // geo, lead_quality, deals, gclid_attribution, search_terms,
 // ngrams, in_progress_leads) use the latest run of any type because the global
 // freshness bar already shows the latest run.  If no run data is available the
@@ -1725,7 +1710,8 @@ function _datasetDisplayName(key) {
     "google_ads_api/search_terms": "Search-term data",
     "google_ads_api/keyword_facts": "Keyword evidence data",
     "google_ads_api/keywords":     "Keyword data (legacy snapshot)",
-    "google_ads_api/geo":          "Geo data",
+    "google_ads_api/canonical_geo": "Country spend data (daily)",
+    "google_ads_api/geo":          "Geo data (legacy monthly snapshot)",
     "hubspot/contacts":     "Contacts data",
     "hubspot/deals":        "Deals data",
     "gclid/matches":        "Attribution data",
@@ -2132,7 +2118,6 @@ const CANONICAL_REASON_LABELS = {
   campaign_spend_mapping_unavailable: "this campaign has no mapped Google Ads spend",
   no_google_ads_spend_in_window: "no Google Ads spend in this window",
   no_customers_in_window: "no customers in this window",
-  numerator_and_denominator_scopes_differ: "numerator and denominator are different populations",
   canonical_coverage_not_proven: "deal-ledger coverage is not proven",
   canonical_ledger_stale: "the deal sync is overdue, so these figures may be out of date",
   canonical_ledger_unreadable: "the deal ledger could not be read",
@@ -10505,45 +10490,192 @@ function junkRateBadge(junkPct) {
   return `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
 }
 
-// Normalize a country string to a consistent key. Trims whitespace; maps
-// null, empty, or whitespace-only values to "(unknown)". Used by both the
-// geo performance aggregator and the lead-quality map so merging is lossless.
-function normalizeCountryKey(country) {
-  const value = (country || "").trim();
-  return value || "(unknown)";
+// ── Geo Intelligence page ──────────────────────────────────────────────────
+//
+// PR-ADS-165A: `/api/geo` returns ONE row per country with Google Ads spend
+// and HubSpot lead figures already joined on the canonical country identity.
+// This page joins nothing: joining on display text made "UK" leads and
+// "United Kingdom" spend two rows, and printed $0 beside the leads.
+//
+// Spend is the canonical DAILY country spend for N days through yesterday,
+// published only when every one of those days has a verified fetch made AFTER
+// that day ended (a day fetched while in progress is a part-day). So it is
+// available from the morning sync onward and Unavailable before it. The page
+// used to read the legacy `geo` snapshot, which only
+// the monthly job writes: mid-month the 7-day window held no rows and every
+// country rendered Spend $0 under "Fresh with data".
+//
+// The server decides; this page prints the verdict:
+//   published   — the figure. $0 only for a known country, in a covered
+//                 window, with no spend row, when the window also holds no
+//                 spend against a location nothing on record names.
+//   unavailable — "Unavailable", with the reason: the window is not fully
+//                 covered, an FX rate is missing, the lead country could not
+//                 be matched to a known country, or some of the window's
+//                 spend has no country and might be this one's. Never $0,
+//                 never the sum of the days that happen to be synced.
+
+/** "2026-12-08" → "8 Dec 2026". Dates are account-local calendar days. */
+function geoDay(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 }
 
-// ── Geo Intelligence page ──────────────────────────────────────────────────
+const GEO_COVERAGE_REASONS = {
+  geo_coverage_incomplete: "not every day of the window has been synced",
+  // Every day has been fetched at least once, but the newest was last fetched
+  // while it was still in progress: what is stored for it is a partial day.
+  spend_not_reread_since_day_ended: "yesterday's spend has not been re-read since the day ended",
+  // The same, but a sync covering those days has already run and FAILED.
+  spend_reread_failed: "the sync that should have re-read yesterday's spend failed",
+  account_time_zone_unknown: "the Google Ads account's time zone is not on record, so it cannot be told when each day ended",
+  geo_coverage_has_failed_chunks: "a sync of part of this window failed and has not been repeated",
+  geo_coverage_ledger_unreadable: "the record of which days were synced could not be read",
+  geo_rows_unreadable: "the synced country spend could not be read",
+  google_ads_customer_id_not_configured: "no Google Ads account is configured",
+};
+
+/**
+ * The spend verdict for the whole window, from the /api/geo response.
+ * Fail closed: anything that is not an explicit "covered" is unavailable.
+ * Returns { published, message }.
+ */
+function geoSpendVerdict(perfData) {
+  if (!perfData || perfData.db_unavailable) {
+    return { published: false, message: "Unavailable — country spend could not be loaded." };
+  }
+  const cov = perfData.coverage || {};
+  if (cov.status === "covered" && perfData.spend_status === "published" && Array.isArray(perfData.rows)) {
+    return { published: true, message: "" };
+  }
+  let why = GEO_COVERAGE_REASONS[cov.reason] || "coverage for this window is not proven";
+  if (cov.reason === "spend_not_reread_since_day_ended" || cov.reason === "spend_reread_failed") {
+    // "Yesterday" only when yesterday is the one day missing; otherwise say
+    // which days.
+    const failed = cov.reason === "spend_reread_failed";
+    const gaps = cov.missing_ranges || [];
+    const onlyYesterday = gaps.length === 1 && gaps[0].start === gaps[0].end && gaps[0].end === cov.requested_through;
+    if (!onlyYesterday && gaps.length) {
+      const first = gaps[0].start, last = gaps[gaps.length - 1].end;
+      why = failed
+        ? `the sync that should have re-read spend for ${geoDay(first)} to ${geoDay(last)} failed`
+        : `spend for ${geoDay(first)} to ${geoDay(last)} has not been re-read since those days ended`;
+    }
+    // A failed sync is not "wait for the morning sync": it already ran.
+    why += failed
+      ? " — what is stored for it is a part-day figure. This page stays unavailable until a sync succeeds"
+      : " — what is stored for it is a part-day figure. The morning sync re-reads it; this page is available after that";
+  }
+  const requested = cov.requested_through
+    ? (cov.requested_from
+        ? `${geoDay(cov.requested_from)} to ${geoDay(cov.requested_through)}`
+        : `all time to ${geoDay(cov.requested_through)}`)
+    : "the selected window";
+  if (cov.status === "not_covered" && cov.covered_from && cov.covered_through) {
+    return {
+      published: false,
+      message: `Unavailable — Google Ads country spend is complete for ${geoDay(cov.covered_from)} to ${geoDay(cov.covered_through)} only, not for the whole window (${requested}): ${why}. No spend is shown, because part of a window is not the window.`,
+    };
+  }
+  if (cov.status === "not_covered") {
+    return {
+      published: false,
+      message: `Unavailable — no day of this window (${requested}) has been synced for Google Ads country spend: ${why}.`,
+    };
+  }
+  return { published: false, message: `Unavailable — Google Ads country spend for ${requested} cannot be verified: ${why}.` };
+}
+
+/**
+ * A spend figure on this page. `fmtDollar` rounds to whole dollars, so 39
+ * cents would print "$0" — a zero that was not measured. Anything above zero
+ * and below a dollar reads "<$1". (Not changed in fmtDollar: other pages.)
+ */
+function geoFmtSpend(v) {
+  if (v === null || v === undefined) return "Unavailable";
+  if (v > 0 && v < 1) return "<$1";
+  return fmtDollar(v);
+}
+
+const GEO_ROW_SPEND_REASONS = {
+  spend_location_unresolved: "some spend in this window has no country",
+  country_not_matched: "country not matched",
+  no_country_recorded: "no country recorded",
+  fx_rate_missing: "FX rate missing",
+};
+
+/** One country's Spend cell. `spend_usd === null` is unknown, never 0. */
+function geoSpendCell(row) {
+  if (row.spend_status !== "published" || row.spend_usd === null || row.spend_usd === undefined) {
+    const why = GEO_ROW_SPEND_REASONS[row.spend_reason];
+    const title = row.spend_reason === "spend_location_unresolved"
+      ? "No spend is recorded against this country, but some of this window's spend was reported by Google Ads without a country (the unresolved location row). That spend may be this country's, so this is not a zero."
+      : row.spend_reason === "country_not_matched"
+      ? "This lead country is not a country name the system recognises, so it cannot be matched to Google Ads spend. It may be a spelling of a country listed above."
+      : row.spend_reason === "no_country_recorded"
+        ? "These leads have no country recorded, so there is no country's spend to show beside them."
+      : row.spend_reason === "fx_rate_missing"
+        ? "An FX rate is missing for at least one day of this country's spend."
+        : "Country spend for this window is not published.";
+    return `<span class="td--na" title="${escapeHtml(title)}">Unavailable${why ? ` — ${escapeHtml(why)}` : ""}</span>`;
+  }
+  return geoFmtSpend(row.spend_usd);
+}
+
+const GEO_NA = '<span class="td--na">Unavailable</span>';
+
+/** A lead count cell: unknown when the lead summary could not be read. A
+ *  count the server sent is printed as the number it is — 0 for a zero. */
+function geoLeadCell(value) {
+  if (value === null || value === undefined) return GEO_NA;
+  return String(value);
+}
+
+/** Top Campaign / Top Keyword as plain text. "Several" when the spellings
+ *  merged into this country name different ones: the most common across
+ *  them cannot be told from what the lead summary carries. */
+function geoTopText(row, field, leadsAvailable) {
+  if (!leadsAvailable) return "Unavailable";
+  if (row[`${field}_several`]) return "Several";
+  return row[field] || "—";
+}
+
+let geoSpendState = { published: false, message: "" };
+// False when the lead summary could not be read: every lead column is then
+// unknown, and says so — never a dash, which reads as "none".
+let geoLeadsAvailable = true;
 
 async function loadGeo() {
   renderPageDatasetFreshness("geo");
   const tableEl = document.getElementById("geo-table-body");
   const mapEl   = document.getElementById("geo-map");
-  const mapFallbackEl = document.getElementById("geo-map-fallback");
+  const noticeEl = document.getElementById("geo-spend-notice");
+  const rangeEl  = document.getElementById("geo-spend-range");
 
   if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading geo intelligence…</p>`;
   if (mapEl)   mapEl.innerHTML   = "";
+  if (noticeEl) { noticeEl.hidden = true; noticeEl.textContent = ""; }
+  if (rangeEl)  { rangeEl.hidden = true;  rangeEl.textContent = ""; }
 
-  const evWindow = evidenceWindowQuery();
-
-  // Fetch both endpoints; partial failures are tolerated.
-  let perfData  = null;
-  let leadsData = null;
-
-  try {
-    perfData = await fetchJSON(`/api/geo?${evWindow}`);
-  } catch (_) { /* geo performance unavailable */ }
-
-  try {
-    leadsData = await fetchJSON(`/api/leads/country-summary?${evWindow}`);
-  } catch (_) { /* lead country summary unavailable */ }
-
-  // Both failed
-  if (!perfData && !leadsData) {
-    ["geo-kpi-countries", "geo-kpi-spend", "geo-kpi-sqls", "geo-kpi-junk"].forEach((id) => {
+  const setKpis = (values) => {
+    ["geo-kpi-countries", "geo-kpi-spend", "geo-kpi-sqls", "geo-kpi-junk"].forEach((id, i) => {
       const el = document.getElementById(id);
-      if (el) el.textContent = "—";
+      if (el) el.textContent = values[i];
     });
+  };
+
+  // One request: the server joins spend and leads on the country identity.
+  let data = null;
+  try {
+    data = await fetchJSON(`/api/geo?${evidenceWindowQuery()}`);
+  } catch (_) { /* country evidence unavailable */ }
+
+  if (!data || !Array.isArray(data.rows)) {
+    geoMergedRows = [];
+    geoSpendState = { published: false, message: "" };
+    setKpis(["—", "—", "—", "—"]);
     if (tableEl) tableEl.innerHTML = `
       <div class="geo-empty-state">
         <p class="empty-state">Could not load geo intelligence. Check API health or run status.</p>
@@ -10551,110 +10683,87 @@ async function loadGeo() {
     return;
   }
 
-  // Aggregate geo performance rows by country
-  const perfByCountry = new Map();
-  for (const row of ((perfData && !perfData.db_unavailable) ? perfData.rows || [] : [])) {
-    const key = normalizeCountryKey(row.country);
-    if (!perfByCountry.has(key)) {
-      perfByCountry.set(key, {
-        spend_usd: 0, clicks: 0, impressions: 0, conversions: 0,
-        campaigns: new Map(), last_run_date: null,
-      });
-    }
-    const agg = perfByCountry.get(key);
-    agg.spend_usd    += row.spend_usd    || 0;
-    agg.clicks       += row.clicks       || 0;
-    agg.impressions  += row.impressions  || 0;
-    agg.conversions  += (row.conversions || 0);
-    if (row.campaign_name) {
-      const prev = agg.campaigns.get(row.campaign_name) || 0;
-      agg.campaigns.set(row.campaign_name, prev + (row.spend_usd || 0));
-    }
-    if (row.last_run_date && (!agg.last_run_date || row.last_run_date > agg.last_run_date)) {
-      agg.last_run_date = row.last_run_date;
-    }
+  const verdict = geoSpendVerdict(data);
+  geoSpendState = verdict;
+  if (noticeEl && !verdict.published) {
+    noticeEl.textContent = verdict.message;
+    noticeEl.hidden = false;
+  }
+  // Say which days the spend is for. The window ends yesterday, not today
+  // (today's spend is still arriving), and is published only once yesterday
+  // was re-read after it ended — which the server's verdict has checked.
+  const range = data.window_range || {};
+  if (rangeEl && verdict.published && range.through) {
+    rangeEl.textContent = (range.from
+      ? `Spend is for ${geoDay(range.from)} through ${geoDay(range.through)}`
+      : `Spend is for all synced days through ${geoDay(range.through)}`)
+      + ", re-read after that day ended. Today is not included."
+      + " Lead counts cover a different period — the same number of days counted through today, by lead run date — so do not divide one by the other.";
+    rangeEl.hidden = false;
+  }
+  // Spend Google reported against a location nothing on record names. The
+  // total includes it; a country with no spend of its own cannot be called
+  // zero while it is there.
+  const loose = data.unresolved_spend || {};
+  if (noticeEl && verdict.published && loose.blocks_zero) {
+    const amount = (loose.spend_usd !== null && loose.spend_usd !== undefined)
+      ? `${geoFmtSpend(loose.spend_usd)} of this window's spend`
+      : "Some of this window's spend";
+    const where = loose.criteria === 1 ? "one location" : `${loose.criteria} locations`;
+    noticeEl.textContent = `${amount} was reported by Google Ads against ${where} with no country on record. It is in the total and in the "(unresolved location)" row. A country with no spend of its own reads "Unavailable" rather than zero, because that spend may be its own. Countries that show a figure are not affected.`;
+    noticeEl.hidden = false;
   }
 
-  // Build lead quality lookup by country
-  const leadsByCountry = new Map();
-  for (const row of ((leadsData && !leadsData.db_unavailable) ? leadsData.rows || [] : [])) {
-    const key = normalizeCountryKey(row.country);
-    leadsByCountry.set(key, row);
-  }
-
-  // Merge — union of all countries from both sources
-  const allCountries = new Set([...perfByCountry.keys(), ...leadsByCountry.keys()]);
-
-  const merged = [];
-  for (const country of allCountries) {
-    const perf  = perfByCountry.get(country) || null;
-    const leads = leadsByCountry.get(country) || null;
-
-    // Derive top campaign from perf spend
-    let topCampaign = (leads && leads.top_campaign) || null;
-    if (perf && perf.campaigns.size > 0) {
-      topCampaign = [...perf.campaigns.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    }
-
-    merged.push({
-      country,
-      spend_usd:        perf  ? Math.round(perf.spend_usd * 100) / 100 : 0,
-      clicks:           perf  ? perf.clicks       : 0,
-      impressions:      perf  ? perf.impressions  : 0,
-      conversions:      perf  ? Math.round(perf.conversions * 100) / 100 : 0,
-      campaigns_count:  perf  ? perf.campaigns.size : 0,
-      top_campaign:     topCampaign,
-      top_keyword:      leads ? leads.top_keyword   : null,
-      total_leads:      leads ? leads.total_leads   : 0,
-      confirmed_sqls:   leads ? leads.confirmed_sqls  : 0,
-      in_progress:      leads ? leads.in_progress    : 0,
-      confirmed_junk:   leads ? leads.confirmed_junk  : 0,
-      wrong_fit:        leads ? leads.wrong_fit       : 0,
-      unknown:          leads ? leads.unknown         : 0,
-      verdicted_leads:  leads ? leads.verdicted_leads : 0,
-      junk_rate_pct:    leads ? leads.junk_rate_pct   : null,
-      last_run_date:    (perf && perf.last_run_date)
-                          ? perf.last_run_date
-                          : (leads ? leads.last_run_date : null),
-    });
-  }
-
-  // Sort: spend desc, then total_leads desc
-  merged.sort((a, b) => {
-    if (b.spend_usd !== a.spend_usd) return b.spend_usd - a.spend_usd;
-    return b.total_leads - a.total_leads;
+  // The rows are printed as served. Fail closed on the window verdict: if the
+  // window is not published no row's spend is read, whatever the row says.
+  const leadsAvailable = data.leads_status === "published";
+  const merged = data.rows.map((r) => {
+    const rowPublished = verdict.published && r.spend_status === "published"
+      && r.spend_usd !== null && r.spend_usd !== undefined;
+    return {
+      ...r,
+      spend_usd:    rowPublished ? r.spend_usd : null,
+      spend_status: rowPublished ? "published" : "unavailable",
+      spend_reason: rowPublished ? null : (r.spend_reason || null),
+    };
   });
-
   geoMergedRows = merged;
 
+  // KPI cards, from the server's own totals. A figure that needs spend is
+  // Unavailable when spend is.
+  const totalSpend = (verdict.published && data.total_spend_usd !== null && data.total_spend_usd !== undefined)
+    ? data.total_spend_usd : null;
+  const unmatched = data.unmatched_lead_countries || 0;
+  const countriesActive = (verdict.published && data.countries_active !== null && data.countries_active !== undefined)
+    ? `${data.countries_active}${unmatched ? ` (+${unmatched} not matched)` : ""}`
+    : "Unavailable";
+  // Countries only: an unmatched lead text and "No country recorded" are not
+  // countries, and are not counted as one.
+  const countryRows   = merged.filter((r) => r.country_resolved === true);
+  const countriesSQLs = countryRows.filter((r) => r.confirmed_sqls > 0).length;
+  const highJunk      = countryRows.filter((r) => r.junk_rate_pct !== null && r.junk_rate_pct !== undefined && r.junk_rate_pct >= uiThresholds.junk_rate.high_pct).length;
+  geoLeadsAvailable = leadsAvailable;
+  setKpis([
+    countriesActive,
+    totalSpend === null ? "Unavailable" : geoFmtSpend(totalSpend),
+    leadsAvailable ? String(countriesSQLs) : "Unavailable",
+    leadsAvailable ? String(highJunk) : "Unavailable",
+  ]);
+
   if (merged.length === 0) {
-    ["geo-kpi-countries", "geo-kpi-spend", "geo-kpi-sqls", "geo-kpi-junk"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = "—";
-    });
+    // Nothing to list. Say which of the two facts that is: a covered window
+    // with no spend and no leads, or a window whose spend is not known.
     if (tableEl) tableEl.innerHTML = `
       <div class="geo-empty-state">
-        <p class="empty-state">No geo intelligence available for the selected window.</p>
-        <p class="geo-empty-subtext">No Google Ads API geo data has been synced yet. Run the weekly or monthly scheduler or check System Status.</p>
+        <p class="empty-state">${!leadsAvailable
+          ? "Lead figures could not be read."
+          : verdict.published
+            ? "No Google Ads country spend and no leads in the selected window."
+            : "No leads in the selected window."}</p>
+        ${verdict.published ? "" : `<p class="geo-empty-subtext">Google Ads API country spend: ${escapeHtml(verdict.message)}</p>`}
       </div>`;
     return;
   }
-
-  // KPI cards
-  const countriesActive = merged.filter((r) => r.spend_usd > 0 || r.total_leads > 0).length;
-  const totalSpend      = merged.reduce((s, r) => s + r.spend_usd, 0);
-  const countriesSQLs   = merged.filter((r) => r.confirmed_sqls > 0).length;
-  const highJunk        = merged.filter((r) => r.junk_rate_pct !== null && r.junk_rate_pct >= uiThresholds.junk_rate.high_pct).length;
-
-  const kpiCountriesEl = document.getElementById("geo-kpi-countries");
-  const kpiSpendEl     = document.getElementById("geo-kpi-spend");
-  const kpiSQLsEl      = document.getElementById("geo-kpi-sqls");
-  const kpiJunkEl      = document.getElementById("geo-kpi-junk");
-
-  if (kpiCountriesEl) kpiCountriesEl.textContent = String(countriesActive);
-  if (kpiSpendEl)     kpiSpendEl.textContent     = fmtDollar(totalSpend);
-  if (kpiSQLsEl)      kpiSQLsEl.textContent      = String(countriesSQLs);
-  if (kpiJunkEl)      kpiJunkEl.textContent      = String(highJunk);
 
   // Map
   renderGeoMap(merged, "total_leads");
@@ -10693,25 +10802,25 @@ function renderGeoMap(rows, metric) {
   };
 
   const countries  = rows.map((r) => r.country);
-  // junk_rate_pct is intentionally nullable (null = no verdicted leads, not 0% junk).
-  // Preserve null for that metric so any future map renderer treats it as missing
-  // data rather than zero. Other numeric metrics default to 0 when absent.
-  const nullableMetrics = new Set(["junk_rate_pct"]);
+  // PR-ADS-165A: null is unknown and is drawn as NO value — never as 0. Spend
+  // is null when it is not published for the window; a lead count is null
+  // when the lead summary could not be read; junk_rate_pct is null with no
+  // verdicted leads. The server sends a real 0 where a 0 was measured.
   const values = rows.map((r) => {
     const value = r[metric];
-    if (value != null) return value;
-    return nullableMetrics.has(metric) ? null : 0;
+    return (value === null || value === undefined) ? null : value;
   });
+  const known = (v) => (v === null || v === undefined) ? "Unavailable" : v;
 
   const customdata = rows.map((r) => [
     r.country,
-    r.spend_usd != null ? fmtDollar(r.spend_usd) : "—",
-    r.total_leads  || 0,
-    r.confirmed_sqls || 0,
-    r.confirmed_junk || 0,
-    r.junk_rate_pct != null ? r.junk_rate_pct.toFixed(1) + "%" : "—",
-    r.top_campaign || "—",
-    r.top_keyword  || "—",
+    geoFmtSpend(r.spend_usd),
+    known(r.total_leads),
+    known(r.confirmed_sqls),
+    known(r.confirmed_junk),
+    r.junk_rate_pct != null ? r.junk_rate_pct.toFixed(1) + "%" : (geoLeadsAvailable ? "—" : "Unavailable"),
+    geoTopText(r, "top_campaign", geoLeadsAvailable),
+    geoTopText(r, "top_keyword", geoLeadsAvailable),
   ]);
 
   const data = [{
@@ -10763,8 +10872,6 @@ function renderGeoTable(rows) {
       <tr>
         <th>Country</th>
         <th class="td--num">Spend</th>
-        <th class="td--num">Clicks</th>
-        <th class="td--num">Conv.</th>
         <th class="td--num">Leads</th>
         <th class="td--num">SQLs</th>
         <th class="td--num">In Progress</th>
@@ -10772,29 +10879,31 @@ function renderGeoTable(rows) {
         <th>Junk Rate</th>
         <th>Top Campaign</th>
         <th>Top Keyword</th>
-        <th>Last Run</th>
+        <th title="The date of the newest lead run for this country.">Leads as of</th>
       </tr>
     </thead>`;
 
   const tbody = rows.map((r) => {
-    const badge = junkRateBadge(r.junk_rate_pct);
+    const badge = geoLeadsAvailable ? junkRateBadge(r.junk_rate_pct) : GEO_NA;
+    const top = (field) => {
+      const text = geoTopText(r, field, geoLeadsAvailable);
+      return text === "Unavailable" ? GEO_NA : escapeHtml(text);
+    };
 
     return `
       <tr data-country="${escapeHtml(r.country)}"
           data-campaign="${escapeHtml(r.top_campaign || "")}"
           data-keyword="${escapeHtml(r.top_keyword || "")}">
         <td class="td--name">${escapeHtml(r.country)}</td>
-        <td class="td--num">${r.spend_usd > 0 ? fmtDollar(r.spend_usd) : "—"}</td>
-        <td class="td--num">${r.clicks > 0 ? r.clicks : "—"}</td>
-        <td class="td--num">${r.conversions > 0 ? r.conversions.toFixed(1) : "—"}</td>
-        <td class="td--num">${r.total_leads > 0 ? r.total_leads : "—"}</td>
-        <td class="td--num">${r.confirmed_sqls > 0 ? r.confirmed_sqls : "—"}</td>
-        <td class="td--num">${r.in_progress > 0 ? r.in_progress : "—"}</td>
-        <td class="td--num">${r.confirmed_junk > 0 ? r.confirmed_junk : "—"}</td>
+        <td class="td--num">${geoSpendCell(r)}</td>
+        <td class="td--num">${geoLeadCell(r.total_leads)}</td>
+        <td class="td--num">${geoLeadCell(r.confirmed_sqls)}</td>
+        <td class="td--num">${geoLeadCell(r.in_progress)}</td>
+        <td class="td--num">${geoLeadCell(r.confirmed_junk)}</td>
         <td>${badge}</td>
-        <td>${escapeHtml(r.top_campaign || "—")}</td>
-        <td>${escapeHtml(r.top_keyword || "—")}</td>
-        <td>${escapeHtml(r.last_run_date || "—")}</td>
+        <td>${top("top_campaign")}</td>
+        <td>${top("top_keyword")}</td>
+        <td>${geoLeadsAvailable ? escapeHtml(r.last_run_date || "—") : GEO_NA}</td>
       </tr>`;
   }).join("");
 
@@ -11493,6 +11602,16 @@ function wireTermsControls() {
 // page read `waste_terms` run snapshots and multiplied spend by the number of
 // runs that had seen a term.
 
+// PR-ADS-165A: how fresh a flag can be. Waste detection ran in the weekly job
+// (retired) and in the monthly job; the monthly job is now its only writer.
+// The spend, clicks and dates beside a flag still come from the daily
+// search-term sync — only the flag itself is monthly.
+const FLAG_DETECTION_CADENCE_NOTE =
+  "Waste detection runs once a month, on the 1st, over the previous 30 days. " +
+  "A flag here can be up to a month old, and a term first seen since the last " +
+  "monthly run has not been checked yet — its absence from this tab is not a " +
+  "clean result. Spend, clicks and dates are from the daily search-term sync.";
+
 const FLAG_REVIEW_ACTIONS = [
   { state: "keep",              label: "Keep" },
   { state: "monitor",           label: "Monitor" },
@@ -11588,7 +11707,8 @@ function renderFlaggedTab() {
     </div>
     <p class="grace-note">Flag evidence comes from durable waste classification, never from
       "spend with no SQLs". Review decisions are stored locally only — Averroes never adds
-      negative keywords or writes anything to Google Ads.</p>`;
+      negative keywords or writes anything to Google Ads.</p>
+    <p class="grace-note" id="st-flagged-cadence-note">${escapeHtml(FLAG_DETECTION_CADENCE_NOTE)}</p>`;
   renderFlaggedTable();
   wireFlaggedControls();
 }
@@ -12284,7 +12404,7 @@ function renderStTermDrawer(body, data) {
       <div class="drawer-section__title">Classification Proof</div>
       <table class="drawer-table st-fact-table"><tbody>
         ${factRow("Review state", stStateBadge(cls.state))}
-        ${factRow("State source", cls.state_source ? escapeHtml(({durable_flag: "Durable flag (search_terms)", waste_terms: "Confirmed waste evidence (weekly detection)", durable_reviewed_clean: "Durable reviewed clean", unclassified: "Unclassified — needs review"})[cls.state_source] || cls.state_source) : "—")}
+        ${factRow("State source", cls.state_source ? escapeHtml(({durable_flag: "Durable flag (search_terms)", waste_terms: "Confirmed waste evidence (scheduled waste detection)", durable_reviewed_clean: "Durable reviewed clean", unclassified: "Unclassified — needs review"})[cls.state_source] || cls.state_source) : "—")}
         ${factRow("Junk category", cls.junk_categories && cls.junk_categories.length ? escapeHtml(cls.junk_categories.join(", ")) : "—")}
         ${factRow("Matched rule / pattern", cls.matched_patterns && cls.matched_patterns.length ? escapeHtml(cls.matched_patterns.join(", ")) : "—")}
         ${factRow("CRM-junk confirmations", cls.crm_junk_confirmed !== null && cls.crm_junk_confirmed !== undefined ? fmtCount(cls.crm_junk_confirmed) : stUnavailable())}
@@ -13699,7 +13819,7 @@ async function triggerRun(jobType) {
     if (res.ok && data.status === "success") {
       showSchedFeedback("success", `Run completed. Finished at ${escapeHtml(data.finished_at || "—")}.`);
     } else if (res.ok && data.status === "partial") {
-      // PR-ADS-162H: the weekly and monthly data refreshes report their own
+      // PR-ADS-162H: the monthly data refresh reports its own
       // outcome. Partial is neither success nor failure: the run finished and
       // at least one step did not land, so the steps are named.
       // showSchedFeedback() assigns textContent, so the step names need no
@@ -14378,7 +14498,9 @@ function renderWarRoom(el, data) {
   // Scheduler Timeline
   const sched = data.scheduler || {};
   html += `<div class="war-room-section"><h3 class="war-room-section__title">Scheduler Latest Runs</h3><div class="war-room-scheduler">`;
-  for (const [key, label] of [["latest_daily", "Daily"], ["latest_weekly", "Weekly"], ["latest_monthly", "Monthly"], ["latest_incremental", "Incremental"]]) {
+  // PR-ADS-165A: no Weekly tile — the weekly job is retired, so its last run
+  // is history and not a live health signal.
+  for (const [key, label] of [["latest_daily", "Daily"], ["latest_monthly", "Monthly"], ["latest_incremental", "Incremental"]]) {
     const run = sched[key];
     const runStatus = run ? run.status : "not_run";
     // PR-ADS-163B: a partial run is not the same grey as "never ran".
@@ -14431,7 +14553,7 @@ function datasetRelatedPage(source, dataset) {
   const map = {
     "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
     "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
-    "google_ads_api/geo":          { page: "geo",           label: "Country Performance" },
+    "google_ads_api/canonical_geo": { page: "geo",          label: "Country Performance" },
     "google_ads_api/canonical_spend": { page: "campaigns",  label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Leads" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },
@@ -14649,7 +14771,7 @@ function renderDatasetFreshness(data) {
     return `
       <tr>
         <td>${row.source ? _sourceDisplayName(row.source) : "—"}</td>
-        <td class="td--name">${escapeHtml(fmt(row.dataset).replace(/_/g, " "))}</td>
+        <td class="td--name">${escapeHtml(fmt(row.dataset).replace(/_/g, " "))}${row.refresh_cadence === "monthly" ? ' <span class="td--na" title="Written by the monthly job only (1st of the month). Fresh means refreshed on that schedule, not recent.">· refreshed monthly</span>' : ""}</td>
         <td><span class="freshness-status-badge ${badgeCls}"${reasonTip}>${badgeLabel}</span></td>
         <td>${rowsCell}</td>
         <td>${row.last_successful_sync_at ? fmtDate(row.last_successful_sync_at) : '<span class="td--na">—</span>'}</td>
@@ -16196,14 +16318,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     bySourceWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-  // Wire up Unit Economics controls
-  const ueRefresh = document.getElementById("unit-economics-refresh-btn");
-  const ueWindow  = document.getElementById("unit-economics-window");
-  if (ueRefresh) ueRefresh.addEventListener("click", loadUnitEconomics);
-  // PR-ADS-153E-B: the selector now carries a BUSINESS window, so it must go to
-  // the business-window handler. Leaving it on the day-window handler fed a
-  // business key into `parseInt("current_quarter")` and silently reverted the page.
-  if (ueWindow)  ueWindow.addEventListener("change", handleBusinessWindowSelectChange);
 
 
   // Force-close help drawer on startup (PR-ADS-098: ensures clean state)
@@ -16468,9 +16582,6 @@ function handleBusinessWindowSelectChange(e) {
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
     case "revenue-by-source": loadRevenueBySource(); break;
-    // PR-ADS-153E-B: Unit Economics now shares this selector, so it must reload
-    // ITSELF — falling through to the default reloaded Campaign Revenue & Spend instead.
-    case "unit-economics":  loadUnitEconomics(); break;
     default:                loadRoasCampaigns();
   }
 }
@@ -18160,145 +18271,6 @@ document.addEventListener("click", (e) => {
     setTimeout(() => { if (typeof runSpendBackfillJob === "function") runSpendBackfillJob(false); }, 0);
   }
 });
-
-// ── Unit Economics ─────────────────────────────────────────────────────────
-
-let unitEconomicsData = null;
-let unitEconomicsStatus = "idle";
-
-// PR-ADS-153E-B: the advertising scope Unit Economics computes CAC / ROAS at.
-// Sent explicitly so the page can never be read as a company-wide total: the
-// business figures beside it are `all_source`, and the two must stay labelled.
-const UNIT_ECONOMICS_SCOPE = "campaign_attributable";
-
-async function loadUnitEconomics() {
-  // PR-ADS-153E-B: business window, not a rolling day window.
-  const window_ = getRoasBusinessWindow();
-
-  unitEconomicsStatus = "loading";
-  const body = document.getElementById("unit-economics-table-body");
-  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading unit economics…</p>';
-
-  try {
-    const res = await fetch(
-      `/api/reports/unit-economics?window=${encodeURIComponent(window_)}` +
-      `&scope=${encodeURIComponent(UNIT_ECONOMICS_SCOPE)}`,
-      { credentials: "same-origin" });
-    if (!res.ok) {
-      unitEconomicsStatus = "error";
-      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load unit economics.</p>';
-      return;
-    }
-    unitEconomicsData = await res.json();
-    unitEconomicsStatus = "ok";
-    renderUnitEconomicsPage();
-  } catch (err) {
-    console.error("[loadUnitEconomics]", err);
-    unitEconomicsStatus = "error";
-    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading unit economics.</p>';
-  }
-}
-
-function renderUnitEconomicsPage() {
-  const kpiGrid = document.getElementById("unit-economics-kpis");
-  const verdictEl = document.getElementById("unit-economics-verdict");
-  const tableBody = document.getElementById("unit-economics-table-body");
-
-  if (!unitEconomicsData) {
-    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No unit economics data available.</p>';
-    renderPageExplanation("unit-economics", { forceVisible: true });
-    return;
-  }
-
-  const d = unitEconomicsData;
-  // PR-ADS-153E-B: two labelled populations. `business` is all_source — the
-  // company. `advertising` is the declared attribution scope, and is the only
-  // one CAC/ROAS may be computed on. A withheld metric renders as "Unavailable"
-  // with its reason; it is never shown as 0.
-  const business = d.business || {};
-  const advertising = d.advertising || {};
-  const withheld = d.unavailable || [];
-  const reasonFor = (metric) => (withheld.find((u) => u.metric === metric) || {}).reason || "";
-
-  // Average deal value = revenue ÷ won deals, so when it is null it is null for
-  // the reason of whichever input is not published — never a bare word.
-  const avgDealInput = (block) => {
-    const m = (block || {}).metrics || {};
-    const rev = m.revenue_usd || m.won_revenue_usd;
-    if (rev && rev.status && rev.status !== "published") return rev;
-    const deals = m.closed_won_deals;
-    if (deals && deals.status && deals.status !== "published") return deals;
-    return null;
-  };
-  // The window-level verdict when no population is released: the canonical
-  // deal-count metric carries its status ("withheld" for a CRM finding,
-  // "unavailable" for an outage) and reason.
-  const populationVerdict = (business.metrics || {}).closed_won_deals;
-
-  if (kpiGrid) {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">Closed-won deals (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "closed_won_deals", fmt, businessBlockerOpts())}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Customers (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "customers", fmt, businessBlockerOpts())}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Closed-won revenue (all sources)</div><div class="kpi-card__value">${rowMetricHtml(business, "revenue_usd", fmtMoney, businessBlockerOpts())}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Avg deal value</div><div class="kpi-card__value">${canonicalValueHtml(business.avg_deal_value_usd, avgDealInput(business), fmtMoney, businessBlockerOpts())}</div></div>
-      <div class="kpi-card" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}"><div class="kpi-card__label">${PERIOD_SPEND_PER_CUSTOMER_LABEL} (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</div></div>
-      <div class="kpi-card" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}"><div class="kpi-card__label">${PERIOD_RATIO_LABEL} (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${rowMetricHtml(advertising, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">${CERTIFIED_RATIO_LABELS.cac}</div><div class="kpi-card__value">${rowMetricHtml(advertising, "cac", fmtMoney, businessBlockerOpts())}</div></div>
-      <div class="kpi-card" title="${escapeHtml(reasonFor("ltv_to_cac"))}"><div class="kpi-card__label">LTV/CAC</div><div class="kpi-card__value">Unavailable</div></div>
-    `;
-  }
-
-  if (verdictEl) {
-    if (d.revenue_available === false) {
-      // Withheld (a CRM finding, with View blockers for admins) or Unavailable
-      // (an outage), with the canonical reason in words — never a raw code.
-      const verdictHtml = populationVerdict && populationVerdict.status
-        ? canonicalMetricHtml(populationVerdict, fmt, businessBlockerOpts())
-        : `<span class="badge badge--warn">Unavailable</span> ${escapeHtml(canonicalReasonLabel(d.revenue_unavailable_reason) || "reason not reported")}`;
-      verdictEl.innerHTML = `
-        <div class="unit-economics-verdict-card">
-          <span class="unit-economics-verdict-explanation">Closed-won population for this window: ${verdictHtml}. ${escapeHtml("No legacy revenue source is used as a fallback.")}</span>
-        </div>`;
-    } else {
-      verdictEl.innerHTML = `
-        <div class="unit-economics-verdict-card">
-          <span class="unit-economics-verdict-explanation">${escapeHtml(
-            "Revenue: canonical HubSpot deal ledger. Spend: canonical Google Ads. " +
-            "LTV/CAC and payback are withheld — " + reasonFor("ltv_to_cac"))}</span>
-        </div>`;
-    }
-  }
-
-  const campaigns = d.by_campaign || d.campaigns || [];
-  if (!campaigns.length) {
-    if (tableBody) {
-      // A withheld window has no campaign rows because nothing was released,
-      // not because no campaign exists — say which.
-      tableBody.innerHTML = d.revenue_available === false && populationVerdict && populationVerdict.status
-        ? `<p class="empty-state" style="padding:var(--space-5)">Campaign economics for this window: ${canonicalMetricHtml(populationVerdict, fmt, businessBlockerOpts())}</p>`
-        : '<p class="empty-state" style="padding:var(--space-5)">No campaign-level economics data.</p>';
-    }
-    return;
-  }
-
-  if (tableBody) {
-    const headerRow = `<tr>
-      <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>Customers</th><th>Won Revenue</th>
-      <th>Avg Deal Value</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_SPEND_PER_CUSTOMER_LABEL}</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th>
-    </tr>`;
-    const rows = campaigns.map((r) => `<tr>
-      <td>${escapeHtml(r.campaign || "")}</td>
-      <td>${r.spend === null || r.spend === undefined ? "Unavailable" : fmtMoney(r.spend)}</td>
-      <td>${rowMetricHtml(r, "closed_won_deals", fmt, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "customers", fmt, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, businessBlockerOpts())}</td>
-      <td>${canonicalValueHtml(r.avg_deal_value_usd, avgDealInput(r), fmtMoney, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</td>
-    </tr>`).join("");
-    tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
-  }
-}
 
 // ── Page Help Drawer (PR-ADS-071) ─────────────────────────────────────────
 

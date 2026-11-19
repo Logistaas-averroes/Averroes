@@ -5,7 +5,7 @@ ONE shared path keeps the durable ``keyword_daily_facts`` table current and
 complete so operators never need a Render Shell for normal use:
 
   - ``sync_keyword_daily_facts(date_from, date_to, sync_type)`` — the single
-    keyword-fact sync used by the daily/weekly/monthly schedulers, the admin
+    keyword-fact sync used by the daily/monthly schedulers, the admin
     refresh action and the bootstrap. Pulls the range from the DIRECT Google Ads
     API and upserts on the immutable natural key (no duplication), tracking a
     ``google_ads_api/keyword_facts`` sync batch + state. Skipped-identity rows or

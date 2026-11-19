@@ -152,7 +152,8 @@ def test_recent_incremental_uses_rolling_account_local_window(sync_env):
     assert a == "2026-06-14"   # today + previous 29 days inclusive
 
 
-@pytest.mark.parametrize("module_name", ["scheduler.daily", "scheduler.weekly", "scheduler.monthly"])
+# PR-ADS-165A: "scheduler.weekly" was the third module here; it is deleted.
+@pytest.mark.parametrize("module_name", ["scheduler.daily", "scheduler.monthly"])
 def test_all_schedulers_route_through_shared_sync(module_name):
     """§3 — no competing keyword-fact sync paths: every scheduler imports the
     shared service, never a bespoke write_keyword_daily_facts block."""

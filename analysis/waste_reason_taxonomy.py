@@ -6,7 +6,7 @@ Queue and any report that names why a search term was flagged.
 
 Why this module exists
 ----------------------
-The raw reason values are the ``junk_category`` keys written by the weekly waste
+The raw reason values are the ``junk_category`` keys written by the monthly waste
 detection run, which come from ``config/junk_patterns.yaml``. Before this PR the
 consuming surfaces each re-interpreted those raw keys inline:
 

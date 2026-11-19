@@ -52,7 +52,8 @@ _needs_pg = pytest.mark.skipif(
 _SYNC_SRC = (_ROOT / "scheduler" / "incremental_sync.py").read_text(encoding="utf-8")
 _AUDIT = "scripts.audit_keyword_search_term_freshness"
 
-_SCHEDULERS = ("scheduler/daily.py", "scheduler/weekly.py", "scheduler/monthly.py")
+# PR-ADS-165A: "scheduler/weekly.py" was listed here; the weekly job is deleted.
+_SCHEDULERS = ("scheduler/daily.py", "scheduler/monthly.py")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -821,8 +822,9 @@ def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
         encoding="utf-8")
     assert "FROM keywords" not in kw_evidence
 
-    # The weekly/monthly schedulers still write it, and still label it legacy.
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
+    # The monthly scheduler still writes it, and still labels it legacy.
+    # (PR-ADS-165A: the weekly scheduler did too, until it was retired.)
+    for rel in ("scheduler/monthly.py",):
         assert "write_keywords(" in (_ROOT / rel).read_text(encoding="utf-8"), rel
 
 

@@ -168,14 +168,6 @@
             <span class="nav-item__label">Country Revenue &amp; Spend</span>
           </a>
         </li>
-        <li>
-          <a class="nav-item" data-page="unit-economics" href="#" role="button" tabindex="0" aria-label="Unit Economics">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
-            </span>
-            <span class="nav-item__label">Unit Economics</span>
-          </a>
-        </li>
 
         <!-- Admin -->
         <li class="sidebar__section-label" role="heading" aria-level="2">Admin</li>
@@ -395,6 +387,8 @@
             <div class="kpi-card__value" id="geo-kpi-junk">—</div>
           </div>
         </div>
+        <p id="geo-spend-notice" class="mapping-notice mapping-notice--info" role="status" hidden></p>
+        <p id="geo-spend-range" class="grace-note" hidden></p>
         <div class="panel geo-map-panel">
           <div class="panel__header geo-map-panel__header">
             <span>World Heatmap</span>
@@ -430,7 +424,7 @@
         </div>
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Geo data appears after a weekly or monthly run writes Google Ads API country performance to the database.
+          Spend is Google Ads API country spend from the daily sync, in USD at each day's FX rate, for the selected number of days through yesterday. It is shown only once every one of those days has been re-read after it ended: available from the morning sync onward, and Unavailable before it and on a day the sync fails — never $0. Leads are matched to spend by country; a lead country that names no single country reads "Unavailable — country not matched". A country shows $0 only when it has no spend and none of the window's spend is without a country; amounts under a dollar read "&lt;$1". Lead counts run through today, a different period from spend. Clicks and conversions by country are not shown: the daily country table holds spend only.
         </p>
       </section>
 
@@ -938,42 +932,6 @@
             <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
           </div>
         </div>
-      </section>
-
-      <!-- Unit Economics -->
-      <section id="page-unit-economics" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Unit Economics</h1>
-          <p class="page-subtitle">Are we buying customers profitably? Executive-level SaaS economics from revenue truth.</p>
-        </header>
-        <div id="page-explanation-unit-economics" hidden></div>
-        <div class="roas-window-controls">
-          <label class="roas-window-label">Window:</label>
-          <!-- PR-ADS-153E-B: Unit Economics uses BUSINESS windows, the same
-               resolver every other revenue page uses. Rolling ad-style day
-               windows cut a B2B sales cycle in half and gave this page a period
-               no other page shared. -->
-          <select id="unit-economics-window" class="waste-filter-select" data-business-window-select aria-label="Unit economics window">
-            <option value="current_quarter" selected>Current Quarter</option>
-            <option value="last_quarter">Last Quarter</option>
-            <option value="last_6_months">Last 6 Months</option>
-            <option value="ytd">YTD</option>
-            <option value="all_time">All Time</option>
-          </select>
-          <button id="unit-economics-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
-        </div>
-        <div id="unit-economics-kpis" class="kpi-grid"></div>
-        <div id="unit-economics-verdict" class="unit-economics-verdict"></div>
-        <div class="panel">
-          <div class="panel__header">Campaign-Level Economics</div>
-          <div class="panel__body panel__body--flush" id="unit-economics-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading unit economics…</p>
-          </div>
-        </div>
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Unit economics reads the canonical closed-won deal ledger and canonical Google Ads spend, read-only. No writes to Google Ads, HubSpot, or any external system.
-        </p>
       </section>
 
 

@@ -379,7 +379,8 @@ def test_scheduler_diagnostic_when_runs_null_but_sources_synced():
     }
     summary = compute_scheduler_summary(None, sync_info)
     assert summary["latest_daily"] is None
-    assert summary["latest_weekly"] is None
+    # PR-ADS-165A: no `latest_weekly` — the weekly job is retired.
+    assert "latest_weekly" not in summary
     assert summary["latest_monthly"] is None
     assert summary["latest_incremental"] is None
     assert summary["diagnostic_status"] == "no_scheduler_run_recorded"

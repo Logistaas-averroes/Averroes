@@ -8,14 +8,18 @@
 # while the in-app scheduler is active — duplicate runs would write every
 # dataset twice.
 #
-# PR-ADS-162H: the weekly and monthly jobs no longer generate or email a
+# PR-ADS-162H: the scheduled jobs no longer generate or email a
 # report, so SENDGRID_API_KEY, REPORT_SENDER_EMAIL, REPORT_RECIPIENT_EMAIL and
 # ANTHROPIC_API_KEY are no longer declared here. Nothing in the service reads
 # them; values still set in the Render dashboard are ignored and can be deleted.
 #
 # Single-service architecture (Phase 1):
 #   One Render Web Service handles: UI, API, manual run endpoints,
-#   and all three scheduled Phase 1 jobs (daily / weekly / monthly).
+#   and the scheduled jobs (daily pulse, monthly refresh, daily incremental
+#   sync, daily platform certification).
+#
+# PR-ADS-165A: the weekly job is retired. It was killed at this service's
+# 512 MB memory limit every Monday; nothing replaces it.
 #
 # All secrets are marked sync: false — set them in the Render dashboard under
 # the web service's "Environment" tab. Never commit real values here.
@@ -24,7 +28,7 @@ services:
   # ─────────────────────────────────────────────────────────
   # Web Service — FastAPI read-only API + in-app scheduler
   # Handles: health checks, readiness, manual run endpoints,
-  #          scheduled daily/weekly/monthly Phase 1 jobs
+  #          scheduled daily/monthly jobs, incremental sync, certification
   # Start: python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
   # Health check: /health
   # Scheduler status: /scheduler/status

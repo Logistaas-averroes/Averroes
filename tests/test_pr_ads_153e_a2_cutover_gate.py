@@ -1094,7 +1094,8 @@ CONSUMER_MODULES = [
     "services/dashboard_channels_service.py",
     "services/revenue_attribution_service.py",
     "services/source_attribution_service.py",
-    "services/canonical_unit_economics_service.py",
+    # PR-ADS-165A: "services/canonical_unit_economics_service.py" stood here;
+    # the Unit Economics service is deleted with its page.
     "services/revenue_decision_mart.py",
 ]
 

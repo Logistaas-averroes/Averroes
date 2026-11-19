@@ -58,7 +58,7 @@ REQUIRED_HELP_PAGES = [
     "roas-campaigns",
     "roas-countries",
     "gclid-attribution",
-    "unit-economics",
+    # PR-ADS-165A: "unit-economics" was deleted with its page.
     "scheduler",
     "health",
     "backfill",

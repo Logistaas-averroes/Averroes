@@ -34,8 +34,12 @@ PostgreSQL through the canonical read service. No Google Ads, HubSpot or
 Mailchimp call of any kind, and no mutation of any external platform.
 
 Never called from a GET endpoint — this is a scheduler/analysis write path
-(``scheduler/weekly.py``, after the waste-detection annotations land) and an
+(``scheduler/monthly.py``, after the waste-detection annotations land) and an
 explicit operator backfill.
+
+PR-ADS-165A: the caller used to be ``scheduler/weekly.py``. That job is
+retired; the step moved to the monthly job, which writes the same
+``waste_terms`` annotations. History is therefore observed once a month.
 """
 
 from __future__ import annotations
@@ -44,10 +48,11 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# Windows used by the weekly run and by an operator backfill respectively. The
-# weekly pass only needs to cover the evidence the run just analysed; the
-# backfill walks everything the canonical facts can support.
-WEEKLY_HISTORY_WINDOW = "30d"
+# Windows used by the scheduled (monthly) run and by an operator backfill
+# respectively. The scheduled pass only needs to cover the evidence the run
+# just analysed — the monthly job analyses 30 days — and the backfill walks
+# everything the canonical facts can support.
+SCHEDULED_HISTORY_WINDOW = "30d"
 BACKFILL_HISTORY_WINDOW = "all_time"
 
 
@@ -81,7 +86,7 @@ def _observations_from_rows(rows: list) -> list[dict]:
     return observations
 
 
-def record_flag_history(window: str = WEEKLY_HISTORY_WINDOW,
+def record_flag_history(window: str = SCHEDULED_HISTORY_WINDOW,
                         *, page_size: int = 200) -> dict:
     """Record flag history for every currently-flagged term in ``window``.
 
@@ -93,7 +98,7 @@ def record_flag_history(window: str = WEEKLY_HISTORY_WINDOW,
     decision no matter how many times its flag is observed again (§44).
 
     Returns ``{available, observed, written, pages, reason}``. Never raises: a
-    failure here must not break the weekly run that produced the annotations.
+    failure here must not break the scheduled run that produced the annotations.
     """
     try:
         from db import search_term_review_repository as review_repo  # noqa: PLC0415

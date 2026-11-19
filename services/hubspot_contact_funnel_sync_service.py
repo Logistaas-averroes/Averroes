@@ -5,7 +5,7 @@ PR-ADS-153B — the ONE ingestion path that owns ``hubspot_contact_funnel``.
 
 Ownership doctrine (PR-ADS-153B §30)
 ------------------------------------
-Exactly one service writes the canonical contact store. The daily / weekly /
+Exactly one service writes the canonical contact store. The daily /
 monthly / incremental schedulers may CALL this service, but none of them writes
 canonical contact rows independently, so four writers can never append
 conflicting truth. The legacy ``leads`` snapshot writers are untouched and keep

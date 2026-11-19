@@ -9,9 +9,12 @@ access.  No external calls.  Pure function — safe to import in tests without
 the web-framework stack.
 
 Stale thresholds (configurable via config/thresholds.yaml ui.monitoring):
-  daily:   stale after > 2 days without a successful run
-  weekly:  stale after > 8 days without a successful run
-  monthly: stale after > 35 days without a successful run
+  daily:                  stale after > 2 days without a successful run
+  daily_incremental_sync: stale after > 2 days without a successful run
+  monthly:                stale after > 35 days without a successful run
+
+There is no `weekly` cadence (PR-ADS-165A): that job is retired. See
+`RETIRED_RUN_TYPES` below for how its old rows are treated.
 
 Severity ladder:
   green  — no warnings
@@ -51,7 +54,6 @@ from typing import Any
 STALE_DAYS_DEFAULT: dict[str, int] = {
     "daily":                  2,
     "daily_incremental_sync": 2,
-    "weekly":                 8,
     "monthly":                35,
 }
 CONSECUTIVE_FAILURE_WARNING_DEFAULT = 2
@@ -96,7 +98,7 @@ CONSECUTIVE_FAILURE_WARNING_DEFAULT = 2
 # Two run types may still map to one cadence — but only where they are the same
 # pipeline, because the verdict they receive is indivisible.
 MONITORING_CADENCES: tuple[str, ...] = (
-    "daily", "daily_incremental_sync", "weekly", "monthly",
+    "daily", "daily_incremental_sync", "monthly",
 )
 
 #: Concrete run type → cadence. Add a row here when a new scheduler starts
@@ -105,9 +107,54 @@ MONITORING_CADENCES: tuple[str, ...] = (
 RUN_TYPE_CADENCE: dict[str, str] = {
     "daily":                  "daily",
     "daily_incremental_sync": "daily_incremental_sync",
-    "weekly":                 "weekly",
     "monthly":                "monthly",
 }
+
+#: PR-ADS-165A — run types whose job no longer exists, with the reason.
+#:
+#: The `runs` table keeps every row a retired job ever wrote. Those rows are
+#: HISTORY: they say what happened, and nothing about the system's health now.
+#: A retired run type therefore
+#:
+#:   * is not a cadence — it has no failure streak, no `last_success_at`, no
+#:     staleness verdict and no warning. The weekly job's last rows are all
+#:     `failed` and its last success is months old; counted as a live cadence
+#:     it would hold monitoring red, "failed N times in a row" and "stale",
+#:     for ever, about a job nobody runs;
+#:   * is not folded into another cadence — a cadence is ONE pipeline's
+#:     verdict (PR-ADS-160-F2). Old weekly failures voting on `monthly` would
+#:     turn a healthy job red; old weekly successes would hide a broken one;
+#:   * is not silently dropped either — it is reported under `retired_runs`,
+#:     labelled retired, so "weekly is missing" is never a question a reader
+#:     has to guess the answer to.
+#:
+#: This is deliberately a separate table from "unknown". An unknown run type
+#: (`monitoring_cadence` -> None, absent from here) is a scheduler nobody
+#: registered; a retired one is a decision.
+RETIRED_RUN_TYPES: dict[str, str] = {
+    "weekly": ("The weekly data refresh was retired in PR-ADS-165A. The host "
+               "killed it at the 512 MB memory limit every Monday; every "
+               "dataset it wrote has another scheduled writer. Its rows are "
+               "history, not a health signal."),
+}
+
+#: PR-ADS-165A — cadences where ONE failed (or partial) latest run is already
+#: a finding, whatever the failure streak.
+#:
+#: The streak rule (`consecutive_failure_warning`, 2) and the staleness clock
+#: suit a job that runs again tomorrow: one bad morning is retried within a day
+#: and two in a row turn red. Neither suits a job whose next attempt is a month
+#: away. A monthly run that failed yesterday, after a success 31 days ago, has
+#: a streak of 1 (under 2) and a last success inside the 35-day threshold — so
+#: it read `green`, no warnings, while every dataset only that job writes had
+#: just missed its one refresh of the month.
+#:
+#: Since the weekly job was retired the monthly job is the SOLE scheduled
+#: writer of several datasets (`services.freshness_service.
+#: MONTHLY_REFRESH_DATASETS`), so for it the latest outcome is the verdict: a
+#: latest run that is not `success` is at least yellow, with a plain warning.
+#: The daily cadences are deliberately absent — their rules are unchanged.
+LATEST_RUN_MUST_SUCCEED: frozenset[str] = frozenset({"monthly"})
 
 #: Cadence → the words a human reads in a warning. `str.capitalize()` was fine
 #: while every cadence was one lowercase word; it renders the incremental
@@ -115,7 +162,6 @@ RUN_TYPE_CADENCE: dict[str, str] = {
 CADENCE_LABELS: dict[str, str] = {
     "daily":                  "Daily",
     "daily_incremental_sync": "Daily incremental sync",
-    "weekly":                 "Weekly",
     "monthly":                "Monthly",
 }
 
@@ -137,6 +183,39 @@ def monitoring_cadence(run_type: str | None) -> str | None:
     if not run_type:
         return None
     return RUN_TYPE_CADENCE.get(str(run_type).strip().lower())
+
+
+def is_retired_run_type(run_type: str | None) -> bool:
+    """True when ``run_type`` belongs to a job that no longer exists."""
+    return bool(run_type) and str(run_type).strip().lower() in RETIRED_RUN_TYPES
+
+
+def retired_run_history(runs: list[dict]) -> dict[str, Any]:
+    """What the history holds for each retired run type — as history only.
+
+    ``runs`` is newest first. Each retired run type that has at least one row
+    gets ``{retired: True, reason, last_run_at, last_status, runs_in_history}``.
+    Nothing here is a verdict: there is no severity, no ``stale`` and no
+    ``consecutive_failures``, because a job that is not supposed to run cannot
+    be late or failing.
+    """
+    out: dict[str, Any] = {}
+    for r in runs:
+        key = str(r.get("run_type") or "").strip().lower()
+        if key not in RETIRED_RUN_TYPES:
+            continue
+        entry = out.get(key)
+        if entry is None:
+            out[key] = {
+                "retired": True,
+                "reason": RETIRED_RUN_TYPES[key],
+                "last_run_at": r.get("finished_at") or r.get("started_at"),
+                "last_status": (r.get("status") or "unknown").lower(),
+                "runs_in_history": 1,
+            }
+        else:
+            entry["runs_in_history"] += 1
+    return out
 
 
 def compute_monitoring_status(
@@ -162,11 +241,19 @@ def compute_monitoring_status(
                 "latest_runs": {
                     "daily":   { "last_success_at", "last_status",
                                  "consecutive_failures", "stale" },
-                    "weekly":  { ... },
+                    "daily_incremental_sync": { ... },
                     "monthly": { ... },
                 },
                 "warnings": ["..."],
+                "retired_runs": {
+                    "weekly": { "retired": True, "reason", "last_run_at",
+                                "last_status", "runs_in_history" },
+                },
             }
+
+        ``retired_runs`` (PR-ADS-165A) is history, never health: it does not
+        contribute to ``severity``, ``warnings`` or ``latest_runs``, and is
+        empty when the history holds no row of a retired run type.
 
     This function is read-only — it performs no mutations and has no side
     effects.  All errors in individual records are handled gracefully.
@@ -200,6 +287,7 @@ def compute_monitoring_status(
                 "last_completed_at": None,
                 "last_status": None,
                 "latest_partial": False,
+                "latest_failed_unresolved": False,
                 "consecutive_failures": 0,
                 "stale": True,
             }
@@ -255,11 +343,21 @@ def compute_monitoring_status(
             except (ValueError, OverflowError):
                 stale = True
 
+        # PR-ADS-165A: for a cadence whose next attempt is far away, a latest
+        # run that did not succeed is itself the finding (see
+        # LATEST_RUN_MUST_SUCCEED). Fail closed: any latest status other than
+        # `success` or `partial` counts — an unrecognised status is not
+        # evidence of success. Partial keeps its own flag and warning below.
+        latest_failed_unresolved = (
+            run_type in LATEST_RUN_MUST_SUCCEED
+            and latest_status not in ("success", "partial"))
+
         latest_runs[run_type] = {
             "last_success_at": last_success_at,
             "last_completed_at": last_completed_at,
             "last_status": latest_status,
             "latest_partial": latest_partial,
+            "latest_failed_unresolved": latest_failed_unresolved,
             "consecutive_failures": consecutive_failures,
             "stale": stale,
         }
@@ -277,6 +375,12 @@ def compute_monitoring_status(
                 f"{label} run completed partially — some "
                 f"datasets were incomplete."
             )
+        elif latest_failed_unresolved:
+            warnings.append(
+                f"{label} run failed on its latest attempt — the datasets only "
+                f"this job writes were not refreshed, and it does not run "
+                f"again until its next scheduled date."
+            )
         elif stale:
             warnings.append(f"{label} run data is stale.")
 
@@ -288,10 +392,12 @@ def compute_monitoring_status(
     )
     any_stale = any(v.get("stale") for v in latest_runs.values())
     any_partial = any(v.get("latest_partial") for v in latest_runs.values())
+    any_latest_failed = any(
+        v.get("latest_failed_unresolved") for v in latest_runs.values())
 
     if any_repeated_failure:
         severity = "red"
-    elif any_stale or any_partial:
+    elif any_stale or any_partial or any_latest_failed:
         # Partial is deliberately NOT green. It is also deliberately not red:
         # real work landed and the pipeline is not down. Yellow is the only
         # honest answer — something needs looking at, nothing is on fire.
@@ -304,4 +410,5 @@ def compute_monitoring_status(
         "severity": severity,
         "latest_runs": latest_runs,
         "warnings": warnings,
+        "retired_runs": retired_run_history(runs),
     }

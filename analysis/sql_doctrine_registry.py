@@ -308,7 +308,7 @@ CONSUMERS: list[dict] = [
        decision=True, operational=True),
     _c("Geo Intelligence country summary (Countries page)",
        "confirmed_sqls per country from raw leads snapshots on run_date.",
-       endpoint="GET /api/leads/country-summary",
+       endpoint="GET /api/leads/country-summary; republished per country by GET /api/geo",
        service_function="api.server.api_leads_country_summary",
        repository_source="inline SQL in api/server.py",
        source_table=LEGACY_TABLE,
@@ -319,8 +319,12 @@ CONSUMERS: list[dict] = [
        code_location="api/server.py:api_leads_country_summary",
        migration_notes="Different window field (run_date) and different filters from "
                        "Campaign Evidence under the same Evidence Window label. No "
-                       "sql_reconciliation. Frontend loadGeo coerces missing rows to 0.",
-       truth_status="none — no reconciliation block; frontend renders 0 for absent rows",
+                       "sql_reconciliation. PR-ADS-165A: /api/geo "
+                       "(services/country_evidence_service) sums these rows per "
+                       "canonical country identity and joins them to spend; the "
+                       "SQL definition is unchanged and is not recomputed there.",
+       truth_status="none — no reconciliation block; counts are summed across "
+                    "spellings of one country, never redefined",
        headline=True, row=True, filters=True, sorting=True, decision=True, operational=True),
 
     # ── Executive / Revenue ─────────────────────────────────────────────────
@@ -518,7 +522,7 @@ CONSUMERS: list[dict] = [
        truth_status="cpql None when sqls == 0", row=True, cpql=True),
     _c("leads snapshot writer (db.writers.write_leads / _map_status_category)",
        "Derives status_category from mql_status and stores contact_created_at from createdate.",
-       endpoint="scheduler.weekly / monthly / incremental_sync; scripts.backfill_hubspot",
+       endpoint="scheduler.daily / monthly / incremental_sync; scripts.backfill_hubspot",
        service_function="db.writers.write_leads / _map_status_category",
        repository_source="INSERT INTO leads", source_table=LEGACY_TABLE,
        sql_definition="mql_status in _QUALIFIED → 'qualified'", date_field=LEGACY_DATE,
@@ -1178,6 +1182,12 @@ RULES: list[dict] = [
 
     # ── api/server.py by route function ─────────────────────────────────────
     _r("api.geo", "api/server.py", CLS_LEGACY, _GEO, symbol="api_leads_country_summary"),
+    # PR-ADS-165A: the Countries page join. It names the summary's count
+    # fields to sum them per canonical country; it defines no SQL of its own.
+    _r("country_evidence.join", "services/country_evidence_service.py", CLS_LEGACY,
+       _GEO, symbol="_lead_figures"),
+    _m("country_evidence.module", "services/country_evidence_service.py", CLS_LEGACY,
+       _GEO, ["confirmed_sqls_ref"]),
     _r("api.leads", "api/server.py", CLS_LEGACY, _LEADS_API,
        symbol=["api_leads", "_lead_quality_sql_reconciliation"]),
     _r("api.campaign_detail", "api/server.py", CLS_LEGACY, _CD, symbol="_build_campaign_detail"),

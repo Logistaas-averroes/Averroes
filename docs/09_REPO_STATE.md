@@ -3561,3 +3561,533 @@ the absent ids returned a DIFFERENT, surviving contact whose
 `865430158531;91109773542`): they were merged, not deleted. A direct read of a
 live contact returned it under its own id. So the merge rule matches the real
 API, and some of the 30 absent contacts are merges.
+
+---
+
+## PR-ADS-165A — retire the weekly job and the Unit Economics page
+
+**Owner decisions (2026-11-19).** "remove the weekly job, this is killing
+render each week", and "unit economics is not needed".
+
+**Production facts behind the first.** The weekly data refresh
+(`scheduler/weekly.py`, Mondays 07:00 Asia/Amman / 04:00 UTC) was killed by
+Render at the 512 MB memory limit every Monday from 2026-10-19 at the latest.
+Its last recorded success was 2026-06-01. Its newest row in `runs` is `failed`.
+The monthly job (`scheduler/monthly.py`) completes.
+
+### A. The weekly job
+
+**The audit.** Every step of `run_weekly_report`, what it wrote, who else
+writes the same thing, and who reads it. "Monthly" is `run_monthly_report`;
+"incremental" is the 09:00 daily incremental sync; "daily" is the 06:00 pulse.
+
+| # | Weekly step | What it wrote | Other scheduled writers | Readers | Decision |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Google Ads pull, 30 days: campaigns, keywords, geo | `data/ads_campaigns.json`, `ads_keywords.json`, `ads_geo.json` | Monthly (same 30 days) | Daily pulse's spend-anomaly baseline reads `ads_campaigns.json`; `revenue_attribution_service` names it as a diagnostic fallback | Deleted. Monthly is the writer |
+| 2 | HubSpot pull, 30 days: paid-search contacts, their deals, summary | `data/crm_contacts.json`, `crm_deals.json`, `crm_summary.json` | Monthly | GCLID match and waste detection, both inside the monthly job | Deleted |
+| 3 | `start_run("weekly")` / `write_run` | one `runs` row, `run_type = 'weekly'` | none — a retired run type | `/api/runs`, monitoring, the war room | No new rows. Old rows kept as history (below) |
+| 4 | `write_leads` | `leads`; batch `hubspot/contacts` | Daily, incremental, monthly | Leads page, Dashboard, CRM funnel | Deleted |
+| 5 | `write_deals` | `deals` (legacy GCLID snapshot); batch `hubspot/deals` | Incremental, monthly | No page (163B) | Deleted |
+| 6 | `write_geo` | `geo` (legacy snapshot); batch `google_ads_api/geo` | **Monthly only** | Was `/api/geo` — the Google Ads → Countries page (`#/geo`) — which is **cut over to canonical daily spend in this PR** (section C). Left: `revenue_attribution_service` (probe, reconciliation fallback, degraded-mode diagnostic), the admin spend audit, the admin pollution report | Deleted from weekly. Kept in monthly; no page reads it |
+| 7 | `write_keywords` | `keywords` (legacy snapshot); batch `google_ads_api/keywords` | **Monthly only** | `/api/keywords` (no page calls it), the Dashboard Campaigns keyword-theme snapshot (latest snapshot, dated), the keyword legacy audit | Deleted from weekly. Kept in monthly (section C) |
+| 8 | `sync_keyword_daily_facts`, 30 days | `keyword_daily_facts`; batch `google_ads_api/keyword_facts` | Daily, incremental (30-day window), monthly | Keywords page | Deleted |
+| 9 | `sync_recent_search_terms("weekly", days=60)` | `search_terms`; batch `google_ads_api/search_terms` | Daily and incremental (14-day rolling window), monthly (30 days) | Search Terms page, n-grams | Deleted. The 60-day re-read is gone (gap 3) |
+| 10 | search-term JSON snapshot | `data/ads_search_terms.json` | Monthly | GCLID match | Deleted |
+| 11 | `run_waste_detection` + `write_waste_terms` | `waste_terms`; batch `analysis/waste_terms` | **Monthly only** | Search Terms → Flagged, campaign drawer flag preview | Deleted. Now monthly — threshold changed |
+| 12 | `record_flag_history` | `search_term_review.first_flagged_at` / `latest_flagged_at` / reasons | **None.** Weekly was the only scheduled caller | Search Terms → Flagged ("first flagged", "last flagged") | **Moved** to the monthly job, after `write_waste_terms` |
+| 13 | `run_gclid_match` + `write_gclid_attribution` | `gclid_attribution`; batch `gclid/matches`; `outputs/` JSON | Incremental, monthly | GCLID Attribution page, revenue reconciliation | Deleted |
+| 14 | `write_gclid_coverage_snapshot` | `gclid_coverage_snapshots`; batch `gclid/coverage_snapshots` | **Monthly only** | `/api/gclid-coverage`, `/api/attribution/quality` | Deleted. Now monthly — threshold changed |
+
+So: **no dataset lost its only writer**, and nothing was added to
+`RETIRED_DATASETS`. One step lost its only caller (12) and was moved.
+
+**Removed.**
+
+- `scheduler/weekly.py`.
+- The scheduler registration, its wrapper `_run_weekly_scheduled`, its
+  `_job_state` slot and schedule description (`api/scheduler.py`). `weekly` is
+  recorded in `RETIRED_JOB_IDS`.
+- `POST /run/weekly`. The Data Runs page builds one trigger button per job
+  `/scheduler/status` lists, so the button went with the job id.
+- `make weekly`; the module from the readiness and healthcheck module lists
+  (`api/server.py::_REQUIRED_MODULES`, `scripts/healthcheck.py`,
+  `scripts/phase1_readiness.py`).
+- The `weekly` monitoring cadence: `MONITORING_CADENCES`, `RUN_TYPE_CADENCE`,
+  `STALE_DAYS_DEFAULT`, `CADENCE_LABELS`, and the `weekly: 8` line in
+  `config/thresholds.yaml`.
+- The war room's Weekly tile: the `runs` query for it (`api/server.py`),
+  `latest_weekly` in `compute_scheduler_summary`, and the tile in
+  `static/app.js`.
+- The weekly allowlist entry in `analysis/legacy_source_guard.py`.
+
+**Kept, and why.**
+
+- **The flag-history step**, in the monthly job. It is the only writer of the
+  flag history the Flagged tab shows. It is local-database only and reads the
+  flagged population 200 rows a page — the same read the tab itself does on a
+  GET. It runs once, after `write_waste_terms`, and a failure makes the run
+  `partial`, exactly as it did in the weekly job.
+- **Search Terms → Flagged.** The monthly job writes the same `waste_terms`
+  annotations, so the tab is not one that can only ever be empty. It now says
+  how fresh a flag can be: waste detection runs once a month, on the 1st, over
+  the previous 30 days, so a flag can be up to a month old and a term first
+  seen since the last monthly run has not been checked. Spend, clicks and
+  dates beside a flag are still from the daily search-term sync.
+- **Every dataset.** The four the monthly job alone now writes — `waste_terms`,
+  the legacy `keywords` and `geo` snapshots, `gclid_coverage_snapshots` — had
+  the weekly threshold of 8 days. Left alone they would read `stale_with_data`
+  from the 9th of every month to the end of it. They take
+  `MONTHLY_REFRESH_STALE_DAYS` (35, the monthly cadence's own monitoring
+  threshold) and carry `refresh_cadence: "monthly"`, republished by
+  `/api/datasets/freshness` and by the war room's pipeline rows, and printed
+  as "refreshed monthly" in the System Status table. A missed monthly run
+  still turns them stale at day 36.
+
+  "Fresh" for these four means "refreshed on schedule", not "recent". That is
+  only honest because **none of them is a core dataset or the dataset of a
+  page's primary figure**: the legacy `keywords` and `geo` snapshots were
+  removed from `CORE_DATASETS` (Keyword Evidence reads `keyword_facts`,
+  Countries reads `canonical_geo`), so System Status no longer reads "ok" on
+  the strength of a wide threshold over a month-old snapshot.
+- **`VALID_SYNC_TYPES` still contains `weekly`.** Old `sync_batches` rows carry
+  it.
+
+**Old `weekly` rows in `runs`.** They stay. They are history, never a health
+signal:
+
+- `weekly` is in `api.monitoring.RETIRED_RUN_TYPES`. It is not a cadence: no
+  failure streak, no `last_success_at`, no staleness, no warning, no severity.
+- It is not folded into another cadence. A cadence is one pipeline's verdict
+  (PR-ADS-160-F2); folded into `monthly`, old weekly failures would redden a
+  healthy job and an old weekly success would hide a broken one.
+- `/api/monitoring/status` reports them under `retired_runs`:
+  `{retired, reason, last_run_at, last_status, runs_in_history}`. No surface
+  renders that block; it is there so the API never leaves "where did weekly
+  go" to be guessed.
+- `/api/runs` still lists them with their own `run_type`.
+- The search-term pipeline verdict asked for "the latest weekly run" to decide
+  whether the pipeline had ever run. It now asks for the latest run of a job
+  that syncs search terms (`SEARCH_TERM_RUN_TYPES`: daily, incremental,
+  monthly).
+
+**What production shows after this ships.**
+
+- Data Runs: four jobs — daily, monthly, daily_incremental_sync,
+  platform_certification. No weekly card, no weekly button.
+- The monitoring banner: no "Weekly run has failed N times in a row". With the
+  three live jobs healthy the severity is green.
+- System Status: three run tiles (Daily, Monthly, Incremental). `waste_terms`,
+  `keywords`, `geo` and `gclid_coverage_snapshots` read fresh for 35 days after
+  a monthly run, each marked "refreshed monthly".
+- A monthly run that fails turns the monitoring banner yellow the same day
+  ("Monthly run failed on its latest attempt…"), not 35 days later.
+- Google Ads → Countries: spend from the daily sync through yesterday, one
+  row per country whatever the lead spelling, available from the morning sync
+  onward — and "Unavailable" with the reason before it. Never `$0` for a
+  window with no rows or an unmatched country.
+- No Monday 04:00 UTC memory kill.
+
+**A failed monthly run is never green.** `compute_monitoring_status` turned red
+at two failures in a row and stale after 35 days. A monthly run that failed
+yesterday after a success 31 days ago has a streak of 1 and is not stale, so
+it read `green` with no warnings — while the monthly job is now the sole
+writer of four datasets and does not run again for a month. For the cadences
+in `LATEST_RUN_MUST_SUCCEED` (`monthly` only) a latest run that is not
+`success` is at least yellow, with a plain warning; an unrecognised status
+counts (fail closed). The daily cadences are unchanged: one failed morning,
+retried tomorrow, is still under the streak.
+
+### B. The Unit Economics page
+
+Deleted, following PR-ADS-162D / 162G: the sidebar entry, the page section,
+`loadUnitEconomics` / `renderUnitEconomicsPage` and their state, the two CSS
+rules, `GET /api/reports/unit-economics`, and
+`services/canonical_unit_economics_service.py`. The page key is gone from
+`PAGES`, so `#/unit-economics` lands on the Dashboard through the router's
+existing guard. The help text of Deals and Campaign Revenue & Spend no longer
+points at it.
+
+It was a registered reader of closed-won figures. Its row is gone from
+`INVENTORY` and from `_page_builders` in
+`scripts/audit_customer_revenue_reader_cutover.py`; `build_unit_economics` was
+added to `READER_ENTRY_POINTS`, so a module that brings it back is a reader
+that must be inventoried. `scripts/audit_customer_closed_won_truth.py` never
+named it and is unchanged. The SQL doctrine registry held no entry for it.
+
+No other page changed what it publishes. The helpers the page shared
+(`rowMetricHtml`, `canonicalMetricHtml`, `canonicalValueHtml`,
+`fmtPeriodRatio`, the business-window handler) are still used by the pages
+that remain. Average deal value is still published by the Dashboard's Revenue
+tab (`dashboard_revenue_service`) and the Deals page
+(`revenue_attribution_service`). The all-source "business" block beside an
+advertising scope was this page's alone.
+
+That block was the only caller that ever passed `period_ratio_scope_ok=False`
+to `reader_row` (period ratios unavailable for a population Google Ads spend
+cannot have produced). With the page gone no production code could turn the
+rule on, so the flag, `closed_won_truth`'s `scope_compatible` parameter and the
+reason `numerator_and_denominator_scopes_differ` were removed rather than kept
+with a test as their only caller. Each remaining reader passes spend only
+beside a Google Ads-scoped population, as before the flag existed (docs/48 §4
+is updated).
+
+### C. The Google Ads → Countries page reads daily canonical spend
+
+**The defect this section fixes, which the first version of this PR would have
+caused.** The page read the legacy `geo` snapshot: `/api/geo` ran
+`SUM(spend_usd) … WHERE run_date >= NOW() - N days`, and `loadGeo` filled a
+country with no spend row as `spend_usd: 0`. In production the newest `geo`
+and `keywords` `run_date` is 2026-11-16: the weekly job wrote those two tables
+before it was killed each Monday. Retiring it makes the monthly job their only
+writer. Monthly run on Dec 1, viewed on Dec 12 with the 7-day window:
+`/api/geo` returns nothing, the leads endpoint still returns countries, every
+country shows Spend `$0`, "Total Geo Spend $0", under "Fresh with data". On
+Dec 20 the 30-day window shows twelve days of spend as the 30-day figure.
+
+**What it reads now.** `GET /api/geo` is served by
+`services/country_evidence_service.build_country_evidence` and returns one row
+per country with spend and lead figures already joined:
+
+- per-country spend from `google_ads_geo_daily_spend`, which the daily
+  incremental sync writes (it replaces each re-fetched range, so an
+  overlapping re-sync never adds to a day); converted to USD at each day's own
+  FX rate (`fetch_geo_daily_spend_by_country`, now scopable to one account);
+- a coverage verdict for the window —
+  `{status, covered_from, covered_through, reason, requested_from,
+  requested_through, missing_days, missing_ranges, failed_chunks}`;
+- the lead figures of `/api/leads/country-summary` for the same evidence
+  window, read by the handler and joined in the service.
+
+A spend figure appears only when `coverage.status` is `covered`.
+
+**The gate, exactly.** Every day of the window must lie in a `verified` chunk
+of the `google_ads_geo_coverage` ledger (for the configured account) that was
+**fetched at or after the end of that account-local day**, and the rows must
+be readable.
+
+The second half is the third review's finding. The daily sync fetches a range
+ending today and marks the chunk `verified` at about 06:00 UTC, so the ledger
+says "verified" for a day with six hours of spend in it. On chunk status alone
+yesterday read "covered" from account-midnight until this morning's sync —
+holding only what yesterday morning's sync saw — and all day if the sync
+fails: `$775` published where the week's spend was `$875`. Now each verified
+chunk counts only for the days that had ended when it was fetched
+(`settled_through`); otherwise the window is `not_covered`
+with reason `spend_not_reread_since_day_ended` and the page says "yesterday's
+spend has not been re-read since the day ended". When a sync covering those
+days has run and failed, the reason is `spend_reread_failed` and the page says
+so instead of pointing at a morning sync that already ran.
+
+The account's time zone is read where the geo sync reads it
+(`repo.fetch_account_time_zone`: the zone Google reported with the account's
+spend), not from the `Europe/London` constant. With no zone on record the
+window is `unavailable` / `account_time_zone_unknown`. (The sync itself falls
+back to UTC in that case; this page does not.)
+
+**So the page is not always available, and says so:** spend is published from
+the morning sync onward and reads "Unavailable" between account-midnight and
+that sync, and all day when the sync fails.
+
+The day arithmetic is the shared `analyze_coverage`, fed the ledger's chunks
+clipped to the days each settles; the gap codes are the geo service's own.
+This is **not Country Revenue & Spend's gate**. That page divides revenue by
+this spend, so it also requires complete campaign-spend coverage, FX coverage
+and a geo↔campaign reconciliation within tolerance; this page divides by
+nothing and requires geo coverage only, so a window whose geo total does not
+reconcile is published here and blocked there. And that page judges coverage
+on chunk status alone: **the same part-day hole exists in the shared
+`analyze_geo_coverage` / `analyze_coverage` it uses** (and in the campaign
+spend ledger read the same way). Not changed here; see Known gaps.
+
+**The window ends yesterday** in the account time zone, not today: today is a
+day still in progress. Yesterday is complete only once it was re-read after it
+ended, which is what the gate checks — the bound alone does not make it so.
+The page prints "Spend is for <from> through <through>, re-read after that day
+ended. Today is not included." `all_time` has no requested start: coverage
+starts at the earliest verified chunk and the row read is bounded to that same
+certified range.
+
+**The join is on the server, on an ISO country code.** The page used to join
+spend to leads in the browser on the trimmed country text: leads spelled `UK`
+beside spend for "United Kingdom" were two rows and the lead row read `$0` in
+a covered window. The first server-side join then resolved both sides through
+`country_identity`'s supported-MARKET registry (96 codes) — and production
+spend falls in 162 ISO codes, with lead countries stored lower-case
+("nigeria", "libyan arab jamahiriya"), so most of the page would have read
+"(unresolved location)" or "not matched". Now:
+
+- a spend row is keyed by the ISO code of its Google criterion and shown under
+  Google's name. The code is the one any stored row of that criterion carries,
+  read over the whole table (`repo.fetch_geo_criterion_identities`). This is
+  the fourth review's finding: the sync stores a row with **no** code when its
+  country lookup fails that day (and overwrites a code already stored), the
+  chunk is still `verified` and the run `success` — so the UAE's £50 moved to
+  "(unresolved location)" and the page read "United Arab Emirates $0". The
+  criterion id is Google's own id for the location, so a code on another row
+  of the same criterion is stored evidence, not inference. Exactly one code on
+  record resolves; none, or two that disagree, do not;
+- spend whose criterion no stored row names is one "(unresolved location)"
+  row, in the total. The payload counts the criteria (`unresolved_spend`).
+  Production holds two such criteria, `2192` and `2364` (25 rows, about £11,
+  none ever named): a standing state, not only a failed lookup;
+- lead text resolves through the complete ISO 3166-1 table —
+  `country_identity.resolve_iso_country_text` over `analysis/iso_countries.py`
+  (249 codes as repo data, no new dependency; ISO's inverted names, former
+  names such as "Libyan Arab Jamahiriya", common spellings). Exact matches
+  only: bare "Congo", "California", "Dubai" and two-letter text ("CA", "IN")
+  match nothing;
+- a lead country that names no single country is its own row, "Unavailable —
+  country not matched", never `$0`;
+- a resolved country with **no spend row** is `$0` only when the window holds
+  no unresolved spend. While it does, that spend may be this country's: the
+  row reads "Unavailable — some spend in this window has no country"
+  (`spend_location_unresolved`) and a notice says how much and that the
+  figures shown are not affected. A country **with** a spend row is complete,
+  not a lower bound, on the assumption that Google keys one country under
+  one criterion. Production on 2026-11-19: 212 coded criteria, 212 codes, no
+  code under two criteria and no criterion with two codes. The code does not
+  enforce that assumption;
+- blanks and placeholders ("Other", "N/A", "(unknown)") are one "No country
+  recorded" row, not counted as unmatched countries;
+- a merged row shows a top campaign / keyword only when every spelling agrees
+  on it — the summary does not carry the counts to recompute it — and
+  "Several" when they differ;
+- Kosovo: Google reports it under `XK`, which ISO has not assigned. It is held
+  apart from the ISO table (`USER_ASSIGNED_COUNTRY_CODES`) and the lead text
+  "Kosovo" resolves to it.
+
+`country_identity`'s existing functions and `SUPPORTED_COUNTRIES` are
+unchanged: the complete resolver is a separate block of new names, called only
+by the Countries service. No revenue page's country grouping moved.
+
+**What the page shows.**
+
+| State | Spend column | Total Geo Spend | Countries Active |
+| --- | --- | --- | --- |
+| Window covered | the figure; "<$1" for an amount under a dollar. `$0` only for a country that resolved, with no spend row, in a window holding no unresolved spend — otherwise "Unavailable — some spend in this window has no country". "Unavailable — country not matched" for lead text that names no single country; "Unavailable — no country recorded" for leads with none | the total | resolved countries with spend or leads |
+| Covered, one country missing an FX rate | "Unavailable — FX rate missing" for that country | "Unavailable" | "Unavailable" |
+| Not every day re-read after it ended (each morning before the sync, or the sync failed), a gap, coverage / rows / criterion identities unreadable, no account configured, or no account time zone on record | "Unavailable" for every country | "Unavailable" | "Unavailable" |
+
+In the third state a notice above the map says which days are complete, in
+words, and why that is not the window. No spend figure appears anywhere,
+including the map. The lead figures are the same as before, summed per
+country. A count the server sent is printed as the number it is, `0`
+included. When the lead summary cannot be read every lead column — counts,
+junk rate, top campaign, top keyword, leads-as-of — reads "Unavailable" in the
+table and in the map hover, the map carries no value (it drew 0), and an empty
+table says "Lead figures could not be read." rather than "No leads". "Countries
+with SQLs" and "High Junk Countries" count resolved countries only. One line
+under the notice says lead counts cover a different period from spend —
+through today, by lead run date — and the help text no longer invites
+comparing them.
+
+"SQLs" on this page is the legacy lead-summary count
+(`status_category = 'qualified'`), not the canonical lifecycle or cohort SQL
+figure. The column and the card say only "SQLs". Not relabelled here; it
+belongs to the page-unification slice.
+
+**Dropped from the page**, because the canonical table holds cost only: the
+Clicks and Conv. columns, and "top campaign by spend" (Top Campaign is the
+HubSpot lead evidence it already fell back to). They are not filled in from
+the monthly snapshot — that would put two periods under one heading. "Last
+Run" is renamed "Leads as of": it is the lead run date.
+
+**Gone:** the empty-state text "No Google Ads API geo data has been synced
+yet. Run the monthly scheduler". No surface tells an operator to run the
+memory-heavy job to refresh a page.
+
+**Registries.** The page's freshness strip and dependency maps key on
+`google_ads_api/canonical_geo` (`PAGE_DATASET_MAP`, `PAGE_DEPENDENCIES`,
+`datasetRelatedPage`, `PAGE_PIPELINE_IMPACT["geo"]`). Country Revenue & Spend's
+JS dependency named the legacy dataset too, though it has read canonical geo
+since PR-ADS-124; corrected. In the SQL doctrine registry the "Geo
+Intelligence country summary" consumer now says `/api/geo` republishes its
+counts per country, and the join (`country_evidence_service._lead_figures`)
+is bound to it: it sums the summary's counts across spellings of one country
+and defines no SQL of its own.
+
+**Legacy `geo` — kept, not retired.** No page reads it now, but three readers
+remain, so it is still written by the monthly job and still registered
+(`page: None`, "Geo (legacy monthly snapshot)", not core):
+
+1. `revenue_attribution_service._build_from_db` calls
+   `fetch_campaign_country_spend` (a business-window sum over it) as its
+   database-reachable probe; as a fallback geo total used only to *test*
+   reconciliation when canonical geo has no rows — country spend itself still
+   requires canonical rows and complete coverage, so this cannot publish; and,
+   only when the canonical campaign-spend table cannot be read, as a
+   diagnostic spend column (`spend_source: geo_fallback`, every ratio
+   unavailable). **That last use is the same window-sum-over-a-monthly-table
+   defect, in a degraded path.** Not fixed here: it sits in the middle of the
+   revenue contract, and dozens of tests stub that function.
+2. `build_google_ads_spend_audit` (admin) prints it as `legacy_geo_total`.
+3. `fetch_campaign_pollution_report` (admin diagnostic) lists campaigns with
+   leads and no `geo` row in the window — which will over-report mid-month.
+
+Retiring the table needs those three moved first; that is the next slice.
+
+**Legacy `keywords` — kept.** Readers: `GET /api/keywords` (a day-window sum
+over `run_date`, the same defect — but no page calls it; `static/app.js` has
+no reference); the Dashboard Campaigns keyword-theme snapshot
+(`fetch_keyword_theme_snapshot`, the single latest snapshot with its date, not
+a window sum); and the keyword legacy audit. `/api/keywords` was left as it
+is: deleting or repointing an endpoint is its own change. Next slice.
+
+### Tests
+
+`tests/test_pr_ads_165a_weekly_job_and_unit_economics_retired.py`, 27 cases,
+`tests/test_pr_ads_165a_countries_pg_integration.py`, 32 cases, and
+`tests/test_pr_ads_165a_country_identity_complete.py`, 162 cases (section C).
+Monitoring is driven over the history production holds — `daily`,
+`daily_incremental_sync`, `monthly`, plus old `weekly` rows ending in `failed`
+— under the run types the schedulers persist. The war room and the freshness
+endpoint are driven through their routes over a database stub in the same
+state. Against the parent commit 24 fail and 3 pass: the closed-won audit
+(unchanged by this slice), and two counterfactuals that restore the old
+registration, or fold `weekly` into `monthly`, and show the alarm or the
+masking return.
+
+The Countries cases run on real PostgreSQL: the real tables seeded through the
+real writers (the restatement through `replace_geo_daily_spend_chunk`, the
+writer the sync uses), the real `api_geo` handler, and its response rendered
+by the real `loadGeo` in node. They cover:
+
+- a covered window with an overlapping re-sync — exact sums, no double count;
+- three kinds of uncovered window (sync behind, a gap, a failed chunk) —
+  "Unavailable", no `$0`, no partial sum;
+- a covered window where a known country has leads and no spend, and no
+  spend is without a country — `$0`;
+- a missing FX rate; a database holding only the legacy monthly snapshot;
+- `UK` / `united kingdom` / `UAE` leads against "United Kingdom" / "United
+  Arab Emirates" spend — one row each, leads summed; an unmatched lead country
+  — "Unavailable — country not matched", and not counted as a geography;
+- yesterday fetched during yesterday (through the real
+  `run_google_ads_geo_sync`, ledger re-stamped to yesterday 06:05 UTC) —
+  "Unavailable", not `$775`; after this morning's real sync — `$875`;
+- `all_time` with an uncertified row twenty days before the certified range;
+- all 162 production spend codes each as its own row, the 40 production lead
+  spellings joined to them; Kazakhstan / Georgia / no-code spend with
+  `Congo`, `California`, `Dubai`, `IN`, `CA` leads — totals conserved, no
+  wrong join; `XK`; a merged country's top campaign; unreadable leads on the
+  table and the map;
+- a failed country lookup in this morning's real sync: with an older row
+  naming the criterion the UAE keeps its `$63`; with none, the UAE reads
+  "Unavailable — some spend in this window has no country", not `$0`;
+- production's criterion `2192`, never named: a window holding some of it
+  withholds a spend-less lead country and leaves the others published; a
+  window holding none publishes that country's `$0`;
+- one criterion stored under two codes — given neither; the identity read
+  failing — unavailable;
+- 39p never renders `$0`; unreadable leads are not "No leads"; a failed
+  re-read is not "wait for the morning sync"; the country cards count
+  countries; Kosovo; no account time zone on record;
+- mutations removing the server gate and the page gate.
+
+The identity cases hold the complete table (249 codes, round trip), every
+production lead spelling and spend code, the names that must not match, and
+that the market registry and its callers are exactly as they were.
+
+Every Countries case failed against one or more of the three earlier versions
+of this PR (`4651e2e`, `0ed6326`, `c23df68`). Against `c23df68`: `$775` for
+"Unavailable" (08), "Unavailable — country not matched" for Kazakhstan's `$63`
+(11), `camp-A` shown for a merged country (12), `0` on the map for unreadable
+leads (13). Against `14542fd`: "United Arab Emirates `$0`" for `$63` (14) and
+for "Unavailable" (14b), `$0` for 39p (17), "No leads in the selected window."
+for unreadable leads (18), "The morning sync re-reads it" after that sync
+failed (19), "Countries with SQLs 3" for 1 (20), Kosovo "not matched" (21).
+
+Existing tests edited or deleted are listed in the commit message. None was
+skipped or weakened: cases parametrised over both jobs now run for the job
+that exists; cases that used `weekly` as their example cadence run on
+`monthly`; cases that read the deleted page, service or job, and nothing
+else, were deleted with a note in their place.
+
+One of the two documented baseline deselects,
+`test_weekly_empty_search_terms_marks_success_not_success_empty`, drove the
+deleted job and is deleted. The baseline is now one deselect, in `CLAUDE.md`
+and in `.github/workflows/pr-ads-153d-checks.yml`.
+
+### Known gaps
+
+1. **The monthly job is now the only scheduled writer of four datasets** —
+   `waste_terms`, the legacy `keywords` and `geo` snapshots and
+   `gclid_coverage_snapshots` — and of the search-term flag history. It runs
+   the same pulls the weekly job did, and **its peak memory is UNMEASURED**.
+   If it is ever killed at the memory limit as the weekly job was, those four
+   stop refreshing and nothing else writes them. The failed-monthly warning
+   (yellow on the first failure) is how that shows; they then go stale at day
+   36. The flag-history step added to it calls `build_flagged_search_terms`,
+   which builds the whole 30-day search-term population in memory for each
+   page of flagged rows — its cost does not depend on how many terms are
+   flagged.
+2. **A monthly run that is still `running` reads as "failed on its latest
+   attempt".** `LATEST_RUN_MUST_SUCCEED` treats every latest status other than
+   `success` / `partial` as not succeeded, which fails closed for an unknown
+   status but is wrong wording for a run in flight. Follow-up.
+3. **Two more readers sum a monthly table over a window.** The degraded-mode
+   spend column in `revenue_attribution_service` (only when canonical campaign
+   spend is unreadable) and the admin pollution report read legacy `geo`;
+   `GET /api/keywords` reads legacy `keywords` and has no page caller. See
+   section C. Next slice: move them, then retire both snapshots and drop their
+   pulls from the monthly job.
+4. **Country Revenue & Spend and Campaign Evidence count a part-day as
+   covered.** Both end their windows today, and both judge coverage on chunk
+   status alone (`analyze_geo_coverage`, `analyze_coverage` over the campaign
+   spend ledger): today — and, before the morning sync, yesterday — counts as
+   covered while holding a few hours of spend. The fetched-after-the-day-ended
+   rule is applied on the Countries page only. Follow-up: move the rule into
+   the shared coverage function.
+5. **On Countries the spend window and the lead window differ by a day.**
+   Spend ends yesterday; the lead summary still windows
+   on `run_date >= now - N days`. They are different facts about different
+   entities, shown side by side, and no ratio is computed between them.
+
+   Four more on the same page:
+
+   - **The geo sync blanks a stored country code when its lookup fails.**
+     `_resolve_country_metadata` swallows the failure and
+     `replace_geo_daily_spend_chunk` deletes the re-read range and inserts the
+     new rows, so a code already stored for those days is replaced by NULL, the chunk is `verified`
+     and the run `success`. The Countries page now reads each criterion's
+     code from any stored row, which covers every criterion that has a row
+     outside the re-read range. It does **not** cover a criterion whose only
+     rows were all inside it: nothing on record names that location any more,
+     its spend sits in "(unresolved location)", and its lead row reads
+     "Unavailable" (not `$0`) until a later sync restores the code. Follow-up
+     in the sync: keep the last known code per criterion, and do not report a
+     failed lookup as a clean run. Country Revenue & Spend reads the same
+     rows through its own reader and is not changed here.
+   - **Two production locations have no country on any row** — criteria
+     `2192` and `2364`. By Google's convention a country criterion id is
+     2000 + the ISO numeric code; that convention is not in the stored data
+     and is not applied. Whether to name them that way is the owner's call.
+   - **No settle margin.** A day counts once a verified fetch was made at or
+     after account-midnight. A manual sync minutes after midnight settles
+     yesterday on whatever Google had attributed by then, until the 06:00 UTC
+     sync re-reads it. `fetched_at` is stamped when the chunk is recorded,
+     after the fetch.
+   - **The page depends on the account time zone being on record** (the
+     newest `google_ads_account_daily_spend.account_time_zone`). Not checked
+     against production in this PR. If it is absent the page reads
+     "Unavailable" and says why.
+6. **The docs/48 scope rule is convention only.** With `period_ratio_scope_ok`
+   removed, nothing checks that a reader passes spend only beside a Google
+   Ads-scoped population. A check in `audit_customer_revenue_reader_cutover`
+   belongs in a later slice.
+7. **Flagged holds no rows in production, and this does not change that.**
+   `waste_terms` and `search_term_review` are empty. A term is "confirmed
+   waste" only when it matches a junk pattern, spent at least $5, and a
+   HubSpot contact whose keyword equals the term exactly carries a junk
+   status. The monthly job applies the same rule over 30 days.
+8. **The 60-day search-term re-read is gone.** Search terms are re-read over
+   14 days daily and 30 days monthly. A Google Ads restatement older than 30
+   days is no longer picked up by any scheduled job.
+9. **Other monthly data.** The waste flags, the GCLID coverage snapshot, the
+   Dashboard's keyword-theme snapshot and the local JSON snapshots — the daily
+   pulse's spend-anomaly baseline among them — are up to a month old.
+10. **`retired_runs` is rendered nowhere.** It is in the monitoring API only.
+11. **Older documents were not rewritten.** `docs/DEPLOYMENT.md` and
+    `docs/48` §4 are corrected. `docs/API_CONTRACT.md`, `docs/03`, `docs/04`,
+    `docs/07`, `docs/24`, `docs/31` and earlier sections of this file still
+    describe `POST /run/weekly`, the weekly job, the Unit Economics page and
+    the old `/api/geo` response.

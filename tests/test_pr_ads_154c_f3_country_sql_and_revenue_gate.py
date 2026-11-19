@@ -863,7 +863,8 @@ def test_f3f1_3_the_mart_reads_the_verdict_rather_than_re_deriving_it(monkeypatc
 _COUNT_READERS = {
     "services/canonical_revenue_service.py": "decision",
     "services/revenue_decision_mart.py": "disclosure",
-    "services/canonical_unit_economics_service.py": "disclosure",
+    # PR-ADS-165A: the Unit Economics service was a "disclosure" reader here;
+    # it is deleted with its page.
     "services/revenue_attribution_service.py": "disclosure",
     "services/source_attribution_service.py": "disclosure",
 }

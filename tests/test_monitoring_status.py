@@ -5,8 +5,15 @@ PR-ADS-069 — Unit tests for monitoring status computation logic.
 
 Tests cover:
   - All latest runs successful → severity green, no warnings.
-  - Weekly fails twice consecutively → warning generated, severity red.
-  - No successful weekly run for > threshold → stale warning.
+  - Monthly fails twice consecutively → warning generated, severity red.
+  - No successful monthly run for > threshold → stale warning.
+
+PR-ADS-165A: the cases above used the `weekly` cadence as their example. The
+weekly job is retired and `weekly` is no longer a cadence, so they are
+repointed at `monthly` — the same rules (failure streak, staleness against the
+cadence's own threshold), asserted on a cadence that still exists. Nothing
+about what they assert changed. What a retired run type's OLD rows do is
+covered by tests/test_pr_ads_165a_weekly_job_and_unit_economics_retired.py.
   - Missing run history does not crash.
   - Response is read-only and contains no action instruction.
   - Single failure below threshold → yellow, not red.
@@ -32,7 +39,7 @@ from api.monitoring import monitoring_cadence as _monitoring_cadence
 # Helpers
 # ---------------------------------------------------------------------------
 
-_STALE_DAYS = {"daily": 2, "daily_incremental_sync": 2, "weekly": 8, "monthly": 35}
+_STALE_DAYS = {"daily": 2, "daily_incremental_sync": 2, "monthly": 35}
 _CONSEC_WARNING = 2
 
 
@@ -56,14 +63,15 @@ def _run(run_type: str, status: str, days_ago: float) -> dict:
 def _other_cadences_healthy(*, exclude: str = "") -> list[dict]:
     """A recent success for every monitored cadence except `exclude`.
 
-    PR-ADS-160-F2. Production registers FOUR jobs (`api/scheduler.py:49`), so a
-    fixture carrying only three cadences is not a healthy system — it is a
+    PR-ADS-160-F2. Production registers three run-writing jobs
+    (`api/scheduler.py` JOB_IDS: daily, monthly, daily_incremental_sync — the
+    weekly job was a fourth until PR-ADS-165A retired it), so a
+    fixture carrying only two cadences is not a healthy system — it is a
     system with a pipeline missing, and monitoring now says so. Tests that mean
     "everything is fine except the thing under test" have to supply the whole
     board, the way production does.
     """
-    ages = {"daily": 0.5, "daily_incremental_sync": 0.4,
-            "weekly": 1.0, "monthly": 2.0}
+    ages = {"daily": 0.5, "daily_incremental_sync": 0.4, "monthly": 2.0}
     return [_run(rt, "success", age) for rt, age in ages.items()
             if rt != exclude]
 
@@ -92,7 +100,7 @@ class TestAllSuccess:
         A fixture that silently omits a pipeline would otherwise let this whole
         class assert health over a system that is missing one.
         """
-        for cadence in ("daily", "daily_incremental_sync", "weekly", "monthly"):
+        for cadence in ("daily", "daily_incremental_sync", "monthly"):
             result = _compute_monitoring_status(
                 _other_cadences_healthy(exclude=cadence),
                 _STALE_DAYS, _CONSEC_WARNING)
@@ -108,34 +116,31 @@ class TestAllSuccess:
     def test_consecutive_failures_zero(self):
         runs = [
             _run("daily",   "success", 0.5),
-            _run("weekly",  "success", 1.0),
             _run("monthly", "success", 2.0),
         ]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        for rt in ("daily", "weekly", "monthly"):
+        for rt in ("daily", "monthly"):
             assert result["latest_runs"][rt]["consecutive_failures"] == 0
 
     def test_not_stale(self):
         runs = [
             _run("daily",   "success", 1.0),
-            _run("weekly",  "success", 3.0),
             _run("monthly", "success", 10.0),
         ]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        for rt in ("daily", "weekly", "monthly"):
+        for rt in ("daily", "monthly"):
             assert result["latest_runs"][rt]["stale"] is False
 
 
-class TestWeeklyConsecutiveFailures:
-    """Weekly run fails twice in a row → warning, severity red."""
+class TestMonthlyConsecutiveFailures:
+    """Monthly run fails twice in a row → warning, severity red."""
 
     def _runs(self):
         return [
-            _run("weekly", "failed", 0.5),
-            _run("weekly", "failed", 1.5),
-            _run("weekly", "success", 5.0),
+            _run("monthly", "failed", 0.5),
+            _run("monthly", "failed", 1.5),
+            _run("monthly", "success", 5.0),
             _run("daily",  "success", 0.3),
-            _run("monthly","success", 3.0),
         ]
 
     def test_severity_red(self):
@@ -144,20 +149,21 @@ class TestWeeklyConsecutiveFailures:
 
     def test_warning_message_present(self):
         result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
-        assert any("weekly" in w.lower() for w in result["warnings"])
+        assert any("monthly" in w.lower() and "2 times in a row" in w
+                   for w in result["warnings"])
 
     def test_consecutive_failure_count(self):
         result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
-        assert result["latest_runs"]["weekly"]["consecutive_failures"] == 2
+        assert result["latest_runs"]["monthly"]["consecutive_failures"] == 2
 
     def test_last_status_failed(self):
         result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
-        assert result["latest_runs"]["weekly"]["last_status"] == "failed"
+        assert result["latest_runs"]["monthly"]["last_status"] == "failed"
 
     def test_last_success_at_is_populated(self):
         result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
-        # The last successful weekly run was 5 days ago — should be populated.
-        assert result["latest_runs"]["weekly"]["last_success_at"] is not None
+        # The last successful monthly run was 5 days ago — should be populated.
+        assert result["latest_runs"]["monthly"]["last_success_at"] is not None
 
 
 class TestSingleFailureBelowThreshold:
@@ -165,56 +171,54 @@ class TestSingleFailureBelowThreshold:
 
     def test_severity_yellow_not_red(self):
         runs = [
-            _run("weekly", "failed",  0.5),
-            _run("weekly", "success", 2.0),
+            _run("monthly", "failed",  0.5),
+            _run("monthly", "success", 2.0),
             _run("daily",  "success", 0.3),
-            _run("monthly","success", 3.0),
         ]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        # 1 failure < threshold of 2, but weekly is stale (last success 2 days ago,
-        # threshold is 8 — actually not stale). Check severity is NOT red.
+        # 1 failure < threshold of 2, and monthly is not stale (last success
+        # 2 days ago, threshold 35). Check severity is NOT red.
+        assert result["latest_runs"]["monthly"]["consecutive_failures"] == 1
         assert result["severity"] != "red"
 
     def test_no_consecutive_failure_warning(self):
         runs = [
-            _run("weekly", "failed",  0.5),
-            _run("weekly", "success", 2.0),
+            _run("monthly", "failed",  0.5),
+            _run("monthly", "success", 2.0),
             _run("daily",  "success", 0.3),
-            _run("monthly","success", 3.0),
         ]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
         assert not any("2 times" in w or "times in a row" in w for w in result["warnings"])
 
 
-class TestStaleWeekly:
-    """Weekly last success is older than the threshold → stale warning."""
+class TestStaleMonthly:
+    """Monthly last success is older than the threshold → stale warning."""
+
+    def _runs(self):
+        return [
+            _run("monthly", "success", 36.0),   # 36 days ago, threshold is 35
+            _run("daily",   "success", 0.5),
+            _run("daily_incremental_sync", "success", 0.4),
+        ]
 
     def test_stale_flag_set(self):
-        runs = [
-            _run("weekly",  "success", 9.0),   # 9 days ago, threshold is 8
-            _run("daily",   "success", 0.5),
-            _run("monthly", "success", 3.0),
-        ]
+        result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
+        assert result["latest_runs"]["monthly"]["stale"] is True
+
+    def test_not_stale_just_inside_the_threshold(self):
+        """The control: the same board one day inside the threshold is green."""
+        runs = [_run("monthly", "success", 34.0)] + self._runs()[1:]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        assert result["latest_runs"]["weekly"]["stale"] is True
+        assert result["latest_runs"]["monthly"]["stale"] is False
+        assert result["severity"] == "green"
 
     def test_stale_warning_message(self):
-        runs = [
-            _run("weekly",  "success", 9.0),
-            _run("daily",   "success", 0.5),
-            _run("monthly", "success", 3.0),
-        ]
-        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        assert any("weekly" in w.lower() and "stale" in w.lower() for w in result["warnings"])
+        result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
+        assert any("monthly" in w.lower() and "stale" in w.lower() for w in result["warnings"])
 
     def test_severity_at_least_yellow(self):
-        runs = [
-            _run("weekly",  "success", 9.0),
-            _run("daily",   "success", 0.5),
-            _run("monthly", "success", 3.0),
-        ]
-        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
-        assert result["severity"] in ("yellow", "red")
+        result = _compute_monitoring_status(self._runs(), _STALE_DAYS, _CONSEC_WARNING)
+        assert result["severity"] == "yellow"
 
 
 class TestMissingRunHistory:
@@ -229,7 +233,7 @@ class TestMissingRunHistory:
 
     def test_empty_runs_all_types_present(self):
         result = _compute_monitoring_status([], _STALE_DAYS, _CONSEC_WARNING)
-        for rt in ("daily", "weekly", "monthly"):
+        for rt in ("daily", "daily_incremental_sync", "monthly"):
             assert rt in result["latest_runs"]
 
     def test_none_type_runs_ignored(self):
@@ -265,14 +269,15 @@ class TestReadOnlyContract:
         return " ".join(result.get("warnings", [])).lower()
 
     def test_no_action_wording_green(self):
-        runs = [_run("daily", "success", 0.5), _run("weekly", "success", 1.0), _run("monthly", "success", 2.0)]
+        runs = [_run("daily", "success", 0.5), _run("monthly", "success", 2.0)]
         text = self._result_text(runs)
         for phrase in self._FORBIDDEN:
             assert phrase not in text, f"Forbidden phrase found: {phrase!r}"
 
     def test_no_action_wording_warnings(self):
-        runs = [_run("weekly", "failed", 0.5), _run("weekly", "failed", 1.5)]
+        runs = [_run("monthly", "failed", 0.5), _run("monthly", "failed", 1.5)]
         text = self._result_text(runs)
+        assert "times in a row" in text, "control: this board must produce a warning"
         for phrase in self._FORBIDDEN:
             assert phrase not in text, f"Forbidden phrase found: {phrase!r}"
 
@@ -490,19 +495,24 @@ class TestRunTypeIdentity:
         assert incremental["last_success_at"] is None
         assert incremental["last_completed_at"] is not None
 
-    def test_weekly_and_monthly_are_untouched(self):
-        """The mapping must not disturb the cadences that already worked."""
+    def test_daily_and_monthly_are_untouched(self):
+        """The mapping must not disturb the cadences that already worked.
+
+        PR-ADS-165A: this named `weekly` and `monthly`. `weekly` is retired and
+        maps to no cadence; `daily` takes its place as the second cadence the
+        incremental mapping must leave alone."""
         runs = [
-            _run("weekly",  "failed",  0.5),
+            _run("daily",   "failed",  0.5),
             _run("monthly", "partial", 0.5),
         ]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
 
-        assert result["latest_runs"]["weekly"]["last_status"] == "failed"
+        assert result["latest_runs"]["daily"]["last_status"] == "failed"
         assert result["latest_runs"]["monthly"]["last_status"] == "partial"
         assert result["latest_runs"]["monthly"]["latest_partial"] is True
-        assert _monitoring_cadence("weekly") == "weekly"
+        assert _monitoring_cadence("daily") == "daily"
         assert _monitoring_cadence("monthly") == "monthly"
+        assert _monitoring_cadence("weekly") is None
 
     def test_an_unknown_run_type_never_silently_becomes_daily(self):
         """Unknown is not daily, the same way unknown is not zero.

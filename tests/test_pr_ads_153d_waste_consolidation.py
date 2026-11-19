@@ -1351,20 +1351,23 @@ def test_review_state_payload_never_collapses_an_outage_into_a_state():
 # =============================================================================
 # Merge-blocker 4 (PR #156) — flag history must be WIRED, not merely writable
 # =============================================================================
-_WEEKLY_PY = (_ROOT / "scheduler" / "weekly.py").read_text()
+# PR-ADS-165A: the scheduled caller was scheduler/weekly.py. That job is
+# retired and the step moved to the monthly job, which writes the same
+# waste_terms annotations; what this test asserts is unchanged.
+_ANALYSIS_RUN_PY = (_ROOT / "scheduler" / "monthly.py").read_text()
 _HISTORY_SERVICE_PY = (
     _ROOT / "services" / "search_term_flag_history_service.py").read_text()
 
 
-def test_flag_history_is_called_from_the_weekly_analysis_run():
+def test_flag_history_is_called_from_the_scheduled_analysis_run():
     """Before this fix record_flag_observations had no caller outside tests, so
     a real deployment left every history column NULL forever."""
-    assert "record_flag_history" in _WEEKLY_PY
-    assert "search_term_flag_history_service" in _WEEKLY_PY
+    assert "record_flag_history" in _ANALYSIS_RUN_PY
+    assert "search_term_flag_history_service" in _ANALYSIS_RUN_PY
     # It runs AFTER the annotations land, so it reads a population that already
     # reflects this run's classification.
-    assert (_WEEKLY_PY.index("write_waste_terms")
-            < _WEEKLY_PY.index("record_flag_history"))
+    assert (_ANALYSIS_RUN_PY.index("write_waste_terms(")
+            < _ANALYSIS_RUN_PY.index("record_flag_history("))
 
 
 def test_flag_history_is_never_written_from_a_get_endpoint():

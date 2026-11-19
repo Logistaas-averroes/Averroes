@@ -28,7 +28,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=45000,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=45000,
             live_pull_has_search_term=True,
             api_rows=100,
@@ -41,7 +41,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=12000,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.OK
 
@@ -50,7 +50,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=0,
             live_pull_has_search_term=None,
         )
@@ -61,7 +61,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=45000,
             live_pull_has_search_term=True,
         )
@@ -72,7 +72,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=45000,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             api_rows=0,
         )
         assert verdict == Verdict.DB_HAS_ROWS_API_EMPTY
@@ -82,7 +82,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.FRESH_BUT_EMPTY
 
@@ -91,7 +91,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=45000,
             live_pull_has_search_term=False,
         )
@@ -106,7 +106,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status=None,
-            latest_weekly_run=None,
+            latest_search_term_run=None,
         )
         assert verdict == Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
 
@@ -122,7 +122,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status="failed",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.CANONICAL_SYNC_FAILED
         assert "NOT covered" in reason
@@ -134,7 +134,7 @@ class TestSearchTermsVerdict:
             db_available=True,
             db_rows_window=0,
             sync_status=None,
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.UNKNOWN
 
@@ -144,7 +144,7 @@ class TestSearchTermsVerdict:
             db_rows_window=12,
             window_days=14,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.OK
         assert "14-day window" in reason
@@ -159,7 +159,7 @@ def test_run_verification_respects_db_only(monkeypatch):
             "rows_60d": 99,
             "rows_requested_window": 7,
             "sync_status": "success",
-            "latest_weekly_run": {"started_at": "2026-05-25 07:00:00"},
+            "latest_search_term_run": {"started_at": "2026-05-25 07:00:00"},
         },
     )
     monkeypatch.setattr(verifier, "_check_file", lambda: {"row_count": 0})

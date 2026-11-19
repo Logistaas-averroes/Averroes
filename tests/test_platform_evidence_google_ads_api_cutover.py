@@ -234,7 +234,13 @@ class TestDatasetSourceMapping:
         # to. Both pages are deleted. The Campaigns page itself has mapped to
         # the canonical daily-spend dataset since PR-ADS-143, so that is the
         # google_ads_api key asserted for it now.
-        page_datasets = ["canonical_spend", "search_terms", "keyword_facts", "geo"]
+        # PR-ADS-165A: the last entry was "geo" — the legacy geo snapshot,
+        # which only the monthly job writes. The Countries page reads the
+        # daily canonical country spend now, so that is the google_ads_api
+        # key asserted for it (and the legacy key must not be a page's).
+        page_datasets = ["canonical_spend", "search_terms", "keyword_facts",
+                         "canonical_geo"]
+        assert '"google_ads_api/geo"' not in block
         for ds in page_datasets:
             assert f"google_ads_api/{ds}" in block, (
                 f"PAGE_DATASET_MAP must map to google_ads_api/{ds}"
@@ -346,7 +352,13 @@ class TestWindsorIsLegacyOnly:
         # Geo empty state in index.html. (Keyword Evidence, PR-ADS-146, renders
         # its header/subtitle/empty state in the JS shell, not index.html; its
         # Google-Ads-API source is asserted via PAGE_HELP_CONTENT above.)
-        assert "Google Ads API country performance" in INDEX_HTML
+        # PR-ADS-165A: the sentence pinned here was "Geo data appears after a
+        # weekly or monthly run writes Google Ads API country performance…",
+        # which described the legacy snapshot the page no longer reads. The
+        # note still names the Google Ads API as the source.
+        assert "Google Ads API country spend" in INDEX_HTML
+        assert "Windsor" not in INDEX_HTML.split('id="page-geo"')[1].split(
+            "</section>")[0]
 
 
 # ───────────────────────────────────────────────────────────────────────────

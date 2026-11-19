@@ -3379,8 +3379,10 @@ def test_96_pg_the_api_serves_partial_rather_than_a_rounded_status(
 #: One threshold per MONITORED CADENCE. Spelled once so a cadence added to
 #: `api.monitoring.MONITORING_CADENCES` fails the invariant below rather than
 #: quietly running these tests without a threshold.
+#: PR-ADS-165A: `"weekly": 8` stood here. The weekly job is retired and is no
+#: longer a cadence, which is exactly what the invariant below caught.
 _MONITORING_THRESHOLDS = {
-    "daily": 2, "daily_incremental_sync": 2, "weekly": 8, "monthly": 35,
+    "daily": 2, "daily_incremental_sync": 2, "monthly": 35,
 }
 
 

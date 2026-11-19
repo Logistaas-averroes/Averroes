@@ -126,7 +126,8 @@ ui:
       # The incremental sync is its own cadence (PR-ADS-160-F2): it is a
       # different pipeline from the 06:00 pulse and gets its own verdict.
       daily_incremental_sync: 2
-      weekly: 8
+      # PR-ADS-165A: no `weekly` line — the weekly job is retired and is not a
+      # monitoring cadence (api/monitoring.py RETIRED_RUN_TYPES).
       monthly: 35
     consecutive_failure_warning: 2
 

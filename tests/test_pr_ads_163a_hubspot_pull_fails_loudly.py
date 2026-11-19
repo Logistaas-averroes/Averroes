@@ -851,7 +851,9 @@ def test_20_no_except_handler_in_a_legacy_pull_breaks_or_returns():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 5 — the weekly and monthly jobs, with the real pulls over a failing HubSpot
+# 5 — the monthly job, with the real pulls over a failing HubSpot
+#     (PR-ADS-165A: the weekly job ran through these cases too, until it was
+#     retired; the monthly job's assertions are unchanged)
 # ═════════════════════════════════════════════════════════════════════════════
 PREVIOUS_SNAPSHOT = [{"id": "previous-run-contact"}]
 
@@ -915,7 +917,7 @@ JOB_FAILURES = [
 ]
 
 
-@pytest.mark.parametrize("job", ["monthly", "weekly"])
+@pytest.mark.parametrize("job", ["monthly"])
 @pytest.mark.parametrize("case, break_hubspot, pull", JOB_FAILURES,
                          ids=[c[0] for c in JOB_FAILURES])
 def test_21_a_failed_hubspot_pull_fails_the_job_and_writes_nothing(
@@ -934,12 +936,10 @@ def test_21_a_failed_hubspot_pull_fails_the_job_and_writes_nothing(
         f"the {job} job recorded {h.record['status']!r} over a HubSpot pull "
         "that did not finish")
     assert pull in h.record["error_message"]
-    if job == "weekly":                      # the weekly job raises
-        assert isinstance(raised, hp.HubSpotPullIncompleteError)
-    else:                                    # the monthly job returns
-        assert raised is None
-        assert outcome["status"] == "failed"
-        assert "Step 2/4" in h.record["failed_step"]
+    # The monthly job returns its outcome; it does not raise.
+    assert raised is None
+    assert outcome["status"] == "failed"
+    assert "Step 2/4" in h.record["failed_step"]
 
     # Nothing from the truncated or empty pull was stored.
     assert run.leads == [] and "write_leads" not in h.calls
@@ -958,7 +958,7 @@ def test_21_a_failed_hubspot_pull_fails_the_job_and_writes_nothing(
     assert {rec["status"] for _rid, rec in h.updated} <= {"failed"}
 
 
-@pytest.mark.parametrize("job", ["monthly", "weekly"])
+@pytest.mark.parametrize("job", ["monthly"])
 def test_22_the_same_job_over_a_healthy_hubspot_succeeds_and_stores_everything(
         job, job_run, hubspot):
     """The control for test_21: the harness can succeed with the real pulls,

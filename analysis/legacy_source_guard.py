@@ -107,8 +107,8 @@ LEGACY_ACCESS_ALLOWLIST: dict[str, str] = {
     # all four, which is the "silently remove it" the section forbids — so the
     # writes stay, documented and non-authoritative, and this guard's job is to
     # stop NEW ones appearing rather than to pretend these do not exist.
-    "scheduler/weekly.py": "legacy snapshot writer — four live non-evidence "
-                           "consumers, documented in docs/38",
+    # PR-ADS-165A: "scheduler/weekly.py" stood here. The job is deleted; the
+    # monthly job is the one scheduled writer of the legacy snapshot left.
     "scheduler/monthly.py": "legacy snapshot writer — four live non-evidence "
                             "consumers, documented in docs/38",
     "scripts/verify_search_terms_pipeline.py": "diagnostic — reports legacy state",

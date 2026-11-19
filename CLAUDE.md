@@ -60,15 +60,15 @@ git diff --check origin/main...HEAD          # whitespace in the diff only
 
 # 1. PostgreSQL integration (named modules — see the workflow for the list)
 # 2. targeted contract suites (named modules — see the workflow)
-# 3. full suite, with the two baseline deselects below
+# 3. full suite, with the one baseline deselect below
 python -m pytest -q \
-  --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty" \
-  --deselect "tests/test_search_terms_followup_fixes.py::test_weekly_empty_search_terms_marks_success_not_success_empty"
+  --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty"
 ```
 
-**Those two deselects are a documented baseline.** They fail identically on
-`main` with `OSError: Missing required Google Ads env vars`, and CI routes them
-to a separate non-blocking job. Anything failing beyond them is yours.
+**That one deselect is a documented baseline.** It fails identically on
+`main` with `OSError: Missing required Google Ads env vars`, and CI routes it
+to a separate non-blocking job. Anything failing beyond it is yours. (There
+were two until PR-ADS-165A: the weekly case was deleted with the weekly job.)
 
 ### Production certification (Render shell)
 
@@ -197,8 +197,82 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   `green` with no warnings. **Do not map two independent pipelines onto one
   cadence** — they receive one indivisible verdict, and the healthier wins it.
   Corrected in **PR-ADS-160-F2**; see `docs/42_*`. A fixture that carries only
-  some of the four registered jobs is not production, and monitoring now says
-  so.
+  some of the three registered run-writing jobs (`daily`,
+  `daily_incremental_sync`, `monthly`) is not production, and monitoring now
+  says so.
+
+  **A retired job is not a cadence either** (PR-ADS-165A). The weekly job is
+  gone, but `runs` keeps its rows and the newest is `failed`. `weekly` is in
+  `RETIRED_RUN_TYPES`: it has no cadence, no threshold, no tile and no warning,
+  it is never folded into another cadence, and its rows are reported only
+  under `retired_runs`, as history. Retiring a job means removing it from
+  `RUN_TYPE_CADENCE`, `MONITORING_CADENCES`, `config/thresholds.yaml` and the
+  war-room tiles AND adding it to `RETIRED_RUN_TYPES`, or it reads "failed"
+  or "never ran" for ever. A dataset the monthly job alone now writes takes
+  `MONTHLY_REFRESH_STALE_DAYS` (and `refresh_cadence: "monthly"`), not the
+  8-day weekly threshold; one that loses its only writer goes in
+  `RETIRED_DATASETS`. A monthly dataset must never be in `CORE_DATASETS` or be
+  a page's primary dataset: "fresh" for it means "refreshed on schedule".
+
+  **A failed monthly run is never green** (`LATEST_RUN_MUST_SUCCEED`). The
+  streak rule (2) and the 35-day clock both stay silent for a monthly run
+  that failed yesterday, so for that cadence the latest outcome is the
+  verdict: not `success` is at least yellow. Do not extend it to the daily
+  cadences, which retry tomorrow.
+
+- **Never sum a snapshot table over a day window** (PR-ADS-165A). The legacy
+  `geo` / `keywords` tables hold whatever days the last monthly run pulled, so
+  `SUM(...) WHERE run_date >= NOW() - N days` returns nothing or part of the
+  window mid-month — and the Countries page printed that as Spend `$0` under
+  "Fresh with data". A page figure over a window comes from a daily canonical
+  table AND its coverage ledger (`services/country_evidence_service.py`
+  feeds `analyze_coverage` the ledger's chunks, which must certify every
+  day), and an uncovered window
+  renders "Unavailable" with the covered range — never `$0`, never the sum of
+  the days that happen to be present.
+
+  **A `verified` chunk is not a complete day.** The daily sync marks its
+  chunk verified through TODAY at ~06:00 UTC, so chunk status alone calls a
+  day with six hours of spend "covered" — and yesterday stays that way until
+  the next morning's sync. A day is complete only if a verified chunk
+  containing it has `fetched_at` at or after the END of that account-local
+  day (`settled_through`), in the account time zone the sync itself reads
+  (`repo.fetch_account_time_zone`, never a constant; unknown is unavailable).
+  The window ends yesterday, is published from the morning sync onward, and
+  is "Unavailable" before it; say that, do not promise it is always
+  available. (`analyze_geo_coverage` / `analyze_coverage`
+  themselves still judge on status alone — a known gap for Country Revenue &
+  Spend and Campaign Evidence.)
+
+  Do not fix a stale-snapshot page with a disclosure or a wider staleness
+  threshold. Known remaining offenders are listed in `docs/09`.
+
+- **Never join countries on display text, and never in the browser.** The
+  Countries page joined spend to leads on the trimmed country string: `UK`
+  leads beside "United Kingdom" spend were two rows and the lead row read
+  `$0` in a covered window. Join ON THE SERVER, on an ISO code.
+
+  `country_identity.resolve` / `SUPPORTED_COUNTRIES` is a supported-MARKET
+  registry (96 codes) for the revenue pages; do not resolve Google Ads spend
+  or free-text lead countries through it — production spend is in 162 codes
+  and most of the page would read "(unresolved location)". Key spend by the
+  code its Google criterion carries; resolve lead text with
+  `resolve_iso_country_text` (the complete ISO table in
+  `analysis/iso_countries.py`, exact matches only — bare "Congo", "CA", "IN"
+  match nothing). Text that names no single country is its own row,
+  "Unavailable — country not matched" — never 0; blanks and placeholders are
+  one "No country recorded" row.
+
+  **A geo row's own `country_code` can be blank for a country that has one.**
+  The sync stores NULL when its lookup fails that day and overwrites a code
+  already stored; the chunk is still `verified`. Read a criterion's code from
+  ANY stored row of that criterion (`fetch_geo_criterion_identities`): one
+  code resolves, none or two that disagree do not, and nothing is guessed
+  (not even Google's 2000 + ISO-numeric convention). A country with no spend
+  row is `$0` only in a covered window that holds NO unresolved spend;
+  otherwise it is "Unavailable — some spend in this window has no country".
+  A country with a row is complete. `fmtDollar` prints `$0` for 39 cents:
+  beside a rule that `$0` is measured, render "<$1".
 
 - **Never read a SQL total from `analysis/lifecycle_sql_coverage.py`.** Its
   `window_coverage()` answers only "could a complete total exist for this

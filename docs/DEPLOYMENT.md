@@ -5,7 +5,9 @@
 This document covers the Render.com deployment for the Logistaas Ads Intelligence System.
 
 Phase 1 deploys a **single Render Web Service** that hosts the UI, API, manual run
-endpoints, and all Phase 1 scheduled jobs (daily, weekly, monthly).
+endpoints, and the scheduled jobs (daily pulse, monthly refresh, daily
+incremental sync, daily platform certification). The weekly job was retired in
+PR-ADS-165A: Render killed it at the 512 MB memory limit every Monday.
 
 > ⚠️ **Warning:** Do NOT enable both Render cron jobs and the in-app scheduler at
 > the same time. Duplicate runs will generate duplicate reports and emails.
@@ -19,15 +21,15 @@ endpoints, and all Phase 1 scheduled jobs (daily, weekly, monthly).
 
 The production deployment uses a single Render web service.
 
-Render cron workers are not required for Phase 1. Scheduled daily, weekly, and monthly
+Render cron workers are not required for Phase 1. Scheduled daily and monthly
 jobs are registered inside the FastAPI process through in-app APScheduler.
 
 Expected model:
 
 - one Render web service
 - FastAPI serves API endpoints and static dashboard
-- APScheduler registers daily, weekly, and monthly jobs inside the service
-- manual run triggers are exposed through admin-gated `/run/daily`, `/run/weekly`, and `/run/monthly`
+- APScheduler registers the daily and monthly jobs, the daily incremental sync and the daily platform certification inside the service (there is no weekly job)
+- manual run triggers are exposed through admin-gated `/run/daily`, `/run/monthly` and `/run/incremental-sync`
 - all scheduled and manual runs remain read-only with respect to Google Ads and HubSpot
 
 > **Do not reintroduce separate Render cron jobs** unless a future architecture PR
@@ -53,12 +55,10 @@ Render.com
        ├── GET  /scheduler/status    — In-app scheduler state (requires auth)
        ├── GET  /runs/latest         — Latest run history record (requires auth)
        ├── POST /run/daily           — Trigger daily pulse (requires admin)
-       ├── POST /run/weekly          — Trigger weekly data refresh (requires admin)
        └── POST /run/monthly         — Trigger monthly data refresh (requires admin)
 
 In-app scheduler (APScheduler, runs inside the web service process):
   Daily pulse      — every day at 06:00 Asia/Amman (03:00 UTC)
-  Weekly data refresh  — every Monday at 07:00 Asia/Amman (04:00 UTC)
   Monthly data refresh — 1st of month at 08:00 Asia/Amman (05:00 UTC)
 ```
 
@@ -99,7 +99,6 @@ All services are defined in `render.yaml` at the repo root.
 | `GET /scheduler/status` | Any auth | In-app scheduler state and next run times (read-only) |
 | `GET /runs/latest` | Any auth | Latest record from `runtime_logs/run_history.jsonl` |
 | `POST /run/daily` | Admin (cookie or Bearer) | Trigger daily pulse scheduler |
-| `POST /run/weekly` | Admin (cookie or Bearer) | Trigger the weekly data refresh |
 | `POST /run/monthly` | Admin (cookie or Bearer) | Trigger the monthly data refresh |
 
 Unauthenticated requests to protected endpoints return **401**.
@@ -151,7 +150,7 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 
 > **PR-ADS-162H:** `ADVISOR_MODE`, `ANTHROPIC_API_KEY`, `SENDGRID_API_KEY`,
 > `REPORT_SENDER_EMAIL` and `REPORT_RECIPIENT_EMAIL` are no longer read by
-> anything. The weekly and monthly jobs no longer generate or email a report.
+> anything. No scheduled job generates or emails a report.
 > Values still set in the Render dashboard are ignored and can be deleted.
 
 > **Security warning:** `APP_SECRET_KEY` must be a long random secret (at least 32 bytes).
@@ -165,16 +164,22 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 
 ---
 
-## Weekly and monthly jobs (no report)
+## The monthly job (no report, and no weekly job)
 
 The advisor report and its email were removed in PR-ADS-162H. There is no
 advisor mode to configure and no report file to look for.
 
-The weekly and monthly jobs still run on their schedules, as data refreshes:
-Google Ads and HubSpot pulls, the legacy leads / deals / geo / keywords
-snapshots, durable keyword facts, the canonical search-term sync, search-term
-waste detection (weekly: plus flag history) and the GCLID match with its
-coverage snapshot.
+The weekly job was retired in PR-ADS-165A — Render killed it at the 512 MB
+memory limit every Monday. **Do not run it, and there is nothing to run:**
+`scheduler/weekly.py`, `make weekly` and `POST /run/weekly` are gone.
+
+The monthly job still runs on the 1st, as a data refresh: Google Ads and
+HubSpot pulls, the legacy leads / deals / geo / keywords snapshots, durable
+keyword facts, the canonical search-term sync, search-term waste detection
+with its flag history, and the GCLID match with its coverage snapshot. It is
+the same kind of memory-heavy run the weekly job was; do not trigger it
+mid-month to "refresh" a page. Daily data (campaign and country spend, search
+terms, keyword facts, contacts, deals) comes from the daily incremental sync.
 
 Each run is recorded `success` (every step landed), `partial` (the run finished
 and at least one step did not — the run record's `failed_step` names them) or
@@ -322,7 +327,6 @@ Expected response:
   "status": "running",
   "jobs": [
     {"job": "daily",   "schedule": "06:00 Asia/Amman (03:00 UTC)",            "next_run": "..."},
-    {"job": "weekly",  "schedule": "Monday 07:00 Asia/Amman (04:00 UTC)",     "next_run": "..."},
     {"job": "monthly", "schedule": "1st of month 08:00 Asia/Amman (05:00 UTC)", "next_run": "..."}
   ]
 }
@@ -333,8 +337,8 @@ Expected response:
 With `ADMIN_API_TOKEN` set on the web service, you can trigger jobs remotely:
 
 ```bash
-# Weekly data refresh
-curl -X POST https://<service>.onrender.com/run/weekly \
+# Daily incremental sync
+curl -X POST https://<service>.onrender.com/run/incremental-sync \
   -H "Authorization: Bearer $ADMIN_API_TOKEN"
 
 # Daily pulse
@@ -357,7 +361,6 @@ curl -X POST https://<service>.onrender.com/run/monthly \
 | Job | Schedule (Asia/Amman) | UTC Equivalent |
 |-----|-----------------------|----------------|
 | Daily pulse | Every day at 06:00 | 03:00 UTC |
-| Weekly data refresh | Every Monday at 07:00 | Monday 04:00 UTC |
 | Monthly data refresh | 1st of month at 08:00 | 1st of month 05:00 UTC |
 
 **Timezone note:** Asia/Amman = UTC+3 year-round. Jordan suspended daylight saving
@@ -435,7 +438,7 @@ After deploying, confirm the following:
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Windsor.ai API returns error / timeout | The monthly job logs `Step 1/4 FAILED`, records the run `failed` and returns that outcome; the weekly job records the run `failed` and re-raises |
+| Windsor.ai API returns error / timeout | The monthly job logs `Step 1/4 FAILED`, records the run `failed` and returns that outcome |
 | HubSpot API returns 429 rate limit | `hubspot_pull.py` retries with exponential back-off; if retries exhausted, raises exception caught by monthly scheduler |
 | HubSpot API returns other error | Same retry logic; ultimately caught by monthly scheduler |
 | A database write persists nothing, or a sync reports not-ok | The step is logged, the run continues, and the run is recorded `partial` with the step named in `failed_step` |
@@ -482,11 +485,9 @@ python scripts/validate_phase1.py
 
 # 5. Run each scheduler manually
 make daily
-make weekly
 make monthly
 # or directly:
 python -m scheduler.daily
-python -m scheduler.weekly
 python -m scheduler.monthly
 ```
 
@@ -496,7 +497,6 @@ python -m scheduler.monthly
 |---------|------|---------|
 | `make healthcheck` | `python scripts/healthcheck.py` | Validate env vars, dirs, imports |
 | `make daily` | `python -m scheduler.daily` | Run the daily pulse |
-| `make weekly` | `python -m scheduler.weekly` | Run the weekly data refresh |
 | `make monthly` | `python -m scheduler.monthly` | Run the monthly data refresh |
 | `make validate` | `python scripts/validate_phase1.py` | Phase 1 read-only validation |
 | `make runs` | `tail runtime_logs/run_history.jsonl` | Show last 20 run records |
@@ -504,7 +504,6 @@ python -m scheduler.monthly
 To syntax-check without running:
 ```bash
 python -m py_compile scheduler/daily.py
-python -m py_compile scheduler/weekly.py
 python -m py_compile scheduler/monthly.py
 ```
 
@@ -516,7 +515,7 @@ The dashboard is served at `/` and provides:
 
 - **System status cards** — health, readiness, latest run.
 - **Latest Run panel** — reads from `/runs/latest`.
-- **Manual Run Controls** — buttons for Daily, Weekly, Monthly. Require `ADMIN_API_TOKEN`.
+- **Manual Run Controls** — buttons for each scheduled job (Daily, Monthly, incremental sync, certification). Require `ADMIN_API_TOKEN`.
 - **Doctrine reminder** — Phase 1 read-only status always visible.
 
 ### Token security

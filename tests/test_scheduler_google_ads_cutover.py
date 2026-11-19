@@ -2,7 +2,8 @@
 Tests for PR-ADS-104: Incremental Scheduler Cutover to Google Ads API
 
 Validates that:
-- scheduler/daily.py, weekly.py, monthly.py do NOT import connectors.windsor_pull
+- scheduler/daily.py and monthly.py do NOT import connectors.windsor_pull
+  (PR-ADS-165A: weekly.py was the third; the weekly job is deleted)
 - All three schedulers import connectors.google_ads_source
 - Google Ads dataset sync batches use source="google_ads_api"
 - source="windsor" is not used for campaigns/search_terms/keywords/geo in schedulers
@@ -67,7 +68,6 @@ def _all_string_literals(tree: ast.Module) -> list[str]:
 
 SCHEDULER_PATHS = {
     "daily": "scheduler/daily.py",
-    "weekly": "scheduler/weekly.py",
     "monthly": "scheduler/monthly.py",
 }
 
@@ -117,10 +117,8 @@ class TestGoogleAdsSourceImported:
 # ---------------------------------------------------------------------------
 
 class TestReviewFeedbackWindowSemantics:
-    def test_weekly_log_mentions_30d_and_60d_windows(self):
-        src = _read_source("scheduler/weekly.py")
-        assert "campaigns/keywords/geo=30d" in src
-        assert "search_terms=60d" in src
+    # PR-ADS-165A: `test_weekly_log_mentions_30d_and_60d_windows` stood here.
+    # It read a log line of scheduler/weekly.py, which is deleted with the job.
 
     def test_daily_search_terms_window_is_a_recovery_window_not_two_days(self):
         """PR-ADS-156 §4/§5 replaced the 2-day daily pull, and the reason matters.

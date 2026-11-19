@@ -112,7 +112,7 @@ def _check_import(module: str, label: str = "") -> bool:
 # ── Check groups ──────────────────────────────────────────────────────────────
 
 def check_windsor(failures: list) -> None:
-    _header("Windsor.ai  [required for daily / weekly / monthly]")
+    _header("Windsor.ai  [required for daily / monthly]")
     if not _check_env_var("WINDSOR_API_KEY"):
         failures.append("WINDSOR_API_KEY")
     if not _check_env_var("WINDSOR_ACCOUNT_ID"):
@@ -120,7 +120,7 @@ def check_windsor(failures: list) -> None:
 
 
 def check_hubspot(failures: list) -> None:
-    _header("HubSpot CRM  [required for daily / weekly / monthly]")
+    _header("HubSpot CRM  [required for daily / monthly]")
     if not _check_env_var("HUBSPOT_API_KEY"):
         failures.append("HUBSPOT_API_KEY")
 
@@ -181,7 +181,6 @@ def check_imports(failures: list) -> None:
         ("analysis.core",            "analysis/core.py"),
         ("api.auth",                 "api/auth.py"),
         ("scheduler.daily",          "scheduler/daily.py"),
-        ("scheduler.weekly",         "scheduler/weekly.py"),
         ("scheduler.monthly",        "scheduler/monthly.py"),
         ("scheduler.run_history",    "scheduler/run_history.py"),
     ]

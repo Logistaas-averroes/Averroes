@@ -9,7 +9,7 @@ Checks:
   2. Required configuration files exist.
   3. Required documentation files exist (including PHASE1_PRODUCTION_READINESS.md).
   4. Makefile exists and contains all expected targets.
-  5. In-app APScheduler registration (daily, weekly, monthly jobs).
+  5. In-app APScheduler registration (daily and monthly jobs).
      NOTE: The current deployment model is a single Render web service with
      in-app APScheduler (api/scheduler.py).  Render cron workers are
      intentionally absent — they are not required and must NOT be re-enabled
@@ -170,7 +170,6 @@ def check_docs(failures: list) -> None:
 _REQUIRED_MAKEFILE_TARGETS = [
     "healthcheck",
     "daily",
-    "weekly",
     "monthly",
     "validate",
     "readiness",
@@ -200,7 +199,8 @@ def check_makefile_targets(failures: list) -> None:
 
 # ── 5. APScheduler in-app job registration ───────────────────────────────────
 
-_REQUIRED_APSCHEDULER_JOBS = {"daily", "weekly", "monthly"}
+# PR-ADS-165A: the weekly job is retired and must not be required here.
+_REQUIRED_APSCHEDULER_JOBS = {"daily", "monthly"}
 
 
 def check_apscheduler(failures: list) -> None:
@@ -260,7 +260,6 @@ def check_apscheduler(failures: list) -> None:
 
 _REQUIRED_SCHEDULER_FILES = [
     "scheduler/daily.py",
-    "scheduler/weekly.py",
     "scheduler/monthly.py",
     "scheduler/run_history.py",
 ]

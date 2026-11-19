@@ -6,7 +6,8 @@ In-app APScheduler for the Logistaas Ads Intelligence System.
 Phase 1 — Read Only.
 
 Responsibility:
-  - Manage in-app scheduled jobs for daily, weekly, and monthly Phase 1 runs.
+  - Manage in-app scheduled jobs for the daily and monthly Phase 1 runs,
+    the daily incremental sync and the daily platform certification.
   - Provide shared in-memory concurrency guards used by api/server.py manual
     run endpoints, so scheduled and manual runs cannot overlap.
   - Log job start, success, and failure.
@@ -16,11 +17,19 @@ Responsibility:
 
 Schedules (Asia/Amman = UTC+3, no DST since Jordan suspended DST in 2022):
   Daily pulse     — every day at 06:00 Asia/Amman  (03:00 UTC)
-  Weekly data refresh  — every Monday at 07:00 Asia/Amman (04:00 UTC)
   Monthly data refresh — 1st of month at 08:00 Asia/Amman (05:00 UTC)
 
-PR-ADS-162H: the weekly and monthly jobs no longer generate or email a report.
-Their job ids, schedules and run types are unchanged.
+PR-ADS-162H: the monthly job no longer generates or emails a report. Its job
+id, schedule and run type are unchanged.
+
+PR-ADS-165A: the weekly data refresh (Mondays 07:00 Asia/Amman) is retired by
+owner decision. Render killed it at the 512 MB memory limit every Monday from
+2026-10-19 at the latest, and its last recorded success was 2026-06-01. Every
+dataset it wrote is also written by the monthly job, the daily pulse or the
+daily incremental sync; its one unique step, the search-term flag history, now
+runs in the monthly job. It is not registered and has no manual trigger;
+`weekly` is recorded in `RETIRED_JOB_IDS`, and a test holds that no retired id
+is also a job id. Historical `weekly` rows stay in the `runs` table as history.
 """
 
 import logging
@@ -44,13 +53,22 @@ _TZ = ZoneInfo("Asia/Amman")
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Canonical job IDs — single source of truth for all three Phase 1 jobs.
+# Canonical job IDs — single source of truth for every scheduled job.
 # Used by _job_state, start_scheduler(), get_registered_job_ids(), and
 # get_scheduler_status() to avoid duplication that could cause drift.
 # ---------------------------------------------------------------------------
 
-JOB_IDS: tuple[str, ...] = ("daily", "weekly", "monthly", "daily_incremental_sync",
+JOB_IDS: tuple[str, ...] = ("daily", "monthly", "daily_incremental_sync",
                             "platform_certification")
+
+#: PR-ADS-165A — job ids that used to be scheduled and are not any more, with
+#: the reason. A retired id has no scheduler registration, no `_job_state`
+#: slot, no schedule description and no `/run/<id>` endpoint.
+RETIRED_JOB_IDS: dict[str, str] = {
+    "weekly": ("Retired in PR-ADS-165A: killed by the host at the 512 MB "
+               "memory limit every Monday; every dataset it wrote has another "
+               "scheduled writer."),
+}
 
 _job_state: dict[str, bool] = {job_id: False for job_id in JOB_IDS}
 _run_lock = threading.Lock()
@@ -64,7 +82,6 @@ _scheduler: BackgroundScheduler | None = None
 # Human-readable schedule descriptions (UTC equivalents noted).
 _SCHEDULE_DESCRIPTIONS: dict[str, str] = {
     "daily": "06:00 Asia/Amman (03:00 UTC)",
-    "weekly": "Monday 07:00 Asia/Amman (04:00 UTC)",
     "monthly": "1st of month 08:00 Asia/Amman (05:00 UTC)",
     "daily_incremental_sync": "09:00 Asia/Amman (06:00 UTC)",
     # PR-ADS-161J: after the incremental sync has had 90 minutes to finish.
@@ -97,7 +114,7 @@ def _run_daily_scheduled() -> None:
 
 
 def _log_data_refresh_outcome(job: str, outcome) -> None:
-    """Log what a weekly / monthly data refresh reported about itself.
+    """Log what the monthly data refresh reported about itself.
 
     PR-ADS-162H. "Did not raise" used to be logged as "succeeded", which was
     false for a monthly run that had recorded itself `failed` and returned
@@ -115,25 +132,6 @@ def _log_data_refresh_outcome(job: str, outcome) -> None:
         log.error("[scheduler/%s] failed at: %s", job, steps)
     else:
         log.error("[scheduler/%s] returned no recognisable outcome: %r", job, outcome)
-
-
-def _run_weekly_scheduled() -> None:
-    """Scheduled wrapper for the weekly data refresh."""
-    with _run_lock:
-        if _job_state["weekly"]:
-            log.warning("[scheduler/weekly] skipped — already running (manual or previous scheduled run still active)")
-            return
-        _job_state["weekly"] = True
-
-    log.info("[scheduler/weekly] started (scheduled)")
-    try:
-        from scheduler.weekly import run_weekly_report  # noqa: PLC0415
-        _log_data_refresh_outcome("weekly", run_weekly_report())
-    except Exception as exc:  # noqa: BLE001
-        log.error("[scheduler/weekly] failed: %s", exc, exc_info=True)
-    finally:
-        with _run_lock:
-            _job_state["weekly"] = False
 
 
 def _run_monthly_scheduled() -> None:
@@ -229,16 +227,6 @@ def start_scheduler() -> None:
         misfire_grace_time=3600,  # 1-hour grace window for process restarts.
     )
 
-    # Weekly data refresh — every Monday at 07:00 Asia/Amman.
-    _scheduler.add_job(
-        _run_weekly_scheduled,
-        trigger=CronTrigger(day_of_week="mon", hour=7, minute=0, timezone=_TZ),
-        id="weekly",
-        name="Weekly Data Refresh",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
-
     # Monthly data refresh — 1st of every month at 08:00 Asia/Amman.
     _scheduler.add_job(
         _run_monthly_scheduled,
@@ -271,7 +259,7 @@ def start_scheduler() -> None:
 
     _scheduler.start()
     log.info(
-        "[scheduler] started — daily 06:00, weekly Mon 07:00, monthly 1st 08:00, "
+        "[scheduler] started — daily 06:00, monthly 1st 08:00, "
         "daily_incremental_sync 09:00, platform_certification 10:30 "
         "(Asia/Amman / UTC+3)"
     )
@@ -302,7 +290,7 @@ def get_registered_job_ids() -> list[str]:
 
 
 def get_scheduler_status() -> dict:
-    """Return current scheduler state and next run times for all three jobs."""
+    """Return current scheduler state and next run times for every job."""
     if _scheduler is None or not _scheduler.running:
         return {
             "status": "not_running",

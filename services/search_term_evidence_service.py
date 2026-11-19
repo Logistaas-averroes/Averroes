@@ -34,8 +34,8 @@ One durable truth path for the Search Terms page (Terms tab + Patterns tab):
     USD).
   - Classification (PR-ADS-145 precedence) resolves per unit, highest first:
       1. durable ``search_terms.is_flagged_waste = true`` → Flagged waste;
-      2. safely campaign-scoped confirmed ``waste_terms`` evidence (the weekly
-         waste-detection pipeline) → Flagged waste;
+      2. safely campaign-scoped confirmed ``waste_terms`` evidence (the scheduled
+         waste-detection step — monthly since PR-ADS-165A) → Flagged waste;
       3. durable ``is_flagged_waste = false`` on every underlying row →
          Reviewed clean;
       4. otherwise (any unreviewed row, or no evidence at all) → Needs review.
@@ -682,8 +682,8 @@ def _globally_ambiguous_norms(norm_to_ids: dict, aliases_by_id: dict) -> set:
 def _attach_waste_evidence(units: list, start, end, identity_by_label,
                            aliases_by_id, norm_to_ids) -> dict:
     """Attach safely campaign-scoped ``waste_terms`` evidence to units so a term
-    the weekly pipeline already confirmed shows as Flagged waste rather than
-    Needs review (PR-ADS-145 §4). Mutates units in place.
+    the monthly waste detection already confirmed shows as Flagged waste rather
+    than Needs review (PR-ADS-145 §4). Mutates units in place.
 
     Returns the JOIN CONTRACT outcome (PR-ADS-153D §24):
     ``{available, annotation_rows, attached, legacy_unresolved}``. An annotation
@@ -779,7 +779,7 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
                 "matched_pattern": match.get("matched_pattern"),
                 "crm_junk_confirmed": match.get("crm_junk_confirmed"),
                 "classification_date": match.get("run_date"),
-                "classification_source": "waste_terms (weekly waste detection)",
+                "classification_source": "waste_terms (scheduled waste detection)",
             }
 
     # Every annotation row that no safe join could place. These are historical
@@ -886,7 +886,7 @@ def _build_population(start, end) -> dict:
     _fx_convert_population(unit_list, start, end)
 
     # Attach safely campaign-scoped waste_terms classification evidence so a
-    # newly imported term that the weekly pipeline already confirmed shows as
+    # newly imported term that the monthly waste detection already confirmed shows as
     # Flagged waste rather than Needs review (PR-ADS-145 §4).
     annotation_join = _attach_waste_evidence(
         unit_list, start, end, identity_by_label, aliases_by_id, norm_to_ids)
@@ -915,7 +915,7 @@ def _unit_classification(unit: dict) -> dict:
     if unit.get("any_flagged"):
         source = "durable_flag"          # search_terms.is_flagged_waste = true
     elif unit.get("_waste_flag"):
-        source = "waste_terms"           # safe weekly waste-detection evidence
+        source = "waste_terms"           # safe monthly waste-detection evidence
     elif state == STATE_CLEAN:
         source = "durable_reviewed_clean"  # every underlying row explicit false
     else:
@@ -1685,7 +1685,7 @@ def _flagged_row(unit: dict, aliases_by_id: dict, review: dict | None,
              if review_available else None)
     classification = _unit_classification(unit)
     # Reason evidence must include the waste_terms ANNOTATION, not only the
-    # durable search_terms.junk_category. A term flagged purely by the weekly
+    # durable search_terms.junk_category. A term flagged purely by the monthly
     # classification run has no durable category of its own, so reading the raw
     # column alone rendered its reason as "unmapped" even though the annotation
     # named it. _unit_classification is the one place that merges both.
