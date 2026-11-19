@@ -21,7 +21,7 @@ Guarantees
 Reports
 -------
   1. Canonical sync      bootstrap status, total contacts, modification watermark
-  2. Current window      Leads / MQLs / SQLs / Opportunities / Lifecycle Customers,
+  2. Current window      Leads / MQLs / SQLs / Opportunities / Moved to Customer stage,
                          each on its OWN stage-entry date
   3. SQL reconciliation  canonical lifecycle SQL vs legacy qualified, split into
                          date-shift and population causes

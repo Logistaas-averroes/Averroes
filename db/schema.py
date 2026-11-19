@@ -1142,6 +1142,21 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel (
   country                   TEXT,
   company                   TEXT,
   owner_id                  TEXT,
+  -- PR-ADS-166A: the contact's own name (HubSpot firstname / lastname), for
+  -- the Leads page's contact rows. NULL = HubSpot gave none, or the contact
+  -- has not been read since these columns were added.
+  first_name                TEXT,
+  last_name                 TEXT,
+  -- When HubSpot last ANSWERED a read of this contact's names. NULL = the
+  -- names have never been read (so a NULL name means "not loaded yet");
+  -- set = they were read (so a NULL name means "HubSpot has none"). The two
+  -- are different claims and `first_name IS NULL` cannot tell them apart.
+  names_read_at             TIMESTAMPTZ,
+  -- When a read that HubSpot ANSWERED last asked for this contact and did not
+  -- get it back (deleted, merged, invisible to the token). With
+  -- names_read_at NULL that is "not returned by HubSpot" — neither "not
+  -- loaded yet" nor "no name". Such a contact is asked again weekly.
+  names_last_asked_at       TIMESTAMPTZ,
 
   -- GCLID evidence, same privacy doctrine as `leads` (no synthetic GCLIDs)
   gclid                     TEXT,
@@ -2348,6 +2363,10 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_removed (
   country                   TEXT,
   company                   TEXT,
   owner_id                  TEXT,
+  first_name                TEXT,
+  last_name                 TEXT,
+  names_read_at             TIMESTAMPTZ,
+  names_last_asked_at       TIMESTAMPTZ,
   gclid                     TEXT,
   has_gclid                 BOOLEAN,
   source_system             TEXT,
@@ -2366,6 +2385,44 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_removed (
   last_missing_at           TIMESTAMPTZ,
   absence_checks            INTEGER
 );
+-- PR-ADS-166A: contact names, on databases that already have both tables.
+-- Placed here, after both CREATEs, so the funnel table and its archive always
+-- gain the columns together (test_22 of PR-ADS-163C compares them).
+ALTER TABLE hubspot_contact_funnel ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE hubspot_contact_funnel ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE hubspot_contact_funnel_removed ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE hubspot_contact_funnel_removed ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE hubspot_contact_funnel ADD COLUMN IF NOT EXISTS names_read_at TIMESTAMPTZ;
+ALTER TABLE hubspot_contact_funnel_removed ADD COLUMN IF NOT EXISTS names_read_at TIMESTAMPTZ;
+ALTER TABLE hubspot_contact_funnel ADD COLUMN IF NOT EXISTS names_last_asked_at TIMESTAMPTZ;
+ALTER TABLE hubspot_contact_funnel_removed ADD COLUMN IF NOT EXISTS names_last_asked_at TIMESTAMPTZ;
+-- The name backfill's queue: contacts never read, newest first.
+CREATE INDEX IF NOT EXISTS idx_hcf_names_unread
+  ON hubspot_contact_funnel(created_at DESC, contact_id DESC)
+  WHERE names_read_at IS NULL;
+
+-- PR-ADS-166A — the NAME of a HubSpot company a won deal is associated with.
+-- `hubspot_deal_company_association` holds company ids only; a customer is
+-- that id, and this table only says what to call it. One row per company a
+-- read has ANSWERED for:
+--   no row                  never asked ("not loaded yet");
+--   row, read_at NULL       asked, and HubSpot did not return the company;
+--   row, read, name NULL    HubSpot returned it and it has no name;
+--   row, read, name set     the last non-empty name HubSpot returned.
+-- A failed read writes nothing, and an answer with an empty name never
+-- replaces a stored one (COALESCE in the writer), so the last good name
+-- stands. Nothing here decides who is a customer.
+CREATE TABLE IF NOT EXISTS hubspot_company_name (
+  company_id   TEXT PRIMARY KEY,
+  name         TEXT,
+  read_at      TIMESTAMPTZ,              -- last read that RETURNED the company
+  last_asked_at TIMESTAMPTZ,             -- last answered read that did NOT
+  CONSTRAINT ck_company_name_answered
+    CHECK (read_at IS NOT NULL OR last_asked_at IS NOT NULL),
+  created_at   TIMESTAMPTZ DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_hcf_removed_contact
   ON hubspot_contact_funnel_removed(contact_id);
 CREATE INDEX IF NOT EXISTS idx_hcf_removed_run

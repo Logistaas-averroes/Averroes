@@ -191,6 +191,22 @@ INVENTORY = (
      "ui_effect": "Closed-won deals KPI; customers per country, not summed",
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "google_ads_source_closed_won_deals", "status": "migrated"},
+    # PR-ADS-166A: the Leads page showed contacts moved to the Customer
+    # lifecycle stage under the word "Customers" (219 for Q3 2026 against 8
+    # won deals). That count keeps its own name; customers won is read here.
+    {"consumer": "services/canonical_crm_funnel_service.py",
+     "surface": "/api/crm-funnel/customers-won; Leads page",
+     "existing_source": "hubspot_contact_funnel.date_entered_customer count",
+     "existing_meaning": "contacts moved to the Customer lifecycle stage, "
+                         "shown as Customers",
+     "canonical_replacement": "load_won_deals canonical customers + "
+                              "closed_won_deals, beside the relabelled "
+                              "stage-move count",
+     "window_cohort": "business window · close-date cohort",
+     "ui_effect": "Customers won = distinct companies or Withheld/Unavailable "
+                  "+ reason; unavailable under a Scope/Source filter",
+     "families": ("customers",),
+     "canonical_via": "load_won_deals", "status": "migrated"},
     {"consumer": "services/cross_page_parity_service.py",
      "surface": "/api/audit/cross-page-parity",
      "existing_source": "page `customers` fields",

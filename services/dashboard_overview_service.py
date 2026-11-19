@@ -62,6 +62,10 @@ from services.revenue_attribution_service import build_revenue_deals
 from services.revenue_decision_mart import build_revenue_decision_mart
 from services.source_attribution_service import build_revenue_by_source
 
+from analysis.crm_lifecycle import (  # noqa: E402
+    EVENT_ACTIVITY_LABELS, EVENT_TARGET_LABELS,
+)
+
 logger = logging.getLogger(__name__)
 
 # Trend buckets: weekly for quarter-scale windows, monthly for longer spans.
@@ -1390,6 +1394,10 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         "reconciliation": payload.get("reconciliation"),
         "definitions": {e: {
             "label": (events.get(e) or {}).get("label"),
+            # PR-ADS-166A: the canonical wording of the event as one period's
+            # activity and as a conversion target (see analysis/crm_lifecycle).
+            "activity_label": (events.get(e) or {}).get("activity_label"),
+            "target_label": (events.get(e) or {}).get("target_label"),
             "event_date_property": (events.get(e) or {}).get("event_date_property"),
         } for e in empty},
         "sync": payload.get("sync"),
@@ -1542,7 +1550,9 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
             # and different claims, and only the second one is true. The noun
             # is the canonical event label, not a second vocabulary invented
             # here to read more smoothly.
-            "activity_label": f"{label} entered during this period",
+            "activity_label": (definition.get("activity_label")
+                               or EVENT_ACTIVITY_LABELS.get(event)
+                               or f"{label} entered during this period"),
             "entered": entered,
             "available": entered is not None,
             "event_date_property": definition.get("event_date_property"),
@@ -1568,7 +1578,12 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
         to_event = conversion.get("to_event")
         from_label = ((definitions.get(from_event) or {}).get("label")
                       or (from_event or "").upper())
-        to_label = ((definitions.get(to_event) or {}).get("label")
+        # The TARGET wording: a conversion into the Customer stage reads
+        # "→ Customer stage", a stage move, never a customer conversion.
+        to_definition = definitions.get(to_event) or {}
+        to_label = (to_definition.get("target_label")
+                    or EVENT_TARGET_LABELS.get(to_event)
+                    or to_definition.get("label")
                     or (to_event or "").upper())
         conversions.append({
             **conversion,

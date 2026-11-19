@@ -149,6 +149,11 @@ class TestSummaryShape:
             # (deleted or merged), which the modified-since contact sync
             # cannot see. It runs right after that sync.
             "hubspot/contact_reconciliation",
+            # PR-ADS-166A: the two read-only name loads — contacts already
+            # stored (after the contact sync) and the companies on won deals
+            # (after the associations).
+            "hubspot/contact_names",
+            "hubspot/company_names",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -848,6 +853,20 @@ def _patch_all_datasets_success(
     monkeypatch.setattr(
         "services.hubspot_contact_reconciliation_service."
         "run_contact_reconciliation", _contact_reconciliation_stub)
+
+    # PR-ADS-166A: the two name loads. Patched at the service seam like every
+    # other step (the real ones read a queue from the database and batch-read
+    # HubSpot), mirroring the source_pull failure mode. A healthy fixture
+    # describes a load with nothing due.
+    def _names_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"status": "success", "selected": 0, "batches_requested": 0,
+                "batches_answered": 0, "written": 0,
+                "hubspot_writes_performed": False}
+    for _runner in ("run_contact_name_backfill", "run_company_name_sync"):
+        monkeypatch.setattr(
+            f"services.hubspot_name_backfill_service.{_runner}", _names_stub)
 
     def _fx_stub(*a, **kw):
         if source_pull:

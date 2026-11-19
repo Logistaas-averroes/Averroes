@@ -3483,6 +3483,7 @@ _CONTACT_FUNNEL_COLUMNS = (
     "hs_latest_source", "hs_latest_source_data_1", "hs_latest_source_data_2",
     "hs_analytics_first_url",
     "ip_country", "country", "company", "owner_id",
+    "first_name", "last_name", "names_read_at", "names_last_asked_at",
     "gclid", "has_gclid",
     "source_system", "lifecycle_rule_version", "mql_rule_version",
 )
@@ -3531,7 +3532,23 @@ _CONTACT_FUNNEL_EVIDENCE_COLUMNS = (
 )
 
 
+# PR-ADS-166A — a stored contact name is kept when a later payload omits it.
+# HubSpot's search returns only the properties it holds a value for, so a
+# sparse read would otherwise blank a name the platform had and report success
+# (the hazard above, for a different column). A DIFFERENT non-null name still
+# replaces the stored one. The cost, stated: a name deliberately cleared in
+# HubSpot stays here until a new one is typed.
+#
+# `names_read_at` follows the same rule: a writer that did not read the names
+# (a row without the key) must not erase the record that they were read.
+_CONTACT_FUNNEL_NAME_COLUMNS = ("first_name", "last_name", "names_read_at",
+                                "names_last_asked_at")
+
+
 def _contact_funnel_set(col: str) -> str:
+    if col in _CONTACT_FUNNEL_NAME_COLUMNS:
+        return (f"{col} = COALESCE(EXCLUDED.{col}, "
+                f"hubspot_contact_funnel.{col})")
     if col in _CONTACT_FUNNEL_EVIDENCE_COLUMNS:
         # Absence is not a correction. Only a present value may replace one.
         return (f"{col} = COALESCE(EXCLUDED.{col}, "
@@ -3585,7 +3602,8 @@ def upsert_hubspot_contact_funnel(rows: list, *,
                 "created_at", "last_modified_at", "date_entered_lead",
                 "date_entered_mql", "date_entered_sql",
                 "date_entered_opportunity", "date_entered_customer",
-                "latest_stage_entry_at",
+                "latest_stage_entry_at", "names_read_at",
+                "names_last_asked_at",
             }:
                 values.append(_parse_ts_or_none(value))
             elif col == "has_gclid":
@@ -3633,6 +3651,159 @@ def upsert_hubspot_contact_funnel(rows: list, *,
                 "persisted": max(0, int(persisted)), "error": None}
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_hubspot_contact_funnel failed: %s", exc)
+        return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-166A — names read by id (the backfill), and company names
+# ---------------------------------------------------------------------------
+def apply_contact_names(rows: list, *, read_at) -> dict:
+    """Record the names HubSpot ANSWERED with for stored contacts. LOCAL ONLY.
+
+    ``rows`` are ``{"contact_id", "first_name", "last_name"}`` for contacts a
+    read returned. Each is stamped ``names_read_at = read_at``; a NULL incoming
+    name keeps the stored one (COALESCE). A contact the read did NOT return is
+    simply not in ``rows`` and is not touched — its ``names_read_at`` stays
+    NULL. Never inserts: a contact that left the funnel is not re-created.
+
+    Returns ``{"ok", "attempted", "persisted", "error"}`` — ``persisted`` is
+    what the database updated, not ``len(rows)``.
+    """
+    prepared = [(r.get("first_name"), r.get("last_name"), read_at,
+                 str(r.get("contact_id") or "").strip())
+                for r in rows or [] if str((r or {}).get("contact_id") or "").strip()]
+    if not prepared:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
+            persisted = 0
+            with conn.cursor() as cur:
+                for params in prepared:
+                    cur.execute(
+                        """
+                        UPDATE hubspot_contact_funnel
+                           SET first_name    = COALESCE(%s, first_name),
+                               last_name     = COALESCE(%s, last_name),
+                               names_read_at = %s,
+                               updated_at    = NOW()
+                         WHERE contact_id = %s
+                        """, params)
+                    persisted += max(0, cur.rowcount or 0)
+        return {"ok": True, "attempted": len(prepared),
+                "persisted": persisted, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("apply_contact_names failed: %s", exc)
+        return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+def mark_contact_names_not_returned(contact_ids, *, asked_at) -> dict:
+    """Record that an ANSWERED read asked for these contacts and HubSpot did
+    not return them. LOCAL ONLY.
+
+    Stamps ``names_last_asked_at`` and nothing else: ``names_read_at`` stays
+    NULL, no name is touched, nothing is removed (PR-ADS-163C owns removals).
+    A contact whose names HAVE been read is left alone.
+    """
+    ids = sorted({str(c).strip() for c in contact_ids or [] if str(c or "").strip()})
+    if not ids:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(ids), "persisted": 0,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE hubspot_contact_funnel
+                       SET names_last_asked_at = %s, updated_at = NOW()
+                     WHERE contact_id = ANY(%s) AND names_read_at IS NULL
+                    """, (asked_at, ids))
+                persisted = max(0, cur.rowcount or 0)
+        return {"ok": True, "attempted": len(ids), "persisted": persisted,
+                "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("mark_contact_names_not_returned failed: %s", exc)
+        return {"ok": False, "attempted": len(ids), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+def mark_company_names_not_returned(company_ids, *, asked_at) -> dict:
+    """Record that an ANSWERED read asked for these companies and HubSpot did
+    not return them. A stored name and its ``read_at`` are never touched."""
+    ids = sorted({str(c).strip() for c in company_ids or [] if str(c or "").strip()})
+    if not ids:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(ids), "persisted": 0,
+                        "error": "database_unavailable"}
+            persisted = 0
+            with conn.cursor() as cur:
+                for company_id in ids:
+                    cur.execute(
+                        """
+                        INSERT INTO hubspot_company_name
+                               (company_id, name, read_at, last_asked_at)
+                        VALUES (%s, NULL, NULL, %s)
+                        ON CONFLICT (company_id) DO UPDATE SET
+                            last_asked_at = GREATEST(
+                                EXCLUDED.last_asked_at,
+                                hubspot_company_name.last_asked_at),
+                            updated_at = NOW()
+                        """, (company_id, asked_at))
+                    persisted += max(0, cur.rowcount or 0)
+        return {"ok": True, "attempted": len(ids), "persisted": persisted,
+                "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("mark_company_names_not_returned failed: %s", exc)
+        return {"ok": False, "attempted": len(ids), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+def upsert_company_names(rows: list, *, read_at) -> dict:
+    """Record the company names HubSpot ANSWERED with. LOCAL ONLY.
+
+    ``rows`` are ``{"company_id", "name"}`` for companies a read returned
+    (``name`` None when HubSpot holds none). An empty answer never replaces a
+    stored name; a company the read did not return is not in ``rows`` and
+    gets no row. Same structured result as :func:`apply_contact_names`.
+    """
+    prepared = [(str(r.get("company_id") or "").strip(), r.get("name"), read_at)
+                for r in rows or [] if str((r or {}).get("company_id") or "").strip()]
+    if not prepared:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
+            persisted = 0
+            with conn.cursor() as cur:
+                for params in prepared:
+                    cur.execute(
+                        """
+                        INSERT INTO hubspot_company_name (company_id, name, read_at)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (company_id) DO UPDATE SET
+                            name       = COALESCE(EXCLUDED.name,
+                                                  hubspot_company_name.name),
+                            read_at    = EXCLUDED.read_at,
+                            updated_at = NOW()
+                        WHERE hubspot_company_name.read_at IS NULL
+                           OR EXCLUDED.read_at >= hubspot_company_name.read_at
+                        """, params)
+                    persisted += max(0, cur.rowcount or 0)
+        return {"ok": True, "attempted": len(prepared),
+                "persisted": persisted, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_company_names failed: %s", exc)
         return {"ok": False, "attempted": len(prepared), "persisted": 0,
                 "error": str(exc)[:300]}
 

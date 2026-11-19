@@ -7504,7 +7504,14 @@ def api_crm_funnel_contacts(
     whose campaign-identity contract cannot be consulted returns
     ``available: false``, never an empty page that would read as a proven zero.
 
-    NEVER returns an email address — company and HubSpot contact id only.
+    NEVER returns an email address. Each row carries the HubSpot contact id,
+    the company typed on the contact, and (PR-ADS-166A) the contact's own
+    first + last name. ``contact_name`` is null when the platform holds none,
+    and ``contact_name_status`` says which: ``not_recorded`` (HubSpot was
+    asked and has none) or ``not_loaded`` (never read). ``names_progress``
+    is how many stored contacts have had their names read. Names are served
+    under this route's existing gate (any signed-in user), the gate every
+    other field of the row already has; ``q`` matches company or name.
     """
     try:
         from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
@@ -7519,6 +7526,43 @@ def api_crm_funnel_contacts(
     except Exception as exc:  # noqa: BLE001
         log.error("[api/crm-funnel/contacts] failed: %s", exc)
         raise HTTPException(status_code=500, detail="CRM funnel contacts unavailable") from exc
+
+
+@app.get("/api/crm-funnel/customers-won")
+def api_crm_funnel_customers_won(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="current_quarter"),
+    window_type: str = Query(default="business"),
+    scope: str = Query(default="all_source"),
+    acquisition_group: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """"Customers won" for the Leads page window (PR-ADS-166A). Read-only.
+
+    Distinct HubSpot companies with a closed-won deal closed in the window,
+    republished from the closed-won reader contract as
+    ``{value, status, reason}`` — a DIFFERENT metric from the page's
+    lifecycle-stage count ("moved to Customer stage in HubSpot"), shown beside
+    it and never derived from it.
+
+    A non-business window, or a Scope / Source filter (which classify
+    contacts, not deals), returns ``unavailable`` with the reason instead of
+    an approximation. A withheld or unavailable count is ``null``, never 0.
+
+    ``won_customers`` — one entry per won customer (company name, deal count,
+    latest close date) — is present ONLY when the customer count is
+    published. Withheld or unavailable: the key is absent.
+    """
+    try:
+        from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
+        return crm_funnel.build_customers_won(
+            window_type, window, scope=scope,
+            acquisition_group=acquisition_group or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/crm-funnel/customers-won] failed: %s", exc)
+        raise HTTPException(status_code=500,
+                            detail="customers won unavailable") from exc
 
 
 @app.get("/api/crm-funnel/operational-status")

@@ -52,6 +52,7 @@ from analysis import closed_won_truth as cwt  # PR-ADS-161E
 from services import canonical_revenue_service as canonical_revenue
 from services.canonical_contract import (
     METRIC_TRUTH_KEY,
+    SOURCE_CANONICAL_DEAL_LEDGER,
     SOURCE_CANONICAL_FUNNEL,
     SOURCE_CANONICAL_GEO,
     SOURCE_CANONICAL_SPEND,
@@ -299,6 +300,10 @@ PROOF_COUNTRY_SQLS = "mart_lead_population_and_country_assignment"
 #: Paths are asserted against real payloads in the test suite, so a renamed key
 #: fails a test rather than silently reporting the metric "unavailable" here —
 #: an audit that goes quiet when it loses its grip is worse than no audit.
+#: PR-ADS-166A — `GET /api/crm-funnel/customers-won`, the Leads page's
+#: "Customers won" block.
+CONSUMER_LEADS_CUSTOMERS_WON = "leads/customers_won"
+
 METRIC_IDENTITIES = {
     # ── Google Ads spend, FULL account denominator ───────────────────────────
     # Countries' `kpis.verified_spend_usd` is deliberately NOT here. It sums the
@@ -355,8 +360,13 @@ METRIC_IDENTITIES = {
             ("dashboard/channels", "kpis.total_closed_won_deals"),
             ("dashboard/deals", "kpis.closed_won_deals"),
             ("revenue_decision_mart", "summary.closed_won_deals"),
+            # PR-ADS-166A: the Leads page's "Customers won" block reads the
+            # reader contract directly; it must show the Deals page's figures.
+            (CONSUMER_LEADS_CUSTOMERS_WON, "closed_won_deals.value"),
         ],
-        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
+        "consumer_sources": {
+            "dashboard/channels": SOURCE_REVENUE_BY_SOURCE,
+            CONSUMER_LEADS_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
     },
     "customers": {
         "label": "Customers (distinct HubSpot companies), ALL sources",
@@ -369,7 +379,10 @@ METRIC_IDENTITIES = {
             ("dashboard/channels", "kpis.customers"),
             ("dashboard/deals", "kpis.closed_won_customers"),
             ("revenue_decision_mart", "summary.customers"),
+            (CONSUMER_LEADS_CUSTOMERS_WON, "customers.value"),
         ],
+        "consumer_sources": {
+            CONSUMER_LEADS_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
     },
 
     # ── Campaign-ATTRIBUTABLE outcomes — a SUBSET, not the business total ────
@@ -510,9 +523,13 @@ METRIC_IDENTITIES = {
 #: campaign-attributable SQL count or the channel source-group count. The
 #: registry keeps all three apart on purpose.
 LIFECYCLE_STAGES = ("leads", "mqls", "sqls", "opportunities", "customers")
+#: PR-ADS-166A: the fifth stage is a lifecycle stage MOVE, never "customers"
+#: (the identity key stays `lifecycle_customers`; only the wording changes).
+_LIFECYCLE_STAGE_LABELS = {"customers": "Moved to Customer stage"}
 for _stage in LIFECYCLE_STAGES:
     METRIC_IDENTITIES[f"lifecycle_{_stage}"] = {
-        "label": f"Lifecycle {_stage}, ALL sources (canonical funnel)",
+        "label": (f"{_LIFECYCLE_STAGE_LABELS.get(_stage, 'Lifecycle ' + _stage)}"
+                  ", ALL sources (canonical funnel)"),
         "canonical_source": SOURCE_CANONICAL_FUNNEL,
         "scope": f"lifecycle_{_stage}",
         "coverage_proof": PROOF_LIFECYCLE_FUNNEL,
@@ -902,7 +919,13 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
     from services.dashboard_deals_service import build_dashboard_deals  # noqa: PLC0415
     from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
 
+    from services.canonical_crm_funnel_service import (  # noqa: PLC0415
+        build_customers_won,
+    )
+
     builders = {
+        CONSUMER_LEADS_CUSTOMERS_WON: lambda: build_customers_won(
+            "business", window, now=now),
         "dashboard/overview": lambda: build_dashboard_overview(window=window, now=now),
         "dashboard/revenue": lambda: build_dashboard_revenue(window=window, now=now),
         "dashboard/channels": lambda: build_dashboard_channels(window=window, now=now),

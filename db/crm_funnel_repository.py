@@ -1368,8 +1368,16 @@ def fetch_polluted_mql_status_rows(limit: int = 200) -> dict:
 MAX_CONTACT_PAGE_SIZE = 100
 DEFAULT_CONTACT_PAGE_SIZE = 50
 
+#: PR-ADS-166A — "holds at least one letter", as PostgreSQL can say it without
+#: depending on the database locale: an ASCII letter, or any non-ASCII
+#: character. (Python's rule is `str.isalpha`; the two differ only for a value
+#: made of non-ASCII punctuation alone.)
+NAME_HAS_A_LETTER_REGEX = r"[A-Za-z]|[^\x01-\x7F]"
+
 _CONTACT_PAGE_COLUMNS = (
-    "contact_id", "company", "lifecycle_stage", "lead_status",
+    "contact_id", "company", "first_name", "last_name", "names_read_at",
+    "names_last_asked_at",
+    "lifecycle_stage", "lead_status",
     "mql_status", "mql_status_category",
     "created_at", "last_modified_at",
     "date_entered_lead", "date_entered_mql", "date_entered_sql",
@@ -1538,8 +1546,30 @@ def fetch_funnel_contact_page(
         params.append(operational_status)
 
     if company_query:
-        where.append(f"({FUNNEL_ALIAS}.company ILIKE %s)")
-        params.append(f"%{company_query.strip()}%")
+        # PR-ADS-166A: the same box finds a contact by name. Each column is
+        # matched on its own value — a NULL name matches nothing.
+        #
+        # A name field that holds an email, or no letter at all, is not
+        # displayed as a name (`contact_display_name`) and is not searchable
+        # as one either: typing an address must not find the contact whose
+        # "first name" is that address.
+        needle = f"%{company_query.strip()}%"
+        first = f"{FUNNEL_ALIAS}.first_name"
+        last = f"{FUNNEL_ALIAS}.last_name"
+
+        def shown(col):
+            return f"({col} NOT LIKE %s AND {col} ~ %s)"
+        where.append(
+            f"({FUNNEL_ALIAS}.company ILIKE %s"
+            f" OR ({shown(first)} AND {first} ILIKE %s)"
+            f" OR ({shown(last)} AND {last} ILIKE %s)"
+            f" OR ({shown(first)} AND {shown(last)}"
+            f" AND ({first} || ' ' || {last}) ILIKE %s))")
+        at, letter = "%@%", NAME_HAS_A_LETTER_REGEX
+        params.extend([needle,
+                       at, letter, needle,
+                       at, letter, needle,
+                       at, letter, at, letter, needle])
 
     where_sql = " AND ".join(where)
 

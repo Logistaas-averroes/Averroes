@@ -596,7 +596,7 @@ def _source_detail_row(r: dict, group: str, channel_label: str, platform_label: 
         "deal_name": r.get("deal_name") or None,
         "company": None,                    # contact employer is not on the ledger
         "company_id": None,                 # company record id is not stored
-        "main_contact": None,               # contact name is not stored
+        "main_contact": None,               # not joined here (names live on hubspot_contact_funnel since PR-ADS-166A)
         "contact_id": r.get("primary_contact_id") or None,
         "lifecycle_stage": None,            # HubSpot lifecyclestage is not persisted
         "status_category": r.get("status_category") or None,
@@ -628,7 +628,7 @@ def _source_contact_row(r: dict, channel_label: str, platform_label: str) -> dic
     return {
         "company": r.get("company") or None,
         "company_id": None,                 # company record id is not stored
-        "main_contact": None,               # contact name is not stored
+        "main_contact": None,               # not joined here (names live on hubspot_contact_funnel since PR-ADS-166A)
         "contact_id": r.get("contact_id") or None,
         "lifecycle_stage": None,            # HubSpot lifecyclestage is not persisted
         "status_category": status,

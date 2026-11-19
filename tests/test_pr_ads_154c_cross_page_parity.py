@@ -186,6 +186,7 @@ def _payloads(**overrides):
     _SPEND = contract_mod.SOURCE_CANONICAL_SPEND
     _GEO = contract_mod.SOURCE_CANONICAL_GEO
     _FUNNEL = contract_mod.SOURCE_CANONICAL_FUNNEL
+    _LEDGER = contract_mod.SOURCE_CANONICAL_DEAL_LEDGER
 
     def _mt(*specs):
         return {m: _contract(m, src, scope) for m, src, scope in specs}
@@ -196,6 +197,17 @@ def _payloads(**overrides):
     # country-attributed subsets, 25 campaign-attributable SQLs against 0
     # source-group SQLs, 105 leads.
     base = {
+        # PR-ADS-166A: the Leads page's "Customers won" block
+        # (`/api/crm-funnel/customers-won`). It reads the closed-won reader
+        # contract directly, so it names the deal ledger, and publishes each
+        # figure as {value, status, reason}.
+        "leads/customers_won": {
+            "window": dict(_WIN), "legacy_fallback_used": False,
+            "customers": {"value": 3, "status": "published", "reason": None},
+            "closed_won_deals": {"value": 3, "status": "published", "reason": None},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("customers", _LEDGER, "all_source_business_revenue"),
+                ("closed_won_deals", _LEDGER, "all_source_business_revenue"))},
         "dashboard/overview": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_decision_mart",       # a STRING, as in production
@@ -1181,11 +1193,16 @@ def test_f2_2d_all_source_outcomes_span_every_page_that_publishes_them(monkeypat
     checks all five rather than two."""
     from services.cross_page_parity_service import METRIC_IDENTITIES
 
+    pages = {"dashboard/overview", "dashboard/revenue", "dashboard/channels",
+             "dashboard/deals", "revenue_decision_mart"}
+    # PR-ADS-166A added a sixth surface for customers (and closed-won deals):
+    # the Leads page's "Customers won" block, which publishes no revenue. The
+    # expectation grew by that one consumer; nothing was removed.
+    expected = {"closed_won_revenue_usd": pages,
+                "customers": pages | {"leads/customers_won"}}
     for key in ("closed_won_revenue_usd", "customers"):
         consumers = {c for c, _ in METRIC_IDENTITIES[key]["consumers"]}
-        assert consumers == {"dashboard/overview", "dashboard/revenue",
-                             "dashboard/channels", "dashboard/deals",
-                             "revenue_decision_mart"}, key
+        assert consumers == expected[key], key
 
     out = _audit_with(monkeypatch, _payloads(
         dashboard__deals={"kpis.closed_won_customers": 4}))

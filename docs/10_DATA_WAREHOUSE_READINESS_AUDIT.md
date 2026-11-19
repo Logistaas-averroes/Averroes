@@ -211,7 +211,7 @@ Filters contacts where `hs_analytics_source = PAID_SEARCH` and `createdate >= cu
 
 | Field | Fetched? | Stored in DB? | Table | Notes |
 |-------|---------|--------------|-------|-------|
-| `firstname` / `lastname` | ✅ | ❌ | — | Not stored (PII consideration) |
+| `firstname` / `lastname` | ✅ | ❌ | — | Not stored (PII consideration). **Superseded by PR-ADS-166A:** stored on `hubspot_contact_funnel.first_name` / `last_name` |
 | `email` | ✅ | ❌ | — | Fetched via CONTACT_PROPERTIES but not written to leads |
 | `company` | ✅ | ✅ | `leads.company` | |
 | `hs_google_click_id` | ✅ | ✅ | `leads.gclid` | GCLID |
@@ -877,7 +877,7 @@ This separation means:
 | Frontend loading too many search terms | High | Requires pagination from day one |
 | Mixing Windsor conversions with HubSpot SQLs | Medium | These are different metrics; must not be compared directly |
 | Treating missing search terms as zero waste | Medium | If `pull_search_terms()` returns empty, waste detection falls back to keywords |
-| Storing PII unnecessarily | Medium | Email not stored (correct); firstname/lastname not stored (correct) |
+| Storing PII unnecessarily | Medium | Email not stored (correct); firstname/lastname not stored (correct). **Since PR-ADS-166A** contact names are stored, by owner request, for the Leads page; email still is not |
 | Exposing sensitive CRM data | Low | Auth required for all API endpoints |
 | Phase 1 accidentally writing to external platforms | Low | No write operations to Google Ads or HubSpot in any current module |
 
