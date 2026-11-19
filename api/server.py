@@ -5646,17 +5646,20 @@ async def get_revenue_deals(
     window: str = Query(default="current_quarter"),
     _user=Depends(require_auth),
 ):
-    """Closed-Won Revenue Ledger (PR-ADS-113).
+    """Closed-Won Deals (PR-ADS-113; canonical deal ledger since PR-ADS-153E-B).
 
-    Read-only deal-level revenue truth for the rebuilt Deals page. Sourced from
-    the durable gclid_attribution table, windowed by the real deal_close_date
-    (NEVER the scheduler run_date). Only closed-won deals count as revenue.
+    Read-only deal-level revenue truth for the Deals page: EVERY HubSpot
+    closed-won deal in the window, from every source (not only Google Ads),
+    windowed by the real deal close date (NEVER the scheduler run_date).
     Business-revenue windows only: current_quarter, last_quarter, last_6_months,
     ytd, all_time.
 
-    No Google Ads conversion value. No scheduler-date revenue windows. When the
-    durable ledger cannot be read, source_health.ledger_status is
-    "database_unavailable" (distinct from a safe-empty window).
+    No Google Ads conversion value. No scheduler-date revenue windows.
+    ``closed_won_population`` carries the canonical {value, status, reason} of
+    the window's won-deal count (PR-ADS-164A): an empty ``deals`` list means
+    "no deal closed" only beside ``status: published, value: 0``. A stale or
+    unreadable ledger is withheld / unavailable with its reason, and
+    ``source_health.ledger_status`` names the same reason.
 
     Read-only — no writes to Google Ads, HubSpot, or any external system.
     """

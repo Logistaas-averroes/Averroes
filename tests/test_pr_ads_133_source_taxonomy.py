@@ -494,7 +494,9 @@ def test_frontend_renders_hierarchy():
     assert "source-channel-row" in JS
     assert "source-platform-row" in JS
     # Page still reads the mart rows and keeps the mart chrome.
-    page = _slice(JS, "function renderRevenueBySourcePage", span=1200)
+    # PR-ADS-164A: span widened from 1200 — the verdict guard added at the top
+    # of the renderer moved the section call ~240 characters further in.
+    page = _slice(JS, "function renderRevenueBySourcePage", span=1500)
     assert "data.rows" in page
     assert "renderSourceGroupSection" in page
 

@@ -255,7 +255,10 @@ def test_endpoint_registered_business_window_only():
 def test_deals_uses_business_windows_not_day_windows():
     section = _section("page-deals")
     assert "Closed-Won Deals" in section
-    assert "HubSpot closed-won revenue attributed to Google Ads, by deal close date." in section
+    # PR-ADS-164A: the page lists EVERY closed-won deal (all_source scope), so
+    # the subtitle no longer says "attributed to Google Ads".
+    assert ("Every HubSpot closed-won deal, from every source — not only Google "
+            "Ads — by deal close date.") in section
     for win in ("current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"):
         assert f'value="{win}"' in section
     for ad in ('value="7d"', 'value="14d"', 'value="30d"', 'value="60d"'):
@@ -287,11 +290,15 @@ def test_deals_states_differ():
     region = _deals_region()
     assert "function renderRevenueDealsUnavailable" in region
     assert "function renderRevenueDealsSafeEmptyState" in region
-    assert "Closed-won revenue is unavailable" in region
-    assert "The durable attribution ledger cannot be read right now." in region
-    assert "No closed-won deals found for this window" in region
-    # Render flow: unavailable -> safe-empty -> table.
-    page = _fn("function renderRevenueDealsPage", span=1200)
+    # PR-ADS-164A: the unavailable card states the canonical word and reason
+    # (rendered by the shared helper), and the empty card is reached only on a
+    # published zero — so its wording says the ledger was read.
+    assert "renderClosedWonBlocked(verdict)" in region
+    assert "No closed-won deals closed in this period" in region
+    assert "The deal ledger was read and is current." in region
+    # Render flow: unavailable -> safe-empty -> table. (Span widened from 1200:
+    # the verdict lines moved the table call to ~1230 characters in.)
+    page = _fn("function renderRevenueDealsPage", span=1600)
     i_unavail = page.find("renderRevenueDealsUnavailable")
     i_empty = page.find("renderRevenueDealsSafeEmptyState")
     i_table = page.find("renderRevenueDealsTable")
@@ -308,15 +315,16 @@ def test_deals_no_fake_zero_or_roas():
 
 def test_deals_table_columns_and_attribution_labels():
     table = _fn("function renderRevenueDealsTable", span=1400)
-    for col in ("Company", "Closed", "Country", "Campaign", "Won Revenue", "Attribution"):
+    # PR-ADS-164A: the table shows only fields the canonical deal row carries.
+    # "Company" was hard-coded None by the server (the ledger stores the deal's
+    # name, not an employer) and "Attribution" read `match_source`, which the
+    # payload stopped carrying in PR-ADS-153E-B — every row read "Needs Review".
+    for col in ("Deal", "Closed", "Country", "Campaign", "Source", "Won Revenue"):
         assert f">{col}<" in table, f"deals table missing column {col}"
-    for gone in (">Stage<", ">Keyword<", ">Amount<"):
+    for gone in (">Stage<", ">Keyword<", ">Amount<", ">Company<", ">Attribution<"):
         assert gone not in table
-    badge = _fn("function dealAttributionBadge", span=900)
-    assert "Exact GCLID" in badge
-    assert "CRM Match" in badge
-    assert "URL Match" in badge
-    assert "Needs Review" in badge
+    assert "function dealAttributionBadge" not in JS
+    assert "r.acquisition_group" in table and "r.deal_name" in table
 
 
 # ════════════════════════════ FRONTEND — HEALTH ════════════════════════════

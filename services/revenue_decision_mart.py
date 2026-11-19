@@ -614,9 +614,14 @@ def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> d
       - data_health: view-specific availability the canonical spend_truth cannot
         carry. For the deal view this surfaces deal_ledger_status so a durable
         ledger OUTAGE is never silently rendered as a truthful empty window.
+      - closed_won_population (PR-ADS-164A): for the deal and source views, the
+        view builder's OWN canonical ``{value, status, reason}`` for the won-deal
+        population its rows list or partition. ``rows == []`` means "none" only
+        beside ``status: published, value: 0``; passed through, never derived
+        here. None for the campaign and country views.
     """
     payload = {"rows": [], "ledger_summary": None, "data_health": {},
-               "source_spend_truth": None}
+               "source_spend_truth": None, "closed_won_population": None}
     if view == "campaign":
         payload["rows"] = core.get("campaigns") or []
     elif view == "country":
@@ -624,12 +629,14 @@ def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> d
     elif view == "source":
         source = build_revenue_by_source(window, now=now)
         payload["rows"] = source.get("groups") or []
+        payload["closed_won_population"] = source.get("closed_won_population")
         # PR-ADS-140: carry the Google Ads spend-truth proof block so the page can
         # prove its Google Ads spend reconciles with the canonical top-line.
         payload["source_spend_truth"] = source.get("source_spend_truth")
     elif view == "deal":
         deals = build_revenue_deals(window, now=now)
         payload["rows"] = deals.get("deals") or []
+        payload["closed_won_population"] = deals.get("closed_won_population")
         payload["ledger_summary"] = deals.get("summary")
         payload["data_health"] = {
             "deal_ledger_status": (deals.get("source_health") or {}).get("ledger_status"),
@@ -714,6 +721,10 @@ def build_revenue_decision_mart(
         "sql_reconciliation": sql_reconciliation,
         "readiness": readiness,
         "rows": payload["rows"],
+        # Deal / source views (PR-ADS-164A): the canonical verdict for the
+        # won-deal population behind `rows`. An empty `rows` is "there are
+        # none" only when this says published with value 0.
+        "closed_won_population": payload["closed_won_population"],
         # Deal view: the ledger's own summary (consistent with its rows) and the
         # ledger availability signal. None / empty for the other views.
         "ledger_summary": payload["ledger_summary"],

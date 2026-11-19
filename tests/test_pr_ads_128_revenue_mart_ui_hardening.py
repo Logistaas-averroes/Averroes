@@ -97,11 +97,17 @@ def test_shared_clean_spend_truth_card():
                   "FX Coverage", "Period Ratio Basis"):
         assert label in card, f"spend card missing '{label}'"
     assert "ROAS Basis" not in card
-    # All four business page renderers use the SAME component.
+    # The three business pages that carry Google Ads spend use the SAME
+    # component. PR-ADS-164A removed it from the Deals page: that page lists
+    # ALL-SOURCE won deals, and a Google Ads spend card above them read as the
+    # spend behind those deals.
     for page in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
-                 "function renderRevenueBySourcePage", "function renderRevenueDealsPage"):
+                 "function renderRevenueBySourcePage"):
         body = _slice(page, span=3000)
         assert "renderMartSpendTruth(" in body, f"{page} must use the shared spend card"
+    deals = JS[JS.find("function renderRevenueDealsPage"):
+               JS.find("\n}\n", JS.find("function renderRevenueDealsPage")) + 3]
+    assert "renderMartSpendTruth(" not in deals
 
 
 # ── Test 5 — No native-as-USD; Unavailable, never $0 ────────────────────────

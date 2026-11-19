@@ -112,7 +112,15 @@ def test_all_revenue_pages_share_mart_renderers():
         "function renderRevenueDealsPage",
     ):
         body = _slice(page, span=3000)
-        assert "renderMartSpendTruth(" in body, f"{page} must render the shared spend truth strip"
+        if page == "function renderRevenueDealsPage":
+            # PR-ADS-164A: the Deals page lists ALL-SOURCE won deals, so it no
+            # longer shows the Google Ads spend card above them (spend lives
+            # on the Google Ads pages). Sliced to the function's own end so
+            # the assertion is about this renderer, not its neighbours.
+            own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
+            assert "renderMartSpendTruth(" not in own
+        else:
+            assert "renderMartSpendTruth(" in body, f"{page} must render the shared spend truth strip"
         assert "renderMartDiagnostics(" in body, f"{page} must render shared diagnostics"
     # The shared strip reads spend_truth + summary; the summary strip reads summary.
     st = _slice("function renderMartSpendTruth", span=900)

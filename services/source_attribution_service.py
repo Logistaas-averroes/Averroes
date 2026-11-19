@@ -176,6 +176,11 @@ def _unavailable_revenue_by_source(resolved, canonical, spend_truth, now) -> dic
     return {
         "window": resolved,
         "groups": [],
+        # PR-ADS-164A: the canonical verdict for the won-deal population the
+        # groups would have partitioned. `groups` is empty because no
+        # population was released — never because there was no activity.
+        "closed_won_population": canonical_revenue.subset_metrics(
+            canonical, [])["closed_won_deals"],
         "summary": source_attribution_health_counts(),
         "source_spend_truth": spend_truth,
         "source_truth": canonical_revenue.CANONICAL_SOURCE,
@@ -547,6 +552,10 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     return {
         "window": resolved,
         "groups": groups,
+        # PR-ADS-164A: the canonical verdict for the all-source won-deal
+        # population the groups partition (published, with the exact count).
+        "closed_won_population": canonical_revenue.subset_metrics(
+            canonical, revenue_rows)["closed_won_deals"],
         "summary": summary,
         # PR-ADS-140: proof for the Google Ads spend number — the canonical
         # campaign-daily spend truth (native GBP + USD reporting + FX/coverage
@@ -686,6 +695,12 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
             "window": resolved, "source_group": source_group,
             "source_channel": source_channel, "source_platform": source_platform,
             "contacts": [], "deals": [], "rows": [],
+            # PR-ADS-164A: why the deal list is empty. The canonical verdict
+            # when the ledger withheld the population; None when the ledger
+            # was readable and only the contact evidence was not — no count
+            # is published beside a drilldown that shows no rows.
+            "closed_won_population": (canonical_revenue.subset_metrics(
+                canonical, [])["closed_won_deals"] if unreadable_ledger else None),
             # Counts are NULL, not 0 — see above.
             "summary": {"contacts": None, "sqls": None, "deals": None},
             # Contact evidence is a DIFFERENT source (the classification
@@ -710,9 +725,11 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
         }
 
     deals = []
+    matched_rows = []
     for r in (deals_fetch.get("rows") or []):
         hit, ch_label, pf_label = _matches(r)
         if hit:
+            matched_rows.append(r)
             deals.append(_source_detail_row(r, source_group, ch_label, pf_label))
 
     contacts = []
@@ -729,6 +746,11 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
         "contacts": contacts,
         "deals": deals,
         "rows": deals,   # backward-compatible alias
+        # PR-ADS-164A: the canonical verdict for THIS platform's won deals —
+        # the subset of the window's population listed in `deals`. Published
+        # with value 0 is the only state in which an empty list means "none".
+        "closed_won_population": canonical_revenue.subset_metrics(
+            canonical, matched_rows)["closed_won_deals"],
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
         "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
         "revenue_available": True,
