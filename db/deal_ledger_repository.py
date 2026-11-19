@@ -338,10 +338,21 @@ def record_sync_state(*, status: str, sync_mode: str, watermark=None,
 
     The watermark advances on a fully successful sync, or — when
     ``watermark_is_checkpoint`` — to the end of a CLEANLY PROCESSED PREFIX of a
-    capped run. Deals are read in ascending ``hs_lastmodifieddate`` order, so a
-    checkpoint at the last fully committed deal skips nothing: it is the
-    difference between a capped backfill that resumes and one that reprocesses
-    its first page forever.
+    capped or interrupted run. That checkpoint skips nothing only because the
+    deal read pages by KEYSET (PR-ADS-166B, ``pull_deals_for_ledger``): every
+    query asks for ``hs_lastmodifieddate >= the newest timestamp read so far``,
+    so every deal a stopped read did not reach has a timestamp at or after the
+    last one it did, and the next run re-reads from the checkpoint minus an
+    overlap. Under the offset paging used before PR-ADS-166B this was false: a
+    deal edited mid-read shifted the offsets, an unread deal was skipped, and a
+    checkpoint could pass it. It is the difference between a capped backfill
+    that resumes and one that reprocesses its first page forever.
+
+    The argument assumes HubSpot honoured every query. When the read ends
+    SHORT of HubSpot's own ``total`` (``gap_proven`` from the connector), a
+    deal was missed and nothing says where — possibly behind the prefix — so
+    ``sync_deals`` passes no watermark and this function advances nothing
+    (PR-ADS-166B, review round 2).
 
     A failed run, or a partial run with no clean prefix, leaves the watermark
     where it was.
