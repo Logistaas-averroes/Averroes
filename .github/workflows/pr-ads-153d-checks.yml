@@ -33,7 +33,13 @@ jobs:
     # fail: a timeout reports as `cancelled`, and a cancelled required check
     # looks like an infrastructure hiccup rather than a suite that outgrew its
     # budget. 45 restores real headroom.
-    timeout-minutes: 45
+    #
+    # PR-ADS-166B: it outgrew 45 the same way. PR-ADS-166A's run finished in
+    # 38m20s; PR-ADS-166B's was cancelled at 45m13s at 90% of the full suite,
+    # every test so far passing (the suite takes ~40 min locally on its own).
+    # No test in that PR sleeps: its changed modules run in 2.4 minutes. 75
+    # gives the next year of growth room; a hang still ends the job.
+    timeout-minutes: 75
     steps:
       # Full history: the whitespace check below diffs against the base branch,
       # and actions/checkout fetches a single commit by default.
