@@ -267,7 +267,8 @@ def test_08_an_old_bookmark_lands_on_the_dashboard():
 def test_09_every_remaining_sidebar_page_still_routes():
     nav = re.findall(r'class="nav-item[^"]*" data-page="([a-z0-9-]+)"', HTML)
     pages = _pages()
-    assert len(nav) == len(set(nav)) == 18
+    # PR-ADS-165A: 18 until the Unit Economics page was deleted.
+    assert len(nav) == len(set(nav)) == 17
     assert set(nav) <= pages, sorted(set(nav) - pages)
     for page in sorted(nav):
         assert f'id="page-{page}"' in HTML, page
@@ -326,6 +327,10 @@ def test_11_the_report_generator_went_in_162h_and_the_jobs_stayed():
     Removed: the advisor modules, the email module, and the registry's report
     consumer with its rules. Kept: both job modules, the analysis module that
     holds waste detection, and both manual run endpoints.
+
+    PR-ADS-165A then retired the weekly job itself (the host killed it every
+    Monday). The monthly job, the analysis module and `/run/monthly` are what
+    is kept now; `scheduler/weekly.py` and `/run/weekly` are gone.
     """
     from analysis import sql_doctrine_registry as registry
     for rel in ("analysis/rule_advisor.py", "analysis/advisor.py",
@@ -337,13 +342,15 @@ def test_11_the_report_generator_went_in_162h_and_the_jobs_stayed():
     assert not {"report.core", "report.core.module", "report.rule_advisor",
                 "report.rule_advisor.module", "report.advisor"} & rule_ids
 
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py", "analysis/core.py"):
+    for rel in ("scheduler/monthly.py", "analysis/core.py"):
         assert (ROOT / rel).exists(), rel
+    assert not (ROOT / "scheduler/weekly.py").exists()
     from analysis import core
     assert callable(core.run_waste_detection)
     import api.server as server
     paths = {r.path for r in server.app.routes}
-    assert {"/run/weekly", "/run/monthly"} <= paths
+    assert "/run/monthly" in paths
+    assert "/run/weekly" not in paths
 
 
 def test_12_the_waste_truth_audit_no_longer_rebuilds_a_queue():

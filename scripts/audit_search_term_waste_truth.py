@@ -217,7 +217,7 @@ def _flag_history_state() -> dict:
     """Is the PRODUCTION flag-history writer actually running?
 
     A durable review table with flagged terms but no ``latest_flagged_at``
-    anywhere means the weekly write path never ran — the exact gap PR #156
+    anywhere means the scheduled write path never ran — the exact gap PR #156
     merge-blocker 4 names.
     """
     from db.connection import get_conn
@@ -348,7 +348,7 @@ def _validate(data: dict, findings: _Findings) -> None:
     elif rows and history.get("rows_with_latest_flagged_at", 0) == 0:
         findings.fail("flagged terms exist but NO durable flag history is "
                       "persisted — the production write path "
-                      "(scheduler/weekly.py -> record_flag_history) is not "
+                      "(scheduler/monthly.py -> record_flag_history) is not "
                       "running")
     elif not rows:
         findings.note("no flagged terms in this window — flag-history "

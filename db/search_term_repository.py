@@ -514,7 +514,7 @@ def fetch_waste_evidence_for_terms(search_terms: list) -> dict:
     """Latest waste_terms evidence for a batch of search terms, keyed by
     (search_term, campaign_name) (PR-ADS-145 §4). Read-only.
 
-    Bridges the weekly waste-detection pipeline's persisted evidence into the
+    Bridges the monthly waste-detection step's persisted evidence into the
     Search Terms page. waste_terms stores ``campaign_name`` but NOT
     ``campaign_id``, so the SERVICE is responsible for attaching a row only when
     the (term, campaign_name) uniquely and safely identifies one canonical

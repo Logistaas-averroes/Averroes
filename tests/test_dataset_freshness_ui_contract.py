@@ -45,6 +45,9 @@ KNOWN_DATASET_KEYS: set[str] = {
     "google_ads_api/keyword_facts",
     "google_ads_api/search_terms",
     "google_ads_api/geo",
+    # PR-ADS-165A: the Countries page's dataset — canonical daily country
+    # spend, a registered freshness key (DATASET_FRESHNESS_CONFIG).
+    "google_ads_api/canonical_geo",
     "hubspot/contacts",
     "hubspot/deals",
     "gclid/matches",

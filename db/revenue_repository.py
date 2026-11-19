@@ -1451,7 +1451,7 @@ def fetch_geo_coverage(customer_id: str, start: date | None, end: date) -> dict:
                     """
                     SELECT chunk_start, chunk_end, status, rows_written,
                            cost_micros_total, country_count, error_message,
-                           sync_run_id, updated_at
+                           sync_run_id, updated_at, fetched_at
                     FROM google_ads_geo_coverage
                     WHERE customer_id = %s
                       AND chunk_end >= COALESCE(%s::date, chunk_end) AND chunk_start <= %s
@@ -1470,6 +1470,11 @@ def fetch_geo_coverage(customer_id: str, start: date | None, end: date) -> dict:
                         "country_count": int(r.get("country_count") or 0),
                         "error_message": r.get("error_message"),
                         "sync_run_id": r.get("sync_run_id"),
+                        # PR-ADS-165A: WHEN the chunk was last fetched. A
+                        # chunk verified during a day holds only part of that
+                        # day; a reader that needs complete days compares this
+                        # with the end of each day (country_evidence_service).
+                        "fetched_at": r.get("fetched_at"),
                     })
             return {"available": True, "chunks": chunks}
     except Exception as exc:  # noqa: BLE001
@@ -1659,8 +1664,14 @@ def fetch_geo_daily_spend_total(start: date | None, end: date,
         return {"available": False, "has_rows": False}
 
 
-def fetch_geo_daily_spend_by_country(start: date | None, end: date) -> dict:
+def fetch_geo_daily_spend_by_country(start: date | None, end: date,
+                                     customer_id: str | None = None) -> dict:
     """Per-country canonical Google Ads geo spend for the window (PR-ADS-124).
+
+    ``customer_id`` (PR-ADS-165A) scopes the read to one Google Ads account, as
+    :func:`fetch_geo_daily_spend_total` already can. A caller that judges the
+    window by ONE account's coverage ledger must read that account's rows; None
+    keeps the account-wide read every earlier caller makes.
 
     The country-level ROAS spend SOURCE, read DIRECTLY from the canonical
     google_ads_geo_daily_spend table (the same source as the geo reconciliation
@@ -1694,9 +1705,11 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date) -> dict:
                      AND fx.base_currency = g.currency_code
                      AND fx.quote_currency = %s
                     WHERE (%s::date IS NULL OR g.spend_date >= %s) AND g.spend_date <= %s
+                      AND (%s::text IS NULL OR g.customer_id = %s)
                     GROUP BY g.country_criterion_id
                     """,
-                    (FX_REPORTING_CURRENCY, start, start, end),
+                    (FX_REPORTING_CURRENCY, start, start, end,
+                     customer_id, customer_id),
                 )
                 rows = []
                 total = 0
@@ -1725,8 +1738,9 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date) -> dict:
                     SELECT MIN(customer_id) AS customer_id, MIN(currency_code) AS currency
                     FROM google_ads_geo_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                      AND (%s::text IS NULL OR customer_id = %s)
                     """,
-                    (start, start, end),
+                    (start, start, end, customer_id, customer_id),
                 )
                 meta = cur.fetchone() or (None, None)
             fx_complete = not any_fx_missing
@@ -1745,6 +1759,61 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_daily_spend_by_country failed: %s", exc)
         return {"available": False, "has_rows": False, "rows": []}
+
+
+def fetch_geo_criterion_identities(criterion_ids) -> dict:
+    """The country code(s) every stored row of each Google criterion carries.
+
+    PR-ADS-165A. A geo row's ``country_code`` is filled at sync time from a
+    lookup that can fail, and a failed lookup stores the row with no code. The
+    criterion id is Google's own identifier for the location, so a code any
+    OTHER stored row of the same criterion carries is stored evidence about
+    that same location — read here over the WHOLE table, every account and
+    every date, not just a window.
+
+    Returns ``{available, identities: {criterion_id: {codes: [..], name}}}``.
+    ``codes`` is every DISTINCT non-blank code on record for the criterion:
+    empty when no row ever carried one, and more than one when the rows
+    disagree — the caller decides what a disagreement means; nothing is
+    picked here. ``name`` is the name on the newest row that carries a code.
+    ``available: False`` means the read failed, which is not "no identity".
+    Read-only.
+    """
+    ids = sorted({str(c).strip() for c in (criterion_ids or []) if str(c or "").strip()})
+    if not ids:
+        return {"available": True, "identities": {}}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "identities": {}}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT country_criterion_id,
+                           ARRAY_AGG(DISTINCT UPPER(BTRIM(country_code)))
+                               FILTER (WHERE NULLIF(BTRIM(country_code), '') IS NOT NULL)
+                               AS codes,
+                           (ARRAY_AGG(country_name ORDER BY spend_date DESC)
+                               FILTER (WHERE NULLIF(BTRIM(country_code), '') IS NOT NULL
+                                         AND NULLIF(BTRIM(country_name), '') IS NOT NULL))[1]
+                               AS name
+                    FROM google_ads_geo_daily_spend
+                    WHERE country_criterion_id = ANY(%s)
+                    GROUP BY country_criterion_id
+                    """,
+                    (ids,),
+                )
+                identities = {
+                    str(r.get("country_criterion_id")): {
+                        "codes": sorted(r.get("codes") or []),
+                        "name": r.get("name"),
+                    }
+                    for r in _rows_as_dicts(cur)
+                }
+            return {"available": True, "identities": identities}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_criterion_identities failed: %s", exc)
+        return {"available": False, "identities": {}}
 
 
 def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:

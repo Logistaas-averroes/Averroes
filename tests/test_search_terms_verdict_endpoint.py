@@ -26,7 +26,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=45292,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             api_rows=100,
         )
         assert verdict == Verdict.OK
@@ -37,7 +37,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=0,
             sync_status=None,
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=0,
         )
         assert verdict == Verdict.WINDSOR_PULL_EMPTY
@@ -48,7 +48,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=0,
             sync_status=None,
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=45000,
             live_pull_has_search_term=True,
         )
@@ -60,7 +60,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=45000,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             api_rows=0,
         )
         assert verdict == Verdict.DB_HAS_ROWS_API_EMPTY
@@ -71,7 +71,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=0,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.FRESH_BUT_EMPTY
         assert "success" in reason.lower() or "0 rows" in reason.lower()
@@ -81,7 +81,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=0,
             sync_status=None,
-            latest_weekly_run=None,
+            latest_search_term_run=None,
         )
         assert verdict == Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
         assert "not have run" in reason.lower() or "no weekly" in reason.lower()
@@ -99,7 +99,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=12000,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.OK
 
@@ -108,7 +108,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=0,
             sync_status=None,
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
             live_pull_rows=5000,
             live_pull_has_search_term=False,
         )
@@ -120,7 +120,7 @@ class TestSearchTermsVerdictEndpoint:
             db_available=True,
             db_rows_window=0,
             sync_status="running",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.UNKNOWN
 
@@ -131,7 +131,7 @@ class TestSearchTermsVerdictEndpoint:
             db_rows_window=3500,
             window_days=45,
             sync_status="success",
-            latest_weekly_run="2026-05-25 07:00:00",
+            latest_search_term_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.OK
         assert "3500" in reason or "OK" in reason
@@ -143,7 +143,7 @@ class TestSearchTermsVerdictEndpoint:
             db_rows_window=0,
             window_days=1,
             sync_status=None,
-            latest_weekly_run=None,
+            latest_search_term_run=None,
         )
         assert verdict == Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
 

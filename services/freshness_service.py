@@ -176,6 +176,35 @@ def is_retired_dataset(source: str | None, dataset: str | None) -> bool:
     return (source, dataset) in RETIRED_DATASETS
 
 
+# ── Monthly-refresh datasets ────────────────────────────────────────────────
+#: PR-ADS-165A — the staleness threshold for a dataset whose ONLY scheduled
+#: writer is the monthly job (1st of the month).
+#:
+#: The retired weekly job wrote these four datasets every Monday, and each
+#: carried the weekly threshold of 8 days. No dataset lost its only writer —
+#: the monthly job writes every one of them — so none is retired. But a
+#: dataset refreshed once a month against an 8-day threshold reads "stale"
+#: from the 9th of every month until the 1st of the next: a permanent warning,
+#: and a permanently "degraded" page, about a pipeline that is doing exactly
+#: what it is scheduled to do.
+#:
+#: 35 days is the monthly cadence's own monitoring threshold
+#: (`api.monitoring.STALE_DAYS_DEFAULT["monthly"]`): the longest month plus a
+#: few days' grace. Past it, a monthly run was missed and the dataset is stale.
+#:
+#: This widens what "fresh" means for these four and nothing else: "fresh"
+#: here says "refreshed on schedule", and that schedule is monthly. Each
+#: entry carries `refresh_cadence: "monthly"` so a reader of the freshness
+#: payload is told so rather than left to infer it from the threshold.
+MONTHLY_REFRESH_STALE_DAYS = 35
+
+#: The config keys that carry that threshold. Named so a test can prove the
+#: list is exactly the datasets the monthly job alone writes.
+MONTHLY_REFRESH_DATASETS: tuple[str, ...] = (
+    "waste_terms", "keywords", "geo", "gclid_coverage_snapshots",
+)
+
+
 DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     # PR-ADS-162H: the `campaigns` entry (the legacy `campaigns` snapshot table,
     # keyed `google_ads_api/campaigns`) stood first here. It is retired — see
@@ -259,7 +288,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "date_column": "run_date",
         "source": "analysis",
         "dataset": "waste_terms",
-        "stale_threshold_days": 8,
+        "stale_threshold_days": MONTHLY_REFRESH_STALE_DAYS,
+        "refresh_cadence": "monthly",
         "depends_on": ["search_terms"],
         "page": "waste",
     },
@@ -274,7 +304,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "date_column": "run_date",
         "source": "google_ads_api",
         "dataset": "keywords",
-        "stale_threshold_days": 8,
+        "stale_threshold_days": MONTHLY_REFRESH_STALE_DAYS,
+        "refresh_cadence": "monthly",
         "depends_on": [],
         "page": None,   # legacy snapshot — audit-only; not a page dependency
     },
@@ -287,14 +318,32 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "keywords",   # PR-ADS-146: Keyword Evidence depends on durable facts
     },
+    # PR-ADS-165A: the legacy `geo` snapshot. `page` was "geo": the Google Ads
+    # → Countries page summed this table over a day window. The monthly job is
+    # its only scheduled writer, so mid-month that sum was empty or partial and
+    # the page printed $0. The page now reads `canonical_geo`; this dataset
+    # names no page. It is NOT retired, because three readers remain:
+    #   * revenue_attribution_service._build_from_db — its database-reachable
+    #     probe; a fallback geo total used only to TEST reconciliation when
+    #     canonical geo has no rows (country spend itself still requires
+    #     canonical rows and complete coverage); and, ONLY when the canonical
+    #     campaign-spend table cannot be read, a diagnostic spend column
+    #     (`spend_source: geo_fallback`, every ratio unavailable). That last
+    #     one is a window sum over a monthly table and is a known gap
+    #     (docs/09, PR-ADS-165A);
+    #   * google_ads_spend_service.build_google_ads_spend_audit — an admin
+    #     audit that prints it as `legacy_geo_total`;
+    #   * revenue_repository.fetch_campaign_pollution_report — an admin
+    #     diagnostic ("campaigns with leads and no geo rows").
     "geo": {
         "table": "geo",
         "date_column": "run_date",
         "source": "google_ads_api",
         "dataset": "geo",
-        "stale_threshold_days": 8,
+        "stale_threshold_days": MONTHLY_REFRESH_STALE_DAYS,
+        "refresh_cadence": "monthly",
         "depends_on": [],
-        "page": "geo",
+        "page": None,
     },
     "leads": {
         "table": "leads",
@@ -340,8 +389,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     # `db_writers.write_gclid_coverage_snapshot`), but nothing stamped a
     # `(gclid, coverage_snapshots)` sync batch, so it reported "never run"
     # forever while the table filled up normally. It is CONNECTED rather than
-    # removed: scheduler/weekly.py and scheduler/monthly.py now open a batch
-    # under this exact key. Aliasing it onto `(gclid, matches)` was rejected —
+    # removed: the monthly job opens a batch under this exact key (so did the
+    # weekly job, until PR-ADS-165A retired it). Aliasing it onto `(gclid, matches)` was rejected —
     # two configs sharing one (source, dataset) pair collide on the
     # `source/dataset` key the freshness endpoint reports under.
     "gclid_coverage_snapshots": {
@@ -349,7 +398,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "date_column": "snapshot_date",
         "source": "gclid",
         "dataset": "coverage_snapshots",
-        "stale_threshold_days": 8,
+        "stale_threshold_days": MONTHLY_REFRESH_STALE_DAYS,
+        "refresh_cadence": "monthly",
         "depends_on": [],
         "page": "gclid-attribution",
     },

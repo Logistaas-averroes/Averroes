@@ -180,7 +180,7 @@ RETIRED_DATASETS: dict[str, dict] = {
         "note": ("Windsor.ai is no longer a production source. Search terms come "
                  "from the direct Google Ads API through the shared canonical "
                  "sync service, refreshed on a rolling recovery window by THIS "
-                 "incremental run (as well as by the daily/weekly/monthly "
+                 "incremental run (as well as by the daily/monthly "
                  "schedulers, which call the same service)."),
     },
     "windsor/keywords": {
@@ -1501,7 +1501,7 @@ def _sync_keyword_facts(*, run_id, errors: list) -> dict:
     """Refresh durable ``keyword_daily_facts`` on the established correction window.
 
     PR-ADS-156 §3. Delegates to `keyword_sync_service` — the same function the
-    weekly, monthly, bootstrap and admin-refresh paths already call. No second
+    daily, monthly, bootstrap and admin-refresh paths already call. No second
     keyword writer is created here, and the 30-day window is the service's own
     ``DEFAULT_INCREMENTAL_DAYS`` rather than a number chosen again in this file.
     """
@@ -1529,7 +1529,7 @@ def _sync_search_terms(*, run_id, errors: list) -> dict:
     """Refresh durable ``search_terms`` on a rolling recovery window.
 
     PR-ADS-156 §4. Delegates to the shared canonical search-term service, which
-    is now also what the daily, weekly and monthly schedulers call. The window is
+    is now also what the daily and monthly schedulers call. The window is
     wider than the interval between runs, so a missed day is recovered by the
     next run instead of leaving a permanent hole; the write is an upsert on the
     natural key, so overlapping runs cost time and not correctness.

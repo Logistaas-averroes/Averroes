@@ -141,10 +141,14 @@ The window verdict (`get_closed_won_truth`) carries no spend, so it publishes
 neither period ratio and marks ROAS / CAC `not_published` with the cohort
 reasons.
 
-**Scope rule.** The period ratios publish only for `google_ads_source` and
-`campaign_attributable`. Otherwise they are unavailable with
-`numerator_and_denominator_scopes_differ`; for example, Unit Economics at
-`all_source`.
+**Scope rule.** The period ratios are published only beside a population
+Google Ads spend can have produced (`google_ads_source`,
+`campaign_attributable`). Until PR-ADS-165A the contract enforced this with a
+flag (`period_ratio_scope_ok`, reason
+`numerator_and_denominator_scopes_differ`) whose only caller passing False was
+Unit Economics at `all_source`. That page is deleted, so the flag and the
+reason were removed with it: no remaining reader passes spend beside an
+all-source population, and that is each reader's own responsibility.
 
 **Per-campaign placement.** The window is evaluated with Campaign Evidence's
 own resolver (`ccr.campaign_resolver`, built once per snapshot). The page then

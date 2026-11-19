@@ -25,8 +25,10 @@ JS = (ROOT / "static/app.js").read_text(encoding="utf-8")
 EXPECTED = [
     ("Overview", ["dashboard", "channels"]),
     ("Google Ads", ["campaigns", "search-terms", "keywords", "geo"]),
+    # PR-ADS-165A: "unit-economics" was the last Sales Results entry; the
+    # page is deleted (owner decision).
     ("Sales Results", ["leads", "deals", "revenue-by-source", "roas-campaigns",
-                       "roas-countries", "unit-economics"]),
+                       "roas-countries"]),
     ("Admin", ["system", "scheduler", "gclid-attribution", "health",
                "revenue-health", "backfill"]),
 ]
@@ -61,7 +63,8 @@ def test_03_no_page_was_added_or_lost_and_every_one_still_routes():
     pages = set(re.findall(r'"([a-z0-9-]+)"', re.search(
         r"const PAGES = \[(.*?)\];", JS, re.S).group(1)))
     nav = [p for _, ps in _groups() for p in ps]
-    assert len(nav) == len(set(nav)) == 18
+    # PR-ADS-165A: 18 until the Unit Economics page was deleted.
+    assert len(nav) == len(set(nav)) == 17
     assert set(nav) <= pages
     for page in nav:
         assert f'id="page-{page}"' in HTML, page

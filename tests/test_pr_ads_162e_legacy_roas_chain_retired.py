@@ -90,12 +90,16 @@ def test_03_the_routes_are_gone_from_the_running_app(route, monkeypatch):
     assert f'"{route}"' not in SERVER
 
 
-def test_04_the_canonical_unit_economics_route_is_untouched():
-    """Its path sits beside the deleted ones; it must not go with them."""
+def test_04_the_canonical_unit_economics_route_went_later_by_its_own_decision():
+    """162E left the canonical Unit Economics route alone: its path sits beside
+    the deleted ones and it was not to go with them, and this case pinned it.
+    PR-ADS-165A then deleted the page, the route and the service by a separate
+    owner decision ("unit economics is not needed"), so the route is gone —
+    with the legacy chain 162E removed still gone beside it."""
     import api.server as server
-    assert "/api/reports/unit-economics" in {r.path for r in server.app.routes}
-    route = SERVER.split('@app.get("/api/reports/unit-economics")')[1].split("@app.")[0]
-    assert "build_unit_economics" in route
+    assert "/api/reports/unit-economics" not in {r.path for r in server.app.routes}
+    assert "/api/reports/unit-economics" not in SERVER
+    assert not (ROOT / "services/canonical_unit_economics_service.py").exists()
 
 
 def test_05_the_daily_job_no_longer_persists_a_snapshot():

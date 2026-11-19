@@ -682,7 +682,9 @@ _JS_NEW_FUNCTION = (
 @pytest.mark.parametrize("rel_path, addition, expected_symbol", [
     ("services/campaign_evidence_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
     ("services/canonical_contact_outcome_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
-    ("scheduler/weekly.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
+    # PR-ADS-165A: this probed scheduler/weekly.py, which is deleted; the
+    # monthly job is the scheduler module of the same kind that remains.
+    ("scheduler/monthly.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
     ("static/app.js", _JS_NEW_FUNCTION, "pr158ReviewProbe"),
 ])
 def test_new_function_in_known_file_is_unknown_until_bound(tmp_path, rel_path, addition,

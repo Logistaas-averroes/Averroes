@@ -43,64 +43,9 @@ def test_daily_empty_search_terms_marks_success_not_success_empty(monkeypatch):
     assert st_calls[0]["status"] == "success"
 
 
-def test_weekly_empty_search_terms_marks_success_not_success_empty(monkeypatch):
-    import scheduler.weekly as weekly
-
-    finish_calls = []
-
-    monkeypatch.setattr(weekly, "start_run", lambda *_: {})
-    monkeypatch.setattr(weekly, "finish_run", lambda *a, **k: None)
-    # PR-ADS-162H: the stubs for `deliver_report`, `run_lead_quality`,
-    # `run_campaign_truth`, `generate_weekly_report` and `compute_ngram_findings`
-    # are removed with the code they replaced — the weekly job no longer builds
-    # or emails a report. Nothing else about this case changes: it is still the
-    # documented baseline failure (it patches the retired Windsor connector, so
-    # the real Google Ads pull runs and raises for want of credentials).
-    monkeypatch.setattr(weekly, "persistence_succeeded", lambda rows, written: (len(rows or []) == 0 and written == 0) or written > 0)
-
-    monkeypatch.setattr("connectors.windsor_pull.pull_campaign_performance", lambda **_: [])
-    monkeypatch.setattr("connectors.windsor_pull.pull_search_terms", lambda **_: [])
-    monkeypatch.setattr("connectors.windsor_pull.pull_keyword_performance", lambda **_: [])
-    monkeypatch.setattr("connectors.windsor_pull.pull_geo_performance", lambda **_: [])
-    monkeypatch.setattr("connectors.windsor_pull.save_output", lambda *a, **k: None)
-
-    monkeypatch.setattr("connectors.hubspot_pull.pull_paid_search_contacts", lambda **_: [])
-    monkeypatch.setattr("connectors.hubspot_pull.pull_deals_with_gclid", lambda *_: [])
-    monkeypatch.setattr("connectors.hubspot_pull.get_lead_quality_summary", lambda *_: {})
-    monkeypatch.setattr("connectors.hubspot_pull.save_output", lambda *a, **k: None)
-
-    monkeypatch.setattr("connectors.gclid_match.run_gclid_match", lambda: {"matched": [], "coverage": {}})
-    monkeypatch.setattr("connectors.gclid_match.save_output", lambda *a, **k: None)
-
-    # PR-ADS-156-F2 §1: the schedulers now hand waste detection the canonical
-    # rows and an availability flag, so the stub accepts them. A zero-argument
-    # stub would raise TypeError and mask whatever this fixture is really about.
-    monkeypatch.setattr("analysis.core.run_waste_detection",
-                        lambda *a, **k: {"confirmed_waste_items": []})
-
-    monkeypatch.setattr(weekly.db_writers, "write_run", lambda *_: 1)
-    monkeypatch.setattr(weekly.db_writers, "start_sync_batch", lambda *a, **k: 1)
-    monkeypatch.setattr(weekly.db_writers, "write_leads", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_deals", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_geo", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_keywords", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_search_terms", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_waste_terms", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_campaigns", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_gclid_attribution", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "write_gclid_coverage_snapshot", lambda *a, **k: 0)
-    monkeypatch.setattr(weekly.db_writers, "update_run", lambda *a, **k: None)
-    monkeypatch.setattr(
-        weekly.db_writers,
-        "finish_sync_batch",
-        lambda *a, **k: finish_calls.append(k) or True,
-    )
-
-    weekly.run_weekly_report()
-
-    st_calls = [c for c in finish_calls if "search-term rows for last_60d" in str(c.get("error_message", ""))]
-    assert st_calls
-    assert st_calls[0]["status"] == "success"
+# PR-ADS-165A: `test_weekly_empty_search_terms_marks_success_not_success_empty`
+# stood here. It drove `scheduler.weekly.run_weekly_report`, which is deleted
+# with the weekly job; the daily case above is the surviving half of the pair.
 
 
 def test_api_search_terms_data_quality_includes_total_rows_and_rows_returned(monkeypatch):

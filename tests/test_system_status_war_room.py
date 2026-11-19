@@ -243,7 +243,8 @@ def test_scheduler_latest_run_summary_handles_missing_runs():
     """Scheduler summary handles None runs gracefully."""
     summary = compute_scheduler_summary(None)
     assert summary["latest_daily"] is None
-    assert summary["latest_weekly"] is None
+    # PR-ADS-165A: no `latest_weekly` — the weekly job is retired.
+    assert "latest_weekly" not in summary
     assert summary["latest_monthly"] is None
     assert summary["latest_incremental"] is None
 
@@ -252,12 +253,14 @@ def test_scheduler_summary_with_data():
     """Scheduler summary passes through run data."""
     runs_data = {
         "daily": {"status": "success", "started_at": "2026-05-26T06:00:00Z", "finished_at": "2026-05-26T06:03:00Z"},
-        "weekly": {"status": "success", "started_at": "2026-05-25T07:00:00Z", "finished_at": "2026-05-25T07:08:00Z"},
+        "monthly": {"status": "success", "started_at": "2026-05-01T08:00:00Z", "finished_at": "2026-05-01T08:08:00Z"},
+        # PR-ADS-165A: a row of the retired weekly job is not republished.
+        "weekly": {"status": "failed", "started_at": "2026-05-25T07:00:00Z", "finished_at": None},
     }
     summary = compute_scheduler_summary(runs_data)
     assert summary["latest_daily"]["status"] == "success"
-    assert summary["latest_weekly"]["status"] == "success"
-    assert summary["latest_monthly"] is None
+    assert summary["latest_monthly"]["status"] == "success"
+    assert "latest_weekly" not in summary
     assert summary["latest_incremental"] is None
 
 

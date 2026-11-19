@@ -235,8 +235,9 @@ def test_10_a_customer_lower_bound_is_never_published_as_the_total():
                 "services/dashboard_overview_service.py",
                 "services/dashboard_channels_service.py",
                 "services/dashboard_campaigns_service.py",
-                "services/dashboard_deals_service.py",
-                "services/canonical_unit_economics_service.py"):
+                "services/dashboard_deals_service.py"):
+        # PR-ADS-165A: the Unit Economics service was the last file here; it
+        # is deleted with its page.
         assert "lower_bound" not in (_ROOT / rel).read_text(encoding="utf-8"), rel
     js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
     assert "lower_bound" not in js
@@ -864,12 +865,12 @@ def test_30_a_negative_amount_is_never_netted_into_any_total(monkeypatch):
     netted = 18000.0 + 11000.0 - 500.0
     from services.revenue_decision_mart import build_revenue_decision_mart
     from services.revenue_attribution_service import build_revenue_attribution
-    from services.canonical_unit_economics_service import build_unit_economics
     from services.source_attribution_service import build_revenue_by_source
+    # PR-ADS-165A: the Unit Economics page was a fourth builder here; it is
+    # deleted. The three that remain are every page that sums this population.
     pages = {"mart": build_revenue_decision_mart(view="campaign", window="ytd",
                                                  now=t137.NOW),
              "attribution": build_revenue_attribution("ytd", now=t137.NOW),
-             "unit_economics": build_unit_economics("ytd", now=t137.NOW),
              "by_source": build_revenue_by_source("ytd", now=t137.NOW)}
     assert pages["mart"]["summary"]["metrics"]["revenue_usd"]["status"] == cwt.WITHHELD
     for name, payload in pages.items():
@@ -888,23 +889,32 @@ def test_31_period_ratios_need_a_scope_google_ads_spend_can_have_produced(
     rows = from_legacy_deal_rows(t137.DEAL_ROWS)
     patch_canonical_ledger(monkeypatch, rows,
                            company_associations=company_evidence(rows))
-    from services.canonical_unit_economics_service import build_unit_economics
-    allsrc = build_unit_economics("ytd", scope="all_source", now=t137.NOW)["advertising"]
-    for m in cwt.PERIOD_RATIO_KEYS:
-        assert allsrc[m] is None
-        assert allsrc["metrics"][m]["reason"] == cwt.R_SCOPE_INCOMPATIBLE
-    camp = build_unit_economics("ytd", scope="campaign_attributable",
-                                now=t137.NOW)["advertising"]
+    # PR-ADS-165A: this drove the scope rule through the Unit Economics page,
+    # the only caller that passed `period_ratio_scope_ok=False` (for its
+    # all-source block). The page is deleted, no production code could turn
+    # the rule on any more, and the dead flag was removed rather than kept
+    # with a test as its only caller. What remains, and is asserted here on
+    # the contract every surviving reader uses: at a scope Google Ads spend
+    # can have produced the period ratio publishes as a non-cohort ratio, and
+    # certified ROAS / CAC stay unavailable.
+    from analysis import revenue_scope
+    import inspect
+    assert "period_ratio_scope_ok" not in inspect.signature(crs.reader_row).parameters
+    assert not hasattr(cwt, "R_SCOPE_INCOMPATIBLE")
+    base = crs.load_won_deals("ytd", now=t137.NOW)
+    assert base["available"] is True
+    camp = crs.reader_row(
+        base, crs.filter_deals(base["deals"],
+                               revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE),
+        spend_usd=1000.0)
     P = cwt.PERIOD_REVENUE_PER_AD_SPEND
     assert camp["metrics"][P]["status"] == cwt.PUBLISHED
     assert camp["metrics"][P]["cohort_basis"] == cwt.PERIOD_COHORT_BASIS
-    # Even at a compatible scope, certified ROAS / CAC stay unavailable.
-    for page in (allsrc, camp):
-        for m, reason in (("roas", cwt.R_ROAS_NOT_CERTIFIED),
-                          ("cac", cwt.R_CAC_NOT_CERTIFIED)):
-            assert page[m] is None
-            assert page["metrics"][m]["status"] == cwt.UNAVAILABLE
-            assert page["metrics"][m]["reason"] == reason
+    for m, reason in (("roas", cwt.R_ROAS_NOT_CERTIFIED),
+                      ("cac", cwt.R_CAC_NOT_CERTIFIED)):
+        assert camp[m] is None
+        assert camp["metrics"][m]["status"] == cwt.UNAVAILABLE
+        assert camp["metrics"][m]["reason"] == reason
 
 
 def test_32_legacy_outcome_payloads_withhold_every_recoverable_figure():
@@ -1152,16 +1162,19 @@ def test_39_the_audit_goes_red_when_a_page_publishes_the_old_names(monkeypatch):
     rows = from_legacy_deal_rows(t137.DEAL_ROWS)
     patch_canonical_ledger(monkeypatch, rows,
                            company_associations=company_evidence(rows))
-    from services.canonical_unit_economics_service import build_unit_economics
-    page = build_unit_economics("ytd", scope="campaign_attributable", now=t137.NOW)
-    assert page["advertising"][cwt.PERIOD_REVENUE_PER_AD_SPEND] is not None
+    # PR-ADS-165A: the real page builder here was Unit Economics, which is
+    # deleted. Campaign Revenue & Spend is a surviving page that publishes
+    # the same period ratio through the same reader contract.
+    from services.revenue_attribution_service import build_revenue_attribution
+    page = build_revenue_attribution("ytd", now=t137.NOW)
+    assert page["summary"][cwt.PERIOD_REVENUE_PER_AD_SPEND] is not None
     a = audit.Audit()
-    audit._ratio_name_check(a, "ytd unit_economics", page)
+    audit._ratio_name_check(a, "ytd revenue_attribution", page)
     assert a.checks["no_period_ratio_named_roas_or_cac"], a.violations
     a = audit.Audit()
-    audit._ratio_name_check(a, "ytd unit_economics", _old_naming_payload(page))
+    audit._ratio_name_check(a, "ytd revenue_attribution", _old_naming_payload(page))
     assert not a.checks["no_period_ratio_named_roas_or_cac"]
-    assert any(".advertising.roas=" in v for v in a.violations), a.violations
+    assert any(".summary.roas=" in v for v in a.violations), a.violations
 
 
 def test_40_no_ui_text_presents_a_period_ratio_as_roas_or_cac():
@@ -1319,107 +1332,20 @@ def test_45_api_text_never_calls_the_period_ratio_roas(monkeypatch):
 
 # ── PR review round 2 (Copilot) ───────────────────────────────────────────────
 
-#: The pieces of static/app.js the Unit Economics page renders through.
-_UE_STRING_CONSTS = ("PERIOD_RATIO_LABEL", "PERIOD_SPEND_PER_CUSTOMER_LABEL",
-                     "PERIOD_RATIO_DISCLOSURE")
-_UE_CONSTS = ("CANONICAL_REASON_LABELS", "CANONICAL_BASIS_LABELS",
-              "CRM_BLOCKER_FAMILY", "ROW_METRIC_KEYS", "CERTIFIED_RATIO_LABELS")
-_UE_PIECES = ("escapeHtml", "fmt", "fmtMoney", "fmtPeriodRatio", "dashValue",
-              "canonicalReasonLabel", "crmBlockerFamily", "crmBlockersHref",
-              "canonicalBlockingReason", "canonicalMetricHtml", "rowMetricHtml",
-              "canonicalValueHtml", "renderUnitEconomicsPage")
-
-
-def _render_unit_economics(page: dict, *, role: str) -> dict:
-    """Run the REAL renderUnitEconomicsPage over ``page`` in node, against a
-    stub DOM; returns the KPI grid, verdict and table HTML."""
-    node = shutil.which("node")
-    assert node, "node is a CI dependency (node --check static/app.js)"
-    src = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
-    parts = [re.search(rf"const {c} =[\s\S]*?\";", src).group(0)
-             for c in _UE_STRING_CONSTS]
-    parts += [_js_extract(src, f"const {c} = ") for c in _UE_CONSTS]
-    parts += [_js_extract(src, f"function {f}(") for f in _UE_PIECES]
-    script = (
-        f"let _currentUser = {json.dumps({'role': role})};\n"
-        "const window = { location: { hash: '' } };\n"
-        "const _els = {};\n"
-        "const document = { getElementById: (id) => (_els[id] = _els[id] || { innerHTML: '' }) };\n"
-        "function businessBlockerOpts() { return { windowType: 'business', windowKey: 'ytd' }; }\n"
-        "function renderPageExplanation() {}\n"
-        + "\n".join(parts) + "\n"
-        f"let unitEconomicsData = {json.dumps(page)};\n"
-        "renderUnitEconomicsPage();\n"
-        "console.log(JSON.stringify({kpis: _els['unit-economics-kpis'].innerHTML,\n"
-        "  verdict: _els['unit-economics-verdict'].innerHTML,\n"
-        "  table: _els['unit-economics-table-body'].innerHTML}));\n")
-    res = subprocess.run([node, "-e", script], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
-    return json.loads(res.stdout)
-
-
-def _unit_economics_page(monkeypatch, rows, **ledger):
-    from tests import test_pr_ads_137_dashboard_campaigns as t137
-    t137._patch_durable(monkeypatch)
-    patch_canonical_ledger(monkeypatch, rows,
-                           company_associations=company_evidence(rows), **ledger)
-    from services.canonical_unit_economics_service import build_unit_economics
-    return build_unit_economics("ytd", scope="campaign_attributable", now=t137.NOW)
-
-
-def test_46_unit_economics_keeps_the_withheld_verdict_when_no_population_is_released(
-        monkeypatch):
-    """A window withheld for an undated won deal used to return
-    ``business: None`` / ``advertising: None``, so every KPI read a bare
-    "Unavailable" with no reason and no View blockers link. Driven through the
-    REAL canonical producer: one won deal in the ledger has no close date."""
-    from tests import test_pr_ads_137_dashboard_campaigns as t137
-    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
-    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
-    rows[0] = dict(rows[0], deal_close_date=None)
-    page = _unit_economics_page(monkeypatch, rows)
-    assert page["revenue_available"] is False
-    for block in ("business", "advertising"):
-        m = page[block]["metrics"]
-        for key in ("closed_won_deals", "customers", "revenue_usd"):
-            assert m[key]["status"] == cwt.WITHHELD, (block, key)
-            assert m[key]["value"] is None and page[block][key] is None
-        assert m["closed_won_deals"]["reason"] == cwt.R_UNDATED_WON_DEALS
-    adv = page["advertising"]["metrics"]
-    for key in cwt.PERIOD_RATIO_KEYS:
-        assert adv[key]["status"] == cwt.WITHHELD and adv[key]["value"] is None
-    assert adv["cac"]["status"] == cwt.UNAVAILABLE
-    assert audit.ratio_name_violations(page) == []
-    # Admin: the canonical word, the reason in words, and View blockers.
-    admin = _render_unit_economics(page, role="admin")
-    for part in ("kpis", "verdict", "table"):
-        assert "Withheld" in admin[part], part
-        assert "no close date" in admin[part], part
-        assert "View blockers" in admin[part], part
-    assert "won_deals_without_close_date" not in admin["verdict"]   # never a raw code
-    assert "No campaign-level economics data" not in admin["table"]
-    # Viewer: the same truth, no workbench link.
-    viewer = _render_unit_economics(page, role="viewer")
-    for part in ("kpis", "verdict", "table"):
-        assert "Withheld" in viewer[part] and "View blockers" not in viewer[part], part
-
-
-def test_46b_a_ledger_outage_on_unit_economics_reads_unavailable_with_no_link(
-        monkeypatch):
-    """An outage is not a CRM finding: "Unavailable" with the outage reason,
-    and no View blockers link even for an admin — there is no record to fix."""
-    from tests import test_pr_ads_137_dashboard_campaigns as t137
-    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
-    page = _unit_economics_page(monkeypatch, from_legacy_deal_rows(t137.DEAL_ROWS),
-                                available=False)
-    assert page["revenue_available"] is False
-    m = page["business"]["metrics"]["closed_won_deals"]
-    assert m["status"] == cwt.UNAVAILABLE and m["value"] is None
-    admin = _render_unit_economics(page, role="admin")
-    for part in ("kpis", "verdict", "table"):
-        assert "Unavailable" in admin[part] and "View blockers" not in admin[part], part
-        assert "Withheld" not in admin[part], part
-    assert "could not be read" in admin["verdict"]
+# PR-ADS-165A: the Unit Economics render harness (`_render_unit_economics`,
+# `_unit_economics_page`) and two cases stood here:
+#
+#   * test_46_unit_economics_keeps_the_withheld_verdict_when_no_population_is_
+#     released
+#   * test_46b_a_ledger_outage_on_unit_economics_reads_unavailable_with_no_link
+#
+# Both ran the real `renderUnitEconomicsPage` over a payload from
+# `build_unit_economics`. The page, its renderer and its service are deleted
+# (owner decision), so there is nothing left for them to run. The rules they
+# held — a withheld window republishes the canonical verdict with its reason
+# and the admin "View blockers" link; an outage reads "Unavailable" with no
+# link — are properties of `canonicalMetricHtml` / `rowMetricHtml`, which the
+# cases above still exercise for the pages that remain.
 
 
 def test_47_parity_classifies_every_canonical_customer_identity_refusal():
@@ -1468,44 +1394,15 @@ def test_48_parity_names_no_owner_unless_every_consumer_explains_the_absence():
             cpp.V_SOURCE_UNAVAILABLE, partial
 
 
-def test_49_the_all_source_business_block_never_promises_a_period_ratio(monkeypatch):
-    """Unit Economics' ``business`` block is all_source: Google Ads spend can
-    never have produced it, so its period ratios are a scope mismatch — on the
-    published path and on the withheld path alike."""
-    from tests import test_pr_ads_137_dashboard_campaigns as t137
-    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
-    published = _unit_economics_page(monkeypatch, from_legacy_deal_rows(t137.DEAL_ROWS))
-    assert published["revenue_available"] is True
-    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
-    rows[0] = dict(rows[0], deal_close_date=None)
-    withheld = _unit_economics_page(monkeypatch, rows)
-    assert withheld["revenue_available"] is False
-    for page in (published, withheld):
-        for key in cwt.PERIOD_RATIO_KEYS:
-            m = page["business"]["metrics"][key]
-            assert m == {"value": None, "status": cwt.UNAVAILABLE,
-                         "reason": cwt.R_SCOPE_INCOMPATIBLE}, (key, m)
+# PR-ADS-165A: `test_49_the_all_source_business_block_never_promises_a_period_
+# ratio` stood here. It asserted the scope rule on Unit Economics' all-source
+# block — the only place any code passed `period_ratio_scope_ok=False`. With
+# the page deleted the flag had no production caller and was removed (see
+# test_31), so there is no rule left for this case to hold.
 
 
-def test_50_unit_economics_average_deal_value_names_its_blocking_input(monkeypatch):
-    """Average deal value is revenue ÷ won deals: when it is null it carries the
-    blocking input's verdict, never a bare "Unavailable"; when it publishes it
-    is the number."""
-    from tests import test_pr_ads_137_dashboard_campaigns as t137
-    from tests.canonical_ledger_fixtures import from_legacy_deal_rows
-    rows = from_legacy_deal_rows(t137.DEAL_ROWS)
-    rows[1] = dict(rows[1], amount_raw=None, revenue_usd=None,
-                   currency_status="unavailable", currency_reason="no_amount")
-    page = _unit_economics_page(monkeypatch, rows)
-    assert page["revenue_available"] is True
-    assert page["business"]["avg_deal_value_usd"] is None
-    assert page["business"]["metrics"]["revenue_usd"]["status"] == cwt.WITHHELD
-    html = _render_unit_economics(page, role="admin")["kpis"]
-    card = html[html.index("Avg deal value"):].split("</div></div>")[0]
-    assert "Withheld" in card and "proven USD amount" in card, card
-    # Control: priced deals publish the average as a number.
-    ok = _unit_economics_page(monkeypatch, from_legacy_deal_rows(t137.DEAL_ROWS))
-    assert ok["business"]["avg_deal_value_usd"] is not None
-    html = _render_unit_economics(ok, role="admin")["kpis"]
-    card = html[html.index("Avg deal value"):].split("</div></div>")[0]
-    assert "$" in card and "Unavailable" not in card and "Withheld" not in card, card
+# PR-ADS-165A: `test_50_unit_economics_average_deal_value_names_its_blocking_
+# input` stood here. Average deal value was a figure only the Unit Economics
+# page published (revenue ÷ won deals, rendered through `canonicalValueHtml`
+# with the blocking input's verdict). The page is deleted and no other page
+# publishes that figure.

@@ -213,7 +213,8 @@ def _war_room(monkeypatch):
 
 def test_06_the_war_room_shows_the_incremental_sync_by_its_persisted_run_type(
         live_db, monkeypatch):
-    # The four run types production persists, written with the statuses the
+    # The four run types the `runs` table holds — three live jobs and the
+    # weekly job PR-ADS-165A retired — written with the statuses the
     # `runs` table held on 2026-11-18 — the incremental sync as the scheduler
     # names it, not as the tile is labelled.
     from scheduler.incremental_sync import RUN_TYPE
@@ -230,7 +231,9 @@ def test_06_the_war_room_shows_the_incremental_sync_by_its_persisted_run_type(
         conn.commit()
     scheduler = _war_room(monkeypatch)["scheduler"]
     assert scheduler["latest_daily"]["status"] == "success"
-    assert scheduler["latest_weekly"]["status"] == "failed"
+    # PR-ADS-165A: the retired weekly job's last row (`failed`) is in the
+    # table above and is NOT a tile — it is history, not a health signal.
+    assert "latest_weekly" not in scheduler
     assert scheduler["latest_monthly"]["status"] == "success"
     # The newest incremental run, with the status it recorded — `partial` is
     # not folded into either neighbour.

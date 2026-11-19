@@ -5044,24 +5044,6 @@ body.is-revenue-page #monitoring-banner {
   font-weight: 700;
 }
 
-/* ── Unit Economics ─────────────────────────────────────────────────────── */
-
-.unit-economics-verdict-card {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3, 0.75rem);
-  padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
-  background: var(--color-surface-alt, #f8fafc);
-  border: 1px solid var(--color-border, #e2e8f0);
-  border-radius: 8px;
-  margin-bottom: var(--space-4, 1rem);
-}
-
-.unit-economics-verdict-explanation {
-  font-size: 0.85rem;
-  color: var(--color-text-muted, #64748b);
-}
-
 /* ── ROAS KPI Grid ──────────────────────────────────────────────────────── */
 
 .roas-kpi-grid {

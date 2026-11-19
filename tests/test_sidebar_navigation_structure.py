@@ -21,7 +21,8 @@ REQUIRED_ROUTE_KEYS = [
     "deals",
         "roas-campaigns",
     "roas-countries",
-    "unit-economics",
+    # PR-ADS-165A: "unit-economics" was deleted (page, route, endpoint and
+    # service); see tests/test_pr_ads_165a_weekly_job_and_unit_economics_retired.py.
     "scheduler",
     "health",
     "backfill",
@@ -41,7 +42,6 @@ NEW_VISIBLE_LABELS = [
     # close-date ratio is never called ROAS.
     "Campaign Revenue &amp; Spend",
     "Country Revenue &amp; Spend",
-    "Unit Economics",
 ]
 
 # PR-ADS-162F: the groups were renamed to say what they hold. "Command
@@ -135,9 +135,12 @@ def test_roas_pages_exist():
     assert 'id="page-roas-countries"' in HTML
 
 
-def test_unit_economics_page_exists():
-    """Unit Economics page must have a container."""
-    assert 'id="page-unit-economics"' in HTML
+def test_unit_economics_page_is_retired():
+    """PR-ADS-165A: the Unit Economics page is deleted by owner decision —
+    the section and its sidebar entry are gone, not hidden. (This case used
+    to assert the container existed.)"""
+    assert 'id="page-unit-economics"' not in HTML
+    assert 'data-page="unit-economics"' not in HTML
 
 
 def test_churn_input_page_is_retired():
@@ -174,13 +177,13 @@ def test_frontend_uses_api_reports_routes():
     """Frontend JS must use /api/-prefixed routes, not bare /reports/...
 
     PR-ADS-107A: the ROAS by Campaign / Country pages now consume the shared
-    /api/revenue-attribution endpoint (business windows). Unit economics
-    continues to use its /api/ route. (Churn Input was retired in PR-ADS-162D.)
+    /api/revenue-attribution endpoint (business windows). (Churn Input was
+    retired in PR-ADS-162D and Unit Economics in PR-ADS-165A.)
     """
     js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
     # ROAS pages use the shared revenue-attribution contract.
     assert "/api/revenue-attribution" in js
-    assert "/api/reports/unit-economics" in js
+    assert "/api/reports/unit-economics" not in js
     assert "/api/admin/churn-input" not in js
     # Must NOT use bare /reports/ routes for ROAS
     bare_roas = re.findall(r'["\']\/reports\/roas', js)

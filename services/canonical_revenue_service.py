@@ -577,7 +577,7 @@ def campaign_placement_gate(base: dict) -> dict | None:
 
 
 def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
-               period_ratio_scope_ok: bool = True, gate: dict | None = None) -> dict:
+               gate: dict | None = None) -> dict:
     """The canonical closed-won fields of one page row (a campaign, a country,
     a source group, a summary), from one population.
 
@@ -596,6 +596,13 @@ def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
       ``ratio_kind: non_cohort_operational_ratio`` and its disclosure.
 
     ``metrics`` holds every value with its status and reason.
+
+    PR-ADS-165A: the ``period_ratio_scope_ok`` flag is gone. Its one caller
+    that ever passed False was the Unit Economics page (for its all-source
+    block); with that page deleted nothing could turn the rule on, and a rule
+    nothing uses is not a guard. A caller passes ``spend_usd`` only for rows
+    Google Ads spend can have produced — which is every remaining caller's
+    own responsibility, as it was before the flag existed.
     """
     from analysis import closed_won_truth as cwt
 
@@ -606,11 +613,9 @@ def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,
                                "additive": False} if k == "customers" else {}))
              for k in cwt.SUBSET_METRICS}
     per_spend = cwt.derive_period_revenue_per_ad_spend(
-        m["revenue_usd"], spend_usd, spend_reason=spend_reason,
-        scope_compatible=period_ratio_scope_ok)
+        m["revenue_usd"], spend_usd, spend_reason=spend_reason)
     per_customer = cwt.derive_period_spend_per_customer_won(
-        m["customers"], spend_usd, spend_reason=spend_reason,
-        scope_compatible=period_ratio_scope_ok)
+        m["customers"], spend_usd, spend_reason=spend_reason)
     return {
         "closed_won_deals": m["closed_won_deals"]["value"],
         "customers": m["customers"]["value"],

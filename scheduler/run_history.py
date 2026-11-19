@@ -7,7 +7,8 @@ Responsibility: write one JSONL record per scheduler run to runtime_logs/.
 No business logic. No analysis. No API calls.
 
 Record schema:
-  run_type            — "daily" | "weekly" | "monthly"
+  run_type            — "daily" | "monthly" (history also holds "weekly",
+                        a job retired in PR-ADS-165A)
   started_at          — ISO-8601 UTC timestamp
   finished_at         — ISO-8601 UTC timestamp (null until run completes)
   status              — "success" | "failed" | "partial"
@@ -55,7 +56,7 @@ def start_run(run_type: str) -> dict:
     included in the single persisted record.
 
     Args:
-        run_type: One of "daily", "weekly", "monthly".
+        run_type: One of "daily", "monthly".
 
     Returns:
         A mutable dict representing the run record.

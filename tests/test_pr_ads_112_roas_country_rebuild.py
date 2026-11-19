@@ -32,8 +32,10 @@ def _country_region():
     """The ROAS-by-Country implementation block (state -> table renderer)."""
     start = JS.find("let roasCountrySourceHealth")
     assert start != -1, "roasCountrySourceHealth state not found"
-    end = JS.find("// ── Unit Economics", start)
-    assert end != -1, "Unit Economics marker not found"
+    # PR-ADS-165A: the region ended at the "// ── Unit Economics" banner. That
+    # block is deleted; the next banner after the country block ends it now.
+    end = JS.find("// ── Page Help Drawer", start)
+    assert end != -1, "Page Help Drawer marker not found"
     return JS[start:end]
 
 

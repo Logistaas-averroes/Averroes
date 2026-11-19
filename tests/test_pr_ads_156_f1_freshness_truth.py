@@ -55,7 +55,8 @@ _needs_pg = pytest.mark.skipif(
     not _have_postgres(),
     reason="PostgreSQL server binaries / unprivileged postgres user unavailable")
 
-_SCHEDULERS = ("scheduler/daily.py", "scheduler/weekly.py", "scheduler/monthly.py")
+# PR-ADS-165A: "scheduler/weekly.py" was listed here; the weekly job is deleted.
+_SCHEDULERS = ("scheduler/daily.py", "scheduler/monthly.py")
 _AUDIT_MODULE = "scripts.audit_keyword_search_term_freshness"
 
 TODAY = date(2026, 3, 1)
@@ -479,7 +480,7 @@ def test_13b_failed_persistence_disables_downstream_analysis():
     assert "detect_junk_terms(search_terms) if search_terms_available else []" in daily
     assert '"new_junk_terms_available": search_terms_available' in daily
 
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
+    for rel in ("scheduler/monthly.py",):   # the weekly job is retired (PR-ADS-165A)
         tree = ast.parse((_ROOT / rel).read_text(encoding="utf-8"))
         called = _calls(tree)
         assert "compute_ngram_findings" not in called, rel
@@ -511,7 +512,7 @@ def test_13c_a_failed_pull_never_overwrites_the_previous_snapshot():
     src = inspect.getsource(save_output)
     assert "if rows is None:" in src and "continue" in src
 
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
+    for rel in ("scheduler/monthly.py",):   # the weekly job is retired (PR-ADS-165A)
         src = (_ROOT / rel).read_text(encoding="utf-8")
         assert "google_ads_save(campaigns, None, keywords, geos)" in src, rel
         assert "google_ads_save(None, search_terms, None, None)" in src, rel

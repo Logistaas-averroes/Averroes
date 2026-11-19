@@ -124,10 +124,14 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "blocks": [],
     },
+    # PR-ADS-165A: the legacy `geo` snapshot, written by the monthly job
+    # alone. The Countries page (`#/geo`) no longer reads it — its spend is
+    # `canonical_geo`, above — so this pipeline names no page. What still reads
+    # the table is listed in services.freshness_service (the `geo` entry).
     "geo": {
-        "label": "Geo",
+        "label": "Geo (legacy monthly snapshot)",
         "source": "google_ads_api",
-        "page": "Geo",
+        "page": None,
         "depends_on": [],
         "blocks": [],
     },
@@ -248,7 +252,10 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "search-terms": ["search_terms"],
     # PR-ADS-153F: the N-Gram page's only real dependency is search_terms.
     "ngrams": ["search_terms"],
-    "geo": ["geo"],
+    # PR-ADS-165A: the Google Ads → Countries page reads canonical daily
+    # country spend. It named the legacy `geo` snapshot, which the monthly
+    # job alone writes and the page no longer reads.
+    "geo": ["canonical_geo"],
     # PR-ADS-153F: Countries depends on canonical geo spend and the campaign
     # total it must reconcile against.
     "countries": ["canonical_geo", "canonical_spend"],
@@ -273,7 +280,13 @@ CORE_DATASETS = frozenset([
     # with no scheduled writer raised a permanent stale blocker.
     # PR-ADS-163B: "deals" (the legacy GCLID snapshot) removed — no page or
     # service reads it, so its state cannot be a critical blocker.
-    "search_terms", "leads", "keywords", "keyword_facts", "geo",
+    # PR-ADS-165A: "keywords" and "geo" (the legacy snapshots) removed. Both
+    # are written by the monthly job alone and no page's primary figure reads
+    # either — Keyword Evidence reads `keyword_facts`, Countries reads
+    # `canonical_geo`. A core dataset is one whose failure is a "critical
+    # system failure"; a month-old side snapshot is not that, and counting it
+    # as core let System Status read "ok" on the strength of a wide threshold.
+    "search_terms", "leads", "keyword_facts",
     # PR-ADS-153F: directly synced canonical Google Ads spend datasets.
     "canonical_spend", "canonical_geo",
 ])
@@ -630,6 +643,10 @@ def compute_pipelines(
             "rows_in_window": ds_detail.get("rows_in_window"),
             "latest_source_date": ds_detail.get("latest_source_date"),
             "last_batch_row_count": ds_detail.get("last_batch_row_count"),
+            # PR-ADS-165A: "monthly" for a dataset only the monthly job
+            # writes, so "fresh" beside it is read as "refreshed on schedule".
+            "refresh_cadence": (DATASET_FRESHNESS_CONFIG.get(ds_key) or {}).get(
+                "refresh_cadence"),
             "depends_on": pipe_def["depends_on"],
             "blocks": pipe_def["blocks"],
             "reason": ds_detail.get("reason", ""),
@@ -674,10 +691,15 @@ def compute_scheduler_summary(
 ) -> dict[str, Any]:
     """Build scheduler latest-run summary from runs table data.
 
-    runs_data should be a dict with keys: daily, weekly, monthly, incremental
+    runs_data should be a dict with keys: daily, monthly, incremental
     each containing {status, started_at, finished_at} or None.
 
-    PR-ADS-095: when all four run-type entries are null but source-level
+    PR-ADS-165A: there is no ``latest_weekly``. The weekly job is retired; a
+    tile for it could only ever show its last pre-retirement run (``failed``)
+    or "not_run", and both read as a fault in a job that is not supposed to
+    run. A ``weekly`` key in ``runs_data`` is ignored, not republished.
+
+    PR-ADS-095: when all run-type entries are null but source-level
     last_successful_sync_at timestamps exist, surface a diagnostic message so
     operators understand the runs table is empty rather than the source being
     broken.
@@ -685,13 +707,12 @@ def compute_scheduler_summary(
     runs_data = runs_data or {}
     summary: dict[str, Any] = {
         "latest_daily": runs_data.get("daily"),
-        "latest_weekly": runs_data.get("weekly"),
         "latest_monthly": runs_data.get("monthly"),
         "latest_incremental": runs_data.get("incremental"),
     }
 
     all_null = all(summary[k] is None for k in (
-        "latest_daily", "latest_weekly", "latest_monthly", "latest_incremental",
+        "latest_daily", "latest_monthly", "latest_incremental",
     ))
     if not all_null:
         return summary
@@ -715,7 +736,7 @@ def compute_scheduler_summary(
     else:
         summary["diagnostic_status"] = "no_scheduler_run_recorded"
         summary["message"] = "No scheduler run records were found."
-        summary["next_action"] = "Trigger a daily/weekly/monthly run."
+        summary["next_action"] = "Trigger a daily, incremental-sync or monthly run."
     return summary
 
 

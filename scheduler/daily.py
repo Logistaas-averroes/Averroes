@@ -312,7 +312,7 @@ def check_crm_delta(campaigns: list, crm_summary: dict) -> dict:
 
 def check_budget_pacing(campaigns: list) -> list:
     """Flag campaigns on track to exhaust budget early."""
-    # Simplified pacing check — full version in weekly
+    # Simplified pacing check — there is no fuller version anywhere.
     return []
 
 

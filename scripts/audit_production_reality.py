@@ -78,14 +78,18 @@ DATASET_SOURCE: dict[str, str] = {
 # Last sync type mapping (which scheduler populates this).
 DATASET_SYNC_TYPE: dict[str, str] = {
     "runs": "all",
-    "leads": "weekly/daily/incremental",
-    "deals": "weekly/incremental",
-    "keywords": "weekly/incremental",
-    "geo": "weekly/incremental",
-    "search_terms": "weekly/daily",
-    "waste_terms": "weekly",
-    "gclid_attribution": "weekly",
-    "gclid_coverage_snapshots": "weekly",
+    # PR-ADS-165A: the weekly job is retired. These name the schedulers that
+    # write each table today (read from the schedulers, not from the old map,
+    # which credited the incremental sync with the legacy keywords / geo
+    # snapshots it has never written).
+    "leads": "daily/incremental/monthly",
+    "deals": "incremental/monthly",
+    "keywords": "monthly",
+    "geo": "monthly",
+    "search_terms": "daily/incremental/monthly",
+    "waste_terms": "monthly",
+    "gclid_attribution": "incremental/monthly",
+    "gclid_coverage_snapshots": "monthly",
 }
 
 # Freshness thresholds in days — if latest date is older than this, it's stale.
@@ -93,12 +97,15 @@ STALE_THRESHOLD_DAYS: dict[str, int] = {
     "runs": 2,
     "leads": 3,
     "deals": 8,
-    "keywords": 8,
-    "geo": 8,
+    # PR-ADS-165A: these four are written by the monthly job alone since the
+    # weekly job was retired; 35 days is
+    # services.freshness_service.MONTHLY_REFRESH_STALE_DAYS.
+    "keywords": 35,
+    "geo": 35,
     "search_terms": 8,
-    "waste_terms": 8,
+    "waste_terms": 35,
     "gclid_attribution": 8,
-    "gclid_coverage_snapshots": 8,
+    "gclid_coverage_snapshots": 35,
 }
 
 # Datasets that depend on search_terms being populated.

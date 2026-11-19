@@ -21,6 +21,16 @@ forgotten. With the report gone the data steps ARE the job, so a run is
 ``success`` only when every step landed, ``partial`` when it finished and one
 did not, and ``failed`` when it could not continue. ``test_08`` … ``test_10``
 drive the real job functions through each of those.
+
+PR-ADS-165A retired the weekly job (owner decision: the host killed it at the
+memory limit every Monday). ``JOBS`` therefore holds the monthly job alone, and
+every case here that was parametrised over both jobs now runs for the one that
+exists. Nothing asserted about the monthly job was relaxed. Three things moved
+with the retirement and are asserted as they now are: the flag-history step
+runs in the monthly job (``test_05``, ``test_08``, ``test_09``), ``weekly`` is
+no longer a scheduler job id (``test_13``) and no longer a monitoring cadence
+(``test_14``). The retirement itself is covered by
+``tests/test_pr_ads_165a_weekly_job_and_unit_economics_retired.py``.
 """
 from __future__ import annotations
 
@@ -53,8 +63,9 @@ REPORT_CALLS = {"run_lead_quality", "run_campaign_truth", "determine_verdict",
                 "generate_monthly_report", "generate_deterministic_report",
                 "deliver_report", "write_campaigns"}
 
-#: The data steps both jobs still own. `record_flag_history` is weekly only —
-#: the monthly job has never called it.
+#: The data steps the job still owns. `record_flag_history` was weekly only
+#: until PR-ADS-165A moved it into the monthly job; it is counted and ordered
+#: separately in test_05.
 KEPT_CALLS = {
     "pull_campaign_performance", "pull_keyword_performance",
     "pull_geo_performance", "pull_paid_search_contacts", "pull_deals_with_gclid",
@@ -73,8 +84,7 @@ KEPT_BATCHES = {("hubspot", "contacts"), ("hubspot", "deals"),
                 ("analysis", "waste_terms"), ("gclid", "matches"),
                 ("gclid", "coverage_snapshots")}
 
-JOBS = {"weekly": ("scheduler/weekly.py", "run_weekly_report"),
-        "monthly": ("scheduler/monthly.py", "run_monthly_report")}
+JOBS = {"monthly": ("scheduler/monthly.py", "run_monthly_report")}
 
 
 # ── AST helpers ──────────────────────────────────────────────────────────────
@@ -238,13 +248,12 @@ def test_05_both_jobs_still_call_every_kept_data_step(job):
                  "write_run"):
         assert called.count(name) == 1, (name, called.count(name))
 
-    history = called.count("record_flag_history")
-    assert history == (1 if job == "weekly" else 0)
-    if job == "weekly":
-        # After the annotations land, as before.
-        order = [n for n in called
-                 if n in ("write_waste_terms", "record_flag_history")]
-        assert order == ["write_waste_terms", "record_flag_history"]
+    # PR-ADS-165A: the flag-history step moved here from the retired weekly
+    # job. Once, and after the annotations land, as it was there.
+    assert called.count("record_flag_history") == 1
+    order = [n for n in called
+             if n in ("write_waste_terms", "record_flag_history")]
+    assert order == ["write_waste_terms", "record_flag_history"]
 
     # The run type — what the monitoring cadence is keyed on — is unchanged.
     starts = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
@@ -457,9 +466,8 @@ def test_08_a_run_whose_every_step_lands_is_recorded_success(job, harness):
                 "pull_deals_with_gclid", "write_run", "write_leads",
                 "write_deals", "write_geo", "write_keywords",
                 "sync_keyword_daily_facts", "sync_recent_search_terms",
-                "run_waste_detection", "write_waste_terms"]
-    if job == "weekly":
-        expected.append("record_flag_history")
+                "run_waste_detection", "write_waste_terms",
+                "record_flag_history"]
     expected += ["run_gclid_match", "write_gclid_attribution",
                  "write_gclid_coverage_snapshot", "update_run"]
     ran = [c for c in h.calls if c in set(expected)]
@@ -501,9 +509,9 @@ PARTIAL_CASES = [
      "write_waste_terms", "both"),
     ("flag history unavailable", "record_flag_history",
      {"available": False, "reason": "write_unavailable"},
-     "record_flag_history", "weekly"),
+     "record_flag_history", "both"),
     ("flag history raises", "record_flag_history", RuntimeError("boom"),
-     "record_flag_history", "weekly"),
+     "record_flag_history", "both"),
     ("gclid match raises", "run_gclid_match", RuntimeError("no file"),
      "run_gclid_match / write_gclid_attribution", "both"),
     ("gclid attribution not persisted", "write_gclid_attribution", _zero,
@@ -605,17 +613,13 @@ FAILED_CASES = [
 def test_10_a_step_the_run_cannot_continue_past_is_recorded_failed(
         job, case_id, stub, step, harness):
     """Unchanged by this slice: these three ended `failed` before it, and
-    still do. The weekly job raises; the monthly job returns the outcome."""
+    still do. The monthly job returns the outcome rather than raising."""
     h = harness(job)
     h.overrides[stub] = RuntimeError("upstream down")
-    if job == "weekly":
-        with pytest.raises(RuntimeError, match="upstream down"):
-            h.run()
-    else:
-        outcome = h.run()
-        assert outcome["status"] == "failed"
-        assert outcome["failed_steps"] == [h.record["failed_step"]]
-        assert step in h.record["failed_step"]
+    outcome = h.run()
+    assert outcome["status"] == "failed"
+    assert outcome["failed_steps"] == [h.record["failed_step"]]
+    assert step in h.record["failed_step"]
     assert h.record["status"] == "failed"
     assert "upstream down" in h.record["error_message"]
     _assert_no_report_was_recorded(h.record)
@@ -675,7 +679,7 @@ def test_11b_the_jobs_record_a_missing_run_row_under_the_name_the_helper_reads()
     """The rule above keys on one step name. If a job recorded the missing run
     row under another name, the run would quietly go back to `partial`."""
     from scheduler import sync_utils
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
+    for rel, _ in JOBS.values():
         src = (ROOT / rel).read_text(encoding="utf-8")
         assert re.search(
             r'note_step_failure\(\s*step_failures,\s*"write_run"', src), rel
@@ -686,11 +690,9 @@ def test_11c_the_kept_steps_keep_their_windows():
     """A truth review changed three literals in the kept steps (the search-term
     window, the keyword-facts window, a batch's sync type) and every test
     still passed. The windows are part of what "kept" means."""
-    weekly = (ROOT / "scheduler/weekly.py").read_text(encoding="utf-8")
     monthly = (ROOT / "scheduler/monthly.py").read_text(encoding="utf-8")
-    assert 'sync_recent_search_terms("weekly", days=60' in weekly
     assert 'sync_recent_search_terms("monthly", days=30' in monthly
-    for name, src in (("weekly", weekly), ("monthly", monthly)):
+    for name, src in (("monthly", monthly),):
         assert re.search(r"sync_keyword_daily_facts\(\s*run_date - "
                          r"timedelta\(days=29\)", src), name
         assert src.count("timedelta(days=29)") == 1, name
@@ -778,21 +780,29 @@ def test_13_the_scheduled_wrapper_does_not_log_a_non_success_as_succeeded(
         if not (isinstance(outcome, dict) and outcome["status"] == "success"):
             assert not any("succeeded" in m for _, m in lines)
         assert scheduler._job_state[job] is False             # noqa: SLF001
-    # Job ids and schedules are untouched: monitoring is keyed on them.
-    assert {"weekly", "monthly"} <= set(scheduler.JOB_IDS)
-    assert scheduler._SCHEDULE_DESCRIPTIONS["weekly"].startswith("Monday 07:00")   # noqa: SLF001
+    # The job id and schedule are untouched: monitoring is keyed on them.
+    # PR-ADS-165A: `weekly` is no longer a job id — the job is retired.
+    assert "monthly" in scheduler.JOB_IDS
+    assert "weekly" not in scheduler.JOB_IDS
+    assert "weekly" not in scheduler._SCHEDULE_DESCRIPTIONS               # noqa: SLF001
     assert scheduler._SCHEDULE_DESCRIPTIONS["monthly"].startswith("1st of month 08:00")  # noqa: SLF001
 
 
-def test_14_the_weekly_and_monthly_cadences_are_still_monitored():
-    """The jobs were kept partly so these two cadences do not warn forever.
+def test_14_the_monthly_cadence_is_still_monitored():
+    """The job was kept partly so its cadence does not warn forever.
     A success run is green; a partial latest run is yellow and does not move
-    `last_success_at` — the rule monitoring already applies everywhere."""
+    `last_success_at` — the rule monitoring already applies everywhere.
+
+    PR-ADS-165A: this case covered the weekly cadence too and ran its partial
+    scenario on it. The weekly job is retired and is not a cadence, so the
+    same scenario runs on the monthly cadence."""
     from api.monitoring import (MONITORING_CADENCES, RUN_TYPE_CADENCE,
                                 compute_monitoring_status, monitoring_cadence)
-    assert {"weekly", "monthly"} <= set(MONITORING_CADENCES)
-    assert RUN_TYPE_CADENCE["weekly"] == "weekly"
+    assert "monthly" in MONITORING_CADENCES
+    assert RUN_TYPE_CADENCE["monthly"] == "monthly"
     assert monitoring_cadence("monthly") == "monthly"
+    assert "weekly" not in MONITORING_CADENCES
+    assert monitoring_cadence("weekly") is None
 
     now = datetime.now(timezone.utc)
 
@@ -801,22 +811,20 @@ def test_14_the_weekly_and_monthly_cadences_are_still_monitored():
         return {"run_type": run_type, "status": status, "started_at": ts,
                 "finished_at": ts}
     base = [run("daily", "success", 0), run("daily_incremental_sync", "success", 0)]
-    thresholds = {"daily": 2, "daily_incremental_sync": 2, "weekly": 8,
-                  "monthly": 35}
+    thresholds = {"daily": 2, "daily_incremental_sync": 2, "monthly": 35}
     healthy = compute_monitoring_status(
-        base + [run("weekly", "success", 1), run("monthly", "success", 10)],
-        thresholds, 2)
+        base + [run("monthly", "success", 10)], thresholds, 2)
     assert healthy["severity"] == "green" and healthy["warnings"] == []
 
     partial = compute_monitoring_status(
-        base + [run("weekly", "partial", 1), run("weekly", "success", 6),
-                run("monthly", "success", 10)], thresholds, 2)
+        base + [run("monthly", "partial", 1), run("monthly", "success", 6)],
+        thresholds, 2)
     assert partial["severity"] == "yellow"
-    weekly = partial["latest_runs"]["weekly"]
-    assert weekly["latest_partial"] is True
-    assert weekly["consecutive_failures"] == 0
-    assert weekly["last_success_at"] == run("weekly", "success", 6)["finished_at"]
-    assert "Weekly run completed partially" in " ".join(partial["warnings"])
+    monthly = partial["latest_runs"]["monthly"]
+    assert monthly["latest_partial"] is True
+    assert monthly["consecutive_failures"] == 0
+    assert monthly["last_success_at"] == run("monthly", "success", 6)["finished_at"]
+    assert "Monthly run completed partially" in " ".join(partial["warnings"])
 
 
 def test_15_the_scheduler_page_prints_no_report_path_and_names_a_partial_run():
@@ -941,7 +949,8 @@ def test_18_system_status_names_no_dataset_the_freshness_config_lacks():
 def test_19_the_ui_depends_on_no_dataset_the_endpoint_no_longer_reports():
     assert "google_ads_api/campaigns" not in JS
     deps = JS.split("const PAGE_DEPENDENCIES = {")[1].split("\n};")[0]
-    for page in ("dashboard", '"roas-campaigns"', '"unit-economics"', "campaigns"):
+    # PR-ADS-165A: '"unit-economics"' was the fourth page here; it is deleted.
+    for page in ("dashboard", '"roas-campaigns"', "campaigns"):
         line = next(ln for ln in deps.splitlines()
                     if ln.strip().startswith(f"{page}:"))
         assert '"google_ads_api/canonical_spend"' in line, line

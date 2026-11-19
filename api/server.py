@@ -29,10 +29,9 @@ Protected endpoints (require authenticated session):
   GET  /runs/latest         — Latest run record (requires auth).
   GET  /scheduler/status    — Scheduler state (requires auth).
   POST /run/daily           — Trigger daily run (requires admin or ADMIN_API_TOKEN).
-  POST /run/weekly          — Trigger weekly run (requires admin or ADMIN_API_TOKEN).
   POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
   POST /run/incremental-sync — Trigger daily incremental sync manually (requires admin or ADMIN_API_TOKEN).
-  GET  /api/geo                    — Windsor geo performance by country/campaign (requires auth).
+  GET  /api/geo                    — Per-country Google Ads spend from the canonical daily table, with a coverage verdict (requires auth).
   GET  /api/keywords               — Windsor keyword performance by campaign/ad group/keyword (requires auth).
   GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
   GET  /api/campaign-detail        — Campaign drill-down detail, query-param form (requires auth). Preferred.
@@ -186,7 +185,6 @@ _REQUIRED_MODULES = [
     "analysis.core",
     "api.auth",
     "scheduler.daily",
-    "scheduler.weekly",
     "scheduler.monthly",
 ]
 
@@ -561,7 +559,7 @@ def run_daily(request: Request) -> dict[str, Any]:
 
 
 def _data_refresh_response(job: str, outcome: Any, started_at: str) -> dict[str, Any]:
-    """The manual-run response for a weekly / monthly data refresh.
+    """The manual-run response for the monthly data refresh.
 
     PR-ADS-162H. These jobs used to return a report path, and the endpoint
     answered `success` for anything that did not raise — including a monthly
@@ -591,42 +589,6 @@ def _data_refresh_response(job: str, outcome: Any, started_at: str) -> dict[str,
         response["error"] = ("run failed at: " + "; ".join(failed_steps)
                              if failed_steps else "run failed")
     return response
-
-
-@app.post("/run/weekly")
-def run_weekly(request: Request) -> dict[str, Any]:
-    """Trigger the weekly data refresh. Requires admin session or ADMIN_API_TOKEN.
-
-    Responds with the run's own outcome: `success`, `partial` (the run finished
-    and at least one step did not land — named in `result.failed_steps`) or
-    `failed`. No report is produced (PR-ADS-162H).
-    """
-    check_admin_or_token(request)
-
-    with _run_lock:
-        if _job_state["weekly"]:
-            raise HTTPException(status_code=409, detail="job already running")
-        _job_state["weekly"] = True
-
-    started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    log.info("[run/weekly] started at %s", started_at)
-
-    try:
-        from scheduler.weekly import run_weekly_report  # noqa: PLC0415
-        return _data_refresh_response("weekly", run_weekly_report(), started_at)
-    except Exception as exc:  # noqa: BLE001
-        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.error("[run/weekly] failed: %s", exc, exc_info=True)
-        return {
-            "status": "failed",
-            "job": "weekly",
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "error": f"{type(exc).__name__}: scheduler execution failed",
-        }
-    finally:
-        with _run_lock:
-            _job_state["weekly"] = False
 
 
 @app.post("/run/monthly")
@@ -1173,54 +1135,61 @@ def api_geo(
         description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
     ),
 ) -> dict[str, Any]:
-    """Return aggregated Windsor geo performance by country/campaign for the evidence window. Requires auth."""
-    days, window_key = _resolve_evidence_window(window, days)
-    date_clause, date_params = _evidence_date_clause("run_date", days)
+    """The Countries page: one row per country, spend and leads joined. Requires auth.
 
-    from db.connection import get_conn  # noqa: PLC0415
+    PR-ADS-165A. Spend is read from the canonical DAILY country table
+    (``google_ads_geo_daily_spend``, written by the daily incremental sync)
+    and its coverage ledger — never the legacy ``geo`` snapshot, which only
+    the monthly job writes.
+
+    The window is N account-local days ending YESTERDAY (``window_range``).
+    ``coverage`` says whether every one of those days has a verified fetch
+    made after that day ended (``status``: covered / not_covered /
+    unavailable, with the complete range and a reason). A day fetched while it
+    was still in progress holds a part-day and does not count, so the window
+    is covered from the morning sync onward and ``not_covered``
+    (``spend_not_reread_since_day_ended``) before it. A spend figure appears
+    ONLY when the window is covered — never 0 and never a partial sum.
+
+    Lead figures are the ``/api/leads/country-summary`` rows for the same
+    evidence window (which runs through today), joined to spend HERE on an ISO
+    country code: spend by the code its Google criterion carries on any stored
+    row (no code on record = "(unresolved location)"), lead text through the
+    complete ISO table (in ``services.country_evidence_service``). A lead
+    country that names no single country is its own row with spend
+    ``unavailable`` / ``country_not_matched``, never 0; blanks and
+    placeholders are one "No country recorded" row. A country with no spend
+    row is 0 only when the window holds no unresolved spend; otherwise it is
+    ``unavailable`` / ``spend_location_unresolved``. Clicks, impressions and
+    conversions are not returned (``dropped_metrics``).
+    """
+    from analysis.evidence_windows import is_evidence_window  # noqa: PLC0415
+    requested_window = window if isinstance(window, str) and window else None
+    days, window_key = _resolve_evidence_window(requested_window, days)
+    from services.country_evidence_service import build_country_evidence  # noqa: PLC0415
     try:
-        with get_conn() as conn:
-            if conn is None:
-                return _db_empty_response(days, "rows", window_key)
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT
-                        country,
-                        campaign_name,
-                        SUM(spend_usd)        AS spend_usd,
-                        SUM(clicks)           AS clicks,
-                        SUM(impressions)      AS impressions,
-                        SUM(conversions)      AS conversions,
-                        COUNT(DISTINCT run_id) AS runs,
-                        MAX(run_date)         AS last_run_date
-                    FROM geo
-                    WHERE {date_clause}
-                    GROUP BY country, campaign_name
-                    ORDER BY spend_usd DESC
-                    """,
-                    (*date_params,),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                geo_out = []
-                for row in rows:
-                    r = dict(zip(cols, row))
-                    geo_out.append({
-                        "country": r["country"],
-                        "campaign_name": r["campaign_name"],
-                        "spend_usd": round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else 0.0,
-                        "clicks": int(r["clicks"] or 0),
-                        "impressions": int(r["impressions"] or 0),
-                        "conversions": round(float(r["conversions"]), 2) if r["conversions"] is not None else 0.0,
-                        "runs": int(r["runs"] or 0),
-                        "last_run_date": str(r["last_run_date"]) if r["last_run_date"] else None,
-                    })
+        # The lead half, from the endpoint that owns it — the same rows the
+        # page used to fetch separately, for the same window.
+        leads = api_leads_country_summary(
+            user=user, days=days if days is not None else 30,
+            window=window_key if is_evidence_window(window_key) else None)
+        return build_country_evidence(
+            days=days, window_key=window_key,
+            lead_rows=leads.get("rows") or [],
+            leads_available=not leads.get("db_unavailable"))
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/geo] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "rows", window_key)
-
-    return {"days": days, "window": window_key, "rows": geo_out}
+        log.error("[api/geo] country evidence unavailable: %s", exc, exc_info=True)
+        # Unknown, said as unknown: no rows, no total, and a verdict that is
+        # not "covered" — so the page prints "Unavailable", never $0.
+        return {
+            "days": days, "window": window_key, "rows": [],
+            "spend_status": "unavailable", "leads_status": "unavailable",
+            "leads_reason": "lead_summary_unreadable",
+            "total_spend_usd": None, "countries_active": None,
+            "coverage": {"status": "unavailable", "covered_from": None,
+                         "covered_through": None,
+                         "reason": "geo_rows_unreadable"},
+        }
 
 
 @app.get("/api/keywords")
@@ -2169,6 +2138,10 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
         d["latest_source_date"] = d.get("last_source_date")
         d["last_batch_row_count"] = batch_row_count
         d["stale_threshold_days"] = stale_days
+        # PR-ADS-165A: says when a dataset is refreshed monthly, so a wide
+        # threshold is not read as a dataset that should be fresher.
+        d["refresh_cadence"] = (DATASET_FRESHNESS_CONFIG.get(cfg_key) or {}).get(
+            "refresh_cadence") if cfg_key else None
         d["depends_on"] = depends_on
         d["dependency_status"] = None
         if depends_on:
@@ -4490,10 +4463,12 @@ def _read_jsonl_runs() -> list[dict]:
 def api_monitoring_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return read-only monitoring summary for scheduled run health.
 
-    Computes state per monitoring CADENCE (daily/weekly/monthly). A cadence is
+    Computes state per monitoring CADENCE (see api.monitoring.MONITORING_CADENCES;
+    the retired `weekly` job is not one — PR-ADS-165A). A cadence is
     not the same thing as a run type: concrete run types are mapped onto it by
-    ``api.monitoring.monitoring_cadence`` — the incremental sync persists
-    ``daily_incremental_sync`` and reports into the daily cadence. A run type
+    ``api.monitoring.monitoring_cadence``. A cadence is ONE pipeline: the
+    incremental sync persists ``daily_incremental_sync`` and reports into its
+    OWN cadence of that name, never into ``daily`` (PR-ADS-160-F2). A run type
     the mapping does not recognise is not monitored, never silently daily.
 
     Each cadence returns (PR-ADS-160 / PR-ADS-160-F1):
@@ -4512,6 +4487,9 @@ def api_monitoring_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
                                   ``partial`` is not a failure and breaks the
                                   streak.
       - ``stale``               — no ``last_success_at`` inside the threshold.
+      - ``latest_failed_unresolved`` — the monthly cadence only: its newest run
+                                  did not succeed. One such run is at least
+                                  yellow, whatever the streak (PR-ADS-165A).
 
     Derives severity (green/yellow/red) and a human-readable warnings list.
     Partial is yellow: deliberately not green, and not red either — real work
@@ -4732,6 +4710,7 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
     """
     from db.connection import get_conn  # noqa: PLC0415
     from scripts.verify_search_terms_pipeline import (  # noqa: PLC0415
+        SEARCH_TERM_RUN_TYPES,
         Verdict,
         compute_search_terms_verdict,
     )
@@ -4744,7 +4723,7 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
     # gets. A verdict without a next action is a diagnosis with no treatment.
     next_actions = {
         Verdict.OK: "Search Terms pipeline is healthy. Proceed to Waste Terms/N-Grams confidence.",
-        Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT: "Run scheduler (daily or weekly) to trigger first Search Terms sync after deployment.",
+        Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT: "Run the daily incremental sync to trigger the first Search Terms sync after deployment.",
         # PR-ADS-156 §8: provider-neutral next actions. Every one of these used
         # to send the operator to Windsor — a source production retired, whose
         # plan, field mapping and JSON file no longer exist. An instruction
@@ -5011,13 +4990,16 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                                  "current freshness"),
                     }
 
-                # Latest weekly run for verdict logic
+                # Latest run of a job that syncs search terms, for verdict
+                # logic. PR-ADS-165A: this read the latest WEEKLY run; that
+                # job is retired and its old rows prove nothing about today.
                 cur.execute(
                     "SELECT started_at FROM runs "
-                    "WHERE run_type = 'weekly' ORDER BY started_at DESC LIMIT 1"
+                    "WHERE run_type = ANY(%s) ORDER BY started_at DESC LIMIT 1",
+                    (list(SEARCH_TERM_RUN_TYPES),),
                 )
                 row = cur.fetchone()
-                latest_weekly_run = str(row[0]) if row and row[0] else None
+                latest_search_term_run = str(row[0]) if row and row[0] else None
 
     except Exception as exc:
         log.error("[api/search-terms-verdict] DB error: %s", exc, exc_info=True)
@@ -5049,7 +5031,7 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
         db_rows_window=db_rows_window,
         window_days=days,
         sync_status=sync_info.get("sync_state_status"),
-        latest_weekly_run=latest_weekly_run,
+        latest_search_term_run=latest_search_term_run,
     )
 
     next_action = next_actions.get(verdict_str, next_actions[Verdict.UNKNOWN])
@@ -5438,7 +5420,13 @@ def api_system_status_war_room(
                 from scheduler.incremental_sync import (  # noqa: PLC0415
                     RUN_TYPE as _INCREMENTAL_RUN_TYPE,
                 )
-                for tile, run_type in (("daily", "daily"), ("weekly", "weekly"),
+                #
+                # PR-ADS-165A: there is no `weekly` tile. The weekly job is
+                # retired, so its latest row — `failed`, from before the
+                # retirement — is history, not a live health signal. Old
+                # `weekly` rows stay in `runs` and are still listed by
+                # `/api/runs`; monitoring reports them under `retired_runs`.
+                for tile, run_type in (("daily", "daily"),
                                        ("monthly", "monthly"),
                                        ("incremental", _INCREMENTAL_RUN_TYPE)):
                     try:
@@ -6955,51 +6943,6 @@ def _withhold_legacy_closed_won_outcomes(payload):
                 "status": "withheld",
                 "reason": "legacy_deal_source_attribution_not_canonical",
                 "canonical_replacement": "/api/revenue-attribution"}}
-
-
-@app.get("/api/reports/unit-economics")
-async def get_unit_economics(
-    window: str = Query(default="current_quarter"),
-    scope: str = Query(default=None),
-    _user=Depends(require_auth),
-):
-    """Unit economics from canonical sources only (PR-ADS-153E-B).
-
-    Advertising cost is the canonical Google Ads spend truth; customers and
-    revenue are the canonical HubSpot deal ledger, read through the shared
-    contract at an explicit attribution scope. The retired local-JSON/Windsor
-    chain is no longer consulted, and there is no fallback to it: an unreadable
-    or unproven ledger returns explicit unavailable metrics with a reason.
-
-    Windows are BUSINESS windows (current_quarter, last_quarter, last_6_months,
-    ytd, all_time) — the same resolver every other revenue page uses. The old
-    rolling day windows (60d and friends) are rejected: they cut a B2B sales
-    cycle in half and gave this page a period no other page shared.
-    """
-    from analysis.business_windows import WINDOW_KEYS, is_valid_window
-    from analysis.revenue_scope import SCOPE_ORDER, is_valid_scope
-    from services.canonical_unit_economics_service import (
-        DEFAULT_ADVERTISING_SCOPE, build_unit_economics,
-    )
-
-    if not is_valid_window(window):
-        raise HTTPException(
-            status_code=400,
-            detail=("Invalid window. Unit economics uses business windows: "
-                    + ", ".join(WINDOW_KEYS)),
-        )
-    selected_scope = scope or DEFAULT_ADVERTISING_SCOPE
-    if not is_valid_scope(selected_scope):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid scope. Valid values: " + ", ".join(SCOPE_ORDER),
-        )
-
-    try:
-        return build_unit_economics(window=window, scope=selected_scope)
-    except Exception as exc:
-        log.error("Unit economics computation failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Unit economics computation failed") from exc
 
 
 # ---------------------------------------------------------------------------

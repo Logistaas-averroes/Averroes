@@ -1153,7 +1153,7 @@ def test_9b_the_coverage_snapshot_batch_records_its_own_real_outcome():
     to make honest would have reported healthy on a failed insert, and its rows
     would not have been linked to the batch that produced them.
     """
-    for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
+    for rel in ("scheduler/monthly.py",):   # the weekly job is retired (PR-ADS-165A)
         src = (_ROOT / rel).read_text()
         i = src.index("dataset=\"coverage_snapshots\"")
         block = src[i:i + 1400]

@@ -112,13 +112,19 @@ ACCEPTABLE_WITH_FLAG = frozenset({Verdict.VERIFIED_EMPTY})
 
 # ─── Verdict Logic ───────────────────────────────────────────────────────────
 
+#: PR-ADS-165A — the persisted run types of the jobs that sync search terms.
+#: `weekly` is not among them: that job is retired, and an old `weekly` row is
+#: not evidence that the pipeline has run since deployment.
+SEARCH_TERM_RUN_TYPES: tuple[str, ...] = (
+    "daily", "daily_incremental_sync", "monthly")
+
 def compute_search_terms_verdict(
     *,
     db_available: bool = False,
     db_rows_window: int = 0,
     window_days: int = 60,
     sync_status: Optional[str] = None,
-    latest_weekly_run: Optional[str] = None,
+    latest_search_term_run: Optional[str] = None,
     live_pull_rows: Optional[int] = None,
     live_pull_has_search_term: Optional[bool] = None,
     api_rows: Optional[int] = None,
@@ -151,12 +157,15 @@ def compute_search_terms_verdict(
     if not db_available:
         return Verdict.DB_UNAVAILABLE, "Database connection unavailable"
 
-    # Not deployed or not run
-    if latest_weekly_run is None and db_rows_window == 0 and sync_status is None:
+    # Not deployed or not run.
+    # PR-ADS-165A: this asked for a WEEKLY run. That job is retired; the jobs
+    # that sync search terms are the daily pulse, the daily incremental sync
+    # and the monthly refresh (SEARCH_TERM_RUN_TYPES).
+    if latest_search_term_run is None and db_rows_window == 0 and sync_status is None:
         return (
             Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT,
-            "No weekly run found and no sync state for search_terms; "
-            "pipeline may not have run since deployment",
+            "No scheduled search-term run found and no sync state for "
+            "search_terms; pipeline may not have run since deployment",
         )
 
     # Live pull was attempted and returned 0
@@ -273,7 +282,7 @@ def _check_db(days: int) -> dict[str, Any]:
         "null_campaign_count": 0,
         "rows_with_spend": 0,
         "rows_with_clicks": 0,
-        "latest_weekly_run": None,
+        "latest_search_term_run": None,
         "latest_daily_run": None,
         "sync_status": None,
         "sync_batch_latest": None,
@@ -373,14 +382,15 @@ def _check_db(days: int) -> dict[str, Any]:
                 row = cur.fetchone()
                 result["null_customer_rows_in_window"] = int(row[0]) if row else 0
 
-                # Latest weekly run
+                # Latest run of a job that syncs search terms
                 cur.execute(
                     "SELECT id, started_at, status FROM runs "
-                    "WHERE run_type = 'weekly' ORDER BY started_at DESC LIMIT 1"
+                    "WHERE run_type = ANY(%s) ORDER BY started_at DESC LIMIT 1",
+                    (list(SEARCH_TERM_RUN_TYPES),),
                 )
                 row = cur.fetchone()
                 if row:
-                    result["latest_weekly_run"] = {
+                    result["latest_search_term_run"] = {
                         "id": row[0],
                         "started_at": str(row[1]) if row[1] else None,
                         "status": row[2],
@@ -692,9 +702,9 @@ def run_verification(
         db_rows_window=db_info.get("rows_requested_window", 0),
         window_days=days,
         sync_status=db_info.get("sync_status"),
-        latest_weekly_run=(
-            db_info["latest_weekly_run"]["started_at"]
-            if db_info.get("latest_weekly_run") else None
+        latest_search_term_run=(
+            db_info["latest_search_term_run"]["started_at"]
+            if db_info.get("latest_search_term_run") else None
         ),
         live_pull_rows=live_result["row_count"] if live_result else None,
         live_pull_has_search_term=(
@@ -822,7 +832,7 @@ def _print_pretty(result: dict[str, Any]):
     print(f"  Rows w/ spend>0:   {db.get('rows_with_spend')}")
     print(f"  Rows w/ clicks>0:  {db.get('rows_with_clicks')}")
     print(f"  Sync status:       {db.get('sync_status')}")
-    print(f"  Latest weekly run: {db.get('latest_weekly_run')}")
+    print(f"  Latest search-term run: {db.get('latest_search_term_run')}")
     print(f"  Latest daily run:  {db.get('latest_daily_run')}")
     print(f"  Latest sync batch: {db.get('sync_batch_latest')}")
     print()

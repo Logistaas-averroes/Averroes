@@ -127,18 +127,11 @@ INVENTORY = (
      "ui_effect": "Mapping card shows won deals and customers separately",
      "families": ("customers", "revenue"),
      "canonical_via": "reader_row", "status": "migrated"},
-    {"consumer": "services/canonical_unit_economics_service.py",
-     "surface": "/api/reports/unit-economics; Unit Economics",
-     "existing_source": "compute_cac(spend, won_deals)",
-     "existing_meaning": "CAC over won deals",
-     "canonical_replacement": "reader_row: CAC and ROAS unavailable (not one "
-                              "acquisition cohort); period_spend_per_customer_won "
-                              "over canonical customers, withheld when customers are",
-     "window_cohort": "business window · close-date cohort",
-     "ui_effect": "CAC Unavailable + reason; Spend per Customer Won This Period "
-                  "with the non-cohort disclosure",
-     "families": ("customers", "revenue", "period_ratios"),
-     "canonical_via": "reader_row", "status": "migrated"},
+    # PR-ADS-165A: the Unit Economics row stood here
+    # (`services/canonical_unit_economics_service.py`,
+    # `/api/reports/unit-economics`). The page, its route and its service are
+    # deleted by owner decision; `build_unit_economics` stays in
+    # READER_ENTRY_POINTS so a module that brings it back is a reader again.
     {"consumer": "services/dashboard_overview_service.py",
      "surface": "/api/dashboard/overview",
      "existing_source": "mart summary customers (won deals); legacy gate",
@@ -262,7 +255,7 @@ INVENTORY = (
      "families": (), "canonical_via": None, "status": "deferred"},
     {"consumer": "static/app.js",
      "surface": "every dashboard, Campaign / Country Revenue & Spend, Revenue by "
-                "Source, Unit Economics, mapping page",
+                "Source, mapping page",
      "existing_source": "API `customers` / revenue fields",
      "existing_meaning": "a value or a dash",
      "canonical_replacement": "canonicalMetricHtml / rowMetricHtml: value, 0, "
@@ -297,6 +290,9 @@ OWNERS = (
 #: and its two smoke scripts), with the routes and the daily job that served
 #: it; :data:`READER_ENTRY_POINTS` still names its functions, so re-adding one
 #: makes its module a reader that must be inventoried.
+#: PR-ADS-165A deleted the canonical Unit Economics reader the same way
+#: (``services/canonical_unit_economics_service.py`` and its route): a deleted
+#: file is not listed here, and its entry point is named below.
 RETIRED_LEGACY = (
     "analysis/attribution_matcher.py", "analysis/gclid_readiness_audit.py",
     "scripts/report_missing_deal_amounts.py",
@@ -307,7 +303,8 @@ READER_ENTRY_POINTS = (
     "canonical_customer_revenue_service", "fetch_won_deals",
     "compute_all_campaign_roas", "compute_all_country_roas",
     "load_latest_roas_snapshot", "load_roas_snapshots",
-    "run_gclid_readiness_audit", "compute_cac", "has_closed_won_deal",
+    "run_gclid_readiness_audit", "compute_cac", "build_unit_economics",
+    "has_closed_won_deal",
     "get_revenue_snapshot", "get_scope_ladder", "canonical_deal_rows",
     # Direct SQL over the legacy closed-won tables (gclid_attribution,
     # deal_source_attribution): every repository function that reads them is
@@ -918,8 +915,6 @@ def _page_builders():
                                     "build_revenue_attribution")),
         ("revenue_by_source", mod("services.source_attribution_service",
                                   "build_revenue_by_source")),
-        ("unit_economics", mod("services.canonical_unit_economics_service",
-                               "build_unit_economics")),
         ("dashboard_overview", mod("services.dashboard_overview_service",
                                    "build_dashboard_overview")),
         ("dashboard_revenue", mod("services.dashboard_revenue_service",

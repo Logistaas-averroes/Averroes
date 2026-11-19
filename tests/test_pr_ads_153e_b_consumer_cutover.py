@@ -130,7 +130,8 @@ MIGRATED_CONSUMERS = [
     "services/revenue_attribution_service.py",
     "services/source_attribution_service.py",
     "services/revenue_decision_mart.py",
-    "services/canonical_unit_economics_service.py",
+    # PR-ADS-165A: "services/canonical_unit_economics_service.py" stood here.
+    # The Unit Economics page, route and service are deleted (owner decision).
     "services/campaign_identity_service.py",
 ]
 
@@ -686,9 +687,12 @@ def test_14_google_ads_spend_still_comes_from_the_google_ads_canonical_path():
     assert not (spend_calls - pure_period_ratio_derivations), called
 
     # And the spend truth the pages use is still the Google Ads canonical one.
-    unit_econ = (_ROOT / "services" / "canonical_unit_economics_service.py").read_text()
-    assert "build_google_ads_spend_truth" in unit_econ
-    assert "canonical_google_ads_api" in unit_econ
+    # PR-ADS-165A: this read the Unit Economics service, which is deleted.
+    # Revenue by Source is a surviving page that takes its spend the same way.
+    by_source = (_ROOT / "services" / "source_attribution_service.py").read_text()
+    assert "build_google_ads_spend_truth" in by_source
+    spend_truth = (_ROOT / "services" / "revenue_spend_truth_service.py").read_text()
+    assert "canonical_google_ads_api" in spend_truth
 
 
 def test_15_hubspot_revenue_comes_only_from_the_canonical_deal_ledger():
@@ -703,24 +707,11 @@ def test_15_hubspot_revenue_comes_only_from_the_canonical_deal_ledger():
     assert canonical_revenue.CANONICAL_SOURCE == "hubspot_deal_ledger"
 
 
-def test_15b_unit_economics_no_longer_reads_windsor_or_local_json():
-    code = _code_without_comments_or_docstrings(
-        _ROOT / "services" / "canonical_unit_economics_service.py")
-    for banned in ("campaign_performance.json", "attributed_deals",
-                   "_load_windsor_spend", "roas_calculator"):
-        assert banned not in code, banned
-    server = (_ROOT / "api" / "server.py").read_text()
-    route = server.split('@app.get("/api/reports/unit-economics")')[1].split("@app.")[0]
-    assert "build_unit_economics" in route
-    assert "compute_all_campaign_roas" not in route
-    # Business windows, not rolling ad windows.
-    assert "_parse_window(" not in route
-    assert "is_valid_window" in route
+# PR-ADS-165A: `test_15b_unit_economics_no_longer_reads_windsor_or_local_json`
+# stood here. It read the Unit Economics service and its route; both are
+# deleted, so there is no module left to read a retired lineage.
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# §16 — duplicate legacy rows cannot duplicate canonical revenue
-# ─────────────────────────────────────────────────────────────────────────────
 def test_16_duplicate_deal_rows_cannot_duplicate_revenue():
     """`gclid_attribution` keyed rows on an attribution hash, so one deal could
     appear several times and be summed several times. The canonical ledger is
@@ -880,7 +871,6 @@ def test_17c_legacy_tables_are_not_dropped_by_this_pr():
     for text, label in (
             (schema, "schema"),
             ((_ROOT / "services" / "canonical_revenue_service.py").read_text(), "contract"),
-            ((_ROOT / "services" / "canonical_unit_economics_service.py").read_text(), "unit-econ"),
             ((_ROOT / "analysis" / "revenue_scope.py").read_text(), "scope")):
         upper = text.upper()
         for table in PROHIBITED_LEGACY_TABLES:
@@ -891,7 +881,6 @@ def test_17c_legacy_tables_are_not_dropped_by_this_pr():
 
 def test_17d_no_external_write_path_is_introduced():
     for module in ("services/canonical_revenue_service.py",
-                   "services/canonical_unit_economics_service.py",
                    "analysis/revenue_scope.py"):
         code = _code_without_comments_or_docstrings(_ROOT / module).lower()
         for banned in ("requests.post", "requests.put", "requests.patch",
@@ -985,38 +974,12 @@ def _js_whole_function(name):
     return _JS[i:j + 3]
 
 
-def test_18_unit_economics_uses_business_windows_not_the_rolling_60d_contract():
-    select = re.search(r'<select[^>]*id="unit-economics-window"[^>]*>.*?</select>',
-                       _HTML, re.S).group(0)
-    for window in ("current_quarter", "last_quarter", "last_6_months", "ytd",
-                   "all_time"):
-        assert window in select, window
-    # The retired rolling day windows must be gone from the control entirely.
-    for day_window in ("7d", "14d", "30d", "60d", "90d", "365d"):
-        assert f'value="{day_window}"' not in select, day_window
-    assert "data-business-window-select" in select
-
-
-def test_18b_frontend_sends_the_business_window_and_an_explicit_scope():
-    loader = _js_function("async function loadUnitEconomics")
-    assert "getRoasBusinessWindow()" in loader
-    assert "/api/reports/unit-economics?window=" in loader
-    # The scope is sent explicitly — an advertising CAC/ROAS must never be
-    # computed at an unstated population.
-    assert "scope=" in loader
-    assert "UNIT_ECONOMICS_SCOPE" in loader
-    assert 'UNIT_ECONOMICS_SCOPE = "campaign_attributable"' in _JS
-
-
-def test_18c_the_window_selector_is_wired_to_the_business_window_handler():
-    """A business key fed to the DAY-window handler silently reverts the page."""
-    wiring = _js_function('ueWindow  = document.getElementById', span=700)
-    assert 'ueWindow.addEventListener("change", handleBusinessWindowSelectChange)' \
-        in wiring
-    assert "handleSyncedWindowSelectChange" not in wiring
-    # And that handler must reload Unit Economics rather than ROAS by Campaign.
-    handler = _js_function("function handleBusinessWindowSelectChange")
-    assert 'case "unit-economics":' in handler
+# PR-ADS-165A: test_18 (the Unit Economics window select), test_18b (its
+# loader's window and scope) and test_18c (its selector wiring) stood here.
+# All three read markup and functions of the Unit Economics page, which is
+# deleted. The business-window handler they exercised is still covered for
+# the pages that remain (tests/test_pr_ads_107a_frontend.py,
+# tests/test_pr_ads_153c_leads_page.py).
 
 
 def test_18d_deal_rows_prefer_the_canonical_deal_name():
@@ -1026,13 +989,10 @@ def test_18d_deal_rows_prefer_the_canonical_deal_name():
     assert '["deal_name", "Deal name"]' in _JS
 
 
-def test_18e_unavailable_revenue_renders_unavailable_never_zero():
-    renderer = _js_whole_function("function renderUnitEconomicsPage")
-    assert "Unavailable" in renderer
-    assert "revenue_available" in renderer
-    # No hard-coded zero standing in for a withheld figure.
-    assert "|| 0)" not in renderer, "a withheld metric must not default to 0"
-    assert 'fmtMoney(0)' not in renderer
+# PR-ADS-165A: `test_18e_unavailable_revenue_renders_unavailable_never_zero`
+# stood here. It read `renderUnitEconomicsPage`, which is deleted. The rule it
+# held (a withheld figure is "Unavailable", never 0) is enforced for every
+# remaining reader by tests/test_pr_ads_161e_reader_cutover.py.
 
 
 def test_18f_attribution_views_disclose_their_narrower_revenue_scope():
@@ -1058,45 +1018,26 @@ def test_18g_no_frontend_revenue_path_implies_the_retired_windsor_lineage():
     for banned in ("campaign_performance.json", "attributed_deals.json"):
         assert banned not in _JS.lower(), banned
 
-    for fn in ("async function loadUnitEconomics",
-               "function renderUnitEconomicsPage",
-               "function renderRevenueScopeDisclosure"):
+    # PR-ADS-165A: the Unit Economics loader and renderer were checked here
+    # too; both are deleted with the page.
+    for fn in ("function renderRevenueScopeDisclosure",):
         body = _js_function(fn).lower()
         for banned in ("windsor", "campaign_performance", "attributed_deals"):
             assert banned not in body, f"{fn}: {banned}"
 
-    # The live Unit Economics page calls the canonical endpoint and nothing else.
-    loader = _js_function("async function loadUnitEconomics")
-    assert "/api/reports/unit-economics" in loader
-    for retired in ("/api/reports/roas/campaigns", "/api/reports/roas/countries"):
-        assert retired not in loader, retired
-
-    # Metrics the canonical ledger cannot support are shown as withheld.
-    renderer = _js_whole_function("function renderUnitEconomicsPage")
-    if "LTV/CAC" in renderer:
-        assert "Unavailable" in renderer
+    # No frontend path calls the retired report routes — including the Unit
+    # Economics one, retired in PR-ADS-165A.
+    for retired in ("/api/reports/roas/campaigns", "/api/reports/roas/countries",
+                    "/api/reports/unit-economics"):
+        assert retired not in _JS, retired
 
 
-def test_unit_economics_page_uses_business_windows_and_renders_unavailable():
-    html = (_ROOT / "static" / "index.html").read_text()
-    js = (_ROOT / "static" / "app.js").read_text()
-    select = re.search(r'<select[^>]*id="unit-economics-window"[^>]*>.*?</select>',
-                       html, re.S).group(0)
-    assert "data-business-window-select" in select
-    assert "current_quarter" in select and "60d" not in select
-
-    loader = js[js.find("async function loadUnitEconomics"):][:600]
-    assert "getRoasBusinessWindow()" in loader
-    _start = js.find("function renderUnitEconomicsPage")
-    assert _start != -1
-    renderer = js[_start:js.find("\n}\n", _start) + 3]
-    assert "Unavailable" in renderer
-    assert "revenue_available" in renderer
+# PR-ADS-165A: `test_unit_economics_page_uses_business_windows_and_renders_
+# unavailable` stood here; the page it read is deleted.
 
 
 def test_no_python_module_here_writes_to_an_external_platform():
     for module in ("services/canonical_revenue_service.py",
-                   "services/canonical_unit_economics_service.py",
                    "analysis/revenue_scope.py",
                    "tests/canonical_ledger_fixtures.py"):
         code = _code_without_comments_or_docstrings(_ROOT / module).lower()
