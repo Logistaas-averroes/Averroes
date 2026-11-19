@@ -514,6 +514,11 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
 
 - **`len(requested)` is not `persisted`.** Report what the database wrote.
 
+- **The HubSpot SDK has one `ApiException` per package** (contacts, deals,
+  companies …) with no common base. Catch `HUBSPOT_API_EXCEPTIONS` (or
+  `HUBSPOT_SDK_READ_ERRORS` where transport failures are retried), never the
+  contacts class around another package's call (PR-ADS-166B).
+
 - **HubSpot's batch history endpoint refuses more than 50 contacts** rather
   than truncating; chunk before calling it.
 

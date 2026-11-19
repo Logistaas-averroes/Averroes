@@ -247,6 +247,15 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         ledger_repo.record_sync_state(status="failed", sync_mode=sync_mode,
                                       error=result["error"], batch_id=batch_id)
         return result
+    if not pull.get("complete") and not raw_deals:
+        # PR-ADS-166B: an incomplete read that read no deal (a 429 that never
+        # cleared on the first request, a first response with no `results` or
+        # no `total`) learned nothing. It is a failed run, not a partial one:
+        # `partial` means some of the population was read.
+        result["error"] = pull.get("error") or "no_deal_read"
+        ledger_repo.record_sync_state(status="failed", sync_mode=sync_mode,
+                                      error=result["error"], batch_id=batch_id)
+        return result
 
     stage_map = getattr(hubspot, "DEAL_STAGE_MAP", {}) or {}
     home = {}
@@ -433,6 +442,12 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
     # rather than by a failure.
     if status == "success":
         state_watermark, is_checkpoint = watermark, False
+    elif pull.get("gap_proven"):
+        # PR-ADS-166B (review round 2). The read ended short of HubSpot's own
+        # `total`: some deal was missed, and nothing says where. No prefix is
+        # provably clean, so the watermark stays where this run began and the
+        # next run re-reads the whole window.
+        state_watermark, is_checkpoint = None, False
     elif status == "partial" and checkpoint is not None:
         state_watermark, is_checkpoint = checkpoint, True
     else:

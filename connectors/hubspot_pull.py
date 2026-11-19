@@ -56,6 +56,19 @@ class HubSpotSearchIncompleteError(Exception):
     """
 
 
+class HubSpotSearchPageUnreadableError(Exception):
+    """A search page came back as a 200 that cannot be read (no ``results``
+    list).
+
+    PR-ADS-166B (review round 2). Deliberately NOT a
+    ``HubSpotSearchIncompleteError``. That one proves a GAP somewhere in what
+    was read, so callers rewind (contacts) or hold the watermark (deals). An
+    unreadable page proves nothing about the pages before it: under keyset
+    paging every record not yet read still sorts at or after the newest one
+    read, so the prefix keeps its checkpoint and the run is retried from it.
+    """
+
+
 #: PR-ADS-163A. The SDK generates one ``ApiException`` PER API package, with no
 #: common base: ``hubspot.crm.deals`` raises its own class, which
 #: ``except ApiException`` (the contacts class imported above) does not catch.
@@ -1563,31 +1576,39 @@ SCAN_SHORTFALL_TOLERANCE = 0.01
 SCAN_SHORTFALL_MIN_SLACK = 2
 
 
-def _assert_scan_complete(source_total, unique_ids) -> None:
-    """PR-ADS-161I: a scan may end only when it read (about) every contact
+def _assert_scan_complete(source_total, unique_ids, *, noun: str = "contact",
+                          tolerant: bool = True) -> None:
+    """PR-ADS-161I: a scan may end only when it read (about) every record
     HubSpot counted when it began.
 
-    With keyset paging the only legitimate shortfall is a contact merged or
-    deleted mid-scan BEFORE it was read; it is gone from HubSpot too. Contacts
-    modified mid-scan are re-read (de-duplicated by id) and do not lower the
-    count. Tolerance: 1% or 2 contacts, whichever is larger; zero contacts read
-    against a non-empty result set never passes.
+    With keyset paging the only legitimate shortfall is a record merged or
+    deleted mid-scan BEFORE it was read (or, with an extra filter, one that
+    left the filter); it is gone from the result set too. Records modified
+    mid-scan are re-read (de-duplicated by id) and do not lower the count.
+
+    ``tolerant`` (the contact scan): 1% or 2 records, whichever is larger;
+    zero records read against a non-empty result set never passes.
+    ``tolerant=False`` (the deal ledger, PR-ADS-166B): every counted record
+    must have been read. A deal deleted mid-scan then costs one ``partial``
+    run, which the next run repairs; a tolerance would let a missed won deal
+    pass as complete.
     """
     if source_total is None:
         raise HubSpotSearchIncompleteError(
             "the scan never read HubSpot's total; completeness is unproven")
     seen = len({i for i in unique_ids if i})
-    slack = max(SCAN_SHORTFALL_MIN_SLACK,
-                math.ceil(source_total * SCAN_SHORTFALL_TOLERANCE))
+    slack = (max(SCAN_SHORTFALL_MIN_SLACK,
+                 math.ceil(source_total * SCAN_SHORTFALL_TOLERANCE))
+             if tolerant else 0)
     if (source_total > 0 and seen == 0) or seen < source_total - slack:
         raise HubSpotSearchIncompleteError(
-            f"contact scan ended after {seen} unique contacts but HubSpot "
+            f"{noun} scan ended after {seen} unique {noun}s but HubSpot "
             f"counted {source_total} at its start; the scan is INCOMPLETE "
             "and must not be reported as complete")
 
 
-def _contact_id_number(cid: str):
-    """HubSpot contact ids are numeric strings; the id keyset needs the number.
+def _object_id_number(cid: str):
+    """HubSpot object ids are numeric strings; the id keyset needs the number.
 
     Digits are extracted so a test fake's ``c123`` keys like ``123``; a
     production id is all digits, so this is the id itself. None when there is
@@ -1595,6 +1616,222 @@ def _contact_id_number(cid: str):
     """
     digits = "".join(ch for ch in str(cid or "") if ch.isdigit())
     return int(digits) if digits else None
+
+
+_contact_id_number = _object_id_number
+
+
+class HubSpotSearchRequestError(Exception):
+    """One search request failed and its retry budget, if any, is spent.
+
+    PR-ADS-166B. ``transient`` is True for a 429, a 5xx or a transport error
+    (retried ``MAX_RETRIES`` times before this is raised); False for any other
+    API error — a refusal, raised at once. ``status`` is the HTTP status, or
+    None for a transport error. ``detail`` names the status and the attempts.
+    """
+
+    def __init__(self, what: str, status, detail: str, transient: bool):
+        self.what = what
+        self.status = status
+        self.detail = detail
+        self.transient = transient
+        super().__init__(f"HubSpot {what} search failed: {detail}")
+
+
+def _bounded_search(call, what: str):
+    """Run one SDK search request with a bounded retry. ``call()`` performs it.
+
+    Catches ``HUBSPOT_SDK_READ_ERRORS`` — every package's ``ApiException`` and
+    the urllib3 transport errors the SDK lets through — never one package's
+    class. A 429, a 5xx or a transport error is retried ``MAX_RETRIES`` times
+    (``MAX_RETRIES + 1`` attempts, 2 / 4 / 8 s); anything else is raised at
+    once. Both raise ``HubSpotSearchRequestError``.
+    """
+    for attempt in range(1, MAX_RETRIES + 2):
+        try:
+            return call()
+        except HUBSPOT_SDK_READ_ERRORS as exc:
+            status = getattr(exc, "status", None)
+            transient = (status is None or status == 429
+                         or (isinstance(status, int) and status >= 500))
+            if transient and attempt <= MAX_RETRIES:
+                wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning("HubSpot %s search: %s — retry %d/%d in %ds",
+                               what, _describe_hubspot_failure(exc), attempt,
+                               MAX_RETRIES, wait)
+                time.sleep(wait)
+                continue
+            detail = _describe_hubspot_failure(exc)
+            if transient:
+                detail = f"{detail} after {attempt} attempts"
+            raise HubSpotSearchRequestError(what, status, detail,
+                                            transient) from exc
+    raise HubSpotSearchRequestError(        # unreachable: returns or raises
+        what, None, "retry budget exhausted", True)
+
+
+def _keyset_scan(search, *, modified_prop: str, since_ms: int,
+                 base_filters=(), page_size: int = _SEARCH_PAGE_SIZE,
+                 max_pages: int | None = None, noun: str = "record",
+                 tolerant: bool = True):
+    """Keyset-page one HubSpot search over records modified at/after a time.
+
+    PR-ADS-166B: the loop PR-ADS-161I built for contacts, shared so the deal
+    ledger reads the same way. ``search(filters, sort_property)`` performs one
+    request at offset 0 and returns the SDK response; ``base_filters`` (e.g. a
+    stage ``IN``) are added to every query.
+
+    * Every page is a NEW query ``<modified_prop> >= watermark``, never an
+      ``after`` offset, so HubSpot's 10,000-result paging ceiling never
+      applies and a record already read that is modified, merged or deleted
+      mid-scan cannot shift an unread one out of the next page: every unread
+      record still matches ``>= watermark``.
+    * Rows re-returned at the watermark timestamp are de-duplicated by id. A
+      record modified mid-scan to a LATER time is read again later, as its
+      newer version.
+    * A full page that never leaves its starting timestamp is a tie group,
+      walked by id: ``<modified_prop> EQ T AND hs_object_id GT last`` sorted by
+      id, then the scan resumes with ``GT T``. HubSpot's order among tied rows
+      is arbitrary between queries, so they are never paged by offset.
+    * A response with no ``results`` list is an error, never an empty page.
+    * The scan ends on a short range page, and only after
+      ``_assert_scan_complete`` against the FIRST query's ``total``.
+
+    Yields ``(fresh_records, meta)``; the last yield is the completion
+    sentinel ``([], {"complete": True, …})``. A ``max_pages`` cap ends with no
+    sentinel. Raises ``HubSpotSearchStalledError``,
+    ``HubSpotSearchIncompleteError``, or whatever ``search`` raises.
+    """
+    watermark_ms = int(since_ms or 0)
+    total_yielded = 0
+    page_index = 0
+    reanchored = 0          # queries after the first
+    # Ids already emitted at the CURRENT watermark timestamp; reset whenever
+    # the watermark advances.
+    seen_at_watermark: set[str] = set()
+    # HubSpot's ``total`` for the scan's FIRST query: the bar the scan must meet.
+    source_total = None
+    unique_ids: set[str] = set()
+    # True right after a whole tie group at ``watermark_ms`` has been walked.
+    strictly_after = False
+    tie_last_id = None      # not None while walking a tie group by id
+    base_filters = list(base_filters or [])
+
+    while True:
+        if max_pages is not None and page_index >= max_pages:
+            # Capped run: deliberately NO completion sentinel.
+            return
+
+        query_from_ms = watermark_ms
+        query_was_strict = strictly_after and tie_last_id is None
+        if tie_last_id is not None:
+            response = search(base_filters + [
+                {"propertyName": modified_prop, "operator": "EQ",
+                 "value": str(watermark_ms)},
+                {"propertyName": "hs_object_id", "operator": "GT",
+                 "value": str(tie_last_id)},
+            ], "hs_object_id")
+        else:
+            response = search(base_filters + [
+                {"propertyName": modified_prop,
+                 "operator": "GT" if strictly_after else "GTE",
+                 "value": str(watermark_ms)},
+            ], modified_prop)
+
+        if source_total is None:
+            total = getattr(response, "total", None)
+            source_total = (int(total) if isinstance(total, int)
+                            and not isinstance(total, bool) else None)
+            if source_total is None:
+                raise HubSpotSearchIncompleteError(
+                    f"HubSpot {noun} search response carried no `total`; the "
+                    "scan cannot prove completeness")
+        elif page_index:
+            reanchored += 1
+
+        raw_results = getattr(response, "results", None)
+        if not isinstance(raw_results, list):
+            raise HubSpotSearchPageUnreadableError(
+                f"HubSpot {noun} search response carries no `results` list "
+                f"(page {page_index + 1}); an unreadable page is not an empty "
+                "one")
+        results = [r.to_dict() if hasattr(r, "to_dict") else dict(r)
+                   for r in raw_results]
+        fresh = []
+        page_ids = []
+        for record in results:
+            rid = str(record.get("id") or "").strip()
+            page_ids.append(_object_id_number(rid))
+            modified = _epoch_ms(
+                (record.get("properties") or {}).get(modified_prop))
+            if modified <= 0:
+                # Unparseable timestamp: still read (it is in HubSpot's
+                # total), but it can never move the watermark.
+                if rid and rid not in unique_ids:
+                    fresh.append(record)
+            elif modified > watermark_ms:
+                watermark_ms = modified
+                seen_at_watermark = {rid} if rid else set()
+                fresh.append(record)
+            elif (modified == watermark_ms and rid
+                  and rid not in seen_at_watermark):
+                seen_at_watermark.add(rid)
+                fresh.append(record)
+
+        page_index += 1
+        if fresh:
+            total_yielded += len(fresh)
+            unique_ids.update(str(r.get("id") or "") for r in fresh)
+            yield fresh, {
+                "watermark_ms": watermark_ms,
+                "watermark_iso": datetime.utcfromtimestamp(
+                    watermark_ms / 1000.0).isoformat() + "Z",
+                "total_yielded": total_yielded,
+                "page_index": page_index,
+                "reanchored": reanchored,
+                "complete": False,
+            }
+
+        full = len(results) >= page_size
+        if tie_last_id is not None:
+            if tie_last_id == -1 and not results:
+                # Positive control: a full page at this timestamp was just
+                # read, so the walk's first page cannot be empty.
+                raise HubSpotSearchStalledError(
+                    f"HubSpot returned no {noun}s for {modified_prop} EQ "
+                    f"{watermark_ms} right after a full page at it; the tie "
+                    "walk cannot be trusted. The scan is INCOMPLETE.")
+            if not full:
+                tie_last_id = None
+                strictly_after = True
+                continue
+            if None in page_ids or max(page_ids) <= tie_last_id:
+                raise HubSpotSearchStalledError(
+                    f"HubSpot {noun} scan stalled walking the {noun}s that "
+                    f"share {modified_prop}={watermark_ms}: the id keyset "
+                    "did not advance. The scan is INCOMPLETE and must not be "
+                    "reported as complete.")
+            tie_last_id = max(page_ids)
+            continue
+
+        if not full:
+            # A short page from a range query is the end of the result set.
+            _assert_scan_complete(source_total, unique_ids, noun=noun,
+                                  tolerant=tolerant)
+            yield _completion_sentinel(
+                watermark_ms, total_yielded, page_index, reanchored,
+                source_total, len(unique_ids))
+            return
+
+        if query_was_strict and not fresh and watermark_ms == query_from_ms:
+            raise HubSpotSearchStalledError(
+                f"HubSpot {noun} scan made no progress: a full page after "
+                f"{modified_prop}={watermark_ms} moved neither the watermark "
+                f"nor read a new {noun}. The scan is INCOMPLETE.")
+        strictly_after = False
+        if watermark_ms == query_from_ms:
+            # Every row of a full page shares its starting timestamp.
+            tie_last_id = -1
 
 
 def iter_contacts_modified_since(
@@ -1640,175 +1877,47 @@ def iter_contacts_modified_since(
     pages (e.g. because ``max_pages`` capped the run) proves nothing and yields
     no sentinel.
 
-    Raises ``HubSpotRetryableError`` on a non-rate-limit API failure,
+    Raises ``HubSpotRetryableError`` when a search request fails: a 429, a
+    5xx or a transport error after ``MAX_RETRIES`` retries, any other API
+    error at once (PR-ADS-166B: this used to retry a 429 without limit and
+    caught only the contacts ``ApiException``, so a timeout escaped raw).
     ``HubSpotSearchStalledError`` when a query makes no progress (HubSpot did
     not honour the keyset filter, or a contact id is not numeric), and
     ``HubSpotSearchIncompleteError`` when the scan ends short of HubSpot's own
-    ``total`` — a partial read is NEVER reported as a complete one.
+    ``total`` — a partial read is NEVER reported as a complete one — and
+    ``HubSpotSearchPageUnreadableError`` when a page carries no ``results``
+    list (not a proven gap: the pages before it keep their checkpoints). The loop itself is ``_keyset_scan``, shared
+    with the deal ledger since PR-ADS-166B.
     NEVER writes to HubSpot.
     """
     client = client or get_client()
-    watermark_ms = _epoch_ms(since)
-    total_yielded = 0
-    page_index = 0
-    reanchored = 0          # queries after the first
-    # Contact ids already emitted at the CURRENT watermark timestamp; reset
-    # whenever the watermark advances. De-duplicates tie rows a ``>=`` query
-    # re-returns at its boundary.
-    seen_at_watermark: set[str] = set()
-    # HubSpot's ``total`` for the scan's FIRST query: every contact modified
-    # at/after ``since`` when the scan began. The bar the scan must meet.
-    source_total = None
-    unique_ids: set[str] = set()
-    # True right after a whole tie group at ``watermark_ms`` has been walked:
-    # the next query is strictly greater, or it would return that group again.
-    strictly_after = False
-    tie_last_id = None      # not None while walking a tie group by id
 
     def _search(filters, sort_prop):
-        while True:
-            try:
-                return client.crm.contacts.search_api.do_search(
-                    public_object_search_request={
-                        "filterGroups": [{"filters": filters}],
-                        "properties": CONTACT_FUNNEL_PROPERTIES,
-                        "sorts": [{"propertyName": sort_prop,
-                                   "direction": "ASCENDING"}],
-                        "limit": page_size,
-                        "after": None,
-                    }
-                )
-            except ApiException as exc:
-                if exc.status == 429:
-                    wait = INITIAL_BACKOFF_SECONDS * 2
-                    logger.warning(
-                        "HubSpot rate limited during contact-funnel sync — "
-                        "waiting %ds", wait)
-                    time.sleep(wait)
-                    continue
-                raise HubSpotRetryableError(
-                    f"HubSpot contact search failed (status={exc.status}): {exc}"
-                ) from exc
+        # No `_request_timeout` here: unchanged by PR-ADS-166B (see docs/09).
+        return _bounded_search(
+            lambda: client.crm.contacts.search_api.do_search(
+                public_object_search_request={
+                    "filterGroups": [{"filters": filters}],
+                    "properties": CONTACT_FUNNEL_PROPERTIES,
+                    "sorts": [{"propertyName": sort_prop,
+                               "direction": "ASCENDING"}],
+                    "limit": page_size,
+                    "after": None,
+                }
+            ),
+            "contact")
 
-    while True:
-        if max_pages is not None and page_index >= max_pages:
-            # Capped run: deliberately NO completion sentinel. The caller
-            # must treat this as truncated, never as a finished scan.
-            return
-
-        query_from_ms = watermark_ms
-        query_was_strict = strictly_after and tie_last_id is None
-        if tie_last_id is not None:
-            response = _search([
-                {"propertyName": "lastmodifieddate", "operator": "EQ",
-                 "value": str(watermark_ms)},
-                {"propertyName": "hs_object_id", "operator": "GT",
-                 "value": str(tie_last_id)},
-            ], "hs_object_id")
-        else:
-            response = _search([
-                {"propertyName": "lastmodifieddate",
-                 "operator": "GT" if strictly_after else "GTE",
-                 "value": str(watermark_ms)},
-            ], "lastmodifieddate")
-
-        if source_total is None:
-            total = getattr(response, "total", None)
-            source_total = int(total) if isinstance(total, int) else None
-            if source_total is None:
-                # Without HubSpot's own count no scan can prove it is whole.
-                raise HubSpotSearchIncompleteError(
-                    "HubSpot search response carried no `total`; the scan "
-                    "cannot prove completeness")
-        elif page_index:
-            reanchored += 1
-
-        results = [c.to_dict() for c in (response.results or [])]
-        fresh = []
-        page_ids = []
-        for contact in results:
-            cid = str(contact.get("id") or "").strip()
-            page_ids.append(_contact_id_number(cid))
-            modified = _epoch_ms(
-                (contact.get("properties") or {}).get("lastmodifieddate")
-            )
-            if modified <= 0:
-                # Unparseable timestamp: still read the contact (it is in
-                # HubSpot's total), but it can never move the watermark.
-                if cid and cid not in unique_ids:
-                    fresh.append(contact)
-            elif modified > watermark_ms:
-                watermark_ms = modified
-                seen_at_watermark = {cid} if cid else set()
-                fresh.append(contact)
-            elif (modified == watermark_ms and cid
-                  and cid not in seen_at_watermark):
-                seen_at_watermark.add(cid)
-                fresh.append(contact)
-
-        page_index += 1
-        if fresh:
-            total_yielded += len(fresh)
-            unique_ids.update(str(c.get("id") or "") for c in fresh)
-            yield fresh, {
-                "watermark_ms": watermark_ms,
-                "watermark_iso": datetime.utcfromtimestamp(
-                    watermark_ms / 1000.0
-                ).isoformat() + "Z",
-                "total_yielded": total_yielded,
-                "page_index": page_index,
-                "reanchored": reanchored,
-                "complete": False,
-            }
-
-        full = len(results) >= page_size
-        if tie_last_id is not None:
-            # Walking one tie group by id.
-            if tie_last_id == -1 and not results:
-                # Positive control: a full page at this timestamp was just
-                # read, so the walk's first page cannot be empty. If it is,
-                # HubSpot did not match the EQ filter and resuming with GT
-                # would skip the rest of the group.
-                raise HubSpotSearchStalledError(
-                    "HubSpot returned no contacts for lastmodifieddate EQ "
-                    f"{watermark_ms} right after a full page at it; the tie "
-                    "walk cannot be trusted. The scan is INCOMPLETE.")
-            if not full:
-                # Group exhausted: resume strictly after its timestamp.
-                tie_last_id = None
-                strictly_after = True
-                continue
-            if None in page_ids or max(page_ids) <= tie_last_id:
-                raise HubSpotSearchStalledError(
-                    "HubSpot contact scan stalled walking the contacts that "
-                    f"share lastmodifieddate={watermark_ms}: the id keyset "
-                    "did not advance. The scan is INCOMPLETE and must not be "
-                    "reported as complete.")
-            tie_last_id = max(page_ids)
-            continue
-
-        if not full:
-            # A short page from a range query is the end of the result set.
-            _assert_scan_complete(source_total, unique_ids)
-            yield _completion_sentinel(
-                watermark_ms, total_yielded, page_index, reanchored,
-                source_total, len(unique_ids))
-            return
-
-        if query_was_strict and not fresh and watermark_ms == query_from_ms:
-            # A full GT page that neither moved the watermark nor brought one
-            # new contact cannot be followed by anything but itself again
-            # (e.g. a block of contacts whose timestamp cannot be parsed).
-            # Stop instead of looping forever.
-            raise HubSpotSearchStalledError(
-                "HubSpot contact scan made no progress: a full page after "
-                f"lastmodifieddate={watermark_ms} moved neither the watermark "
-                "nor read a new contact. The scan is INCOMPLETE.")
-        strictly_after = False
-        if watermark_ms == query_from_ms:
-            # A full page that never moved past its starting timestamp: every
-            # row shares it. Walk that tie group by contact id.
-            tie_last_id = -1
+    try:
+        yield from _keyset_scan(
+            _search, modified_prop="lastmodifieddate",
+            since_ms=_epoch_ms(since), page_size=page_size,
+            max_pages=max_pages, noun="contact", tolerant=True)
+    except HubSpotSearchRequestError as exc:
+        # `status=` stays in the text: the lifecycle recovery reads it to stop
+        # on 401/403 (`_is_permanent_auth_failure`).
+        raise HubSpotRetryableError(
+            f"HubSpot contact search failed (status={exc.status}): "
+            f"{exc.detail}") from exc
 
 
 def normalize_contact_funnel_row(contact: dict) -> dict | None:
@@ -2725,10 +2834,15 @@ def pull_contact_attribution_properties(contact_ids: list) -> dict:
                     batch_read_input_simple_public_object_id={
                         "properties": DEAL_ATTRIBUTION_CONTACT_PROPERTIES,
                         "inputs": [{"id": cid} for cid in batch],
-                    }
+                    },
+                    _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
                 )
                 break
-            except (ApiException, requests.exceptions.RequestException) as exc:
+            # PR-ADS-166B: the SDK never raises `requests` errors; its
+            # transport failures are urllib3 errors, which this used to let
+            # escape unretried. `requests` is kept as it was.
+            except (*HUBSPOT_SDK_READ_ERRORS,
+                    requests.exceptions.RequestException) as exc:
                 if attempt < MAX_RETRIES:
                     time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
                     continue
@@ -3011,72 +3125,136 @@ def pull_deals_for_ledger(
     Incremental sync is driven by ``hs_lastmodifieddate``, NOT by creation
     recency: a deal created two years ago and closed today must be re-read today.
 
-    Returns ``{available, complete, deals, pages, error}``.
-    ``complete`` is False when pagination was cut short by an error — the caller
-    must then record a PARTIAL sync rather than a successful zero-row result.
+    Returns ``{available, complete, deals, pages, error}``: ``deals`` holds one
+    record per deal id — its newest version — in ascending
+    ``hs_lastmodifieddate`` order; ``pages`` counts the search responses read.
+
+    KEYSET PAGING (PR-ADS-166B). This used to page by HubSpot's ``after``
+    offset over ``hs_lastmodifieddate >= since``, end on the first response
+    without ``paging.next``, and never read ``total``. A deal already read and
+    then edited mid-scan moved to the end of the result set and shifted every
+    later row up one slot, so the next offset skipped an unread deal — and the
+    read still said ``complete``. Tied timestamps (a bulk edit) arrive in an
+    order HubSpot does not keep between queries, so offsets over them skipped
+    some and repeated others. It now reads through ``_keyset_scan``, the
+    PR-ADS-161I contact loop: every page a fresh query from offset 0, ties
+    walked by id, and the end accepted only when the unique deals read are at
+    least HubSpot's ``total`` for the first query (``tolerant=False``).
+
+    Outcomes:
+
+    * ``complete`` True only after that proof.
+    * PARTIAL (``available`` True, ``complete`` False, the deals read so far):
+      a 429, a 5xx or a transport error that outlasted ``MAX_RETRIES``
+      retries; a page with no ``results`` list; a stalled tie walk;
+      ``page_limit`` reached. The error says which.
+    * PARTIAL WITH A PROVEN GAP (the same, plus ``gap_proven`` True): fewer
+      unique deals than HubSpot's ``total``, or no ``total`` to check. The
+      read is known to have missed a deal but not which one, so no prefix is
+      provably clean: the caller must not move its watermark.
+    * UNAVAILABLE (``available`` False, no deals): any other API error (401,
+      403, 400 …) — a refusal that asking again will not change — with the
+      HTTP status in ``error``. Catches ``HUBSPOT_SDK_READ_ERRORS``: before
+      PR-ADS-166B this caught the CONTACTS ``ApiException``, which the deals
+      package never raises.
+
+    WHY A PARTIAL READ'S PREFIX IS SAFE TO CHECKPOINT — except when
+    ``gap_proven``. Each query asks for
+    ``hs_lastmodifieddate >= watermark``, where the watermark is the newest
+    timestamp read so far, and results are read in ascending order. So when a
+    read stops, every deal it has not read has a timestamp at or after the
+    newest one it did read (a deal edited mid-scan only moves later). The sync
+    checkpoints at the end of its clean, committed prefix — at or before that
+    timestamp — and resumes from the checkpoint minus an overlap with ``>=``,
+    so no unread deal lies behind it. With offset paging that was not true.
+    That argument assumes HubSpot honoured every query. A shortfall against
+    ``total`` is evidence it did not (e.g. a tie walk whose id sort was
+    ignored, PR-ADS-166B review S4), or that an unread deal was deleted; the
+    missing deal can sit anywhere, behind the prefix included.
     """
     client = get_client()
 
-    filters = []
+    base_filters = []
     if stages:
-        filters.append({"propertyName": "dealstage", "operator": "IN",
-                        "values": list(stages)})
-    if modified_since_ms is not None:
-        filters.append({"propertyName": "hs_lastmodifieddate",
-                        "operator": "GTE", "value": str(int(modified_since_ms))})
-    if not filters:
-        # The search API needs at least one predicate. `>= epoch 0` matches
-        # every deal, so this is a full read, not a narrowing.
-        filters.append({"propertyName": "hs_lastmodifieddate",
-                        "operator": "GTE", "value": "0"})
-
-    deals: list = []
+        base_filters.append({"propertyName": "dealstage", "operator": "IN",
+                             "values": list(stages)})
     pages = 0
-    after = None
-    consecutive_failures = 0
 
-    while True:
-        try:
-            response = client.crm.deals.search_api.do_search(
+    def _search(filters, sort_prop):
+        nonlocal pages
+        response = _bounded_search(
+            lambda: client.crm.deals.search_api.do_search(
                 public_object_search_request={
                     "filterGroups": [{"filters": filters}],
                     "properties": DEAL_LEDGER_PROPERTIES,
-                    # Stable ordering so a resumed/retried page cannot silently
-                    # skip records.
-                    "sorts": [{"propertyName": "hs_lastmodifieddate",
+                    "sorts": [{"propertyName": sort_prop,
                                "direction": "ASCENDING"}],
                     "limit": 100,
-                    "after": after,
-                }
-            )
-        except ApiException as exc:
-            if exc.status == 429 and consecutive_failures < MAX_RETRIES:
-                consecutive_failures += 1
-                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (consecutive_failures - 1)))
-                continue
-            logger.error("HubSpot deal ledger pull failed on page %d: %s", pages, exc)
-            # Partial, and SAID to be partial.
-            return {"available": True, "complete": False, "deals": deals,
-                    "pages": pages, "error": str(exc)}
-
-        consecutive_failures = 0
+                    # Always offset 0: keyset paging never sends an offset.
+                    "after": None,
+                },
+                _request_timeout=HUBSPOT_REQUEST_TIMEOUT_SECONDS,
+            ),
+            "deal")
+        if not isinstance(getattr(response, "results", None), list):
+            # Checked here as well as in `_keyset_scan` so `pages` counts only
+            # pages that were actually read.
+            raise HubSpotSearchPageUnreadableError(
+                f"HubSpot deal search response carries no `results` list "
+                f"(page {pages + 1}); an unreadable page is not an empty one")
         pages += 1
-        for d in (response.results or []):
-            deals.append(d.to_dict())
+        return response
 
-        if page_limit is not None and pages >= page_limit:
-            return {"available": True, "complete": False, "deals": deals,
-                    "pages": pages, "error": "page_limit_reached"}
+    # One entry per deal id. A deal read again (edited mid-scan) is re-inserted
+    # at its new, later position, so the newest version is kept and the list
+    # stays in ascending modification order.
+    by_id: dict = {}
 
-        if response.paging and response.paging.next:
-            after = response.paging.next.after
-        else:
-            break
+    def _result(available, complete, error, gap_proven=False):
+        deals = list(by_id.values()) if available else []
+        return {"available": available, "complete": complete, "deals": deals,
+                "pages": pages, "error": error, "gap_proven": gap_proven}
 
+    complete = False
+    try:
+        for fresh, meta in _keyset_scan(
+                _search, modified_prop="hs_lastmodifieddate",
+                since_ms=int(modified_since_ms or 0), base_filters=base_filters,
+                page_size=100, max_pages=page_limit, noun="deal",
+                tolerant=False):
+            if meta.get("complete"):
+                complete = True
+                continue
+            for deal in fresh:
+                deal_id = str(deal.get("id") or "")
+                by_id.pop(deal_id, None)
+                by_id[deal_id] = deal
+    except HubSpotSearchRequestError as exc:
+        if not exc.transient:
+            logger.error("HubSpot deal ledger pull refused on page %d: %s",
+                         pages + 1, exc.detail)
+            # Refused, not cut short: nothing this run read is usable.
+            return _result(False, False, f"deal read refused: {exc.detail}")
+        detail = f"{exc.detail} on page {pages + 1}"
+        logger.error("HubSpot deal ledger pull failed: %s", detail)
+        # Partial, and SAID to be partial.
+        return _result(True, False, detail)
+    except HubSpotSearchIncompleteError as exc:
+        # A shortfall against `total` (or no `total` to check against) proves
+        # that a gap exists, not where it is. No prefix of this read is
+        # provably clean, so the caller must not move its watermark at all.
+        logger.error("HubSpot deal ledger pull incomplete: %s", exc)
+        return _result(True, False, str(exc), gap_proven=True)
+    except (HubSpotSearchStalledError, HubSpotSearchPageUnreadableError) as exc:
+        # Stopped before the end; what was read is a keyset-safe prefix.
+        logger.error("HubSpot deal ledger pull stopped: %s", exc)
+        return _result(True, False, str(exc))
+
+    if not complete:
+        return _result(True, False, "page_limit_reached")
     logger.info("Pulled %d deals for the canonical ledger across %d page(s)",
-                len(deals), pages)
-    return {"available": True, "complete": True, "deals": deals,
-            "pages": pages, "error": None}
+                len(by_id), pages)
+    return _result(True, True, None)
 
 
 def fetch_portal_home_currency() -> dict:

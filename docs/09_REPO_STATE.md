@@ -1844,8 +1844,13 @@ none of them could see it.
 
 **Not affected by this cause.** `pull_deals_for_ledger` keeps one filter for its
 whole read. It does page by offset over a live set, so a deal modified during its
-read could in principle shift a page; the deal population is small and
-reconciled by its own audits. This is noted, not fixed here.
+read could in principle shift a page. This is noted, not fixed here.
+*(Corrected in PR-ADS-166B: the original text added "the deal population is
+small and reconciled by its own audits". That was not true — no audit compares
+the ledger with HubSpot; the deal certification audits forbid importing the
+HubSpot connector and check the ledger against itself. The shift was real and executed in review:
+an edited deal made the read skip an unread one and still say `complete`.
+PR-ADS-166B moved the deal read to keyset paging.)*
 
 **Tests.** `tests/test_pr_ads_161i_contact_scan_paging.py` (21). Its fake HubSpot:
 * honours the GTE / GT / EQ and `hs_object_id GT` filters;
@@ -4296,3 +4301,192 @@ Existing tests changed:
     checks. Whether Q3 customers publish in production, how many companies
     are on won deals, and whether the HubSpot token may read company names
     are not known here.
+
+## PR-ADS-166B — HubSpot SDK errors caught per package; the deal ledger read pages by keyset (November 2026)
+
+### 1. What was wrong
+
+**Errors from the wrong package.** The HubSpot SDK makes one `ApiException`
+class for each API package (contacts, deals, companies …), and the classes
+share no parent. Catching the contacts class does not catch a deals error.
+
+- `pull_deals_for_ledger` searched the **deals** API but caught the
+  **contacts** `ApiException`. A deals 429 was never retried, and a 5xx, a 403
+  or a timeout escaped the connector. The deal sync recorded `failed`, with the
+  SDK's raw text (HTTP response headers and body) as the error.
+- `pull_contact_attribution_properties` caught `requests` errors around an SDK
+  batch read. The SDK never raises those; its transport failures are urllib3
+  errors, so a timeout there was not retried.
+- Neither call had a timeout.
+
+**The deal read could skip deals and still say "complete"** (found in review,
+executed against the real connector). `pull_deals_for_ledger` paged HubSpot's
+search by its `after` offset over `hs_lastmodifieddate >= since`, stopped when
+a response had no next page, never read HubSpot's `total`, and never removed
+repeated ids.
+
+- A deal already read and then edited during the read moves to the end of the
+  result set, and every later row moves up one slot. The next offset then
+  skips one unread deal. With 250 deals: 250 records, 249 unique, a closed-won
+  deal never read, `complete: True`, and the watermark moved past it, so the
+  next incremental never read it either.
+- HubSpot does not keep the same order among deals with the same timestamp
+  between queries (a bulk edit gives many the same one). With 150 tied deals,
+  33 were never read; `complete: True`.
+- A 200 response with no `results` key was read as an empty page:
+  `complete: True`, no deals.
+- No audit catches this. The deal certification audits forbid importing the
+  HubSpot connector and check the ledger against itself. docs/09 §161I said
+  the deal read was "reconciled by its own audits"; that was false and is now
+  corrected there.
+
+Production today, from the coordinator's read-only check of HubSpot and of the
+Render database: HubSpot holds 578 deals (190 closed-won) and the ledger holds
+578 / 190, so nothing is missing now. A daily
+incremental reads about 28 deals on one page, where the offset problem cannot
+arise. A bootstrap or restart reads 6 pages, where it can.
+
+### 2. What changed
+
+| Where | Change |
+| --- | --- |
+| `connectors/hubspot_pull.py` `_keyset_scan` (new) | The keyset loop PR-ADS-161I wrote for contacts, moved out so contacts and deals share it. Every page is a new query from offset 0 (`>= watermark`), never an offset, so HubSpot's 10,000-result paging limit never applies. Repeated rows at the watermark are dropped by id. A full page that never leaves its timestamp is a tie group, walked by `EQ T AND hs_object_id GT last` sorted by id, then `GT T`. A first response with no `total`, or a read ending short of it, raises `HubSpotSearchIncompleteError` (a proven gap). A page with no `results` list raises `HubSpotSearchPageUnreadableError`, which is deliberately not a proven gap: the pages before it are a keyset-safe prefix. The read ends only after `_assert_scan_complete` against the first query's `total`. Extra filters (the stage `IN`) ride on every query. |
+| `_bounded_search` (new) | One request with a bounded retry. Catches `HUBSPOT_SDK_READ_ERRORS`. A 429, a 5xx or a transport error is retried 3 times (4 attempts); anything else is raised at once. |
+| `_assert_scan_complete` | Wording names the record kind. New `tolerant=False`: every counted record must be read. The deal read uses it (a deal deleted mid-read costs one `partial` run; a tolerance could let a missed won deal pass). Contacts keep 1% / 2. |
+| `pull_deals_for_ledger` | Rebuilt on `_keyset_scan` with a 30 s timeout. Returns one record per deal id, its newest version, in ascending timestamp order. **Complete** only after the `total` check. **Partial** (`available` True, the deals read so far): a transient error that outlasted its retries, a page with no `results`, a stalled tie walk, `page_limit`. **Partial with `gap_proven`**: a shortfall against `total`, or no `total` to check. **Unavailable** (`available` False, no deals): any other API error, with the HTTP status in the error (`deal read refused: HubSpot API error HTTP 403 (Forbidden)`). `pages` counts only pages actually read. |
+| `iter_contacts_modified_since` | Now a wrapper over `_keyset_scan` and `_bounded_search`. **Behaviour change:** a 429 is retried 3 times and then raises `HubSpotRetryableError` (it used to retry without limit); a 5xx or a timeout is retried the same way (they used to fail at once, or escape raw); a page with no `results` raises `HubSpotSearchPageUnreadableError` instead of reading as empty. That is not a `HubSpotSearchIncompleteError`, so the contact sync keeps its checkpoint instead of rewinding a bootstrap to its start. The error text keeps `status=<code>`, which the lifecycle recovery reads to stop on 401/403. No timeout was added: the existing fakes of this search take no extra arguments. |
+| `pull_contact_attribution_properties` | Catches `HUBSPOT_SDK_READ_ERRORS` as well as `requests` errors, and has a 30 s timeout. |
+| `services/hubspot_deal_sync_service.sync_deals` | An incomplete read that read **no deal** (a 429 that never cleared on the first request, a first response with no `results` or no `total`) is `failed`, not `partial`. A read with `gap_proven` is `partial` and moves **no** watermark. |
+| `db/deal_ledger_repository.record_sync_state` docstring | The "checkpoint skips nothing" claim now says why it holds (keyset), that it did not hold under offset paging, and that it does not hold after a shortfall, when nothing advances. |
+
+**Why a partial read may still move the watermark to its clean prefix.**
+Every query asks for `hs_lastmodifieddate >= the newest timestamp read so
+far`, and results come back oldest first. So when a read stops, every deal it
+did not reach has a timestamp at or after the newest one it did. The sync
+checkpoints at the end of its clean, committed prefix, which is at or before
+that point, and the next run re-reads from the checkpoint minus 15 minutes.
+No unread deal lies behind the checkpoint. Under offset paging an unread deal
+could, and a test now shows the old code checkpointing past one.
+
+**Except after a shortfall.** That argument assumes HubSpot honoured every
+query. A read that ends short of HubSpot's own `total` proves a deal was
+missed but not where — it can sit behind the prefix. Review round 2 executed
+it: with the deals search honouring `hs_object_id GT` but not the id sort, a
+250-deal tie group lost 61 deals, including a won deal; the round-1 code
+checkpointed about 477 hours past the oldest of them, and the next
+incremental recovered none. So a shortfall (`gap_proven`) moves no watermark
+at all: the next run re-reads the whole window. An unread deal deleted
+mid-read also lands here; it costs one more full window read.
+
+### 3. What the sync records for each outcome
+
+Traced through `sync_deals`, `record_sync_state`, `check_sync_coverage`,
+`freshness_block` and `ledger_staleness`, and executed in tests:
+
+| Read outcome | Run status | Watermark |
+| --- | --- | --- |
+| complete | `success` | the newest deal read |
+| transient error, stall, or a page with no `results`, after one or more deals were read | `partial` | the end of the clean, committed prefix |
+| fewer unique deals than `total` (`gap_proven`) | `partial` | unchanged |
+| first response with no `total` (`gap_proven`, nothing read) | `failed` | unchanged |
+| transient error on the first page; first page with no `results` | `failed` | unchanged |
+| refused (401, 403, 400 …) | `failed`, error carries `HTTP 403` | unchanged |
+
+**When figures are withheld.** The first version of this section said deals,
+customers and revenue are withheld "once 36 hours pass" without a successful
+incremental. That was wrong. Executed: a ledger whose last incremental was
+`partial` or `failed` fails the coverage gate at once
+(`last_sync_not_successful`), so `coverage_proven` is false and every
+closed-won figure withholds **from that run on**, for that reason.
+`ledger_staleness` then returns `stale: None`: the 36-hour
+`canonical_ledger_stale` limit applies only while the last run was a success,
+and catches a scheduler that stopped running.
+
+### 4. Tests
+
+- `tests/test_pr_ads_166b_sdk_exception_classes.py`, 27 cases. Runtime cases
+  drive the **real** SDK client and replace only `urllib3.PoolManager.request`,
+  so each exception is the one the SDK itself raises for that status and
+  package (deals `ApiException` 429, `ServiceException` 503,
+  `ForbiddenException` 403, urllib3 `ReadTimeoutError` / `MaxRetryError`).
+  Sync cases run the real `sync_deals` and the real `record_sync_state` over a
+  recording connection. The structural guard parses the connector and fails
+  on an `except` around a `client.crm.<package>` use that does not catch that
+  package's class, or that catches `requests` errors without urllib3's. It now
+  also follows `crm = client.crm`, a local alias of an API object, a nested
+  def judged where it is called, an `except` naming the class by module alias
+  or full dotted path, and counts `HUBSPOT_API_EXCEPTIONS` only for the
+  packages its definition lists (an associations call under it is flagged).
+  Each of those shapes is shown flagged, and shown passing when correct.
+- `tests/test_pr_ads_166b_deal_keyset_paging.py`, 16 cases. Its fake HubSpot
+  honours every filter the read sends, both sort orders, the `after` offset
+  (so the old code can run against it) and the 10,000-result limit, reports
+  `total`, changes its order among tied rows on every query, and can edit a
+  deal between queries. It reproduces the review probes: an edit after page 1
+  (every one of 250 ids read once, the won deal written, success watermark),
+  the same edit followed by a 429 (the checkpoint is behind no unread deal),
+  150 tied deals in a shifting order, ties plus an edit during the tie walk,
+  a `total` one higher than the deals that exist (`partial`, no watermark
+  advance), a first page with no `results` (`failed`), no `total` (`failed`),
+  a page with no `results` mid-read (`partial`, checkpoint kept and behind
+  every unread deal), the round-2 S4 case over two runs (id sort ignored in
+  the tie walk: run 1 `partial` with no advance, run 2 reads every deal run 1
+  missed), 10,050 deals (no offset ever sent), and a stage filter on every
+  query. Two cases execute the coverage gate for the withholding claim
+  above. One case runs the contact sync over the PR-ADS-161I fake: a page
+  with no `results` mid-bootstrap fails the run and keeps the checkpoint
+  instead of rewinding to the epoch.
+- Against the commit before the review fix (`5e8f2a2`): 14 of the 40 cases
+  fail — 11 of the 13 keyset cases (the two that pass execute the coverage
+  gate, which this PR does not change) and 3 of the 27 others (the zero-page
+  `failed` rule, and two whose fakes now model keyset paging). Against
+  `d979638`, the first version of the exception-class module failed 14 of
+  its 20. Against round 1 (`ab8058d`): 4 of the 43 fail — the shortfall
+  advance, the no-`total` `failed` rule, the S4 two-run case and the contact
+  checkpoint case. The mid-read unreadable-page deal case passes on both:
+  round 1 already kept that checkpoint.
+- Existing tests: none changed. `tests/test_pr_ads_161i_contact_scan_paging.py`
+  and the contact-sync suites pass unchanged on the shared loop.
+- No PostgreSQL case was added: the watermark decision (`advance`, the
+  checkpoint) is made in Python before the SQL runs, and the SQL's use of it
+  is covered by `test_watermark_advances_only_on_success` and
+  `test_sync_state_checkpoint_advances_the_watermark_on_a_capped_run`
+  (PR-ADS-153E-A PostgreSQL suite).
+
+### 5. Known gaps
+
+1. **Legacy searches still page by offset** and never read `total`: the
+   offset-skip shown above can happen in them.
+   `pull_paid_search_contacts` (`connectors/hubspot_pull.py:328`),
+   `pull_paid_search_contacts_in_range` (`:384`),
+   `_iter_closed_won_deal_pages` (`:592`, used by
+   `pull_closed_won_deals_in_range` and
+   `pull_closed_won_deals_with_sources_in_range`) and
+   `pull_all_contacts_in_range` (`:836`). They feed the legacy, non-canonical
+   datasets, not the deal ledger.
+2. **The AST guard is not a type checker.** It does not follow an API object
+   passed between module functions other than as a direct argument or lambda
+   to a module helper, an alias assigned in one function and used in another,
+   `getattr(client.crm, name)`, or an alias of a module-level `HUBSPOT_*`
+   tuple. Each shape the review found is covered.
+3. `iter_contacts_modified_since` still passes no request timeout.
+4. The contact history and comparison reads (`fetch_lifecycle_stage_history`,
+   `fetch_lifecycle_stage_history_single`, `compare_sql_entry_evidence`)
+   retry only a 429. A timeout escapes as a raw urllib3 error; every caller
+   catches it and records a failed read — loud, not retried.
+5. `pull_contacts_by_ids` has no retry and no timeout. Its caller treats any
+   error as "unresolved, retry later".
+6. `pull_contact_attribution_properties` still retries a 403 three times.
+7. A deal deleted or merged in HubSpot during a read now makes that run
+   `partial` with no watermark advance (`tolerant=False`). The next run
+   re-reads the window and repairs it.
+8. **The deal tie walk relies on HubSpot honouring `hs_object_id GT` and the
+   `hs_object_id` sort on the deals search.** Both were verified live for
+   contacts in PR-ADS-161I, not for deals. If the sort is ignored the walk
+   skips tied deals; the `total` check then fails the read closed
+   (`partial`, no advance) and every later run would do the same until a run
+   reads the whole window — loud, but not self-healing.
+9. **AST guard residual blind spots** besides those in gap 2: an alias kept
+   on `self` and used in another method (`self.api = client.crm.deals…`), and
+   a tuple-unpacking alias (`a, b = client.crm.deals, …`).
+10. Not checked against production HubSpot.
