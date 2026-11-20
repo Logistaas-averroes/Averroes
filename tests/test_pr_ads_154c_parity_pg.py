@@ -183,8 +183,15 @@ def test_all_consumers_still_resolve_one_window_on_an_empty_database(pg):
 
     out = parity.audit_window("ytd", now=_NOW)
     ranges = {(r["window_start"], r["window_end"], r["timezone"])
-              for r in out["consumer_windows"] if r["window_end"]}
+              for r in out["consumer_windows"]
+              if r["window_end"] and not r["through_reason"]}
     assert len(ranges) <= 1, f"consumers disagreed on the range: {ranges}"
+    # PR-ADS-167A: the settled-day consumers DECLARE their window, and it is
+    # exactly the settled window the audit resolves itself.
+    settled = {(r["window_start"], r["window_end"])
+               for r in out["consumer_windows"] if r["through_reason"]}
+    assert settled == {(out["settled_window"]["start_date"],
+                        out["settled_window"]["end_date"])}
     assert parity.V_WINDOW_MISMATCH not in out["violation_codes"]
 
 

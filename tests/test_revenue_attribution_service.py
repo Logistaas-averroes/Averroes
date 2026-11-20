@@ -96,7 +96,8 @@ def total_or_zero(geo_total_obj):
 
 def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
               spend_cov=("2026-04-01", "2026-06-20"), revenue_cov=("2026-05-01", "2026-05-10"),
-              canonical=None, coverage=None, geo_coverage=None):
+              canonical=None, coverage=None, geo_coverage=None, now=None,
+              settled_days=False):
     spend_rows = spend if spend is not None else _spend_rows()
     spend_obj = {"available": True, "rows": spend_rows,
                  "coverage_start": spend_cov[0], "coverage_end": spend_cov[1], "table": "geo"}
@@ -125,9 +126,13 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
     # the never-fetched case.
     geo_coverage_obj = {"available": True, "chunks": (
         [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
-          "rows_written": 10, "cost_micros_total": total_or_zero(geo_total_obj)}]
+          "rows_written": 10, "cost_micros_total": total_or_zero(geo_total_obj),
+          # PR-ADS-167A: production stamps every chunk with its fetch time —
+          # NOW's morning sync, which settles every day through yesterday.
+          "fetched_at": datetime(2026, 6, 20, 6, 2, tzinfo=timezone.utc)}]
         if geo_coverage is None else list(geo_coverage))}
     with patch("db.revenue_repository.fetch_geo_coverage", return_value=geo_coverage_obj), \
+         patch("db.revenue_repository.fetch_account_time_zone", return_value="Europe/London"), \
          patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
          canonical_ledger_patch(from_legacy_deal_rows(revenue_obj.get("rows") or [])), \
@@ -136,7 +141,9 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
          patch("db.revenue_repository.fetch_geo_daily_spend_total", return_value=geo_total_obj), \
          patch("db.revenue_repository.fetch_geo_daily_spend_by_country", return_value=geo_country_obj), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
-        return build_revenue_attribution(window, now=NOW)
+        if settled_days:
+            return build_revenue_attribution(window, now=now or NOW, settled_days=True)
+        return build_revenue_attribution(window, now=now or NOW)
 
 
 def _geo_from_spend(spend_rows):
@@ -224,7 +231,11 @@ def test_db_campaign_rows():
 
 
 def test_db_country_rows_have_real_country_and_spend():
-    result = _build_db(window="all_time")
+    # PR-ADS-167A (owner decision 2026-11-20): the country consumers' window —
+    # All Time through yesterday. The default contract keeps today, whose
+    # country spend is still arriving — asserted at the end.
+    result = _build_db(window="all_time", settled_days=True)
+    assert result["window"]["through_reason"] == "today_not_settled"
     sa = _by(result["countries"], "country", "Saudi Arabia")
     assert sa["country_code"] == "SA"
     assert sa["spend"] == 1000           # real country spend from the geo table
@@ -232,6 +243,13 @@ def test_db_country_rows_have_real_country_and_spend():
     assert sa["verdict"] == "winner"
     assert result["country_spend_available"] is True
     assert result["geo_country_mapping_status"] == "available"
+    open_ = _build_db(window="all_time", geo_coverage=[
+        {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
+         "fetched_at": datetime(2026, 6, 20, 6, 2, tzinfo=timezone.utc)}])
+    assert open_["source_health"]["country_roas_available"] is False
+    assert result["source_health"]["country_roas_available"] is True
+    assert (open_["source_health"]["geo_coverage_unsettled_reason"]
+            == "window_includes_day_in_progress")
 
 
 def test_db_summary():

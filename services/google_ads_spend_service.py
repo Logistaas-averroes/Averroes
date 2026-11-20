@@ -216,6 +216,151 @@ def analyze_coverage(start: date | None, end: date, chunks: list) -> dict:
     }
 
 
+# ── Settled days (PR-ADS-167A) ───────────────────────────────────────────────
+#
+# `analyze_coverage` answers "was every day of the window FETCHED?" — the
+# question a sync asks of its own ledger before it claims success, and the one
+# the repair job asks before it re-fetches. A page publishing a figure asks a
+# different question: "does what is stored hold every day COMPLETELY?". The
+# daily sync fetches a range ending TODAY and records the chunk `verified` at
+# about 06:00 UTC, so on chunk status alone a day with six hours of spend in it
+# is "covered" — and yesterday stays that way until the next morning's sync, or
+# all day when that sync fails.
+#
+# The rule (first applied on the Countries page in PR-ADS-165A, moved here so
+# every publishing consumer applies the same one): a verified chunk covers only
+# the days that had ENDED, in the account time zone, when it was fetched. A
+# chunk fetched on account-local date D settles every day up to D-1 and nothing
+# later, whatever its `chunk_end` says. Today can therefore never be settled
+# before tomorrow.
+
+#: Every day has a verified chunk, but the newest were last fetched while still
+#: in progress: what is stored for them is a part-day.
+COVERAGE_GAP_DAY_NOT_REREAD = "spend_not_reread_since_day_ended"
+#: The same, and a sync that would have re-read those days has since FAILED.
+COVERAGE_GAP_REREAD_FAILED = "spend_reread_failed"
+#: The window includes today (or a later day): a day still in progress.
+COVERAGE_GAP_DAY_IN_PROGRESS = "window_includes_day_in_progress"
+#: The account time zone is not on record, so "the day ended" has no meaning.
+COVERAGE_GAP_TZ_UNKNOWN = "account_time_zone_unknown"
+
+
+def settled_through(fetched_at, tz) -> date | None:
+    """The last day a chunk fetched at ``fetched_at`` holds COMPLETELY.
+
+    A day is complete in a fetch only if the fetch happened at or after the
+    end of that day in the account time zone ``tz``. So a chunk fetched on
+    local date D settles every day up to D-1. None when the fetch time or the
+    zone is unknown: such a chunk settles nothing.
+    """
+    if fetched_at is None or tz is None:
+        return None
+    if not isinstance(fetched_at, datetime):
+        try:
+            fetched_at = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    return fetched_at.astimezone(tz).date() - timedelta(days=1)
+
+
+def settled_chunks(chunks: list, tz) -> list:
+    """The ledger's chunks, each VERIFIED one clipped to the days it settles.
+
+    A verified chunk whose fetch settled none of its days is dropped — it is
+    not a failure and must not be reported as one; it simply proves nothing
+    about complete days yet. Non-verified chunks pass through unchanged.
+    """
+    out = []
+    for chunk in chunks or []:
+        if chunk.get("status") != "verified":
+            out.append(chunk)
+            continue
+        through = settled_through(chunk.get("fetched_at"), tz)
+        try:
+            cs = date.fromisoformat(str(chunk.get("chunk_start")))
+            ce = date.fromisoformat(str(chunk.get("chunk_end")))
+        except (TypeError, ValueError):
+            continue
+        if through is None:
+            continue
+        ce = min(ce, through)
+        if ce < cs:
+            continue
+        out.append({**chunk, "chunk_end": ce.isoformat()})
+    return out
+
+
+def analyze_settled_coverage(start: date | None, end: date, chunks: list, tz,
+                             now: datetime | None = None) -> dict:
+    """Is every day of ``[start, end]`` held COMPLETELY? The publication verdict.
+
+    ``analyze_coverage`` over the ledger's chunks clipped to the days each one
+    settles (:func:`settled_chunks`), plus ``unsettled_reason`` naming WHY a
+    window that every day of which was fetched is still not complete:
+
+    * ``window_includes_day_in_progress`` — ``end`` is today or later in the
+      account time zone. No fetch can settle it before tomorrow;
+    * ``spend_reread_failed`` — the newest days were fetched only while in
+      progress, and a sync covering them has since failed;
+    * ``spend_not_reread_since_day_ended`` — the same, with no failure on
+      record (the morning sync has not run yet);
+    * ``account_time_zone_unknown`` — ``tz`` is None; nothing is settled.
+
+    ``unsettled_reason`` is None when the window is complete, AND when a day
+    was never fetched at all: that is an ordinary gap, which ``missing_ranges``
+    and ``failed_chunks`` already describe, and the caller names in its own
+    words.
+
+    Pure. ``now`` only places "today" in the account time zone.
+    """
+    if tz is None:
+        out = analyze_coverage(start, end, [])
+        out.update({"settled": True, "complete": False,
+                    "complete_by_status": bool(analyze_coverage(start, end, chunks).get("complete")),
+                    "unsettled_reason": COVERAGE_GAP_TZ_UNKNOWN})
+        return out
+    analysis = analyze_coverage(start, end, settled_chunks(chunks, tz))
+    by_status = analyze_coverage(start, end, chunks)
+    reason = None
+    if not analysis.get("complete") and by_status.get("complete"):
+        base = now or datetime.now(tz=timezone.utc)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        today = base.astimezone(tz).date()
+        if end >= today:
+            reason = COVERAGE_GAP_DAY_IN_PROGRESS
+        else:
+            reason = COVERAGE_GAP_DAY_NOT_REREAD
+            missing = set()
+            for gap in analysis.get("missing_ranges") or []:
+                missing |= _enumerate_days(date.fromisoformat(gap["start"]),
+                                           date.fromisoformat(gap["end"]))
+            for chunk in chunks or []:
+                if chunk.get("status") == "verified":
+                    continue
+                if _chunk_days({"chunk_start": str(chunk.get("chunk_start")),
+                                "chunk_end": str(chunk.get("chunk_end"))}) & missing:
+                    reason = COVERAGE_GAP_REREAD_FAILED
+                    break
+    analysis.update({"settled": True,
+                     "complete_by_status": bool(by_status.get("complete")),
+                     "unsettled_reason": reason})
+    return analysis
+
+
+def zone_or_none(name):
+    """``ZoneInfo(name)``, or None when the name is missing or not a zone."""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+        return ZoneInfo(str(name))
+    except Exception:  # noqa: BLE001 — unknown zone: nothing can be settled
+        return None
+
+
 def _coerce_iso(value) -> str | None:
     """Best-effort ISO date string from a date/datetime/str, else None."""
     if value is None:

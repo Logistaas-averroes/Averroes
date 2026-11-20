@@ -117,6 +117,9 @@ jobs:
             tests/test_pr_ads_163b_freshness_row_counts.py \
             tests/test_pr_ads_163c_removed_contacts.py \
             tests/test_pr_ads_165a_countries_pg_integration.py \
+            tests/test_pr_ads_167a_countries_zero_rule_pg_integration.py \
+            tests/test_pr_ads_167a_geo_sync_country_codes_pg_integration.py \
+            tests/test_pr_ads_167a_settled_coverage_consumers_pg_integration.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
@@ -220,6 +223,15 @@ jobs:
                            # PR-ADS-165A. The Countries page over the real
                            # geo sync, coverage ledger and spend rows.
                            "tests.test_pr_ads_165a_countries_pg_integration",
+                           # PR-ADS-167A. The Countries zero rule over the
+                           # real carrier evidence; the real geo sync with a
+                           # failing country lookup (codes kept, run partial,
+                           # a partial batch); the shared settle rule through
+                           # the reconciliation panel, the revenue contract,
+                           # its mart and the country spend readers.
+                           "tests.test_pr_ads_167a_countries_zero_rule_pg_integration",
+                           "tests.test_pr_ads_167a_geo_sync_country_codes_pg_integration",
+                           "tests.test_pr_ads_167a_settled_coverage_consumers_pg_integration",
                            # PR-ADS-166A. Its PG cases run the real contact
                            # sync, funnel writer and Leads readers: names are
                            # stored, survive a sparse payload, and an existing

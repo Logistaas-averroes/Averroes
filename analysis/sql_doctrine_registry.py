@@ -865,7 +865,9 @@ RULES: list[dict] = [
                "_build_source_mix", "_build_unavailable", "build_dashboard_overview",
                "_build_kpis"]),
     _r("mart", "services/revenue_decision_mart.py", CLS_LEGACY, _MART,
-       symbol=["_summary_block", "build_revenue_decision_mart", "_canonical_core"]),
+       symbol=["_summary_block", "build_revenue_decision_mart", "_canonical_core",
+               # PR-ADS-167A: withholds the country rows' SQL split with the gate.
+               "_withhold_country_rows_when_geo_not_ready"]),
     _m("ras.module", "services/revenue_attribution_service.py", CLS_MIXED, _RAS, ["sqls_field_ref"]),
     _r("ras.json", "services/revenue_attribution_service.py", CLS_INACTIVE, _JSONFALLBACK,
        symbol=["_build_from_json", "_build_campaign_rows", "_build_country_rows", "_build_summary"]),
@@ -890,7 +892,9 @@ RULES: list[dict] = [
     _r("ctry", "services/dashboard_countries_service.py", CLS_LEGACY, _CTRY,
        symbol=["_build_country_rows", "_build_kpis", "_build_period_change", "_build_regional_mix",
                "_build_residual", "_build_unavailable", "_country_status",
-               "build_dashboard_countries", "_residual_gap"]),
+               "build_dashboard_countries", "_residual_gap",
+               # PR-ADS-167A: withholds the row / residual SQL split with the KPIs.
+               "_withhold_when_geo_not_ready"]),
     _m("rev.module", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV, ["contact_created_at_ref"]),
     _r("rev", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV,
        symbol=["_build_customer_trend", "_build_kpis", "_build_unavailable", "build_dashboard_revenue"]),

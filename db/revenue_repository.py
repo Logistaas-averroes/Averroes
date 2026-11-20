@@ -1664,6 +1664,55 @@ def fetch_geo_daily_spend_total(start: date | None, end: date,
         return {"available": False, "has_rows": False}
 
 
+# ── One snapshot for the Countries page's geo reads (PR-ADS-167A) ───────────
+#
+# The Countries page reads the window's spend rows, the identity of every
+# criterion in them, and which criteria carry each spend-less country's code —
+# three statements. A sync naming a code-less criterion between them could
+# make the carriers read disagree with the identities read and turn an
+# "Unavailable" into a false $0. Inside ``geo_read_snapshot()`` the three
+# readers share ONE connection in a REPEATABLE READ, READ ONLY transaction, so
+# they answer from one snapshot. Outside it nothing changes.
+import contextlib as _contextlib  # noqa: E402
+from contextvars import ContextVar as _ContextVar  # noqa: E402
+
+_GEO_SNAPSHOT_CONN: _ContextVar = _ContextVar("geo_read_snapshot_conn", default=None)
+
+
+@_contextlib.contextmanager
+def geo_read_snapshot():
+    """One REPEATABLE READ, READ ONLY transaction for the geo readers inside
+    the block (``fetch_geo_daily_spend_by_country``,
+    ``fetch_geo_criterion_identities``, ``fetch_geo_code_carriers``)."""
+    if _GEO_SNAPSHOT_CONN.get() is not None:
+        yield
+        return
+    with get_conn() as conn:
+        if conn is None:
+            yield
+            return
+        with conn.cursor() as cur:
+            # Before the transaction's first query, or it is not one snapshot.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        token = _GEO_SNAPSHOT_CONN.set(conn)
+        try:
+            yield
+        finally:
+            _GEO_SNAPSHOT_CONN.reset(token)
+
+
+@_contextlib.contextmanager
+def _geo_conn():
+    """The snapshot's connection inside ``geo_read_snapshot()``, else a pooled
+    one exactly as ``get_conn``."""
+    shared = _GEO_SNAPSHOT_CONN.get()
+    if shared is not None:
+        yield shared
+        return
+    with get_conn() as conn:
+        yield conn
+
+
 def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                                      customer_id: str | None = None) -> dict:
     """Per-country canonical Google Ads geo spend for the window (PR-ADS-124).
@@ -1680,37 +1729,57 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
     its OWN spend_date (LEFT JOIN fx_rates); a country with any missing FX date
     has spend_usd withheld (None), never converted at a wrong rate. Read-only.
 
+    PR-ADS-167A: ``country_code`` / ``country_name`` are the CRITERION's
+    identity on record (``db.geo_identity_sql``: exactly one code over the whole
+    table, else None), read in the same statement; ``identity_codes`` lists
+    every code on record so a caller can tell "none" from "two that disagree".
+
     Returns {available, has_rows, rows:[{country_criterion_id, country_code,
-             country_name, cost_micros, spend (native), spend_usd, fx_complete}],
+             country_name, identity_codes, cost_micros, spend (native),
+             spend_usd, fx_complete}],
              total_cost_micros, total_spend, total_spend_usd, fx_complete,
              currency_code, customer_id, reporting_currency}.
     """
     try:
-        with get_conn() as conn:
+        with _geo_conn() as conn:
             if conn is None:
                 return {"available": False, "has_rows": False, "rows": []}
             with conn.cursor() as cur:
+                # PR-ADS-167A: a row's country is the one its CRITERION carries
+                # anywhere on record (``db.geo_identity_sql``), read in the SAME
+                # statement as the window's rows — not MAX(country_code) of the
+                # window's rows, which is NULL for a criterion whose rows in the
+                # window were all written while the sync's country lookup was
+                # failing, and an arbitrary pick when they disagree.
+                from db.geo_identity_sql import criterion_identity_sql  # noqa: PLC0415
                 cur.execute(
                     """
-                    SELECT g.country_criterion_id,
-                           MAX(g.country_code) AS country_code,
-                           MAX(g.country_name) AS country_name,
-                           SUM(g.cost_micros)::bigint AS cost_micros,
-                           SUM((g.cost_micros / 1000000.0) * fx.rate) AS spend_usd,
-                           COUNT(DISTINCT CASE WHEN fx.rate IS NULL THEN g.spend_date END)
-                               AS fx_missing_days
-                    FROM google_ads_geo_daily_spend g
-                    LEFT JOIN fx_rates fx
-                      ON fx.rate_date = g.spend_date
-                     AND fx.base_currency = g.currency_code
-                     AND fx.quote_currency = %s
-                    WHERE (%s::date IS NULL OR g.spend_date >= %s) AND g.spend_date <= %s
-                      AND (%s::text IS NULL OR g.customer_id = %s)
-                    GROUP BY g.country_criterion_id
+                    WITH w AS (
+                        SELECT g.country_criterion_id,
+                               SUM(g.cost_micros)::bigint AS cost_micros,
+                               SUM((g.cost_micros / 1000000.0) * fx.rate) AS spend_usd,
+                               COUNT(DISTINCT CASE WHEN fx.rate IS NULL THEN g.spend_date END)
+                                   AS fx_missing_days
+                        FROM google_ads_geo_daily_spend g
+                        LEFT JOIN fx_rates fx
+                          ON fx.rate_date = g.spend_date
+                         AND fx.base_currency = g.currency_code
+                         AND fx.quote_currency = %s
+                        WHERE (%s::date IS NULL OR g.spend_date >= %s) AND g.spend_date <= %s
+                          AND (%s::text IS NULL OR g.customer_id = %s)
+                        GROUP BY g.country_criterion_id
+                    ),
+                    ident AS (""" + criterion_identity_sql(
+                        "ARRAY(SELECT country_criterion_id FROM w)") + """)
+                    SELECT w.country_criterion_id, w.cost_micros, w.spend_usd,
+                           w.fx_missing_days, ident.codes AS identity_codes,
+                           ident.name AS identity_name
+                    FROM w LEFT JOIN ident USING (country_criterion_id)
                     """,
                     (FX_REPORTING_CURRENCY, start, start, end,
                      customer_id, customer_id),
                 )
+                from db.geo_identity_sql import resolved_code  # noqa: PLC0415
                 rows = []
                 total = 0
                 total_usd = 0.0
@@ -1724,10 +1793,15 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                         total_usd += usd
                     else:
                         any_fx_missing = True
+                    codes = sorted(r.get("identity_codes") or [])
+                    code = resolved_code(codes)
                     rows.append({
                         "country_criterion_id": r.get("country_criterion_id"),
-                        "country_code": r.get("country_code"),
-                        "country_name": r.get("country_name"),
+                        # None unless exactly one code is on record for the
+                        # criterion: none, or two that disagree, name nothing.
+                        "country_code": code,
+                        "country_name": r.get("identity_name") if code else None,
+                        "identity_codes": codes,
                         "cost_micros": micros,
                         "spend": micros / 1_000_000,
                         "spend_usd": usd,
@@ -1783,26 +1857,14 @@ def fetch_geo_criterion_identities(criterion_ids) -> dict:
     if not ids:
         return {"available": True, "identities": {}}
     try:
-        with get_conn() as conn:
+        with _geo_conn() as conn:
             if conn is None:
                 return {"available": False, "identities": {}}
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT country_criterion_id,
-                           ARRAY_AGG(DISTINCT UPPER(BTRIM(country_code)))
-                               FILTER (WHERE NULLIF(BTRIM(country_code), '') IS NOT NULL)
-                               AS codes,
-                           (ARRAY_AGG(country_name ORDER BY spend_date DESC)
-                               FILTER (WHERE NULLIF(BTRIM(country_code), '') IS NOT NULL
-                                         AND NULLIF(BTRIM(country_name), '') IS NOT NULL))[1]
-                               AS name
-                    FROM google_ads_geo_daily_spend
-                    WHERE country_criterion_id = ANY(%s)
-                    GROUP BY country_criterion_id
-                    """,
-                    (ids,),
-                )
+                # PR-ADS-167A: the ONE statement of the rule, shared with the
+                # spend readers below and the sync's writer.
+                from db.geo_identity_sql import criterion_identity_sql  # noqa: PLC0415
+                cur.execute(criterion_identity_sql("%s"), (ids,))
                 identities = {
                     str(r.get("country_criterion_id")): {
                         "codes": sorted(r.get("codes") or []),
@@ -1814,6 +1876,52 @@ def fetch_geo_criterion_identities(criterion_ids) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_criterion_identities failed: %s", exc)
         return {"available": False, "identities": {}}
+
+
+def fetch_geo_code_carriers(codes) -> dict:
+    """Which Google criteria carry each of ``codes`` on record. Read-only.
+
+    PR-ADS-167A. The Countries page may call a country with no spend row a
+    measured ``$0`` while the window also holds spend against a location no
+    stored row names — but only if that location cannot be this country. It
+    cannot when Google keys this country under ANOTHER criterion: one country,
+    one criterion. This read is the evidence: for each code, every criterion
+    with a stored row carrying it, and the full set of codes each of those
+    criteria carries (``db.geo_identity_sql``, the rule every reader uses), over
+    the whole table.
+
+    Returns ``{available, carriers: {code: [{criterion_id, codes}]}}``. A code
+    with no carrier is absent. ``available: False`` means the read failed — the
+    caller must then treat no country as carried.
+    """
+    want = sorted({str(c).strip().upper() for c in (codes or []) if str(c or "").strip()})
+    if not want:
+        return {"available": True, "carriers": {}}
+    try:
+        with _geo_conn() as conn:
+            if conn is None:
+                return {"available": False, "carriers": {}}
+            with conn.cursor() as cur:
+                from db.geo_identity_sql import criterion_identity_sql  # noqa: PLC0415
+                cur.execute(
+                    "WITH c AS (SELECT DISTINCT country_criterion_id "
+                    "FROM google_ads_geo_daily_spend "
+                    "WHERE UPPER(BTRIM(country_code)) = ANY(%s)) "
+                    + criterion_identity_sql("ARRAY(SELECT country_criterion_id FROM c)"),
+                    (want,),
+                )
+                carriers: dict = {}
+                for r in _rows_as_dicts(cur):
+                    held = sorted(r.get("codes") or [])
+                    for code in held:
+                        if code in want:
+                            carriers.setdefault(code, []).append({
+                                "criterion_id": str(r.get("country_criterion_id")),
+                                "codes": held})
+            return {"available": True, "carriers": carriers}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_code_carriers failed: %s", exc)
+        return {"available": False, "carriers": {}}
 
 
 def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:

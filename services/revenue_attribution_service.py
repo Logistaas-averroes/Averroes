@@ -66,7 +66,9 @@ from analysis.attribution_matcher import attribute_deals
 from analysis.business_windows import get_window_bounds, resolve_window
 # PR-ADS-154C: THE canonical window anchor — the Google Ads account calendar
 # day, not UTC. See services/canonical_contract.resolve_canonical_window.
-from services.canonical_contract import resolve_canonical_window
+from services.canonical_contract import (
+    resolve_canonical_window, resolve_settled_window, settled_revenue_bounds,
+)
 from analysis.core import QUALIFIED
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -221,20 +223,29 @@ def _safe_float(value) -> float:
         return 0.0
 
 
-def _read_geo_coverage_ledger(customer_id, start_date, end_date) -> dict:
+def _read_geo_coverage_ledger(customer_id, start_date, end_date, now=None) -> dict:
     """The durable geo coverage ledger for one account and range, or an honest gap.
 
     PR-ADS-153F. Never raises: a coverage read that fails must degrade to "we do
     not know", which the gate treats as blocking, rather than crashing the whole
     revenue contract. An unreadable ledger and an empty one are different facts
     and this preserves the difference — ``available: False`` means unreadable.
+
+    PR-ADS-167A: the PUBLISHED verdict (``analyze_published_geo_coverage``). A
+    verified chunk counts only for the days that had ended, in the account time
+    zone, when it was fetched — so a window that includes today is not complete
+    (``unsettled_reason: window_includes_day_in_progress``), and yesterday is
+    complete only once the morning sync re-read it. Judging on chunk status
+    alone published a part-day as the window's country spend. The country
+    consumers therefore build this contract with ``settled_days=True``: an
+    open window ends at yesterday, which the morning sync settles.
     """
     try:
         from services.google_ads_geo_sync_service import (  # noqa: PLC0415
-            analyze_geo_coverage, configured_customer_id,
+            analyze_published_geo_coverage, configured_customer_id,
         )
-        return analyze_geo_coverage(
-            customer_id or configured_customer_id(), start_date, end_date)
+        return analyze_published_geo_coverage(
+            customer_id or configured_customer_id(), start_date, end_date, now=now)
     except Exception:  # noqa: BLE001 — coverage must never crash the contract
         return {"available": False, "complete": False,
                 "missing_ranges": [], "failed_chunks": []}
@@ -1021,9 +1032,15 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
     }
 
 
-def _window_date_bounds(window: str, now: datetime | None):
-    """Return (start_date, end_date) as date objects (start may be None)."""
-    resolved = resolve_canonical_window(window, now=now)
+def _window_date_bounds(window: str, now: datetime | None,
+                        settled_days: bool = False):
+    """Return (start_date, end_date) as date objects (start may be None).
+
+    ``settled_days`` (PR-ADS-167A): the settled-day consumers' window — an
+    open window ends at yesterday (``canonical_contract.resolve_settled_window``).
+    """
+    resolved = (resolve_settled_window(window, now=now) if settled_days
+                else resolve_canonical_window(window, now=now))
     start_date = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
     end_date = date.fromisoformat(resolved["end_date"])
     return resolved, start_date, end_date
@@ -1120,9 +1137,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # The all-source ladder is carried alongside so these views can state that
     # attributed revenue is a SUBSET, and how large a subset — they must never
     # read as total business revenue.
+    # PR-ADS-167A: a settled-day window (``resolved["through_reason"]``) ends
+    # at yesterday for revenue exactly as for spend — the population is the
+    # reader contract's over the same days, never a page-side filter.
     canonical_base = canonical_revenue.load_won_deals(
         window, start=None if window else start_date,
-        end=None if window else end_date, now=now)
+        end=None if window else end_date, now=now,
+        bounds=settled_revenue_bounds(resolved))
     revenue_available_canonical = bool(canonical_base.get("available"))
     campaign_revenue_rows = (canonical_revenue.canonical_deal_rows(
         canonical_base, revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE)
@@ -1229,7 +1250,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # account-scoped fact, and reading it unscoped would let one account's
         # verified history declare another account's window covered.
         _geo_ledger = _read_geo_coverage_ledger(
-            canonical_customer_id, start_date, end_date)
+            canonical_customer_id, start_date, end_date, now=now)
         geo_coverage_ok = bool(_geo_ledger.get("available") and _geo_ledger.get("complete"))
         _geo_failed_chunks = _geo_ledger.get("failed_chunks") or []
         # PR-ADS-154B §2: the two totals below are only comparable if they were
@@ -1701,6 +1722,9 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
                                 else "incomplete" if _geo_ledger.get("available")
                                 else "unavailable"),
         "geo_coverage_missing_ranges": _geo_ledger.get("missing_ranges") or [],
+        # PR-ADS-167A: why a fully-fetched window is still not complete. The
+        # gate names it instead of "never synced".
+        "geo_coverage_unsettled_reason": _geo_ledger.get("unsettled_reason"),
         "failed_geo_dates": _geo_ledger.get("failed_chunks") or [],
         "country_geo_rows_available": bool(canonical_geo_country),
         # The gate's `geo_readable` input: did the canonical geo QUERY succeed?
@@ -1965,7 +1989,8 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
 
 
 @_canonical_snapshot.single_snapshot
-def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
+def build_revenue_attribution(window: str, now: datetime | None = None, *,
+                              settled_days: bool = False) -> dict:
     """Build the shared revenue-attribution contract for a business window.
 
     Durable-source strategy (PR-ADS-108):
@@ -1984,6 +2009,13 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     Args:
         window: A business-window key (see analysis.business_windows.WINDOW_KEYS).
         now: Optional reference time for deterministic resolution/testing.
+        settled_days: PR-ADS-167A (owner decision 2026-11-20). True only for
+            the settled-day consumers — the mart's country view (Country
+            Revenue & Spend, Dashboard Countries). An open window then ends at
+            YESTERDAY in the account time zone for revenue, deals, customers,
+            leads and spend alike; ``window.window_range`` says so. False (the
+            default, every other caller including ``/api/revenue-attribution``)
+            leaves the window unchanged.
 
     Returns:
         Dict with window, summary, campaigns, countries, and source_health.
@@ -1991,7 +2023,8 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolved, start_date, end_date = _window_date_bounds(window, now)
+    resolved, start_date, end_date = _window_date_bounds(
+        window, now, settled_days=settled_days)
 
     db_result = _build_from_db(resolved, start_date, end_date, window=window, now=now)
     if db_result is not None:
@@ -2003,6 +2036,8 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     # so serving revenue from it during a database outage would silently swap
     # what "closed-won revenue" means at the worst possible moment.
     start_dt, end_dt = get_window_bounds(window, now=now)
+    if resolved.get("through_reason"):
+        start_dt, end_dt = settled_revenue_bounds(resolved)
     return _withhold_json_revenue(_build_from_json(resolved, start_dt, end_dt))
 
 

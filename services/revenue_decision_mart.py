@@ -133,6 +133,13 @@ def _window_block(core: dict) -> dict:
             end_utc = end_dt.isoformat()
     except (TypeError, ValueError):  # disclosure must never break the mart
         logger.warning("window bounds unavailable for key=%s", key)
+    # PR-ADS-167A: a settled-day window reads its deals over the ACCOUNT
+    # calendar (``settled_revenue_bounds``) — publish those instants, the ones
+    # actually used, not UTC midnights of the same dates.
+    _settled = canonical_contract.settled_revenue_bounds(resolved)
+    if _settled is not None:
+        start_utc = _settled[0].isoformat() if _settled[0] else None
+        end_utc = _settled[1].isoformat()
     return {
         "key": key,
         "label": resolved.get("label"),
@@ -144,7 +151,37 @@ def _window_block(core: dict) -> dict:
         "timezone": _account_timezone(),
         "is_closed_window": resolved.get("is_closed_window"),
         "notes": resolved.get("notes"),
+        # PR-ADS-167A: a settled-day window (the country view) says it ends at
+        # yesterday and why; None / absent on every other view.
+        "through_reason": resolved.get("through_reason"),
+        "account_today": resolved.get("account_today"),
+        "window_range": resolved.get("window_range"),
     }
+
+
+def _settled_reference_instant(window_block: dict):
+    """The last instant of YESTERDAY in the account time zone, for a settled-day
+    window (PR-ADS-167A); None when it cannot be placed.
+
+    ``page_reconciliation`` resolves its window from the key and a reference
+    instant, so a settled-day view asks it at this instant, and publishes the
+    reconciliation only when that resolves to EXACTLY the days the view
+    measured (see ``build_revenue_decision_mart``).
+    """
+    try:
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+        tz = ZoneInfo(window_block.get("timezone") or DEFAULT_TIMEZONE)
+        d = datetime.fromisoformat(str(window_block.get("account_today"))).date()
+        return (datetime(d.year, d.month, d.day, tzinfo=tz).astimezone(timezone.utc)
+                - timedelta(microseconds=1))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+#: Count fields a withheld settled-window reconciliation carries as None.
+_SQL_RECON_COUNT_KEYS = ("total_all_source_sqls", "google_ads_source_sqls",
+                         "campaign_attributable_sqls", "keyword_attributable_sqls",
+                         "excluded_sql_contacts", "unmatched_sql_contacts")
 
 
 def _spend_truth_block(core: dict) -> dict:
@@ -211,6 +248,7 @@ def _spend_truth_block(core: dict) -> dict:
         geo_readable=(health.get("country_geo_query_readable") is True),
         geo_coverage_readable=(health.get("geo_coverage_status") in ("complete", "incomplete")),
         geo_coverage_complete=(health.get("geo_coverage_status") == "complete"),
+        geo_coverage_settle_gap=health.get("geo_coverage_unsettled_reason"),
         geo_failed_chunks=health.get("failed_geo_dates") or [],
         missing_geo_dates=health.get("missing_geo_dates") or [],
         campaigns_missing_geo=health.get("campaigns_missing_geo") or [],
@@ -597,8 +635,92 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
     }
 
 
-def _canonical_core(window: str, now: datetime | None):
-    """The single durable revenue-attribution contract for ``window``."""
+def _withhold_empty_settled_window(spend_truth: dict, summary: dict,
+                                   readiness: dict) -> tuple:
+    """PR-ADS-167A — a settled-day window with NO completed day (today is the
+    first day of the quarter or year) measures nothing. Every figure is
+    unavailable with ``no_settled_day_in_window``: no "verified" zero deals,
+    revenue or spend over no day, and no "ready" verdict."""
+    reason = canonical_contract.NO_SETTLED_DAY_IN_WINDOW
+
+    def _blank(value):
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, (int, float)):
+            return None
+        if isinstance(value, dict):
+            if "status" in value and "value" in value:
+                return cwt.metric(None, cwt.UNAVAILABLE, reason)
+            return {k: _blank(v) for k, v in value.items()}
+        return value
+
+    summary = {k: _blank(v) for k, v in summary.items()}
+    summary.update({
+        "revenue_total_available": False,
+        "attributed_revenue_total_available": False,
+        "revenue_total_unavailable_reason": reason,
+        "customers_status": cwt.UNAVAILABLE, "customers_reason": reason,
+    })
+    spend_truth = {k: _blank(v) for k, v in spend_truth.items()}
+    spend_truth.update({
+        "campaign_spend_status": "unavailable", "spend_coverage_status": "unavailable",
+        "geo_coverage_status": "unavailable", "country_spend_status": "unavailable",
+        "country_roas_unblockable": False, "country_gap_codes": [reason],
+        "country_gap_reason": geo_gate.describe_geo_gap([reason]),
+    })
+    readiness = {k: (False if k.endswith("_ready") else v)
+                 for k, v in readiness.items()}
+    readiness["withheld_reason"] = reason
+    return spend_truth, summary, readiness
+
+
+def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> list:
+    """PR-ADS-167A — the country view's rows withhold what the country gate
+    withholds (the rule Dashboard Countries applies to its own rows).
+
+    When the shared geo gate is not ready — yesterday not re-read before the
+    morning sync, unreconciled, uncovered … — each country row and the
+    residual carry no spend, no ratio, and none of the country-attributed
+    outcomes (leads, SQLs, deals, customers, revenue): rows that sum to a
+    figure the gate refuses would publish it. Spend survives only when the
+    ONLY gap is FX ("native spend is shown instead"), as native spend.
+    """
+    if geo_gate.country_geo_ready(spend_truth.get("country_spend_status")):
+        return rows
+    gaps = list(spend_truth.get("country_gap_codes") or [])
+    reason = next(iter(gaps), None) or "country_geo_not_ready"
+    fx_only = gaps == [geo_gate.GEO_GAP_FX_COVERAGE_INCOMPLETE]
+    figures = ("leads", "sqls", "closed_won_deals", "customers", "won_revenue",
+               "period_revenue_per_ad_spend", "period_spend_per_customer_won",
+               "roas", "cac", "spend_usd")
+    out = []
+    for r in rows or []:
+        row = {**r, **{k: None for k in figures if k in r}, "metrics": None,
+               "withheld_reason": reason}
+        if not fx_only:
+            for k in ("spend", "spend_native"):
+                if k in row:
+                    row[k] = None
+        elif "spend_native" in r:
+            row["spend"] = r.get("spend_native")
+        out.append(row)
+    return out
+
+
+#: PR-ADS-167A — the views whose window ends at yesterday when it includes
+#: today (owner decision 2026-11-20): the country view, read by Country Revenue
+#: & Spend and Dashboard Countries. Every other view keeps its window.
+SETTLED_DAY_VIEWS = frozenset({"country"})
+
+
+def _canonical_core(window: str, now: datetime | None, *,
+                    settled_days: bool = False):
+    """The single durable revenue-attribution contract for ``window``.
+
+    ``settled_days`` ends an open window at yesterday for revenue and spend
+    alike (``SETTLED_DAY_VIEWS``)."""
+    if settled_days:
+        return build_revenue_attribution(window, now=now, settled_days=True)
     return build_revenue_attribution(window, now=now)
 
 
@@ -659,8 +781,13 @@ def build_revenue_decision_mart(
 
     Returns:
         The canonical contract: window, spend_truth, summary, rows, diagnostics.
-        ``window``, ``spend_truth`` and ``summary`` are IDENTICAL across views;
-        only ``rows`` changes with the requested grain.
+        ``window``, ``spend_truth`` and ``summary`` are IDENTICAL across the
+        campaign, source and deal views; only ``rows`` changes with the
+        requested grain. PR-ADS-167A: the country view (``SETTLED_DAY_VIEWS``)
+        is the same contract over the settled-day window — an open window ends
+        at yesterday, declared in ``window.through_reason`` /
+        ``window.window_range`` — so its figures are the same rule over one day
+        fewer, never a different rule.
 
     Raises:
         ValueError: If ``view`` is not allowed or ``window`` is unsupported.
@@ -673,24 +800,58 @@ def build_revenue_decision_mart(
     # bad window (shared window resolver — one truth for the business window).
     resolve_canonical_window(window, now=now)
 
-    core = _canonical_core(window, now)
+    settled = view in SETTLED_DAY_VIEWS
+    core = _canonical_core(window, now, settled_days=settled)
 
     spend_truth = _spend_truth_block(core)
     summary = _summary_block(core, spend_truth)
     readiness = _readiness_block(core, spend_truth)
     payload = _view_payload(view, window, core, now)
     diagnostics = _diagnostics(core, view, spend_truth)
+    _empty = settled and bool(((core.get("window") or {}).get("window_range")
+                               or {}).get("empty"))
+    if _empty:
+        spend_truth, summary, readiness = _withhold_empty_settled_window(
+            spend_truth, summary, readiness)
+        payload = {**payload, "rows": []}
+    elif view == "country":
+        payload = {**payload, "rows": _withhold_country_rows_when_geo_not_ready(
+            payload["rows"], spend_truth)}
 
     # PR-ADS-152: the mart top-line (and Campaign Revenue & Spend) is the
     # campaign-attributable SQL subset — campaign ROAS requires campaign identity.
     # Disclose that scope explicitly and reconcile against the canonical
     # population, so the top-line is never mistaken for every Google Ads-source SQL.
     from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
-    sql_reconciliation = _canon.page_reconciliation(
-        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
-        now=now, consumer_count=summary.get("sqls"))
-
     window_block = _window_block(core)
+    if window_block.get("through_reason"):
+        # PR-ADS-167A: the reconciliation over the SAME days this view measured
+        # (start .. yesterday), or an explicit unavailable block naming why —
+        # never a reconciliation of the window that includes today beside this
+        # view's count. Last 6 Months cannot be reproduced (its start would move
+        # a day) and is withheld.
+        ref = _settled_reference_instant(window_block)
+        sql_reconciliation = (_canon.page_reconciliation(
+            _canon.WINDOW_BUSINESS, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+            now=ref, consumer_count=summary.get("sqls")) if ref is not None else {})
+        _rw = sql_reconciliation.get("window") or {}
+        if (_rw.get("start_date"), _rw.get("end_date")) != (
+                window_block.get("start_date"), window_block.get("end_date")):
+            sql_reconciliation = {
+                **sql_reconciliation,
+                **{k: None for k in _SQL_RECON_COUNT_KEYS},
+                "sql_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+                "reconciliation_status": _canon.STATUS_UNAVAILABLE,
+                "unavailable_reason": (canonical_contract.NO_SETTLED_DAY_IN_WINDOW
+                                       if _empty else
+                                       "settled_window_not_reconcilable"),
+                "detail": ("the SQL reconciliation cannot be resolved to the days "
+                           "this view measured (it ends at yesterday)")}
+    else:
+        sql_reconciliation = _canon.page_reconciliation(
+            _canon.WINDOW_BUSINESS, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+            now=now, consumer_count=summary.get("sqls"))
+
     core_health = core.get("source_health") or {}
     # PR-ADS-155-F1: the campaign-attributable scope's own §5 disclosure, already
     # built by `_summary_block` from the scope ladder. Read here so the attributed
@@ -920,7 +1081,6 @@ def build_revenue_performance_audit(
 
     # Current per-page truth, each at its own grain.
     campaigns = core.get("campaigns") or []
-    countries = core.get("countries") or []
     source = build_revenue_by_source(window, now=now)
     deals = build_revenue_deals(window, now=now)
 
@@ -939,7 +1099,14 @@ def build_revenue_performance_audit(
         return round(total, 2) if seen_value else None
 
     campaign_page_spend = _sum_spend(campaigns)
-    country_page_spend = _sum_spend(countries)
+    # PR-ADS-167A: Country Revenue & Spend reads the settled-day core (an open
+    # window ends at yesterday). It is compared with the mart's spend over the
+    # SAME days — never with a window one day longer, which would report the
+    # deliberate difference as a mismatch.
+    country_core = _canonical_core(window, now, settled_days=True)
+    country_page_spend = _sum_spend(country_core.get("countries") or [])
+    country_spend_truth = _spend_truth_block(country_core)
+    country_mart_spend = _summary_block(country_core, country_spend_truth).get("spend_usd")
     google_group = next(
         (g for g in (source.get("groups") or []) if g.get("group") == "google_ads"),
         {},
@@ -950,7 +1117,8 @@ def build_revenue_performance_audit(
     tolerance = 0.02  # mirrors SPEND_VARIANCE_TOLERANCE for reconciliation
     pages_spec = [
         ("roas_by_campaign", "Campaign Revenue & Spend", "spend", campaign_page_spend, mart_spend),
-        ("roas_by_country", "Country Revenue & Spend", "spend", country_page_spend, mart_spend),
+        ("roas_by_country", "Country Revenue & Spend", "spend", country_page_spend,
+         country_mart_spend),
         ("revenue_by_source", "Revenue by Source", "spend", source_google_spend, mart_spend),
         ("deals", "Deals", "revenue", deals_revenue, mart_revenue),
     ]
@@ -971,7 +1139,12 @@ def build_revenue_performance_audit(
             "difference": diff,
             "difference_pct": pct,
             "status": status,
-            "reasons": _difference_reasons(key, spend_truth, status=status),
+            "reasons": _difference_reasons(
+                key, country_spend_truth if key == "roas_by_country" else spend_truth,
+                status=status),
+            # PR-ADS-167A: the window each comparison was made over.
+            "window": (_window_block(country_core) if key == "roas_by_country"
+                       else None),
         })
 
     return {

@@ -33,6 +33,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Deterministic reference time so the YTD window is 2026-01-01 .. 2026-06-22.
 NOW = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
 WINDOW = "ytd"
+#: PR-ADS-167A: the closed window before NOW (2026-04-01 .. 2026-06-30 is the
+#: current quarter; Last Quarter is 2026-01-01 .. 2026-03-31).
+CLOSED_WINDOW = "last_quarter"
 
 
 # ── Coherent durable dataset (native GBP spend, USD reporting) ──────────────
@@ -162,7 +165,10 @@ CANONICAL_FX_INCOMPLETE = {
 # behind them. Tests that want the unfetched case pass `geo_coverage=[]`.
 GEO_COVERAGE_COMPLETE = [
     {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
-     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191},
+     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191,
+     # PR-ADS-167A: production stamps every chunk; this one is NOW's morning
+     # sync, so it settles every day through yesterday.
+     "fetched_at": datetime(2026, 6, 22, 6, 2, tzinfo=timezone.utc)},
 ]
 
 
@@ -245,10 +251,10 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
     )
 
 
-def _mart(view, monkeypatch, **kw):
+def _mart(view, monkeypatch, window=WINDOW, **kw):
     _patch_durable(monkeypatch, **kw)
     from services.revenue_decision_mart import build_revenue_decision_mart
-    return build_revenue_decision_mart(view=view, window=WINDOW, now=NOW)
+    return build_revenue_decision_mart(view=view, window=window, now=NOW)
 
 
 # ── 1. Shared window resolver across all four views ─────────────────────────
@@ -258,17 +264,31 @@ def test_all_views_use_the_same_window_resolver(monkeypatch):
     expected = resolve_window(WINDOW, now=NOW)
 
     windows = {}
-    for view in ("campaign", "country", "source", "deal"):
+    for view in ("campaign", "source", "deal"):
         out = _mart(view, monkeypatch)
         w = out["window"]
         assert w["key"] == expected["key"] == "ytd"
         assert w["start_date"] == expected["start_date"] == "2026-01-01"
         assert w["end_date"] == expected["end_date"] == "2026-06-22"
         assert w["timezone"] == "Europe/London"
+        assert w["through_reason"] is None
         windows[view] = (w["key"], w["start_date"], w["end_date"], w["timezone"])
 
-    # All four views resolve to the exact same window tuple.
+    # The three views resolve to the exact same window tuple.
     assert len(set(windows.values())) == 1
+    # PR-ADS-167A (owner decision 2026-11-20): the country view is the same
+    # resolved window ended at yesterday, and DECLARES it — never a silently
+    # shorter window under the same key.
+    c = _mart("country", monkeypatch)["window"]
+    assert (c["key"], c["start_date"], c["end_date"], c["timezone"]) == (
+        "ytd", "2026-01-01", "2026-06-21", "Europe/London")
+    assert c["through_reason"] == "today_not_settled"
+    assert c["window_range"] == {
+        "start": "2026-01-01", "through": "2026-06-21",
+        "through_reason": "today_not_settled", "empty": False,
+        "disclosure": ("Through 21 Jun 2026 — today is not included until tomorrow "
+                       "morning's sync. Other revenue pages, such as Deals, already "
+                       "count deals closed today.")}
 
 
 def test_invalid_view_is_rejected(monkeypatch):
@@ -310,7 +330,8 @@ def test_country_cannot_invent_spend_beyond_mart(monkeypatch):
     from services.revenue_attribution_service import build_revenue_attribution
     from services.revenue_decision_mart import build_revenue_decision_mart
 
-    page = build_revenue_attribution(WINDOW, now=NOW)
+    # PR-ADS-167A: the country page's contract is the settled-day one.
+    page = build_revenue_attribution(WINDOW, now=NOW, settled_days=True)
     mart = build_revenue_decision_mart(view="country", window=WINDOW, now=NOW)
 
     page_country_spend = round(sum(r["spend"] for r in page["countries"]), 2)
@@ -392,9 +413,23 @@ def test_campaign_mapping_status_is_shared_across_views(monkeypatch):
 
 
 def test_country_reconciliation_status_is_shared_across_views(monkeypatch):
-    statuses = {_mart(v, monkeypatch)["spend_truth"]["country_spend_status"]
+    statuses = {_mart(v, monkeypatch, window=CLOSED_WINDOW)["spend_truth"]["country_spend_status"]
                 for v in ("campaign", "country", "source", "deal")}
     assert statuses == {"verified"}
+    # PR-ADS-167A (owner decision 2026-11-20): over YTD, which includes today,
+    # the COUNTRY view measures through yesterday and is verified; the views
+    # whose window still includes today say why their country spend is not
+    # complete. Two windows, each declared — never one silently relabelled.
+    country = _mart("country", monkeypatch)
+    assert country["spend_truth"]["country_spend_status"] == "verified"
+    assert country["window"]["through_reason"] == "today_not_settled"
+    assert country["window"]["end_date"] == "2026-06-21"
+    for v in ("campaign", "source", "deal"):
+        other = _mart(v, monkeypatch)
+        assert other["window"]["end_date"] == "2026-06-22"
+        assert other["window"]["through_reason"] is None
+        assert other["spend_truth"]["country_spend_status"] == "unavailable"
+        assert "window_includes_day_in_progress" in other["spend_truth"]["country_gap_codes"]
 
 
 # ── 9. Missing mapping is Unavailable, never $0 ─────────────────────────────
@@ -486,6 +521,10 @@ def test_audit_compares_every_page_against_the_mart(monkeypatch):
     assert by_key["roas_by_campaign"]["status"] == "pass"
     assert by_key["roas_by_country"]["status"] == "pass"
     assert by_key["deals"]["status"] == "pass"
+    # PR-ADS-167A: the country page is compared with the mart over ITS days
+    # (YTD through yesterday), and the audit says which days those were.
+    assert by_key["roas_by_country"]["window"]["end_date"] == "2026-06-21"
+    assert by_key["roas_by_country"]["window"]["through_reason"] == "today_not_settled"
 
     # The Source page reports spend on a different basis (geo native vs canonical
     # USD) — the audit must surface the difference WITH a concrete reason.

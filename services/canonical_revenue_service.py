@@ -313,8 +313,48 @@ def ledger_freshness(now=None) -> dict:
             "sync_state_available": available}
 
 
+def _settled_bounds_problem(named: dict, start, end, now) -> str | None:
+    """Why ``bounds`` may not stand in for the named window, or None.
+
+    PR-ADS-167A. ``bounds`` exists to read a named window over the settled
+    days on the ACCOUNT calendar — never to widen it into another period under
+    the same label. They must satisfy: ``start <= end``; ``end <= now``;
+    ``start`` no earlier than account-local midnight of the named window's
+    first day (the account calendar may start up to the zone offset before
+    the UTC one); ``end`` no later than the named window's UTC end. An All
+    Time window (no start) also accepts no start.
+    """
+    from services import canonical_contract  # noqa: PLC0415
+
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if not isinstance(end, datetime) or (start is not None
+                                         and not isinstance(start, datetime)):
+        return "settled bounds are not instants"
+    if start is not None and start > end:
+        return f"settled bounds start {start.isoformat()} after end {end.isoformat()}"
+    if end > now:
+        return f"settled bounds end {end.isoformat()} is after now"
+    named_end = named.get("end")
+    if named_end is not None and end > named_end:
+        return (f"settled bounds end {end.isoformat()} is after the window's end "
+                f"{named_end.isoformat()}")
+    named_start = named.get("start")
+    if named_start is not None:
+        if start is None:
+            return "settled bounds have no start but the window has one"
+        floor = min(named_start, canonical_contract._account_midnight_utc(
+            named.get("start_date"),
+            canonical_contract.configured_account_time_zone()))
+        if start < floor:
+            return (f"settled bounds start {start.isoformat()} is before the "
+                    f"window's first account day ({floor.isoformat()})")
+    return None
+
+
 def load_won_deals(window=None, *, start=None, end=None, now=None,
-                   require_ready: bool = True) -> dict:
+                   require_ready: bool = True, bounds=None) -> dict:
     """The canonical won-deal population of one business window.
 
     PR-ADS-161E: this is now a reader of THE closed-won truth
@@ -345,6 +385,14 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
         start/end: explicit half-open bounds (``end`` EXCLUSIVE) for the
             trend/series consumers; evaluated by the same canonical membership.
         now: reference time, for deterministic tests.
+        bounds: PR-ADS-167A — ``(start, end)`` UTC instants (end EXCLUSIVE)
+            that REPLACE a named window's bounds for the settled-day consumers
+            (Country Revenue & Spend, Dashboard Countries), from
+            ``canonical_contract.settled_revenue_bounds``: the named window
+            ended at yesterday, both ends on the ACCOUNT calendar — the days
+            the settled spend covers. The population is evaluated by the same
+            canonical membership as any explicit bounds; the window block keeps
+            the key and label. ``None`` (every other caller) changes nothing.
         require_ready: retained for signature compatibility. The canonical
             truth never releases a population whose coverage is unproven.
     """
@@ -358,9 +406,17 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
             return unavailable(REASON_UNKNOWN_WINDOW, window=window,
                                detail=f"unknown business window '{window}'")
         resolved = resolve_window(window, now=now)
-        bounds = ccr.window_bounds(ccr.WINDOW_BUSINESS, window, now)
-        start, end = bounds["start"], bounds["end"]
+        named = ccr.window_bounds(ccr.WINDOW_BUSINESS, window, now)
+        start, end = named["start"], named["end"]
         view_args = {"window_type": ccr.WINDOW_BUSINESS, "window_key": window}
+        if bounds is not None:
+            start, end = _utc_bound(bounds[0]), _utc_bound(bounds[1])
+            problem = _settled_bounds_problem(named, start, end, now)
+            if problem:
+                return unavailable(REASON_UNKNOWN_WINDOW, window=window,
+                                   start=start, end=end, resolved=resolved,
+                                   detail=problem)
+            view_args = {"start": start, "end": end}
     else:
         # Normalize BEFORE anything else reads or reports the bounds, so the
         # value membership is evaluated with is the value the response

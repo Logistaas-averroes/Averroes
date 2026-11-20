@@ -677,7 +677,13 @@ def test_05_the_route_reads_the_canonical_table_and_never_the_legacy_one():
     code = re.sub(r'"""[\s\S]*?"""', "", code)
     assert "FROM geo" not in code and "write_geo" not in code
     # The shared day arithmetic, fed chunks clipped to the days each settles.
-    assert "analyze_coverage(start, end, settled_chunks(chunks, tz))" in code
+    # PR-ADS-167A: that rule now lives once, in the spend service, and this
+    # page calls it (``analyze_settled_coverage`` = ``analyze_coverage`` over
+    # ``settled_chunks``) rather than holding a copy.
+    assert "analyze_settled_coverage(start, end" in code
+    spend_src = (ROOT / "services/google_ads_spend_service.py").read_text(
+        encoding="utf-8")
+    assert "analyze_coverage(start, end, settled_chunks(chunks, tz))" in spend_src
     assert "fetch_geo_daily_spend_by_country" in code
 
     js = APP_JS.read_text(encoding="utf-8")
@@ -1176,7 +1182,9 @@ def test_10_every_production_spend_code_is_its_own_row_and_leads_join_it(
             by["code:PK"]["spend_reason"]) == (
         None, "unavailable", "spend_location_unresolved")
     assert geo["unresolved_spend"] == {"criteria": 1, "conflicting_criteria": 0,
-                                       "spend_usd": 8.75, "blocks_zero": True}
+                                       "spend_usd": 8.75, "blocks_zero": True,
+                                       # PR-ADS-167A: the countries it affects.
+                                       "zero_withheld_countries": ["Pakistan"]}
     # 162 spend countries + Pakistan + the one unresolved spend row.
     assert len(geo["rows"]) == 164
     assert geo["countries_active"] == 163
@@ -1203,7 +1211,13 @@ def test_10_every_production_spend_code_is_its_own_row_and_leads_join_it(
     assert page["notice"].startswith(
         "$9 of this window's spend was reported by Google Ads against one "
         "location with no country on record.")
-    assert "Countries that show a figure are not affected." in page["notice"]
+    # PR-ADS-167A: the notice names the countries it affects — Pakistan, the
+    # one lead country never seen in Google Ads spend.
+    assert page["notice"].endswith(
+        "It cannot be the spend of a country Google Ads reports under a location "
+        "of its own, so those countries' figures, zeros included, stand. It "
+        "could be the spend of a country never seen in Google Ads spend: "
+        "Pakistan reads \"Unavailable\" rather than zero.")
 
 
 def test_11_named_spend_is_never_relabelled_and_no_text_is_joined_by_guess(
@@ -1371,9 +1385,14 @@ UNAVAILABLE_NO_COUNTRY = "Unavailable — some spend in this window has no count
 
 
 def _failed_lookup_sync(monkeypatch, google, today):
-    """This morning's REAL sync, with Google's country lookup failing. The
-    sync treats that as non-fatal: it stores every row of the range with no
-    country code, marks the chunk `verified` and reports `success`."""
+    """This morning's REAL sync, with Google's country lookup failing.
+
+    Before PR-ADS-167A the sync treated that as non-fatal: it stored every row
+    of the range with no country code, marked the chunk `verified` and
+    reported `success`. Now it names each criterion from the codes already
+    stored for it, stores only the criteria nothing on record names with no
+    code, and reports `partial` (``country_lookup_failed``) — the chunk is
+    still `verified`, because the spend landed."""
     from services import google_ads_geo_sync_service as geo
     monkeypatch.setattr(geo, "fetch_geo_daily", google.fetch)
 
@@ -1383,7 +1402,10 @@ def _failed_lookup_sync(monkeypatch, google, today):
     result = geo.run_google_ads_geo_sync(
         date_from=(today - timedelta(days=6)).isoformat(),
         date_to=today.isoformat(), dry_run=False, job_id="sync-today")
-    assert result["status"] == "success", result       # the sync does not notice
+    # The status is the caller's to assert: `success` when storage named
+    # every criterion (Google was not asked), `partial` when it had to ask.
+    assert result["status"] in ("success", "partial"), result
+    return result
 
 
 def test_14_a_failed_country_lookup_does_not_turn_a_countrys_spend_into_zero(
@@ -1412,12 +1434,20 @@ def test_14_a_failed_country_lookup_does_not_turn_a_countrys_spend_into_zero(
     _run_real_sync(monkeypatch, google, start - timedelta(days=2), end)
     _backdate_ledger(live_db, "(CURRENT_DATE - 1) + interval '6 hours 5 minutes'")
     google.gbp_by_day[today] = {UK: 5.0}
-    _failed_lookup_sync(monkeypatch, google, today)
+    result = _failed_lookup_sync(monkeypatch, google, today)
+    # Every criterion in the range has a code on record: Google was not asked,
+    # so its failure did not matter, and the run is clean.
+    assert result["status"] == "success", result
     with live_db.connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM google_ads_geo_daily_spend "
                     "WHERE country_code IS NULL AND spend_date BETWEEN %s AND %s",
                     (start, end))
-        assert cur.fetchone()[0] >= 7        # the window's rows really are blank
+        # PR-ADS-167A: the sync no longer blanks them — every criterion here
+        # has a code on record, so storage named it and Google was not asked.
+        # (Before: >= 7 blank rows, and the page read them through the
+        # criterion's identity — which it still does, for rows a pre-167A
+        # sync left blank in production.)
+        assert cur.fetchone()[0] == 0
 
     api = _api("7d")
     page = _render(api, tmp_path)
@@ -1438,16 +1468,21 @@ def test_14_a_failed_country_lookup_does_not_turn_a_countrys_spend_into_zero(
     assert by["code:GB"]["spend_usd"] == 875.0
     assert geo["total_spend_usd"] == 937.5
     assert geo["unresolved_spend"] == {"criteria": 0, "conflicting_criteria": 0,
-                                       "spend_usd": None, "blocks_zero": False}
+                                       "spend_usd": None, "blocks_zero": False,
+                                       "zero_withheld_countries": []}
 
 
 def test_14b_when_no_stored_row_names_the_location_the_country_is_not_zero(
         live_db, tmp_path, monkeypatch):
-    """The reviewer's scenario exactly: the UAE's ONLY rows are inside the
-    range this morning's sync rewrote, so no stored row names criterion 2784
-    any more. Nothing on record says that spend is the UAE's, and nothing
-    here guesses it. But the UAE is not `$0` either: the window holds spend
-    with no country, and that is said."""
+    """No stored row names criterion 2784. Nothing on record says that spend
+    is the UAE's, and nothing here guesses it. But the UAE is not `$0`
+    either: the window holds spend with no country, and that is said.
+
+    PR-ADS-167A changed how this state arises. In 165A it was the UAE's only
+    rows being re-read by a sync whose lookup failed — the sync now keeps
+    their stored code (test_pr_ads_167a_geo_sync_country_codes). It still
+    arises for a location FIRST seen on the morning the lookup fails: the UAE
+    spends for the first time inside this morning's re-read range."""
     today = _today()
     start, end = _window(7)
     _write_fx(start - timedelta(days=2), today)
@@ -1456,11 +1491,14 @@ def test_14b_when_no_stored_row_names_the_location_the_country_is_not_zero(
     google = _GoogleAds()
     for i in range(7):
         google.gbp_by_day[start + timedelta(days=i)] = {UK: 100.0}
-    google.gbp_by_day[end - timedelta(days=2)][UAE] = 50.0
     _run_real_sync(monkeypatch, google, start, end)
     _backdate_ledger(live_db, "(CURRENT_DATE - 1) + interval '6 hours 5 minutes'")
+    google.gbp_by_day[end - timedelta(days=2)][UAE] = 50.0
     google.gbp_by_day[today] = {UK: 5.0}
-    _failed_lookup_sync(monkeypatch, google, today)
+    result = _failed_lookup_sync(monkeypatch, google, today)
+    # The UAE had to be looked up, and the lookup failed: said, not swallowed.
+    assert (result["status"], result["reason"]) == (
+        "partial", "country_lookup_failed"), result
 
     api = _api("7d")
     page = _render(api, tmp_path)
@@ -1531,7 +1569,8 @@ def test_15_a_location_nothing_names_blocks_a_zero_only_in_a_window_that_holds_i
     assert (by["code:GB"]["spend_status"], by["code:AE"]["spend_status"]) == (
         "published", "published")
     assert geo["unresolved_spend"] == {"criteria": 1, "conflicting_criteria": 0,
-                                       "spend_usd": 0.56, "blocks_zero": True}
+                                       "spend_usd": 0.56, "blocks_zero": True,
+                                       "zero_withheld_countries": ["Pakistan"]}
     assert geo["total_spend_usd"] == round((100 + 40 + 0.45) * RATE, 2)
     assert page["notice"].startswith("<$1 of this window's spend was reported")
 
@@ -1564,7 +1603,8 @@ def test_16_a_criterion_stored_under_two_codes_is_not_given_either(
     by = {r["country_key"]: r for r in geo["rows"]}
     assert by["code:DE"]["spend_usd"] is None and by["code:FR"]["spend_usd"] is None
     assert geo["unresolved_spend"] == {"criteria": 1, "conflicting_criteria": 1,
-                                       "spend_usd": 50.0, "blocks_zero": True}
+                                       "spend_usd": 50.0, "blocks_zero": True,
+                                       "zero_withheld_countries": ["France", "Germany"]}
     assert geo["total_spend_usd"] == 175.0
 
     # The rule itself: one code resolves, none and two do not.

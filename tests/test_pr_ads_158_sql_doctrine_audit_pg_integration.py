@@ -379,12 +379,19 @@ def test_end_to_end_run_is_read_only_and_exits_zero(monkeypatch, pg):
     assert _counts(connection) == before
 
 
+#: Distinctive seeded personal data (PR-ADS-167A): an Ofcom drama-range mobile
+#: number and a unique address, so the check can match the WHOLE value.
+_SEEDED_PHONE = "+44 7700 900 123"
+_SEEDED_EMAIL = "pr158.seeded.lead@example.invalid"
+
+
 def test_no_email_or_phone_in_runtime_output(monkeypatch, pg):
     connection = _use_cluster(monkeypatch, pg)
     _seed(connection)
     with connection.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE leads SET company = 'someone@example.com +44 20 7946 0958'")
+            cur.execute("UPDATE leads SET company = %s",
+                        (f"{_SEEDED_EMAIL} {_SEEDED_PHONE}",))
     from scripts import audit_sql_doctrine_inventory as cli
     from analysis import sql_doctrine_audit as audit
     import json
@@ -393,4 +400,16 @@ def test_no_email_or_phone_in_runtime_output(monkeypatch, pg):
     report = cli.run_audit(now=NOW)
     text = json.dumps(report, default=str) + audit.render_human(report)
     assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text)
-    assert "7946" not in text
+    # PR-ADS-167A: look for the fixture's OWN personal data, as whole values —
+    # never a 4-digit fragment that file paths and line numbers can contain
+    # (the old "7946" check failed whenever a reported source line was 17946).
+    assert _SEEDED_EMAIL not in text
+    assert _SEEDED_PHONE not in text
+    # …nor its digits-only form ("447700900123"), however it was punctuated.
+    digits = re.sub(r"\D", "", _SEEDED_PHONE)
+    squeezed = re.sub(r"[\s+().-]", "", text)
+    assert not re.search(r"(?<!\d)" + digits + r"(?!\d)", squeezed)
+    # …nor the national format of the same number ("07700 900123").
+    national = "0" + digits[2:]
+    assert "07700 900123" not in text
+    assert not re.search(r"(?<!\d)" + national + r"(?!\d)", squeezed)

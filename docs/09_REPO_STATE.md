@@ -4490,3 +4490,439 @@ and catches a scheduler that stopped running.
    on `self` and used in another method (`self.api = client.crm.deals…`), and
    a tuple-unpacking alias (`a, b = client.crm.deals, …`).
 10. Not checked against production HubSpot.
+
+---
+
+## PR-ADS-167A — Countries: zeros that are measured, codes the sync keeps, one settle rule (November 2026)
+
+Scope: the PR-ADS-165A known gaps for the Countries page and the surfaces that
+share its geo data. No change to the SQLs column (legacy, separate slice).
+Criteria `2192` and `2364` are not labelled (owner decision pending).
+
+**Production facts (read-only, 2026-11-19).** `google_ads_geo_daily_spend`:
+35,297 rows with a country code over 212 criteria carrying 212 codes, strictly
+one-to-one; 25 code-less rows over two criteria, `2192` and `2364`, with no
+coded row anywhere (about £11; newest code-less day 2026-11-06). Coverage
+ledger: 122 chunks, all verified, every `fetched_at` set; the daily chunk
+[D-6..D] is fetched about 06:02 UTC. One Google Ads account, time zone
+Europe/London.
+
+### A. The zero rule no longer over-withholds (165A gap 1)
+
+Before: a resolved lead country with no spend row read "Unavailable — some
+spend in this window has no country" whenever any spend in the window had no
+country. With `2192` spending, that was every spend-less lead country.
+
+Google keys one country under one criterion. Spend on a criterion no stored
+row names is therefore not the spend of a country whose code another criterion
+carries on record. A resolved country with no spend row is now `$0`
+(published) when:
+
+1. the window is covered (unchanged);
+2. every unresolved criterion in the window is code-less everywhere — none is
+   a criterion whose rows carry two codes;
+3. the country's code is carried on record by exactly one criterion, and that
+   criterion carries no other code (`repo.fetch_geo_code_carriers`).
+
+Otherwise it is "Unavailable" with the same reason as before. Rule 3 is
+stricter than "carried by at least one criterion": if the stored data shows a
+code under two criteria, "one country, one criterion" is false for that
+country and its zero is not measured. Production has no such code. A failed
+carrier read counts as "carried by nothing".
+
+A country never seen in Google Ads geo spend (Pakistan: leads, no Google
+spend) could be the code-less location: "Unavailable" while code-less spend
+is in the window, `$0` when none is.
+
+The payload's `unresolved_spend` gains `zero_withheld_countries`, and
+`blocks_zero` now means "withholds at least one country's zero". The notice
+says which countries are affected. Production-shaped case (UK spends, `2192`
+spent £3 in the window, Jordan's only rows are older, Pakistan has never
+spent):
+
+- before: notice "…A country with no spend of its own reads "Unavailable"
+  rather than zero, because that spend may be its own. Countries that show a
+  figure are not affected."; Jordan "Unavailable — some spend in this window
+  has no country"; Pakistan the same.
+- after: notice "$4 of this window's spend was reported by Google Ads against
+  one location with no country on record. It is in the total and in the
+  "(unresolved location)" row. It cannot be the spend of a country Google Ads
+  reports under a location of its own, so those countries' figures, zeros
+  included, stand. It could be the spend of a country never seen in Google
+  Ads spend: Pakistan reads "Unavailable" rather than zero."; Jordan `$0`;
+  Pakistan "Unavailable — some spend in this window has no country".
+
+When code-less spend is in the window and no country is affected the notice
+still shows, and ends "No country's figure is affected." When a criterion in
+the window carries two codes it says so and lists every spend-less country.
+
+### B. The geo sync keeps known codes and reports a failed lookup (165A gap 2)
+
+Before: `_resolve_country_metadata` swallowed a failed `geo_target_constant`
+lookup; every row of the re-read range was written with no code (the range is
+deleted first, so stored codes for those days were lost), the chunk was
+`verified` and the run `success`.
+
+Now:
+
+- One statement of the identity rule, `db/geo_identity_sql.py` (exactly one
+  code on record over the whole table resolves; none or two do not). Every
+  reader uses it: `fetch_geo_criterion_identities`,
+  `fetch_geo_daily_spend_by_country` and `fetch_geo_code_carriers`.
+- The sync names each criterion from the codes already stored for it, and asks
+  Google only about the criteria storage cannot name.
+- The writer never writes NULL over a stored code: `replace_geo_daily_spend_chunk`
+  reads the identity of code-less incoming criteria inside its own
+  transaction, before deleting the range (it reports `codes_preserved`);
+  `upsert_geo_daily_spend` keeps a stored code when the payload has none.
+- A lookup that raises still writes the rows (the spend is real) and the chunk
+  stays `verified` — coverage is a statement about spend — with the failure in
+  the chunk's `error_message`. The run is `partial`, reason
+  `country_lookup_failed`. The daily incremental step passes `partial` to the
+  sync batch and `sync_state` unchanged, adds the error to the run's error
+  list, and does not advance the watermark or the geo checkpoint.
+- A lookup that answers with no country for a criterion (production's
+  `2192`) is Google's answer, not a failure: the run stays `success`.
+
+### C. One settle rule, and the consumers that publish country spend (165A gaps 3/4)
+
+The "settled" rule — a verified chunk covers only the days that had ended, in
+the account time zone, when it was fetched — moved from
+`country_evidence_service` into `google_ads_spend_service`
+(`settled_through`, `settled_chunks`, `analyze_settled_coverage`). The
+Countries page calls the shared one; the old names are re-exported. The
+reasons are shared codes: `spend_not_reread_since_day_ended`,
+`spend_reread_failed`, `account_time_zone_unknown`, and new
+`window_includes_day_in_progress`.
+
+`analyze_published_geo_coverage` applies it to the geo ledger (reading the
+account time zone where the sync does). `analyze_geo_coverage` keeps its old
+meaning, "was every day fetched?", because the sync's own completeness check
+and the backfill script ask that; with the settle rule every daily sync would
+be `partial`.
+
+**Owner decision (2026-11-20): the country consumers' open windows end
+yesterday.** Today is never settled, so a window that includes today can never
+hold complete country spend. For Country Revenue & Spend and Dashboard
+Countries (and the mart country view and reconciliation panel that feed them)
+a window that includes today ENDS AT YESTERDAY in the account time zone. Its
+deals (and so revenue and customers) are read over the same account-local days
+as its settled spend: from account-local midnight of the first day to
+account-local midnight of today, as UTC instants. Leads keep the mart's
+date-grain read over the same start and end dates. Closed windows (Last
+Quarter) are unchanged: their deals keep the business windows' UTC-midnight
+bounds, so under BST a closed window's deals and its London spend days are an
+hour apart at each end (see Known gaps). Every other revenue page
+keeps its window, so these pages may differ from them by today's deals, and
+say so.
+
+One rule, `services/canonical_contract.py`:
+
+- `end_at_settled_day(resolved)` — an open window keeps its start and ends
+  yesterday; a closed one is unchanged. It adds `through_reason`
+  (`today_not_settled`), `account_today` and `window_range` = `{start,
+  through (inclusive), through_reason, empty, disclosure}`. The disclosure is
+  "Through 19 Nov 2026 — today is not included until tomorrow morning's sync.
+  Other revenue pages, such as Deals, already count deals closed today." On a
+  quarter's or year's first day the open window has no settled day (`empty`,
+  "No completed day in this window yet — …").
+- `resolve_settled_window(window, now)` = that over `resolve_canonical_window`.
+- `settled_revenue_bounds(resolved)` — `(start, end)`: account-local midnight
+  of `start_date` (None for All Time) and of `account_today` (exclusive), as
+  UTC instants; `end == start` on an empty window; None for a closed window.
+  Every settled consumer, the parity reference and the reader cutover audit
+  read deals through it, so they compare the same instants. Review round 1
+  found the first cut resolving the window KEY on the UTC day and only
+  narrowing its end: at 23:30 UTC on 30 Sep (00:30 BST, 1 Oct) the empty Q4
+  window published Q3's 2 deals / $8,000 beside £0 spend, and a deal at 00:20
+  BST on 16 Jul was counted in "Through 15 Jul".
+- An empty window (a quarter's or year's first day) measures nothing: every
+  metric on these consumers is unavailable with `no_settled_day_in_window`
+  (mart summary, spend truth and readiness; Dashboard Countries KPIs, rows,
+  residual and metric contracts; the panel); the UI shows the disclosure
+  instead of the cards, and the range chip shows no reversed range.
+
+Mechanism, no forked reader:
+
+- `canonical_revenue_service.load_won_deals(window, ..., bounds=None)` — a
+  new keyword: `(start, end)` from `settled_revenue_bounds` that replaces the
+  named window's bounds; the population is evaluated over `[start, end)` by
+  the same canonical membership as any explicit bounds (`window_view`), the
+  window block keeps the key and label. `None` (every other caller) changes
+  nothing. No new reader file, so the cutover audit's `INVENTORY` is
+  unchanged.
+- `revenue_attribution_service.build_revenue_attribution(window, now, *,
+  settled_days=False)` — True resolves the settled window for spend, leads and
+  geo coverage and passes `bounds` to the reader contract. The default
+  (`/api/revenue-attribution`, Campaign Revenue & Spend) is unchanged.
+- `revenue_decision_mart.SETTLED_DAY_VIEWS = {"country"}`: the country view is
+  built over the settled-day core; its `window` block carries
+  `through_reason` / `account_today` / `window_range`. The campaign, source and
+  deal views are unchanged. Its `sql_reconciliation` is asked at the last
+  instant of yesterday and published only when that resolves to exactly the
+  view's days; otherwise (Last 6 Months, whose start would move) it is
+  `unavailable` with `settled_window_not_reconcilable`.
+- `dashboard_countries_service._assemble` reads the mart country view and the
+  geo spend over its window, and the deals proving each country with
+  `load_won_deals(..., bounds=settled_revenue_bounds(window_block))`; the
+  mart's `window.start_utc` / `end_utc_exclusive` publish those instants.
+  When geo is not ready (any gate gap, e.g. before the morning sync) each
+  country row and the residual withhold the same figures as the KPIs (spend,
+  revenue, deals and proof list, customers, SQLs, ratio; native spend only
+  where the KPI keeps it), with `withheld_reason` and the status "Country
+  figures withheld" — rows that add back up to a withheld total would publish
+  it (review round 1: before the fix the US row showed spend 8000 / revenue
+  29000 / deals 2 / SQLs 20 beside withheld KPIs). The previous period is
+  judged by the same rule. `analysis/sql_doctrine_registry.py` classifies the
+  new symbol (`_withhold_when_geo_not_ready`) under the existing Dashboard
+  Countries legacy-SQL record.
+- `build_geo_reconciliation` applies `end_at_settled_day` to its account-day
+  window and publishes `through_reason` / `window_range`.
+- The mart's page audit (`build_revenue_performance_audit`) compares Country
+  Revenue & Spend's spend with the mart's spend over the SAME settled days and
+  reports that window on the row.
+
+Final review (round 3):
+
+- `load_won_deals(bounds=)` refuses bounds that do not sit inside the named
+  window (`_settled_bounds_problem`): start after end, end after now, start
+  before account-local midnight of the window's first day, end after its UTC
+  end, or no start for a window that has one → `unavailable` with
+  `unknown_business_window`. Before: `bounds=(2020-01-01, 2030-01-01)` on
+  Current Quarter returned 2024 and 2026 deals labelled "Current Quarter".
+- The parity audit compares a settled consumer's published instants
+  (`window.start_utc` / `end_utc_exclusive`) with `settled_revenue_bounds` for
+  the window it resolves itself, not only the dates: right days read on the
+  UTC calendar is `consumer_windows_differ`.
+- Country Revenue & Spend's own rows (the mart country view) withhold, when
+  the geo gate is not ready, every row's spend, ratio and country-attributed
+  outcome (leads, SQLs, deals, customers, revenue, `metrics`) with
+  `withheld_reason` (`_withhold_country_rows_when_geo_not_ready`); spend
+  survives as native only when FX is the only gap. Before: with the gate at
+  `spend_not_reread_since_day_ended`, the GB row carried spend 6000, revenue
+  9000, 1 deal and SQLs.
+
+| Consumer | Window end | Verdict |
+| --- | --- | --- |
+| Countries (`/api/geo`) | yesterday | unchanged; uses the shared rule |
+| Country Revenue & Spend (mart country view), Dashboard Countries, geo reconciliation panel | yesterday for open windows; Last Quarter unchanged | after the morning sync (~06:02 UTC) every figure publishes. Between account midnight and that sync yesterday was last read in progress: country spend and ratios withheld with `spend_not_reread_since_day_ended` ("…The morning sync re-reads it."); revenue for the same days still publishes |
+| `/api/revenue-attribution` (default contract), Campaign Revenue & Spend, every other revenue page | today | unchanged; its country section withholds open windows with `window_includes_day_in_progress` |
+| Geo sync final check, backfill script | — | unchanged ("was every day fetched") |
+
+The Countries page (`/api/geo`) now reads its spend rows, criterion
+identities and code carriers in ONE REPEATABLE READ, READ ONLY transaction
+(`repo.geo_read_snapshot()`), so a sync naming a criterion between them cannot
+produce a false $0.
+
+Rendered (`static/app.js` `renderWindowRange` → `windowThroughNote`, verbatim
+from `window.window_range.disclosure`), open window after the morning sync:
+"Current Quarter: 2026-10-01 → 2026-11-19 · Through 19 Nov 2026 — today is not
+included until tomorrow morning's sync. Other revenue pages, such as Deals,
+already count deals closed today." on Country Revenue & Spend's range chip and
+on the Dashboard's range chip for Countries; the Verified Geo Spend card shows
+the native/USD figure. Before the morning sync the same window line shows, and
+the card reads "Country spend withheld — yesterday's spend has not been
+re-read since the day ended" (`ctrySpendWithheldText`, from the page's metric
+contract reason code). "Country spend withheld for this window" is gone. The
+Country Revenue & Spend subtitle adds "A window that includes today ends
+yesterday, for revenue and spend alike: today's country spend is complete only
+after tomorrow morning's sync." On a window with no completed day the range
+chip reads "Current Quarter: No completed day in this window yet — today (1 Oct
+2026) is not included until tomorrow morning's sync. Other revenue pages, such
+as Deals, already count deals closed today." and both pages show a "No
+completed day yet" card with that sentence instead of cards and tables.
+
+**Cross-page parity** (`cross_page_parity_service`): a consumer whose window
+block declares `through_reason: today_not_settled` is not compared with the
+others' window; it is compared with the settled window the audit resolves
+itself (`settled_window` in the result) and a declaration it cannot reproduce
+is `consumer_windows_differ`. An UNdeclared shorter window is still compared
+with the others and still differs. A settled reference consumer,
+`revenue_decision_mart/country` (the mart country view; it certifies no
+identity), supplies the coverage proof for the country identities when their
+consumer declares the settled window, and the total for the
+`campaign_attributable_sqls = country + residual` conservation rule
+(`total_source` in the result) — used only while its window is the parts'
+window, otherwise not evaluable. Equality is not loosened. The reader cutover
+audit judges `revenue_decision_mart_country` and `dashboard_countries` against
+the canonical publication for the settled days (`settled_publication`).
+
+**Dashboard Countries now withholds what it declared not ready.** With geo
+not ready, the page's own metric contract said `not_ready` for
+country-attributed spend, revenue, the closed-won deal count and the SQL
+split, and published them anyway (`kpis.verified_spend_usd`,
+`won_revenue_usd`, `closed_won_deals`, `sqls`, `residual.sqls`). That was
+latent for any non-ready geo window (a mismatch); the contract test
+`test_f3_15` and the cross-page parity audit caught it while open windows were
+not ready (before the owner decision above). It still applies before the
+morning sync and to any other geo gap. Those figures are now absent (`null`) when geo is not ready, the
+withheld spend and SQLs name the gate's reason in `unavailable` and in their
+metric contract, and native spend is withheld too unless the only gap is FX
+(the gate's own rule: "native spend is shown instead"). The KPI card reads
+"Unavailable" with "Country spend withheld for this window".
+
+The shared gate `resolve_country_spend_status` gained one required,
+keyword-only argument, `geo_coverage_settle_gap`; it names a fully fetched but
+unsettled window instead of "never synced — run the geo backfill". New
+operator sentences in `GEO_GAP_MESSAGES`.
+
+Country Revenue & Spend and Dashboard Countries read
+`fetch_geo_daily_spend_by_country`, which named a criterion by
+`MAX(country_code)` of the window's rows. It now carries the criterion's
+identity on record, read in the same statement as the rows
+(`identity_codes` lists every code so "none" and "two" differ). A criterion
+whose window rows were written while the lookup failed no longer drops out of
+its country.
+
+### Tests
+
+New, all on real PostgreSQL, in CI's PostgreSQL step and did-run list:
+
+- `tests/test_pr_ads_167a_countries_zero_rule_pg_integration.py` (7): the
+  production shape through the real handler and `loadGeo` — Jordan `$0`,
+  Pakistan "Unavailable" with `2192` spend in the window and `$0` without; a
+  two-code criterion in the window; a code under two criteria; the carrier
+  read failing; an uncovered window; one identity statement.
+- `tests/test_pr_ads_167a_geo_sync_country_codes_pg_integration.py` (4): the
+  real sync with a fake Google whose lookup raises — stored codes kept
+  (including a criterion whose only rows were in the re-read range), the new
+  criterion NULL, Google asked only about it, run `partial`, ledger chunk
+  verified with the error, checkpoint not advanced; the next run resolves it
+  and is `success`; a lookup that names no country is not a failure; the
+  daily step records a `partial` batch and `sync_state`; the writer guard.
+- `tests/test_pr_ads_167a_settled_coverage_consumers_pg_integration.py` (12):
+  the shared rule's reasons; one rule; the reconciliation panel over Last 6
+  Months ends yesterday, excludes today's spend from both totals and is ready
+  after the morning sync, not ready before it (`spend_not_reread_since_day_ended`),
+  Last Quarter unchanged; a closed window not re-read after its last day; the
+  settled revenue attribution contract and the mart country view (ready,
+  declared) beside the unchanged default contract and campaign view; identity
+  in the country spend reader and Dashboard Countries' map; the sync's check
+  is not the publication rule; and end to end, a deal closed TODAY is on the
+  Deals page and the campaign view and not on the mart country view or
+  Dashboard Countries (whose spend, deals, revenue and per-country ratio all
+  cover the same days), with the disclosure, Last Quarter unchanged and
+  spend withheld before the morning sync. Review round 1 added: the first hour
+  of Q4 under BST (23:30 UTC 30 Sep) and noon on 1 Oct publish nothing on the
+  mart, Dashboard Countries or the panel (`no_settled_day_in_window`), and at
+  noon on 16 Jul the 00:30 BST 1 Jul deal is in and the 00:20 BST 16 Jul deal
+  is out, with the window's UTC instants on the account calendar.
+
+Final review added: PG `test_12` (one geo snapshot, behavioural: a concurrent
+commit naming criterion 2192 is invisible to identities and carriers inside
+`geo_read_snapshot`, visible after; an error inside makes the readers
+unavailable; a write inside is refused), and pure 06d (bounds never widen),
+12 (UTC-calendar instants are a window mismatch) and 13 (Country Revenue &
+Spend rows withhold) — all three fail on a05ade7. The 158 privacy test also
+checks the national format ("07700 900123").
+
+Not PostgreSQL (full suite): `tests/test_pr_ads_167a_settled_day_windows.py`
+(16) — the rule (open, closed, all time, a quarter's first day, the account
+day at 23:30 UTC under BST), `load_won_deals(bounds=)` over account-local
+instants (the reviewer's probe cases: 00:20 BST today out, 00:30 BST on the
+first day in, the first hour of a quarter empty), the Countries page's one
+geo snapshot (structural), and the parity audit: the country consumers declare a window it
+reproduces, a wrong declaration and an undeclared shorter window are both
+`consumer_windows_differ`, conservation uses the settled reference only over
+the same days.
+
+Against origin/main 17 of 18 fail; the one that passes is the uncovered-window
+guard (rule 1, unchanged behaviour). Against the first 167A cut (open windows
+withheld, before the owner decision) every new settled-window case fails (13
+of 18 in the two settled modules; the 5 that pass are unchanged rules): the
+panel's `date_to` was today, `load_won_deals` took no `through`, the rule did
+not exist. Review round 1's new cases (06, 06b, 06c, PG 09, 10, 11 and 138's
+extended `test_167a_a`) all fail on 8ef9cac: Q3 deals published under an
+empty Q4 window (3 deals), "verified" zeros on 1 Oct, the window starting at
+UTC midnight, the 00:20 BST deal counted, and the US row's spend 6000
+published beside withheld KPIs. Behavioural failures among them: Jordan
+"Unavailable" for `$0`; the sync `success` after a failed lookup, and the
+daily batch `success`; the writer storing NULL over "AE"; the panel
+`geo_ready: true` for the current quarter; revenue attribution
+`geo_coverage_status: complete` for the current quarter; the UAE named
+`(None, None)` by the country spend reader. A mutation dropping rules 2 and 3
+fails the two-code cases.
+
+Existing tests changed (expectations of the old behaviour, or fakes that did
+not model production):
+
+- `test_pr_ads_165a_countries_pg_integration.py`: `unresolved_spend` dicts
+  gained `zero_withheld_countries`; the notice wording; the structural check
+  now finds the settle rule in the spend service; `_failed_lookup_sync` no
+  longer asserts `success` — test 14 asserts `success` (storage named every
+  criterion, Google was not asked) and that no row is blanked; test 14b's
+  location is now first seen on the failing morning (a sync can no longer
+  blank a known one) and asserts `partial`.
+- `test_pr_ads_153f_country_geo_truth.py`, `test_pr_ads_154b_truth_readiness.py`:
+  the gate's proven-evidence sets and caller checks include the new required
+  argument; the reconciliation fixture's chunk carries `fetched_at` and runs a
+  closed window, and a new case asserts YTD is `window_includes_day_in_progress`.
+- Geo ledger fakes carry `fetched_at` (production stamps every chunk), and
+  the account time zone where it was not patched: 124, 125 (126/129/130/131
+  through it), 129, 130, 138, 153f, `test_revenue_attribution_service.py`.
+- After the owner decision the first cut's moves to Last Quarter are
+  REVERTED: 126, 131, 154c parity and 154c_f3 are origin/main's files again
+  (154c_f3 keeps one change, below); 129/130/153f run YTD again; 125's country
+  cases run YTD again; 138 is back at 22 June / YTD.
+- Changed against origin/main because the behaviour changed:
+  125 `test_all_views_use_the_same_window_resolver` (campaign/source/deal end
+  22 June; the country view ends 21 June and declares it, disclosure text
+  asserted), `test_country_cannot_invent_spend_beyond_mart` (compares with the
+  settled contract), `test_country_reconciliation_status_is_shared_across_views`
+  (all four verified on Last Quarter; on YTD the country view is verified
+  through yesterday and the others say `window_includes_day_in_progress`),
+  `test_audit_compares_every_page_against_the_mart` (the country row reports
+  its window); 154c_f3 `test_f3f1_13` mutates the settled reference, the
+  evidence the country proof now reads; `test_pr_ads_154c_parity_pg` excludes
+  declared rows from the one-range check and asserts they equal
+  `settled_window`; 153f `test_f1_6` (YTD ends yesterday; a ledger fetched two
+  days ago is `spend_not_reread_since_day_ended`); 138 `test_167a_a/b/c` (YTD
+  through yesterday publishes; before the morning sync withheld with the
+  reason, and no row / residual / regional figure the KPIs withhold; Last
+  Quarter unchanged; the card's reason text); 124 and
+  `test_revenue_attribution_service.py` test the settled contract
+  (`settled_days=True`) for availability and still assert the default
+  contract withholds an open window.
+- `test_pr_ads_158_sql_doctrine_audit_pg_integration.py::test_no_email_or_phone_in_runtime_output`
+  (fixture identity, not a weakening): it asserted the fragment "7946" of the
+  seeded phone never appears, and the audit lists source locations — app.js
+  line 17946 is a classified occurrence. The fixture now seeds a distinctive
+  phone and email and the test looks for each whole value and the phone's
+  digits-only form; a probe printing either from the audit fails it.
+- `test_pr_ads_124_roas_country_geo_recovery.py`: the dry-run sync case's fake
+  Google answers the country lookup (unpatched, the real connector cannot load
+  and that is now — correctly — a `partial` run).
+
+### Known gaps
+
+1. **Closed windows keep the UTC-midnight deal bounds** (owner: Last Quarter
+   unchanged), while their spend is London days: under BST a closed window's
+   deals and spend are an hour apart at each end (a deal at 00:30 BST on the
+   quarter's first day is in the previous quarter's revenue). Open windows have
+   no offset. Last 6 Months' SQL reconciliation is withheld on the country
+   view; `/api/revenue-attribution` (default) keeps today and withholds its
+   country section for open windows.
+2. **Campaign spend coverage still judges chunk status.** Campaign ROAS, the
+   Dashboard's spend and Campaign Revenue & Spend use `analyze_coverage` over
+   the campaign spend ledger; they count today's part-day as covered. Applying
+   the rule there withholds the Dashboard's spend for every open window — not
+   done here.
+3. **Campaign Evidence (`/api/campaigns`) has no coverage gate at all.** It
+   sums `fetch_canonical_campaign_spend` over a window ending today, whatever
+   the ledger says. 165A described it as judging chunk status; it does not
+   judge coverage. Not changed.
+4. **Fixed (review round 1):** the Countries page's spend, identity and
+   carrier reads share one snapshot. Its coverage-ledger read before them is
+   still a separate statement.
+5. **Rows already blanked in production stay blank** until a sync re-reads
+   them (the daily sync re-reads 7 days). Readers name them through the
+   criterion's identity; nothing rewrites history.
+6. **No settle margin**, as in 165A: a day settles on any verified fetch made
+   after account-midnight.
+7. **Not checked against production**: the new statements' cost on 35k rows,
+   and whether production's lookup ever raises (the 165A defect assumed it).
+8. **Fixed (review round 1):** Dashboard Countries' rows and residual
+   withhold what its KPIs withhold.
+9. **Parity for open windows** compares the country consumers with the
+   settled reference, one extra mart build per audited window; its cost was
+   not measured against production.

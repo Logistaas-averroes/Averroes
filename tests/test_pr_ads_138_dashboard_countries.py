@@ -143,7 +143,13 @@ DEAL_ROWS = [
 # `geo_coverage=[]`.
 GEO_COVERAGE_COMPLETE = [
     {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
-     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191},
+     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191,
+     # PR-ADS-167A: production stamps every chunk with its fetch time. Fetched
+     # at import: the parity CLI cases (154c, 154c_f3) reuse this fixture and
+     # resolve their window against the WALL CLOCK, so NOW's 06:02 would not
+     # settle their yesterday. After NOW, it settles every day through NOW's
+     # yesterday too.
+     "fetched_at": datetime.now(tz=timezone.utc)},
 ]
 
 
@@ -905,3 +911,74 @@ def test_countries_error_and_loading_states_exist():
     loader = _slice(JS, "async function loadDashboardCountries", 1500)
     assert "renderDashSkeleton()" in loader
     assert "is-refreshing" in loader
+
+
+def test_167a_a_an_open_window_ends_yesterday_and_before_the_morning_sync_withholds(
+        monkeypatch):
+    """PR-ADS-167A (owner decision 2026-11-20). YTD includes today, so
+    Dashboard Countries measures it THROUGH YESTERDAY — revenue and spend over
+    the same days — and states it. After the morning sync (the fixture's chunk,
+    fetched after NOW) every figure publishes; before it, yesterday was last
+    read while in progress and country spend is withheld, with that reason."""
+    import json
+    out = _countries(monkeypatch)
+    assert out["window"]["end_date"] == "2026-06-21"
+    assert out["window"]["through_reason"] == "today_not_settled"
+    assert out["window"]["window_range"]["disclosure"].startswith(
+        "Through 21 Jun 2026 — today is not included until tomorrow morning's sync.")
+    assert out["kpis"]["geo_period_revenue_per_ad_spend"] is not None
+    assert out["kpis"]["verified_spend_usd"] is not None
+    assert any(c["period_revenue_per_ad_spend"] is not None for c in out["countries"])
+    # Before NOW's morning sync: the newest fetch is the previous morning's.
+    yesterday_morning = [dict(GEO_COVERAGE_COMPLETE[0],
+                              fetched_at=datetime(2026, 6, 21, 6, 2, tzinfo=timezone.utc))]
+    early = _countries(monkeypatch, geo_coverage=yesterday_morning)
+    assert early["window"]["end_date"] == "2026-06-21"
+    assert early["kpis"]["geo_period_revenue_per_ad_spend"] is None
+    # Withheld means absent: the not-ready country figures are not published.
+    assert early["kpis"]["verified_spend_usd"] is None
+    assert early["kpis"]["verified_spend_native"]["amount"] is None
+    assert early["kpis"]["sqls"] is None and early["residual"]["sqls"] is None
+    assert all(c["period_revenue_per_ad_spend"] is None for c in early["countries"])
+    # Review round 1 (audit167a/test_probe_e): the rows and the residual
+    # withhold what the KPIs withhold — summing the rows must not give back a
+    # withheld total. Native spend is withheld too: the gap is coverage, not FX.
+    assert early["countries"], "the fixture has country rows"
+    for c in early["countries"]:
+        for f in ("spend_native", "spend_usd", "won_revenue_usd", "closed_won_deals",
+                  "customers", "sqls", "period_revenue_per_ad_spend"):
+            assert c[f] is None, (c["country_code"], f, c[f])
+        assert c["deals"] == [] and c["metrics"] is None
+        assert c["withheld_reason"] == "spend_not_reread_since_day_ended"
+    for f in ("spend_native", "spend_usd", "won_revenue_usd", "closed_won_deals", "sqls"):
+        assert early["residual"][f] is None, f
+    assert not any(isinstance(r.get(k), (int, float)) and r.get(k)
+                   for r in early["regional_mix"]
+                   for k in ("spend_native", "spend_usd", "won_revenue_usd",
+                             "closed_won_deals", "sqls")), early["regional_mix"]
+    assert (early["metric_truth"]["country_attributed_spend_usd"]["unavailable_reason"]
+            == "spend_not_reread_since_day_ended")
+    text = json.dumps(early, default=str)
+    assert "The morning sync re-reads it" in text
+    assert "Run the geo backfill" not in text
+
+
+def test_167a_b_last_quarter_is_unchanged(monkeypatch):
+    """A closed window keeps its last day and declares no cut."""
+    out = _countries(monkeypatch, window="last_quarter")
+    assert out["window"]["end_date"] == "2026-03-31"
+    assert out["window"]["through_reason"] is None
+    assert (out["window"]["window_range"] or {}).get("through_reason") is None
+
+
+def test_167a_c_the_card_names_why_spend_is_withheld_and_never_the_old_sentence():
+    """The KPI card reads the reason code the page's metric contract carries
+    (`GEO_COVERAGE_REASONS`), never "withheld for this window"."""
+    row = _slice(JS, "function renderCtryKpiRow", 2600)
+    assert "ctrySpendWithheldText(d)" in row
+    assert "Country spend withheld for this window" not in JS
+    why = _slice(JS, "function ctrySpendWithheldText", 600)
+    assert "country_attributed_spend_usd" in why and "GEO_COVERAGE_REASONS[" in why
+    rng = _slice(JS, "function windowThroughNote", 1400)
+    assert 'through_reason !== "today_not_settled"' in rng
+    assert "wr.disclosure" in rng
