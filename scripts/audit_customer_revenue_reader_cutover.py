@@ -43,6 +43,12 @@ decide any verdict. It proves:
                                           ROAS or CAC; certified ROAS/CAC are
                                           unavailable
 
+PR-ADS-168A: the same reader checks also run over the Channels page's
+EVIDENCE windows (30d / 60d / 180d / all_time, ``report["evidence_windows"]``):
+``load_won_deals(k, window_type="evidence")`` against the truth service and an
+independent restatement of the evidence window, and ``channel_outcomes``
+through checks 8, 9 and 18 against the publication over its settled days.
+
 A metric WITHHELD for a CRM reason (a won deal without a company, without a
 proven USD amount, without a close date) is a source finding, not a failure:
 the audit exits 0 when every reader says so truthfully.
@@ -109,13 +115,19 @@ INVENTORY = (
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/source_attribution_service.py",
-     "surface": "/api/revenue-by-source; Revenue by Source",
+     "surface": "/api/revenue-by-source; Revenue by Source. PR-ADS-168A: "
+                "/api/channel-funnel `outcomes` (build_channel_outcomes); Channels",
      "existing_source": "bucket deal count, bucket proven sum",
      "existing_meaning": "won deals as customers; customer rate over leads",
      "canonical_replacement": "reader_row per group / channel / platform; "
-                              "lead_to_customer_rate incompatible",
-     "window_cohort": "business window · close-date cohort",
-     "ui_effect": "Customer Rate column retired; customers per bucket, not additive",
+                              "lead_to_customer_rate incompatible. Channels: "
+                              "load_won_deals(evidence window, settled bounds) + "
+                              "reader_row per original source; totals = the "
+                              "window's canonical_metrics",
+     "window_cohort": "business window · close-date cohort; Channels: evidence "
+                      "window ended yesterday · close-date cohort",
+     "ui_effect": "Customer Rate column retired; customers per bucket, not additive. "
+                  "Channels: outcome columns per channel, Source not resolved row",
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/campaign_identity_service.py",
@@ -600,12 +612,36 @@ def _dt(value):
     return p if p.tzinfo else p.replace(tzinfo=timezone.utc)
 
 
-def independent_members(universe: dict, window_key: str, now) -> dict:
-    """Members of a business window, re-derived: the won flag only, an exact
-    close date in ``[start, end)`` and not after ``now``; All Time also holds
-    the undated won deals."""
-    from analysis.business_windows import get_window_bounds  # noqa: PLC0415 - the definition
-    start, end = get_window_bounds(window_key, now=now)
+_EVIDENCE_DAYS = {"7d": 7, "14d": 14, "30d": 30, "60d": 60, "180d": 180,
+                  "all_time": None}
+
+
+def independent_evidence_bounds(window_key: str, now) -> tuple:
+    """An evidence window restated (PR-ADS-168A): N calendar days in the
+    account zone ending on today's account date, half-open on account-local
+    midnights; All Time has no start."""
+    from datetime import time, timedelta  # noqa: PLC0415
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+    tz = ZoneInfo(_ACCOUNT_TZ)
+    today = now.astimezone(tz).date()
+    end = datetime.combine(today + timedelta(days=1), time.min, tzinfo=tz)
+    days = _EVIDENCE_DAYS[window_key]
+    start = (None if days is None else
+             datetime.combine(today - timedelta(days=days - 1), time.min, tzinfo=tz))
+    return (start.astimezone(timezone.utc) if start else None,
+            end.astimezone(timezone.utc))
+
+
+def independent_members(universe: dict, window_key: str, now,
+                        window_type: str = "business") -> dict:
+    """Members of a business (or, PR-ADS-168A, an evidence) window,
+    re-derived: the won flag only, an exact close date in ``[start, end)`` and
+    not after ``now``; All Time also holds the undated won deals."""
+    if window_type == "evidence":
+        start, end = independent_evidence_bounds(window_key, now)
+    else:
+        from analysis.business_windows import get_window_bounds  # noqa: PLC0415 - the definition
+        start, end = get_window_bounds(window_key, now=now)
     start, end = _dt(start), _dt(end)
     all_time = start is None
     members, undated, future = [], 0, 0
@@ -675,11 +711,12 @@ def settled_publication(key: str, now) -> dict | None:
 
 def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
                   mart: dict | None, *, now, pages: dict | None = None,
-                  page_pubs: dict | None = None) -> dict:
+                  page_pubs: dict | None = None,
+                  window_type: str = "business") -> dict:
     from services import canonical_revenue_service as crs  # noqa: PLC0415
 
     pub = truth_w.get("publication") or {}
-    exp = independent_members(universe, key, now)
+    exp = independent_members(universe, key, now, window_type)
     # 6 — the reader's verdicts are the canonical ones.
     for m in ("closed_won_deals", "revenue_usd", "customers"):
         mine = (base.get("publication") or {}).get(m) or {}
@@ -970,6 +1007,36 @@ def _page_builders():
     )
 
 
+#: PR-ADS-168A — the evidence windows the Channels page offers. The reader
+#: contract is checked for each (``load_won_deals(k, window_type="evidence")``
+#: against the truth service and the independent restatement), and the page
+#: builders below run on it so checks 8, 9 and 18 cover them.
+EVIDENCE_PASS_WINDOWS = ("30d", "60d", "180d", "all_time")
+
+
+def _evidence_page_builders():
+    """Production pages that publish closed-won figures over an EVIDENCE
+    window, as ``(name, build(window, now))``. All read-only. Each is a
+    settled-day page: its open window ends yesterday."""
+    def channel_outcomes(w, now):
+        from services.source_attribution_service import build_channel_outcomes  # noqa: PLC0415
+        return build_channel_outcomes(w, now=now)
+    return (("channel_outcomes", channel_outcomes),)
+
+
+def settled_evidence_publication(key: str, now) -> dict:
+    """The canonical publication over an evidence window ended at yesterday
+    (the days the settled-day evidence pages publish)."""
+    from services import canonical_revenue_service as crs  # noqa: PLC0415
+    from services.canonical_contract import (  # noqa: PLC0415
+        resolve_settled_evidence_window, settled_revenue_bounds,
+    )
+    settled = resolve_settled_evidence_window(key, now=now)
+    base = crs.load_won_deals(key, window_type="evidence", now=now,
+                              bounds=settled_revenue_bounds(settled))
+    return base.get("publication") or {}
+
+
 def pure_checks(a: Audit) -> None:
     """11 / 8 / 18 on the contract functions themselves, independent of data."""
     from analysis import closed_won_truth as cwt  # noqa: PLC0415
@@ -1184,6 +1251,9 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
               "database_writes_performed": None,      # measured below
               "inventory": [dict(r, families=list(r["families"])) for r in INVENTORY],
               "structural": structural, "windows": [],
+              # PR-ADS-168A: evidence windows, beside (not inside) the
+              # business windows — they have no mart summary.
+              "evidence_windows": [],
               "pages_not_run": []}
     with crs.one_snapshot():
         universe = crs.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
@@ -1220,6 +1290,30 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                 a, key, universe, by_key[key], base, mart, now=now, pages=built,
                 page_pubs=({n: settled_pub for n in built if n in SETTLED_DAY_PAGES}
                            if settled_pub is not None else None)))
+        # PR-ADS-168A — the evidence windows (Channels page outcomes).
+        ev_truth = svc.get_closed_won_truth(
+            [("evidence", k) for k in EVIDENCE_PASS_WINDOWS], now=now,
+            universe=universe)
+        ev_by_key = {w["window"]["window_key"]: w for w in ev_truth["windows"]}
+        for key in EVIDENCE_PASS_WINDOWS:
+            base = crs.load_won_deals(key, window_type="evidence", now=now)
+            built = {}
+            if pages:
+                for name, build in _evidence_page_builders():
+                    try:
+                        built[name] = build(key, now)
+                    except Exception as exc:  # noqa: BLE001
+                        report["pages_not_run"].append(
+                            {"window": f"evidence/{key}", "page": name,
+                             "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
+            settled_pub = (settled_evidence_publication(key, now)
+                           if built else None)
+            checked = window_checks(
+                a, key, universe, ev_by_key[key], base, None, now=now,
+                pages=built, window_type="evidence",
+                page_pubs={n: settled_pub for n in built} if built else None)
+            checked["window"] = f"evidence/{key}"
+            report["evidence_windows"].append(checked)
         after = _write_fingerprint()
     # 16 — measured, not declared: the closed-won tables are byte-identical.
     report["database_writes_performed"] = (
@@ -1257,7 +1351,7 @@ def _render(report: dict) -> None:
     print("=" * 96)
     print(f"\n  {'window':<18}{'won deals':>10}{'customers':>11}{'revenue USD':>16}"
           "  deals / revenue / customers")
-    for w in report.get("windows") or []:
+    for w in (report.get("windows") or []) + (report.get("evidence_windows") or []):
         pub, out = w["publication"], w["outcomes"]
         st = " / ".join(f"{(pub.get(m) or {}).get('status')}"
                         f"{'' if (pub.get(m) or {}).get('status') == 'published' else ' (' + str((pub.get(m) or {}).get('reason')) + ')'}"

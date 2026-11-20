@@ -1113,6 +1113,108 @@ def _apply_identity_map(rows: list, mapping: dict, applied_log: list) -> list:
     return out
 
 
+def canonical_campaign_spend_block(start_date, end_date, customer_id) -> dict:
+    """THE canonical Google Ads campaign-spend, coverage and FX state of
+    ``[start_date, end_date]`` (inclusive account days), for one account scope.
+
+    PR-ADS-168A: extracted unchanged from :func:`_build_from_db` so the
+    business-window contract and the Channels page's evidence-day spend
+    (``revenue_spend_truth_service.build_google_ads_spend_truth_for_days``)
+    run the same reads and the same state machine. ``canonical_access`` False
+    means the canonical table could not be read; nothing else is then set.
+    Read-only.
+    """
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date, customer_id)
+    if not canonical.get("available"):
+        return {"canonical_access": False, "canonical": canonical,
+                "coverage_chunks": []}
+    from services.google_ads_spend_service import (  # noqa: PLC0415
+        analyze_coverage as _analyze_cov, classify_coverage as _classify_cov,
+    )
+    coverage = repo.fetch_spend_coverage(start_date, end_date, customer_id)
+    _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
+    coverage_complete = bool(_cov.get("complete"))
+    # PR-ADS-129: classify the coverage REASON from the durable ledger so ROAS
+    # availability is auditable — a window whose first spend row starts after
+    # the window start is coverage-COMPLETE when the earlier period was fetched
+    # and verified as zero spend (never inferred zero).
+    _cs = canonical.get("coverage_start")
+    _first_spend = _cs if (isinstance(_cs, str) or _cs is None) else _cs.isoformat()
+    _ce = canonical.get("coverage_end")
+    _last_spend = _ce if (isinstance(_ce, str) or _ce is None) else _ce.isoformat()
+    coverage_detail = _classify_cov(
+        start_date, end_date, coverage.get("chunks", []), _first_spend)
+    canonical_total = round(float(canonical.get("total_spend") or 0), 2)
+    # PR-ADS-119: HubSpot revenue is USD, so the ROAS denominator must be USD.
+    # Convert via daily FX (already done in the repo). fx_complete is None when
+    # the FX layer was not evaluated (legacy/patched canonical) — treat as
+    # not-blocking and fall back to native spend for backward compatibility.
+    fx_complete_raw = canonical.get("fx_complete")
+    fx_evaluated = fx_complete_raw is not None
+    fx_complete = bool(fx_complete_raw) if fx_evaluated else True
+    usd_total = canonical.get("total_spend_usd")
+    spend_usd_total = round(float(usd_total), 2) if usd_total is not None else None
+    use_usd = fx_evaluated and fx_complete
+    # Effective realized rate (native→USD) from the per-day conversions; used
+    # only to express the reconciled country (geo) split in USD.
+    fx_effective_rate = (
+        (spend_usd_total / canonical_total)
+        if (use_usd and spend_usd_total is not None and canonical_total) else None
+    )
+    return {
+        "canonical_access": True,
+        "canonical": canonical,
+        "coverage_chunks": coverage.get("chunks", []),
+        "coverage_complete": coverage_complete,
+        "spend_coverage_status": "complete" if coverage_complete else "incomplete",
+        "first_spend_date": _first_spend,
+        "last_spend_date": _last_spend,
+        "coverage_detail": coverage_detail,
+        "campaign_spend_coverage_status": coverage_detail["status"],
+        "campaign_spend_coverage_reason": coverage_detail["reason"],
+        "spend_source": "canonical_google_ads_api",
+        "canonical_rows": canonical.get("rows") or [],
+        "canonical_total": canonical_total,
+        "canonical_customer_id": customer_id or canonical.get("customer_id"),
+        "canonical_currency": canonical.get("currency_code") or "GBP",
+        "fx_complete": fx_complete,
+        "fx_coverage_status": (
+            ("complete" if fx_complete else "incomplete") if fx_evaluated
+            else "not_evaluated"),
+        "spend_native_total": canonical_total,
+        "spend_usd_total": spend_usd_total,
+        "use_usd": use_usd,
+        "reporting_currency": canonical.get("reporting_currency") or "USD",
+        "fx_effective_rate": fx_effective_rate,
+    }
+
+
+def spend_truth_inputs(block: dict) -> dict:
+    """The ``source_health`` fields ``derive_google_ads_spend_truth`` reads,
+    from one :func:`canonical_campaign_spend_block` — the same values
+    :func:`_build_from_db` publishes under those names."""
+    if not block.get("canonical_access"):
+        return {"spend_source": "geo_fallback",
+                "spend_coverage_status": "geo_fallback",
+                "campaign_spend_coverage_status": "unavailable",
+                "campaign_roas_available": False,
+                "fx_coverage_status": "unavailable",
+                "spend_native_total": None, "spend_usd_total": None,
+                "spend_native_currency": None, "canonical_currency": None}
+    return {
+        "spend_source": block["spend_source"],
+        "spend_coverage_status": block["spend_coverage_status"],
+        "campaign_spend_coverage_status": block["campaign_spend_coverage_status"],
+        "campaign_roas_available": bool(block["coverage_complete"]
+                                        and block["fx_complete"]),
+        "fx_coverage_status": block["fx_coverage_status"],
+        "spend_native_total": block["spend_native_total"],
+        "spend_usd_total": block["spend_usd_total"],
+        "spend_native_currency": block["canonical_currency"],
+        "canonical_currency": block["canonical_currency"],
+    }
+
+
 def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dict | None:
     """Build the contract from durable DB sources.
 
@@ -1178,55 +1280,37 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     )
     _scope_customer_id = _configured_customer_id()
 
-    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date, _scope_customer_id)
-    canonical_access = bool(canonical.get("available"))
+    # PR-ADS-168A: the canonical campaign spend, its coverage and FX state are
+    # read by ONE function (``canonical_campaign_spend_block``), shared with the
+    # Channels page's spend over evidence days, so one state machine decides
+    # every Google Ads spend verdict.
+    _spend_block = canonical_campaign_spend_block(start_date, end_date,
+                                                  _scope_customer_id)
+    canonical = _spend_block["canonical"]
+    canonical_access = _spend_block["canonical_access"]
     if canonical_access:
         from services.google_ads_spend_service import (  # noqa: PLC0415
-            analyze_coverage as _analyze_cov, SPEND_VARIANCE_TOLERANCE,
+            SPEND_VARIANCE_TOLERANCE,
         )
-        coverage = repo.fetch_spend_coverage(start_date, end_date, _scope_customer_id)
-        _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
-        coverage_complete = bool(_cov.get("complete"))
-        spend_coverage_status = "complete" if coverage_complete else "incomplete"
-        # PR-ADS-129: classify the coverage REASON from the durable ledger so ROAS
-        # availability is auditable — a window whose first spend row starts after
-        # the window start is coverage-COMPLETE when the earlier period was fetched
-        # and verified as zero spend (never inferred zero).
-        from services.google_ads_spend_service import classify_coverage as _classify_cov  # noqa: PLC0415
-        _cs = canonical.get("coverage_start")
-        _first_spend = _cs if (isinstance(_cs, str) or _cs is None) else _cs.isoformat()
-        _ce = canonical.get("coverage_end")
-        _last_spend = _ce if (isinstance(_ce, str) or _ce is None) else _ce.isoformat()
-        coverage_detail = _classify_cov(
-            start_date, end_date, coverage.get("chunks", []), _first_spend)
-        campaign_spend_coverage_status = coverage_detail["status"]
-        campaign_spend_coverage_reason = coverage_detail["reason"]
-        spend_source = "canonical_google_ads_api"
-        canonical_rows = canonical.get("rows") or []
-        canonical_total = round(float(canonical.get("total_spend") or 0), 2)
-        canonical_customer_id = _scope_customer_id or canonical.get("customer_id")
-        canonical_currency = canonical.get("currency_code") or "GBP"
-        # PR-ADS-119: HubSpot revenue is USD, so the ROAS denominator must be USD.
-        # Convert via daily FX (already done in the repo). fx_complete is None when
-        # the FX layer was not evaluated (legacy/patched canonical) — treat as
-        # not-blocking and fall back to native spend for backward compatibility.
-        fx_complete_raw = canonical.get("fx_complete")
-        fx_evaluated = fx_complete_raw is not None
-        fx_complete = bool(fx_complete_raw) if fx_evaluated else True
-        fx_coverage_status = (
-            ("complete" if fx_complete else "incomplete") if fx_evaluated else "not_evaluated"
-        )
-        usd_total = canonical.get("total_spend_usd")
-        spend_native_total = canonical_total
-        spend_usd_total = round(float(usd_total), 2) if usd_total is not None else None
-        use_usd = fx_evaluated and fx_complete
-        reporting_currency = canonical.get("reporting_currency") or "USD"
-        # Effective realized rate (native→USD) from the per-day conversions; used
-        # only to express the reconciled country (geo) split in USD.
-        fx_effective_rate = (
-            (spend_usd_total / spend_native_total)
-            if (use_usd and spend_usd_total is not None and spend_native_total) else None
-        )
+        coverage_complete = _spend_block["coverage_complete"]
+        spend_coverage_status = _spend_block["spend_coverage_status"]
+        _first_spend = _spend_block["first_spend_date"]
+        _last_spend = _spend_block["last_spend_date"]
+        coverage_detail = _spend_block["coverage_detail"]
+        campaign_spend_coverage_status = _spend_block["campaign_spend_coverage_status"]
+        campaign_spend_coverage_reason = _spend_block["campaign_spend_coverage_reason"]
+        spend_source = _spend_block["spend_source"]
+        canonical_rows = _spend_block["canonical_rows"]
+        canonical_total = _spend_block["canonical_total"]
+        canonical_customer_id = _spend_block["canonical_customer_id"]
+        canonical_currency = _spend_block["canonical_currency"]
+        fx_complete = _spend_block["fx_complete"]
+        fx_coverage_status = _spend_block["fx_coverage_status"]
+        spend_native_total = _spend_block["spend_native_total"]
+        spend_usd_total = _spend_block["spend_usd_total"]
+        use_usd = _spend_block["use_usd"]
+        reporting_currency = _spend_block["reporting_currency"]
+        fx_effective_rate = _spend_block["fx_effective_rate"]
         # Campaign spend rows in the ROAS currency (USD when FX complete; native
         # diagnostic otherwise).
         campaign_spend_rows = [

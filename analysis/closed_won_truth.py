@@ -812,6 +812,20 @@ def evaluate_window(*, won_rows, definition_rows, contacts_by_deal, start, end,
 #: PR-ADS-161E reasons. Each names the input that blocked the metric.
 R_CUSTOMERS_WITHHELD = "customer_count_withheld"
 R_SPEND_UNAVAILABLE = "google_ads_usd_spend_unavailable"
+#: PR-ADS-168A: a channel with no connected spend source (every channel but
+#: Paid Search, whose Google Ads spend is the only one connected). Its spend
+#: and both period ratios are unavailable for this reason — never $0.
+R_CHANNEL_SPEND_NOT_CONNECTED = "channel_spend_not_connected"
+#: PR-ADS-168A review: the Paid Search ROW is HubSpot's original source, which
+#: holds other search engines and labels approved as not Google Ads, and
+#: misses Google Ads deals HubSpot recorded under another source. Its deals
+#: are not the population Google Ads spend paid for, so its period ratios are
+#: unavailable (``incompatible_rate``); the Google Ads evidence line carries
+#: the comparison.
+R_CHANNEL_POPULATION_NOT_SPEND = "channel_population_is_not_spend_population"
+#: PR-ADS-168A: the Paid Search row's spend cell — Google Ads spend is shown
+#: on the Google Ads line, beside the population it is compared with.
+R_SPEND_ON_GOOGLE_ADS_LINE = "spend_shown_on_google_ads_line"
 R_NO_SPEND_IN_WINDOW = "no_google_ads_spend_in_window"
 R_NO_CUSTOMERS_IN_WINDOW = "no_customers_in_window"
 #: A rate whose numerator is close-date won deals / customers and whose

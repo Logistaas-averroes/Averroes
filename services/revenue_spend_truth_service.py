@@ -150,3 +150,67 @@ def build_google_ads_spend_truth(window: str, now: datetime | None = None) -> di
     """
     core = build_revenue_attribution(window, now=now)
     return derive_google_ads_spend_truth(core.get("source_health") or {})
+
+
+def build_google_ads_spend_truth_for_days(start_date, end_date, *,
+                                          settled: bool = False,
+                                          now: datetime | None = None) -> dict:
+    """Canonical Google Ads spend truth over explicit account days.
+
+    PR-ADS-168A. ``[start_date, end_date]`` are inclusive account-local dates
+    (``start_date`` None for All Time). The reads are
+    ``revenue_attribution_service.canonical_campaign_spend_block`` — the
+    function the business-window contract itself runs — and the verdict is
+    :func:`derive_google_ads_spend_truth`, so a business window's own days
+    give the same answer as :func:`build_google_ads_spend_truth`. One state
+    machine; a parity test holds it across every business window.
+
+    ``settled`` (the Channels page, whose outcome and spend days end
+    yesterday): the coverage must also hold every day COMPLETELY — the
+    PR-ADS-167A settle rule (``google_ads_spend_service.analyze_settled_coverage``)
+    over the same ledger chunks. A window whose last day has not been re-read
+    since it ended is ``coverage_incomplete`` with ``unsettled_reason`` —
+    never spend that is still moving published as a total.
+    """
+    from services.google_ads_spend_service import (  # noqa: PLC0415
+        configured_customer_id,
+    )
+    from services.revenue_attribution_service import (  # noqa: PLC0415
+        canonical_campaign_spend_block, spend_truth_inputs,
+    )
+
+    block = canonical_campaign_spend_block(start_date, end_date,
+                                           configured_customer_id())
+    truth = derive_google_ads_spend_truth(spend_truth_inputs(block))
+    truth["start_date"] = start_date.isoformat() if start_date else None
+    truth["end_date"] = end_date.isoformat()
+    truth["unsettled_reason"] = None
+    truth["settled_rule_applied"] = bool(settled)
+    if settled and truth["state"] in (STATE_VERIFIED, STATE_VERIFIED_ZERO,
+                                      STATE_FX_INCOMPLETE):
+        settle = _settled_verdict(start_date, end_date,
+                                  block.get("coverage_chunks") or [], now)
+        if not settle.get("complete"):
+            truth.update({
+                "state": STATE_COVERAGE_INCOMPLETE, "usd_spend": None,
+                "native_spend": None, "spend_coverage_status": "incomplete",
+                "period_ratio_available": False,
+                "unsettled_reason": settle.get("unsettled_reason")
+                or "spend_days_not_settled"})
+    return truth
+
+
+def _settled_verdict(start_date, end_date, chunks, now) -> dict:
+    """The shared settle rule over the campaign-spend ledger chunks, in the
+    account time zone on record (unknown zone: nothing is settled)."""
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    from services.canonical_contract import configured_account_time_zone  # noqa: PLC0415
+    from services.google_ads_spend_service import analyze_settled_coverage  # noqa: PLC0415
+
+    zone = configured_account_time_zone()
+    try:
+        tz = ZoneInfo(zone) if zone else None
+    except Exception:  # noqa: BLE001 — an unknown zone settles nothing
+        tz = None
+    return analyze_settled_coverage(start_date, end_date, chunks, tz, now=now)

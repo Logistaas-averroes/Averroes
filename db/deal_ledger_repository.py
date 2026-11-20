@@ -634,7 +634,10 @@ def fetch_closed_won_universe(won_stage_id: str, *,
     * ``unknown_won_rows`` — every deal whose ``hs_is_closed_won`` IS NULL (id and
       close date), so the caller can disclose them rather than drop them;
     * ``acquisition_contacts`` — for each won deal, every associated contact and
-      that contact's canonical ``created_at`` (NULL when the funnel holds no row);
+      that contact's canonical ``created_at`` and HubSpot original source
+      ``hs_analytics_source`` (both NULL when the funnel holds no row;
+      PR-ADS-168A reads the source to place a deal on a Channels row, in this
+      same snapshot);
     * ``sync_state`` — the ledger's sync coverage row;
     * ``company_associations`` — PR-ADS-161D2: ``{available, paths,
       observations, sync_state, error}`` for every won deal's deal→company
@@ -694,7 +697,8 @@ def fetch_closed_won_universe(won_stage_id: str, *,
                     f"""
                     SELECT a.deal_id, a.contact_id,
                            f.created_at AS contact_created_at,
-                           (f.contact_id IS NOT NULL) AS funnel_row_present
+                           (f.contact_id IS NOT NULL) AS funnel_row_present,
+                           f.hs_analytics_source
                     FROM {ASSOCIATION_TABLE} a
                     JOIN {LEDGER_TABLE} l
                       ON l.deal_id = a.deal_id AND l.hs_is_closed_won IS TRUE

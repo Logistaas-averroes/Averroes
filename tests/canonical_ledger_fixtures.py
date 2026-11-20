@@ -172,7 +172,8 @@ def from_source_rows(rows, *, default_close_date="2026-05-10T00:00:00+00:00") ->
 
 def fake_closed_won_universe(rows, *, available=True, reason=None,
                              sync_state=None, sync_available=True,
-                             company_associations=None):
+                             company_associations=None,
+                             acquisition_contacts=None):
     """The ``fetch_closed_won_universe`` a test ledger answers with.
 
     PR-ADS-161E: ``load_won_deals`` reads the canonical closed-won universe, so
@@ -212,12 +213,16 @@ def fake_closed_won_universe(rows, *, available=True, reason=None,
                 for r in rows if r.get("hs_is_closed_won") is None],
             # The deal→contact association table, as the ledger rows record
             # it: each won deal's primary contact (creation time not held).
-            "acquisition_contacts": [
+            # PR-ADS-168A: a test that places deals on channels passes the
+            # rows production's read returns (``acquisition_contacts``).
+            "acquisition_contacts": ([dict(c) for c in acquisition_contacts]
+                                     if acquisition_contacts is not None else [
                 {"deal_id": r["deal_id"],
                  "contact_id": str(r["primary_contact_id"]),
-                 "contact_created_at": None, "funnel_row_present": False}
+                 "contact_created_at": None, "funnel_row_present": False,
+                 "hs_analytics_source": None}
                 for r in rows if r.get("hs_is_closed_won") is True
-                and r.get("primary_contact_id") is not None],
+                and r.get("primary_contact_id") is not None]),
             "sync_state": dict(state) if state else None,
             "company_associations": company_associations,
         }
@@ -253,7 +258,8 @@ def _resolver_stub(resolver):
 
 def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
                            sync_state=None, sync_available=True,
-                           company_associations=None, resolver=None):
+                           company_associations=None, resolver=None,
+                           acquisition_contacts=None):
     """Stub the canonical deal ledger for a test.
 
     ``rows`` are canonical ledger rows (see :func:`ledger_row`). ``available``
@@ -290,7 +296,8 @@ def patch_canonical_ledger(monkeypatch, rows, *, available=True, reason=None,
         fake_closed_won_universe(rows, available=available, reason=reason,
                                  sync_state=sync_state,
                                  sync_available=sync_available,
-                                 company_associations=company_associations))
+                                 company_associations=company_associations,
+                                 acquisition_contacts=acquisition_contacts))
     import services.canonical_customer_revenue_service as ccr
     monkeypatch.setattr(ccr, "campaign_resolver",
                         _resolver_stub(resolver or label_resolver()))

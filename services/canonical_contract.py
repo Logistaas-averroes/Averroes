@@ -228,6 +228,39 @@ def settled_revenue_bounds(resolved: dict) -> tuple | None:
     return start, end
 
 
+def resolve_settled_evidence_window(window_key: str,
+                                    now: datetime | None = None) -> dict:
+    """An EVIDENCE window (``30d`` … ``all_time``) ended at its last settled
+    day — PR-ADS-168A, the Channels page's outcome and spend half.
+
+    Evidence windows are N account-local days ending TODAY
+    (``analysis.account_time``), so every one of them is open. The owner's
+    PR-ADS-167A rule for revenue over spend applies unchanged
+    (:func:`end_at_settled_day`): the start never moves, the window ends
+    YESTERDAY, and ``window_range`` carries the disclosure. The result also
+    feeds :func:`settled_revenue_bounds` (it carries ``timezone`` and
+    ``account_today``), so the deals are read over exactly the days the spend
+    covers. Raises ``EvidenceWindowError`` for an unknown key.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    from analysis.account_time import ACCOUNT_TZ, account_today  # noqa: PLC0415
+    from analysis.evidence_windows import resolve_evidence_window  # noqa: PLC0415
+
+    resolved = resolve_evidence_window(window_key)
+    today = account_today(now)
+    days = resolved["days"]
+    start = None if days is None else today - timedelta(days=days - 1)
+    out = end_at_settled_day({
+        "window_type": "evidence", "window_key": resolved["key"],
+        "key": resolved["key"], "label": resolved["key"],
+        "start_date": start.isoformat() if start else None,
+        "end_date": today.isoformat(), "is_closed_window": False,
+        "is_all_time": days is None, "timezone": ACCOUNT_TZ,
+    })
+    return out
+
+
 def truth_contract(*, data_source: str, window: str,
                    truth_status: str = TRUTH_READY,
                    now: datetime | None = None,

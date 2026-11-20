@@ -277,12 +277,36 @@ def test_12_names_from_hubspot_are_escaped_everywhere_they_appear():
 
 
 def test_13_the_page_has_no_attribution_ratio_wording():
+    """PR-ADS-168A changed this contract. Until then the Channels page showed
+    contacts only, so the word "customers" was banned from its code outright.
+    It now also shows customers WON (distinct companies whose deals closed in
+    the same days, PR-ADS-168A). The guard that matters is therefore no longer
+    "never the word" but: the two figures carry distinct headers, no outcome
+    cell is a percentage, and the total customers figure is the window's own
+    metric — never a sum of the rows."""
     src = (ROOT / "static/app.js").read_text()
     span = src[src.index("const CHANNEL_FUNNEL_REASON_LABELS = {"):
                src.index("// ── System: the state of the platform")]
     assert not re.search(r"\b(ROAS|CAC|CPQL)\b", span)
-    assert "customers" not in span.lower().replace("customer-stage", "").replace(
-        "customer stage", "").replace("reached_customer_stage", "")
+    # Distinct headers: a stage count in contacts, customers won in companies.
+    assert '`${st.label} (contacts)`' in span
+    assert '"Customers won (distinct companies)"' in span
+    # Every "customers" in the code is the won-companies figure or its notes.
+    bare = re.findall(r"[^\n]*\bcustomers\b[^\n]*", span.lower())
+    allowed = ("customers won", "rowmetrichtml(r, \"customers\"", "on.customers")
+    assert bare and all(any(a in line for a in allowed) for line in bare), bare
+    # No percentage in an outcome cell: the outcome cell renderer computes none.
+    def fn(name):
+        i = span.index(f"function {name}(")
+        return span[i:span.index("\n}\n", i)]
+    cells = fn("channelOutcomeCellsHtml")
+    assert "%" not in cells and "channelFunnelPct" not in cells \
+        and "channelFunnelRate" not in cells
+    # The total row and the strip read the window's metric, not the rows.
+    render = fn("renderChannelFunnel")
+    assert "channelOutcomeCellsHtml(o.totals, oOpts)" in render
+    assert "reduce(" not in render
+    assert 'metricOf("customers")' in fn("channelOutcomeStripHtml")
 
 
 # ── the controls ──────────────────────────────────────────────────────────

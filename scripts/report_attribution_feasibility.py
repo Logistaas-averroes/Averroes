@@ -17,6 +17,11 @@ rests on numbers, not hope:
    deal? Without it a deal belongs to no acquisition month.
 3. **Cycle length.** How long from first contact creation to close? That is
    the spend window a cohort figure must wait for before it means anything.
+4. **Channel placement** (PR-ADS-168A). How many won deals in each Channels
+   window take one HubSpot original source (every associated contact agrees),
+   and how many sit on "Source not resolved", by reason — the Channels page's
+   own rule (``source_attribution_service.deal_channel``), over the truth's
+   own window membership.
 
 It prints measurements and plain-language readings. It sets no threshold and
 publishes nothing: whether the numbers justify building is the owner's call.
@@ -36,6 +41,9 @@ EXIT_UNAVAILABLE = 2
 
 WINDOWS = (("business", "all_time"), ("business", "last_6_months"),
            ("business", "ytd"))
+#: PR-ADS-168A: the Channels page's evidence windows, measured for section 4.
+CHANNEL_WINDOWS = (("evidence", "all_time"), ("evidence", "180d"),
+                   ("evidence", "60d"), ("evidence", "30d"))
 HORIZON_DAYS = (30, 90, 180, 365)
 PERCENTILES = (25, 50, 75, 90)
 
@@ -148,7 +156,44 @@ def _window_summary(w: dict) -> dict:
     }
 
 
-def measure(universe: dict, truth: dict, now) -> dict:
+def channel_placement(universe: dict, truth: dict | None) -> list:
+    """Section 4: won deals per Channels placement class, per window. The
+    window members are the truth's own (``membership.deal_ids``; None when the
+    truth withholds them — then nothing is counted); the class is the
+    Channels page's rule. Pure."""
+    from services.source_attribution_service import (  # noqa: PLC0415
+        UNRESOLVED_CLASSES, deal_channel,
+    )
+    by_id = {str(r.get("deal_id")): r for r in universe.get("won_rows") or []}
+    contacts: dict = {}
+    for c in universe.get("acquisition_contacts") or []:
+        contacts.setdefault(str(c.get("deal_id")), []).append(c)
+    out = []
+    for w in (truth or {}).get("windows") or []:
+        meta = w.get("window") or {}
+        ids = (w.get("membership") or {}).get("deal_ids")
+        if ids is None:
+            out.append({"window": f"{meta.get('window_type')}/{meta.get('window_key')}",
+                        "members": None, "resolved": None, "by_channel": None,
+                        "unresolved": None})
+            continue
+        classes = {k: 0 for k in UNRESOLVED_CLASSES}
+        channels: dict = {}
+        for did in ids:
+            key, why = deal_channel(by_id.get(str(did)) or {"deal_id": did},
+                                    contacts.get(str(did)))
+            if key is None:
+                classes[why] += 1
+            else:
+                channels[key] = channels.get(key, 0) + 1
+        out.append({"window": f"{meta.get('window_type')}/{meta.get('window_key')}",
+                    "members": len(ids), "resolved": sum(channels.values()),
+                    "by_channel": dict(sorted(channels.items())),
+                    "unresolved": classes})
+    return out
+
+
+def measure(universe: dict, truth: dict, now, channel_truth: dict | None = None) -> dict:
     """Pure: the report from one universe snapshot and the truth computed
     from that same snapshot."""
     from analysis import closed_won_truth as cwt  # noqa: PLC0415
@@ -201,6 +246,7 @@ def measure(universe: dict, truth: dict, now) -> dict:
             "cycle_length": cycle_lengths(won, contacts_by_deal, now),
             "windows": [_window_summary(w)
                         for w in truth.get("windows") or []],
+            "channel_placement": channel_placement(universe, channel_truth),
             "rule_version": cwt.CLOSED_WON_TRUTH_RULE_VERSION}
 
 
@@ -213,7 +259,9 @@ def run(now: datetime | None = None) -> dict:
     universe = crs.load_closed_won_universe(cwt.CONFIRMED_WON_STAGE_ID)
     # The truth reads the SAME universe: one snapshot for every number below.
     truth = ccr.get_closed_won_truth(list(WINDOWS), now=now, universe=universe)
-    return measure(universe, truth, now)
+    channel_truth = ccr.get_closed_won_truth(list(CHANNEL_WINDOWS), now=now,
+                                             universe=universe)
+    return measure(universe, truth, now, channel_truth)
 
 
 def _n(value) -> str:
@@ -268,6 +316,17 @@ def _render(report: dict) -> None:
             f"<={h}d {_n(None if v is None else round(100 * v['share']))}%"
             for h, v in c["closed_within_days"].items())
         print(f"    {'':<12}{within}")
+
+    print("\n  4. CHANNEL PLACEMENT (every associated contact's original source agrees?)")
+    for c in report.get("channel_placement") or []:
+        if c["members"] is None:
+            print(f"    {c['window']:<22}withheld/unknown")
+            continue
+        un = {k: v for k, v in c["unresolved"].items() if v}
+        print(f"    {c['window']:<22}won {c['members']}, resolved {c['resolved']}, "
+              f"source not resolved {c['members'] - c['resolved']}"
+              f"{'  ' + str(un) if un else ''}")
+        print(f"    {'':<22}{c['by_channel']}")
 
     print("\n  HOW TO READ THIS")
     print("    * Cohort attribution can only cover deals in "

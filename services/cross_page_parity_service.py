@@ -596,6 +596,31 @@ PENDING_REDESIGN_CONSUMERS = {
     },
 }
 
+#: PR-ADS-168A — pages that publish closed-won figures over EVIDENCE windows
+#: (N account days ending today), not business windows. This audit compares
+#: consumers over one business window, so it cannot certify them, and it does
+#: not pretend to: they are declared here, outside ``METRIC_IDENTITIES``, and
+#: reported. Their reader contract is certified per evidence window by the
+#: reader cutover audit (``audit_customer_revenue_reader_cutover``: membership
+#: against the truth service and an independent restatement, checks 8/9/18 on
+#: the page payload).
+EVIDENCE_WINDOW_CONSUMERS = {
+    "channel_outcomes": {
+        "window_type": "evidence",
+        "windows": ["30d", "60d", "180d", "all_time"],
+        "metrics": ["closed_won_deals", "customers", "revenue_usd",
+                    "google_ads_spend_usd"],
+        "services": ["services.source_attribution_service.build_channel_outcomes",
+                     "/api/channel-funnel (outcomes)"],
+        "certified_by": "scripts/audit_customer_revenue_reader_cutover.py "
+                        "(evidence-window pass)",
+        "note": ("Channels page outcomes: deals closed in an evidence window's "
+                 "days ended at yesterday, per HubSpot original source. Not "
+                 "comparable with a business-window total; the period's own "
+                 "canonical metrics are its totals."),
+    },
+}
+
 #: Pairs that must NEVER be compared, with the reason. Registering them is what
 #: stops a future reader from "fixing" a difference that is the answer.
 DISTINCT_BY_DESIGN = [
@@ -1461,6 +1486,9 @@ def audit_all_windows(windows=None, now: datetime | None = None) -> dict:
         "uncertified_consumers": [
             {"consumer": name, **detail}
             for name, detail in sorted(PENDING_REDESIGN_CONSUMERS.items())],
+        "evidence_window_consumers": [
+            {"consumer": name, **detail}
+            for name, detail in sorted(EVIDENCE_WINDOW_CONSUMERS.items())],
         "results": results,
         "violations": all_violations,
         "violation_codes": sorted({v["code"] for v in all_violations}),
