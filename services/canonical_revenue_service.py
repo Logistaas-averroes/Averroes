@@ -189,13 +189,18 @@ def _utc_bound(value):
 
 
 def _window_block(window, start, end, resolved) -> dict:
-    return {
+    block = {
         "window": window,
         "window_label": (resolved or {}).get("label"),
         "window_start": _iso(start),
         "window_end": _iso(end),
         "window_is_closed": (resolved or {}).get("is_closed_window"),
     }
+    if (resolved or {}).get("window_type"):
+        # PR-ADS-168A: an evidence window says so; a business window's block
+        # is unchanged.
+        block["window_type"] = resolved["window_type"]
+    return block
 
 
 def unavailable(reason, *, scope=DEFAULT_SCOPE, window=None, start=None,
@@ -354,7 +359,8 @@ def _settled_bounds_problem(named: dict, start, end, now) -> str | None:
 
 
 def load_won_deals(window=None, *, start=None, end=None, now=None,
-                   require_ready: bool = True, bounds=None) -> dict:
+                   require_ready: bool = True, bounds=None,
+                   window_type: str | None = None) -> dict:
     """The canonical won-deal population of one business window.
 
     PR-ADS-161E: this is now a reader of THE closed-won truth
@@ -395,13 +401,40 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
             the key and label. ``None`` (every other caller) changes nothing.
         require_ready: retained for signature compatibility. The canonical
             truth never releases a population whose coverage is unproven.
+        window_type: PR-ADS-168A — ``"evidence"`` reads ``window`` as an
+            EVIDENCE window (``30d`` … ``all_time``: N account-local days
+            ending today) through ``ccr.window_view(window_type=evidence)``,
+            the same membership Campaign Evidence and the truth service use
+            for that key. ``None`` / ``"business"`` (every other caller) is a
+            business window, unchanged. ``bounds`` applies to either.
     """
     from analysis import closed_won_truth as cwt
     from analysis.business_windows import is_valid_window, resolve_window
     from services import canonical_customer_revenue_service as ccr
 
     resolved = None
-    if window is not None:
+    if window_type not in (None, ccr.WINDOW_BUSINESS, ccr.WINDOW_EVIDENCE):
+        return unavailable(REASON_UNKNOWN_WINDOW, window=window,
+                           detail=f"unknown window type '{window_type}'")
+    if window is not None and window_type == ccr.WINDOW_EVIDENCE:
+        from analysis.evidence_windows import is_evidence_window  # noqa: PLC0415
+        if not is_evidence_window(window):
+            return unavailable(REASON_UNKNOWN_WINDOW, window=window,
+                               detail=f"unknown evidence window '{window}'")
+        named = ccr.window_bounds(ccr.WINDOW_EVIDENCE, window, now)
+        resolved = {"label": named.get("label"), "is_closed_window": False,
+                    "window_type": ccr.WINDOW_EVIDENCE}
+        start, end = named["start"], named["end"]
+        view_args = {"window_type": ccr.WINDOW_EVIDENCE, "window_key": window}
+        if bounds is not None:
+            start, end = _utc_bound(bounds[0]), _utc_bound(bounds[1])
+            problem = _settled_bounds_problem(named, start, end, now)
+            if problem:
+                return unavailable(REASON_UNKNOWN_WINDOW, window=window,
+                                   start=start, end=end, resolved=resolved,
+                                   detail=problem)
+            view_args = {"start": start, "end": end}
+    elif window is not None:
         if not is_valid_window(window):
             return unavailable(REASON_UNKNOWN_WINDOW, window=window,
                                detail=f"unknown business window '{window}'")
@@ -485,6 +518,15 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
                                        if membership.get("undated_included")
                                        else 0),
         "company_ids_by_deal": view["company_ids_by_deal"],
+        # PR-ADS-168A: the truth's own attribution partition, as deal COUNTS
+        # per bucket (no ids), and whether its campaign resolver was
+        # available — so ``google_ads_evidence_members`` can prove its member
+        # list against the window's verdict instead of restating it.
+        "attribution_partition": {
+            b: ((((truth.get("attribution") or {}).get("partition") or {})
+                 .get(b)) or {}).get("deals")
+            for b in cwt.ATTRIBUTION_BUCKETS},
+        "campaign_resolver_available": truth.get("campaign_resolver_available"),
         **_canonical_block(truth, cwt.PUBLISHED, None),
         "legacy_fallback_used": False,
     }
@@ -630,6 +672,63 @@ def campaign_placement_gate(base: dict) -> dict | None:
     if placement["status"] == cwt.PUBLISHED:
         return None
     return dict(placement)
+
+
+#: PR-ADS-168A: why the Google Ads evidence population cannot be read.
+R_GOOGLE_ADS_EVIDENCE_UNAVAILABLE = "google_ads_evidence_partition_unavailable"
+R_GOOGLE_ADS_EVIDENCE_MISMATCH = "google_ads_evidence_does_not_reconcile"
+
+
+def google_ads_evidence_members(base: dict, now=None) -> dict:
+    """The window's Google Ads EVIDENCE members — ``campaign_attributable`` +
+    ``google_ads_unplaced`` of the truth's attribution partition — as
+    ``{"rows", "status", "reason"}``.
+
+    PR-ADS-168A. The population Google Ads spend can have paid for, whatever
+    HubSpot's original source says (a GCLID deal recorded as Direct is in
+    it; a label approved as not Google Ads is not). Each member is placed by
+    the truth's own rule (``cwt.attribution_bucket``) with the snapshot's own
+    campaign resolver, and the per-bucket counts must equal the truth's
+    partition for the window; otherwise ``rows`` is None with the reason.
+    Withheld whenever the truth could not tell an excluded label from a
+    Google Ads one (no resolver)."""
+    from analysis import closed_won_truth as cwt
+
+    if not base.get("available"):
+        status = base.get("status") or cwt.UNAVAILABLE
+        return {"rows": None,
+                "status": cwt.UNAVAILABLE if status == cwt.PUBLISHED else status,
+                "reason": base.get("reason") or REASON_LEDGER_UNREADABLE}
+    part = base.get("attribution_partition") or {}
+    wanted = (cwt.BUCKET_CAMPAIGN, cwt.BUCKET_GOOGLE_ADS_UNPLACED,
+              cwt.BUCKET_EXCLUDED)
+    if any(not isinstance(part.get(b), int) for b in wanted):
+        return {"rows": None, "status": cwt.UNAVAILABLE,
+                "reason": R_GOOGLE_ADS_EVIDENCE_UNAVAILABLE}
+    if base.get("campaign_resolver_available") is not True:
+        return {"rows": None, "status": cwt.WITHHELD,
+                "reason": cwt.R_CAMPAIGN_IDENTITY_UNAVAILABLE}
+    resolver, _detail = snapshot_campaign_resolver(now)
+    if resolver is None:
+        return {"rows": None, "status": cwt.WITHHELD,
+                "reason": cwt.R_CAMPAIGN_IDENTITY_UNAVAILABLE}
+    counts = {b: 0 for b in cwt.ATTRIBUTION_BUCKETS}
+    rows = []
+    for r in base.get("deals") or []:
+        bucket = cwt.attribution_bucket(r, resolver)[0]
+        counts[bucket] += 1
+        if bucket in (cwt.BUCKET_CAMPAIGN, cwt.BUCKET_GOOGLE_ADS_UNPLACED):
+            rows.append(r)
+    if not _evidence_counts_match(counts, part):
+        return {"rows": None, "status": cwt.UNAVAILABLE,
+                "reason": R_GOOGLE_ADS_EVIDENCE_MISMATCH}
+    return {"rows": rows, "status": cwt.PUBLISHED, "reason": None}
+
+
+def _evidence_counts_match(counts: dict, part: dict) -> bool:
+    """Every bucket the truth reports has exactly the count placed here."""
+    return all(counts.get(b) == n for b, n in (part or {}).items()
+               if isinstance(n, int))
 
 
 def reader_row(base: dict, rows, *, spend_usd=None, spend_reason=None,

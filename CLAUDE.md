@@ -467,6 +467,30 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   otherwise, never a dash. An admin also gets "View blockers" into the CRM
   Truth Exceptions workbench.
 
+- **A won deal takes a Channels row only when EVERY associated contact
+  agrees** (PR-ADS-168A, `docs/50_*`). The channel is each contact's
+  `hubspot_contact_funnel.hs_analytics_source` through
+  `channel_funnel_service.source_key`, read in the closed-won universe's own
+  snapshot; any disagreement, missing contact, failed lookup, contact outside
+  the funnel or blank source puts the deal on `__deal_source_unresolved__`
+  ("Source not resolved") with its class. Never place a deal by the ledger's
+  `source_primary_raw` (the lowest contact id's source when contacts
+  disagree), never by GCLID (a GCLID deal HubSpot recorded as Direct is
+  Direct), and never fill the unresolved row from a guess. The rows must add
+  back up to the window's deal count or every row withholds
+  (`channel_partition_does_not_reconcile`). Channel outcomes are deals CLOSED
+  in the evidence window's days ended at yesterday — a different cohort from
+  the funnel's contacts acquired: no rate joins them. Google Ads spend
+  is compared only with the "Google Ads (canonical evidence)" line, never
+  with the Paid Search row (its ratios are `incompatible_rate(
+  channel_population_is_not_spend_population)`, its spend cell
+  `spend_shown_on_google_ads_line`). The line is the platform's Google Ads
+  evidence (the truth's campaign_attributable + google_ads_unplaced): a
+  GCLID on any row, plus the Paid Search classification, minus labels
+  approved as not Google Ads. It does NOT by itself exclude other search
+  engines — never describe it as if it did; its `evidence_split` shows how
+  much rests on a click ID. Every other row is `channel_spend_not_connected`.
+
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
   `SEVERITY_MAP`, `canonical_status_display_label()`, and — as appropriate —

@@ -7334,6 +7334,18 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .channel-funnel-pct { color: var(--text-muted); font-size: 0.85em; }
 .channel-funnel-drill { padding-left: calc(var(--space-5) + 14px); color: var(--text-secondary); }
 
+/* ── Channels outcomes (PR-ADS-168A) ────────────────────────────────────── */
+.channel-funnel-table th.channel-funnel-group { text-align: center; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border, #e2e8f0); }
+.channel-outcome-cell .metric-reason { display: block; white-space: normal; max-width: 220px; margin-left: auto; font-size: 11px; color: var(--text-muted); }
+.channel-outcome-na { color: var(--text-muted); font-size: 12px; font-style: italic; }
+.channel-outcome-unresolved td { background: var(--surface-alt, #f9fafb); }
+.channel-outcome-gads td { border-top: 2px solid var(--border, #e2e8f0); background: var(--brand-sky-bg, #f0f7ff); }
+.channel-funnel-sub { font-size: 11px; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
+.channel-outcome-totals { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: var(--space-5); }
+.channel-outcome-totals .dash-outcomes__cell { background: var(--surface-card); box-shadow: var(--shadow-sm); padding: 14px 16px; border-top: 3px solid var(--brand-midnight, #0b2545); }
+.channel-outcome-totals .dash-outcomes__value { font-size: 24px; line-height: 1.15; }
+.channel-outcome-totals .dash-outcomes__sub { font-size: 12px; }
+
 /* ── Channels page revamp (PR-ADS-162I) ─────────────────────────────────── */
 .channels-header { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
 .channel-funnel-seg { display: inline-flex; align-items: center; gap: 2px; background: var(--surface-card); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }

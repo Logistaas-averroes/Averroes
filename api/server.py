@@ -7005,22 +7005,46 @@ def api_channel_funnel(
     window: str = Query(default="180d"),
     _user=Depends(require_auth),
 ) -> dict[str, Any]:
-    """The acquisition-cohort funnel for every channel (PR-ADS-162A, read-only).
+    """The Channels page (PR-ADS-162A funnel + PR-ADS-168A outcomes, read-only).
 
-    Contacts created in the window, by HubSpot original source, with how many
-    have reached MQL / SQL / Opportunity / Customer stage. Publishes no deals,
-    revenue or spend. When the cohort cannot be published the response carries
-    the reason and no counts.
+    The funnel: contacts created in the window, by HubSpot original source,
+    with how many have reached MQL / SQL / Opportunity / Customer stage. When
+    the cohort cannot be published it carries the reason and no counts.
+
+    ``outcomes``: closed-won deals, customers won (distinct companies),
+    revenue and — on Paid Search only — Google Ads spend, per original source,
+    for the deals CLOSED in the same days ended at yesterday
+    (``source_attribution_service.build_channel_outcomes``, the reader
+    contract). A different cohort from the funnel: no rate joins them. Each
+    half is computed on its own and publishes or withholds on its own; one
+    ``now`` for both.
     """
     from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
     from services.channel_funnel_service import build_channel_funnel  # noqa: PLC0415
+    from services.source_attribution_service import build_channel_outcomes  # noqa: PLC0415
+    now = datetime.now(tz=timezone.utc)
     try:
-        return build_channel_funnel(window)
+        funnel = build_channel_funnel(window, now=now)
     except EvidenceWindowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         log.error("[api/channel-funnel] failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="channel funnel failed") from exc
+    try:
+        outcomes = build_channel_outcomes(
+            window, now=now,
+            channel_sources=[c.get("source") for c in funnel.get("channels") or []])
+    except Exception as exc:  # noqa: BLE001 — the funnel still renders
+        log.error("[api/channel-funnel] outcomes failed: %s", exc, exc_info=True)
+        outcomes = {"publication": {m: {"status": "unavailable",
+                                        "reason": "channel_outcomes_failed"}
+                                    for m in ("closed_won_deals", "revenue_usd",
+                                              "customers")},
+                    "totals": None, "channels": None, "partition": None,
+                    "google_ads_line": None,
+                    "metric_family": "closed_won_outcomes",
+                    "window_basis": "deal_close_date"}
+    return {**funnel, "outcomes": outcomes}
 
 
 @app.get("/api/mailchimp/status")

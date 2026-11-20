@@ -1396,7 +1396,7 @@ def fetch_spend_coverage(start: date | None, end: date,
                 cur.execute(
                     """
                     SELECT chunk_start, chunk_end, status, rows_written,
-                           cost_micros_total, customer_id
+                           cost_micros_total, customer_id, fetched_at
                     FROM google_ads_spend_coverage
                     WHERE chunk_end >= COALESCE(%s::date, chunk_end) AND chunk_start <= %s
                       AND (%s::text IS NULL OR customer_id = %s)
@@ -1413,6 +1413,10 @@ def fetch_spend_coverage(start: date | None, end: date,
                         "rows_written": r.get("rows_written"),
                         "cost_micros_total": int(r.get("cost_micros_total") or 0),
                         "customer_id": r.get("customer_id"),
+                        # PR-ADS-168A: when the chunk was fetched, so the
+                        # settle rule can tell which of its days it holds
+                        # COMPLETELY (``analyze_settled_coverage``).
+                        "fetched_at": r.get("fetched_at"),
                     })
             return {"available": True, "chunks": chunks}
     except Exception as exc:  # noqa: BLE001

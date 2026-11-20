@@ -4926,3 +4926,155 @@ not model production):
 9. **Parity for open windows** compares the country consumers with the
    settled reference, one extra mart build per audited window; its cost was
    not measured against production.
+
+## PR-ADS-168A — Channels: closed-won outcomes per channel (November 2026)
+
+Scope: the Channels page gains the deals that CLOSED in the same days as its
+acquisition-cohort funnel, per HubSpot original source, through the reader
+contract. Revenue by Source is unchanged (its removal is PR-ADS-168B). Full
+design: `docs/50_CHANNEL_OUTCOMES.md`.
+
+**Production facts (read-only, 2026-11-20).** Won deals by placement class:
+all time — 155 resolved, 20 contacts disagree, 14 no associated contact, 1
+contact not in the funnel; last 180 days — 15 resolved, nothing unresolved;
+last 60 days — 8 resolved.
+
+### What changed
+
+1. **Deal → channel.** A won deal takes channel X only when every associated
+   contact's `hubspot_contact_funnel.hs_analytics_source` (through
+   `channel_funnel_service.source_key`) is X; otherwise it is on the
+   outcome-only row `__deal_source_unresolved__` ("Source not resolved") with
+   one of six classes (`association_lookup_failed`, `no_associated_contact`,
+   `associated_contacts_not_stored`, `contact_not_in_funnel`,
+   `contact_has_no_source`, `contacts_disagree`).
+   `fetch_closed_won_universe` selects `f.hs_analytics_source` in its
+   REPEATABLE READ snapshot. The ledger's `source_primary_raw` is not read.
+2. **Reader contract.** `load_won_deals(window_type="evidence")` reads an
+   evidence key through `ccr.window_view(window_type=evidence)`; `bounds=`
+   (PR-ADS-167A) applies to it. `source_attribution_service.build_channel_outcomes`
+   (`@single_snapshot`) builds one `reader_row` per channel; totals are the
+   window's `canonical_metrics`; the rows must reconcile to the published
+   deal count (same ids) or every row withholds with
+   `channel_partition_does_not_reconcile`; `channels` / `partition` are null
+   when the deal count is not published.
+3. **Settled days.** `canonical_contract.resolve_settled_evidence_window`
+   ends the evidence window at yesterday through `end_at_settled_day`; deals
+   are read over `settled_revenue_bounds`; the window block carries the
+   disclosure. The funnel keeps its own cohort through today.
+4. **Spend.** `revenue_attribution_service.canonical_campaign_spend_block`
+   is extracted unchanged from `_build_from_db` (which now calls it);
+   `revenue_spend_truth_service.build_google_ads_spend_truth_for_days(start,
+   end, settled=)` runs it and `derive_google_ads_spend_truth`; `settled=True`
+   adds `analyze_settled_coverage` over the campaign-spend chunks
+   (`fetch_spend_coverage` now returns `fetched_at`). Google Ads spend sits on
+   Paid Search only; every other row is `channel_spend_not_connected`
+   (new `cwt.R_CHANNEL_SPEND_NOT_CONNECTED`), the unresolved row
+   `deal_source_not_resolved`, the totals `all_channel_spend_not_connected`.
+5. **API.** `/api/channel-funnel` = `{**build_channel_funnel(window, now=now),
+   "outcomes": build_channel_outcomes(window, now=now)}`, one `now`; an
+   outcomes failure leaves the funnel and reports `channel_outcomes_failed`.
+6. **UI.** `renderChannelFunnel`: an outcome strip (Closed-won deals,
+   Customers won, Revenue, Google Ads spend); a grouped header (Funnel ·
+   contacts acquired | Outcomes · deals closed | Paid media · same days);
+   cells through `canonicalMetricHtml` / `rowMetricHtml` with the evidence
+   window for View blockers; the unresolved row and its class breakdown; each
+   half renders when the other is withheld; the "not on this page yet" bullet
+   replaced by the cohort, attribution, original-source, customers, spend and
+   ratio notes. The page subtitle says it.
+7. **Audits.** Reader cutover: INVENTORY row updated; an evidence-window pass
+   (`report["evidence_windows"]`) for 30d/60d/180d/all_time with an
+   independent evidence-window restatement and `channel_outcomes` through
+   checks 8/9/18. Parity: `EVIDENCE_WINDOW_CONSUMERS` (reported by
+   `audit_all_windows`). SQL doctrine registry: no new SQL occurrence (the
+   scanner finds none in the new code). CI: the new PG module is in the PG
+   step and the did-run list.
+8. **Feasibility report.** Section 4 counts won deals per placement class for
+   evidence all_time / 180d / 60d / 30d.
+
+### Tests
+
+New: `tests/test_pr_ads_168a_channel_outcomes.py` (41, pure + node) and
+`tests/test_pr_ads_168a_channel_outcomes_pg_integration.py` (9, PostgreSQL).
+On 1a889b6 38 of the 39 new cases fail (test_20, which asserts the funnel
+service stays free of reader terms, holds there by design), and so does the
+changed 162i test_13: 39 failures.
+
+Changed: `test_pr_ads_162i_channels_page_revamp.py::test_13` — a contract
+change, not a weakening. It banned the word "customers" from the Channels
+code because the page then showed contacts only; the page now shows
+customers won. It now asserts the stronger properties: distinct headers
+("Customer stage (contacts)" vs "Customers won (distinct companies)"), every
+"customers" in the code is the won-companies figure, no percentage in the
+outcome cell renderer, and the total and strip read the window's metric
+(no `reduce(`). `tests/canonical_ledger_fixtures.py`: the fake universe takes
+production's `acquisition_contacts` rows and its default rows carry
+`hs_analytics_source`, as production's read now does.
+
+### Review round 1
+
+* **BLOCKER — Paid Search ratio was a proxy.** The Paid Search row divided
+  HubSpot's Paid Search deals by Google Ads spend. Probe (g1 mapped campaign
+  $10k, b1 label approved not Google Ads $50k, d1 GCLID recorded as Direct
+  $20k, spend $4,000): published $60,000 / 15.0x; the truth's
+  campaign_attributable was $30k. Now the Paid Search row keeps deals,
+  revenue and customers and refuses both ratios
+  (`channel_population_is_not_spend_population`); a separate line "Google
+  Ads (canonical evidence)" (`outcomes.google_ads_line`) reads the truth's
+  campaign_attributable + google_ads_unplaced members
+  (`canonical_revenue_service.google_ads_evidence_members`, proven against
+  the truth's partition counts now carried on `load_won_deals` as
+  `attribution_partition`) over the same settled Google Ads spend: $30,000 /
+  $4,000 = 7.5x. It overlaps the channel rows and is never added to them.
+* **MINOR — failure payload** rendered "Deals closed in all time, to
+  undefined": the context line now needs `outcomes.window`.
+* **MINOR — funnel source outside the label table** read "the server sent no
+  outcome row": the server passes the funnel's sources
+  (`build_channel_outcomes(channel_sources=)`) and each gets a measured row.
+* **Observation — one calendar.** Deal bounds use `ACCOUNT_TZ`, the settle
+  rule the configured zone. The evidence windows, the funnel cohort and
+  `ccr.window_bounds` all use `ACCOUNT_TZ`; moving them to the configured
+  zone changes Campaign Evidence and the truth's evidence windows too, so it
+  is not done here. Instead the spend is unavailable
+  (`account_time_zone_differs_from_evidence_days`) whenever the configured
+  zone is known and differs. Production: both Europe/London.
+
+### Review round 2
+
+* **MAJOR — the line was described as removing other search engines.** It
+  does not: `cwt.attribution_bucket` admits `google_ads_unplaced` on a GCLID
+  OR `acquisition_group = google_ads`, which the deal sync sets from a Paid
+  Search contact. Probe: g1 GCLID $10k + b2 Paid Search, unmapped, no GCLID
+  $50k → the line is 2 deals, $60,000, 15.0x. Decision kept: the platform's
+  doctrine stands (only an approved not-Google-Ads label removes a Paid
+  Search deal). The page, docs/50, CLAUDE.md and this log now say exactly
+  that, and the line carries `evidence_split` (with a GCLID vs Paid Search
+  classification only, same snapshot, null unless it sums to the line),
+  shown as "N deals: X with a Google click ID, Y by HubSpot source only".
+  PG test_07's p1 is written as the deal sync writes it (`classify_source`):
+  the line is 3 deals, $7,000.
+* **MINOR — ratio gate status.** The Paid Search ratios are now
+  `cwt.incompatible_rate(...)` (unavailable), the convention for a
+  population mismatch.
+* **MINOR — reconcile guard tested** (`_evidence_counts_match`): a tampered
+  partition makes the line unavailable; with the guard removed it publishes.
+* **MINOR — Paid Search spend cell** is unavailable
+  (`spend_shown_on_google_ads_line`); spend stays on the line and the strip.
+* **Observation — gated spend block**: when any gate makes the spend
+  unavailable, `google_ads_state` reads `unavailable` and `native_spend` is
+  null.
+
+### Known gaps
+
+1. Paid Search revenue is HubSpot's original source (labels approved as not
+   Google Ads; GCLID deals recorded elsewhere are on other rows); its ratios
+   and spend cell are unavailable. The Google Ads line carries the
+   comparison over the platform's Google Ads evidence, which still counts
+   Paid Search deals from other engines unless their label is approved as
+   not Google Ads; its split shows how much rests on a click ID.
+2. A deal whose contacts were acquired before the funnel window sits on a
+   channel row the funnel shows with 0 contacts.
+3. The campaign-spend settle rule applies to Channels only (167A gap 2
+   stands for the other pages).
+4. Not run against production: the extra column in the universe read, and
+   the evidence-window audit pass's cost.

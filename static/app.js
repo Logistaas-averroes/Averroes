@@ -2142,6 +2142,25 @@ const CANONICAL_REASON_LABELS = {
     "revenue and SQLs are different populations and cohorts",
   lead_to_customer_rate_needs_one_acquisition_cohort_and_scope:
     "leads and won deals are different populations and cohorts",
+  // PR-ADS-168A: the Channels page's outcome and spend columns.
+  channel_spend_not_connected: "no spend source is connected for this channel",
+  channel_population_is_not_spend_population:
+    "this channel's deals are not the population Google Ads spend paid for — see the Google Ads line",
+  spend_shown_on_google_ads_line: "Google Ads spend is shown on the Google Ads line, beside the deals it is compared with",
+  account_time_zone_differs_from_evidence_days:
+    "the Google Ads account time zone differs from the days these deals are counted on",
+  google_ads_evidence_partition_unavailable: "the Google Ads evidence partition is unavailable",
+  google_ads_evidence_does_not_reconcile: "the Google Ads evidence deals do not match the period's partition",
+  all_channel_spend_not_connected: "no spend source covers every channel",
+  deal_source_not_resolved: "these deals have no single source, so no spend applies",
+  channel_partition_does_not_reconcile: "the channel rows do not add up to the period's won deals",
+  channel_outcomes_failed: "the channel outcomes could not be loaded",
+  spend_not_reread_since_day_ended: "yesterday's spend has not been re-read since the day ended",
+  spend_reread_failed: "the sync that should have re-read yesterday's spend failed",
+  window_includes_day_in_progress: "the window includes a day still in progress",
+  account_time_zone_unknown: "the Google Ads account time zone is not on record",
+  spend_days_not_settled: "the spend days are not settled yet",
+  no_settled_day_in_window: "this window has no completed day yet",
   roas_requires_revenue_and_spend_in_one_acquisition_cohort: "attribution ROAS needs revenue and spend over one acquisition cohort",
   cac_requires_spend_and_customers_in_one_acquisition_cohort: "CAC needs spend and customers over one acquisition cohort",
 };
@@ -9580,15 +9599,127 @@ function channelFunnelRowHtml(row, stages, opts) {
     name = `<span class="channel-funnel-leaf"><strong>${escapeHtml(row.label)}</strong></span>`;
   }
   if (!o.total && !o.drill && channelFunnelIsSmall(row)) name += channelFunnelSmallBadge();
+  if (o.sub) name += `<div class="channel-funnel-sub">${escapeHtml(o.sub)}</div>`;
   const cells = stages.map((st, i) => {
     const color = CHANNEL_FUNNEL_STAGE_COLORS[i % CHANNEL_FUNNEL_STAGE_COLORS.length];
     return `<td class="num channel-funnel-cell">${channelFunnelNum(row[st.key])}${channelFunnelPct(row[st.key], row.contacts)}${
       channelFunnelBar(channelFunnelRate(row[st.key], row.contacts), color)}</td>`;
   }).join("");
   const attrs = o.total ? ' class="channel-funnel-total"'
-    : o.drill ? ` class="channel-funnel-child" data-channel-child="${escapeHtml(o.parent)}" hidden` : "";
+    : o.drill ? ` class="channel-funnel-child" data-channel-child="${escapeHtml(o.parent)}" hidden`
+    : o.unresolved ? ' class="channel-outcome-unresolved"'
+    : o.gads ? ' class="channel-outcome-gads"' : "";
+  // PR-ADS-168A: `funnel` replaces the funnel cells (a row that is not a
+  // contact source, or a funnel that is withheld); `outcome` appends the
+  // outcome and paid-media cells. Neither changes a funnel number.
+  const funnel = o.funnel !== undefined ? o.funnel
+    : `<td class="num">${channelFunnelNum(row.contacts)}</td>${cells}`;
   return `<tr${attrs}><td>${name}</td>
-    <td class="num">${channelFunnelNum(row.contacts)}</td>${cells}</tr>`;
+    ${funnel}${o.outcome || ""}</tr>`;
+}
+
+// ── PR-ADS-168A — outcomes: the deals that CLOSED in the same days ─────────
+// A second cohort beside the funnel. Every figure is the API's {value,
+// status, reason}, rendered by canonicalMetricHtml / rowMetricHtml: a
+// published 0 is "0", anything else is the word and the reason. No share is
+// computed in an outcome cell, and nothing joins the two cohorts.
+const CHANNEL_OUTCOME_UNRESOLVED = "__deal_source_unresolved__";
+const CHANNEL_OUTCOME_NO_SOURCE = "(no source recorded)";
+const CHANNEL_OUTCOME_CLASS_LABELS = {
+  contacts_disagree: "contacts have different sources",
+  no_associated_contact: "no associated contact",
+  association_lookup_failed: "the contact lookup failed",
+  associated_contacts_not_stored: "associated contacts are not stored",
+  contact_not_in_funnel: "a contact is not in the contact data",
+  contact_has_no_source: "a contact has no original source",
+};
+const CHANNEL_OUTCOME_HEADS = ["Closed-won deals", "Customers won (distinct companies)", "Revenue"];
+function channelPaidHeads() { return ["Spend", PERIOD_RATIO_LABEL, PERIOD_SPEND_PER_CUSTOMER_LABEL]; }
+
+function channelOutcomeInt(v) { return Number(v).toLocaleString(); }
+function channelOutcomeMoney(v) { return "$" + Math.round(Number(v)).toLocaleString(); }
+function channelOutcomeRatio(v) { return Number(v).toFixed(2) + "x"; }
+
+function channelOutcomeOpts(o) {
+  return { windowType: "evidence", windowKey: ((o && o.window) || {}).window_key };
+}
+
+// Rows exist only when the window's deal count is published.
+function channelOutcomesPublished(o) {
+  return !!(o && Array.isArray(o.channels));
+}
+
+function channelOutcomeCellsHtml(row, opts) {
+  const r = row || {};
+  return [
+    rowMetricHtml(r, "closed_won_deals", channelOutcomeInt, opts),
+    rowMetricHtml(r, "customers", channelOutcomeInt, opts),
+    rowMetricHtml(r, "won_revenue", channelOutcomeMoney, opts),
+    canonicalMetricHtml(r.spend, channelOutcomeMoney, opts),
+    rowMetricHtml(r, "period_revenue_per_ad_spend", channelOutcomeRatio, opts),
+    rowMetricHtml(r, "period_spend_per_customer_won", channelOutcomeMoney, opts),
+  ].map((h) => `<td class="num channel-outcome-cell">${h}</td>`).join("");
+}
+
+function channelOutcomeNoteCells(text) {
+  return `<td class="channel-outcome-na" colspan="6">${escapeHtml(text)}</td>`;
+}
+
+// A published row whose deal count is a number above zero.
+function channelOutcomeHasDeals(row) {
+  const m = ((row || {}).metrics || {}).closed_won_deals || {};
+  return m.status === "published" && typeof m.value === "number" && m.value > 0;
+}
+
+function channelOutcomeClassText(row) {
+  const by = (row || {}).unresolved_by_class || {};
+  const parts = Object.keys(CHANNEL_OUTCOME_CLASS_LABELS)
+    .filter((k) => typeof by[k] === "number" && by[k] > 0)
+    .map((k) => `${CHANNEL_OUTCOME_CLASS_LABELS[k]}: ${by[k].toLocaleString()}`);
+  return parts.length ? parts.join(" · ") : "";
+}
+
+// The Google Ads line's evidence split: "7 deals: 6 with a Google click ID,
+// 1 by HubSpot source only". Only published counts are shown.
+function channelOutcomeSplitText(line) {
+  const sp = (line || {}).evidence_split;
+  if (!sp) return "";
+  const n = (part) => {
+    const m = ((sp[part] || {}).closed_won_deals) || {};
+    return m.status === "published" && typeof m.value === "number" ? m.value : null;
+  };
+  const g = n("with_gclid");
+  const h = n("source_classification_only");
+  if (g === null || h === null) return "";
+  const total = g + h;
+  return `${total.toLocaleString()} ${total === 1 ? "deal" : "deals"}: ${g.toLocaleString()} with a Google click ID, ${h.toLocaleString()} by HubSpot source only`;
+}
+
+function channelOutcomeRange(o) {
+  const w = (o && o.window) || {};
+  return w.is_all_time || !w.start_date ? `in all time, to ${w.end_date}` : `${w.start_date} to ${w.end_date}`;
+}
+
+// The strip: the window's OWN figures. Customers won is the window's count of
+// distinct companies — never a sum of the rows.
+function channelOutcomeStripHtml(o) {
+  const t = o.totals || {};
+  const m = t.metrics || {};
+  const pub = o.publication || {};
+  const opts = channelOutcomeOpts(o);
+  const metricOf = (k) => m[k] || pub[k] || { status: "unavailable", reason: "channel_outcomes_failed" };
+  const google = (o.spend || {}).google_ads
+    || { status: "unavailable", reason: "google_ads_usd_spend_unavailable" };
+  const cells = [
+    ["Closed-won deals", metricOf("closed_won_deals"), channelOutcomeInt, "deals closed in these days"],
+    ["Customers won", metricOf("customers"), channelOutcomeInt, "distinct companies · not additive across channels"],
+    ["Revenue", metricOf("revenue_usd"), channelOutcomeMoney, "closed-won, USD"],
+    ["Google Ads spend", google, channelOutcomeMoney, "the only connected spend source"],
+  ].map(([label, metric, fmt, sub]) => `<div class="dash-outcomes__cell channel-outcome-stat">
+      <div class="dash-outcomes__label">${escapeHtml(label)}</div>
+      <div class="dash-outcomes__value">${canonicalMetricHtml(metric, fmt, opts)}</div>
+      <div class="dash-outcomes__sub">${escapeHtml(sub)}</div></div>`);
+  return `<div class="dash-outcomes channel-outcome-totals">${cells.join("")}</div>`;
 }
 
 // The totals strip: how many contacts were acquired, and how far they got.
@@ -9662,17 +9793,25 @@ function renderChannelFunnel(data, view) {
   const w = data.window || {};
   const range = w.is_all_time ? `All time, to ${w.end_date}` : `${w.start_date} to ${w.end_date}`;
   const asOf = (data.freshness || {}).as_of;
-  if (pub.status !== "published" || !data.channels || !data.totals) {
+  const funnelOk = pub.status === "published" && !!data.channels && !!data.totals;
+  // PR-ADS-168A: each half publishes or withholds on its own — a withheld
+  // funnel never hides the outcomes, and withheld outcomes never hide the funnel.
+  const o = data.outcomes || null;
+  const outRows = channelOutcomesPublished(o) ? o.channels : null;
+  const oOpts = channelOutcomeOpts(o);
+  let withheld = "";
+  if (!funnelOk) {
     const word = pub.status === "unavailable" ? "Unavailable" : "Withheld";
     const reason = CHANNEL_FUNNEL_REASON_LABELS[pub.reason]
       || String(pub.reason || "the cohort could not be published").replace(/_/g, " ");
-    return `<div class="panel"><p class="empty-state" style="padding:var(--space-5)">
+    withheld = `<div class="panel"><p class="empty-state" style="padding:var(--space-5)">
       <strong>${word}</strong> — ${escapeHtml(reason)}. No figures are shown until the contact data is complete and current.</p></div>`;
+    if (!o) return withheld;
   }
-  const stage = stages.find((st) => st.key === v.stage)
-    || stages.find((st) => st.key === "reached_sql") || stages[0];
+  const stage = funnelOk ? (stages.find((st) => st.key === v.stage)
+    || stages.find((st) => st.key === "reached_sql") || stages[0]) : null;
   const sortKey = v.sort || "contacts";
-  const stagePicker = stages.length > 1 ? `<div class="channel-funnel-seg" role="group" aria-label="Stage to compare">${
+  const stagePicker = stage && stages.length > 1 ? `<div class="channel-funnel-seg" role="group" aria-label="Stage to compare">${
     stages.map((st) => `<button type="button" class="channel-funnel-seg__btn${st === stage ? " is-active" : ""}" data-channel-stage="${escapeHtml(st.key)}" aria-pressed="${st === stage}">${escapeHtml(st.label)}</button>`).join("")}</div>` : "";
   const rankings = stage ? `
     <div class="channel-funnel-grid">
@@ -9689,43 +9828,115 @@ function renderChannelFunnel(data, view) {
         ${channelFunnelRankHtml(data, stage, "rate")}
       </div>
     </div>` : "";
+  const stageHead = (st) => (outRows && st.key === "reached_customer_stage") ? `${st.label} (contacts)` : st.label;
   const head = stages.map((st) =>
-    `<th class="num"><button type="button" class="channel-funnel-sort${sortKey === st.key ? " is-active" : ""}" data-channel-sort="${escapeHtml(st.key)}" title="Sort by ${escapeHtml(st.label)}">${escapeHtml(st.label)}</button></th>`).join("");
-  const body = channelFunnelSorted(data.channels, v, stages).map((ch) => {
-    const drill = channelFunnelHasDrill(ch) ? ch.drilldowns : [];
-    return channelFunnelRowHtml(ch, stages, { children: drill.length })
-      + drill.map((d) => channelFunnelRowHtml(d, stages, { drill: true, parent: ch.source })).join("");
-  }).join("");
-  const total = channelFunnelRowHtml({ label: "All channels", ...data.totals }, stages, { total: true });
-  const anyDrill = data.channels.some(channelFunnelHasDrill);
-  const notes = data.notes || {};
-  return `
-    <p class="channel-funnel-context">Contacts acquired <strong>${escapeHtml(range)}</strong> · stage reached so far${
-      asOf ? ` · measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</p>
-    ${channelFunnelTotalsHtml(data.totals, stages)}
-    ${stage ? `<div class="channel-funnel-compare"><span class="channel-funnel-compare__label">Compare channels on:</span>${stagePicker}</div>` : ""}
-    ${rankings}
+    `<th class="num"><button type="button" class="channel-funnel-sort${sortKey === st.key ? " is-active" : ""}" data-channel-sort="${escapeHtml(st.key)}" title="Sort by ${escapeHtml(st.label)}">${escapeHtml(stageHead(st))}</button></th>`).join("");
+  const contactsHead = `<th class="num"><button type="button" class="channel-funnel-sort${sortKey === "contacts" ? " is-active" : ""}" data-channel-sort="contacts" title="Sort by contacts">Contacts</button></th>`;
+  const byKey = {};
+  (outRows || []).forEach((r) => { byKey[r.source] = r; });
+  const funnelSpan = 1 + stages.length;
+  const outcomeFor = (source) => {
+    if (!outRows) return "";
+    if (source === CHANNEL_OUTCOME_NO_SOURCE) return channelOutcomeNoteCells("n/a — counted under Source not resolved");
+    return byKey[source] ? channelOutcomeCellsHtml(byKey[source], oOpts)
+      : channelOutcomeNoteCells("Unavailable — the server sent no outcome row for this channel");
+  };
+  const blankOutcome = outRows ? '<td class="channel-outcome-blank" colspan="6"></td>' : "";
+  let body = "";
+  let total = "";
+  const funnelSources = {};
+  if (funnelOk) {
+    body = channelFunnelSorted(data.channels, v, stages).map((ch) => {
+      funnelSources[ch.source] = true;
+      const drill = channelFunnelHasDrill(ch) ? ch.drilldowns : [];
+      return channelFunnelRowHtml(ch, stages, { children: drill.length, outcome: outcomeFor(ch.source) })
+        + drill.map((d) => channelFunnelRowHtml(d, stages, { drill: true, parent: ch.source, outcome: blankOutcome })).join("");
+    }).join("");
+    total = channelFunnelRowHtml({ label: "All channels", ...data.totals }, stages,
+      { total: true, outcome: outRows ? channelOutcomeCellsHtml(o.totals, oOpts) : "" });
+  } else if (outRows) {
+    total = channelFunnelRowHtml({ label: "All channels" }, stages,
+      { total: true, funnel: "", outcome: channelOutcomeCellsHtml(o.totals, oOpts) });
+  }
+  if (outRows) {
+    // Channels with closed deals but no contact acquired in this period, then
+    // the deals whose source is not resolved.
+    const zero = {};
+    stages.forEach((st) => { zero[st.key] = 0; });
+    body += outRows.filter((r) => r.source !== CHANNEL_OUTCOME_UNRESOLVED
+        && !funnelSources[r.source] && channelOutcomeHasDeals(r))
+      .map((r) => channelFunnelRowHtml({ label: r.label, contacts: 0, ...zero }, stages,
+        { funnel: funnelOk ? undefined : "", outcome: channelOutcomeCellsHtml(r, oOpts) })).join("");
+    const un = byKey[CHANNEL_OUTCOME_UNRESOLVED];
+    if (un) {
+      body += channelFunnelRowHtml({ label: un.label || "Source not resolved" }, stages, {
+        unresolved: true, sub: channelOutcomeClassText(un),
+        funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — not a contact source</td>` : "",
+        outcome: channelOutcomeCellsHtml(un, oOpts) });
+    }
+  }
+  // The measured comparison with Google Ads spend: deals with Google Ads
+  // evidence wherever HubSpot put them. Not a channel row, never summed.
+  const gads = outRows && o.google_ads_line ? channelFunnelRowHtml(
+    { label: o.google_ads_line.label || "Google Ads (canonical evidence)" }, stages, {
+      gads: true,
+      sub: [channelOutcomeSplitText(o.google_ads_line),
+        "Google click ID on any channel row, or HubSpot Paid Search unless the label is approved as not Google Ads — not part of the rows above and not added to the total"]
+        .filter(Boolean).join(" · "),
+      funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — paid-media line, not a contact source</td>` : "",
+      outcome: channelOutcomeCellsHtml(o.google_ads_line, oOpts) }) : "";
+  const anyDrill = funnelOk && data.channels.some(channelFunnelHasDrill);
+  const thead = outRows
+    ? `<thead><tr><th rowspan="2">Channel</th>${funnelOk ? `<th class="channel-funnel-group" colspan="${funnelSpan}">Funnel · contacts acquired</th>` : ""}
+          <th class="channel-funnel-group" colspan="3">Outcomes · deals closed</th>
+          <th class="channel-funnel-group" colspan="3">Paid media · same days</th></tr>
+        <tr>${funnelOk ? contactsHead + head : ""}${CHANNEL_OUTCOME_HEADS.concat(channelPaidHeads()).map((h) => `<th class="num">${escapeHtml(h)}</th>`).join("")}</tr></thead>`
+    : `<thead><tr><th>Channel</th>${contactsHead}${head}</tr></thead>`;
+  const table = (funnelOk || outRows) ? `
     <div class="dash-panel dash-anim channel-funnel-panel">
       <div class="dash-panel__header"><div>
         <h3 class="dash-panel__title">Every channel, every stage</h3>
-        <p class="dash-panel__sub">Each percentage is the share of that row's contacts. Click a column to sort${anyDrill ? "; click a channel to see its sources" : ""}.</p></div>
+        <p class="dash-panel__sub">${funnelOk ? "Each percentage is the share of that row's contacts. Click a column to sort" : "Outcomes only: the funnel is withheld"}${anyDrill ? "; click a channel to see its sources" : ""}.${
+          outRows ? " Outcome columns count deals closed in the same days — a different group from the contacts, with no percentage between them." : ""}</p></div>
         ${anyDrill ? '<button type="button" class="btn btn--secondary channel-funnel-expand" data-channel-expand-all aria-pressed="false">Show all sources</button>' : ""}
       </div>
       <div style="overflow-x:auto">
         <table class="data-table channel-funnel-table">
-          <thead><tr><th>Channel</th>
-            <th class="num"><button type="button" class="channel-funnel-sort${sortKey === "contacts" ? " is-active" : ""}" data-channel-sort="contacts" title="Sort by contacts">Contacts</button></th>${head}</tr></thead>
-          <tbody>${total}${body}</tbody>
+          ${thead}
+          <tbody>${total}${body}${gads}</tbody>
         </table>
       </div>
-    </div>
+    </div>` : "";
+  const notes = data.notes || {};
+  const on = (o && o.notes) || {};
+  const outcomeContext = o && o.window ? `
+    <p class="channel-funnel-context channel-outcome-context">Deals closed <strong>${escapeHtml(channelOutcomeRange(o))}</strong>${
+      (o.window || {}).disclosure ? ` · ${escapeHtml(o.window.disclosure)}` : ""} The funnel counts contacts acquired ${escapeHtml(range)}, today included: a different group, so no rate joins the two.</p>` : "";
+  const outcomeBullets = o ? [
+    on.cohorts || "The funnel counts contacts acquired in this period; outcomes count deals closed in the same days. No rate is calculated between them.",
+    on.attribution || "A won deal is placed on a channel only when every associated contact has that original source; otherwise it is under Source not resolved.",
+    on.original_source || "Channel is HubSpot's original source, unchanged.",
+    on.customers || "Customers won are distinct companies and are not additive across channels.",
+    on.spend || "Google Ads spend is compared with the Google Ads line, not the Paid Search row.",
+    `${PERIOD_RATIO_LABEL} and ${PERIOD_SPEND_PER_CUSTOMER_LABEL}: ${PERIOD_RATIO_DISCLOSURE}.`,
+  ] : ["Deals, revenue and spend by channel could not be loaded."];
+  return `
+    ${withheld}
+    ${funnelOk ? `<p class="channel-funnel-context">Contacts acquired <strong>${escapeHtml(range)}</strong> · stage reached so far${
+      asOf ? ` · measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</p>
+    ${channelFunnelTotalsHtml(data.totals, stages)}` : ""}
+    ${outcomeContext}
+    ${o ? channelOutcomeStripHtml(o) : ""}
+    ${stage ? `<div class="channel-funnel-compare"><span class="channel-funnel-compare__label">Compare channels on:</span>${stagePicker}</div>` : ""}
+    ${rankings}
+    ${table}
     <div class="dash-panel channel-funnel-howto">
       <h3 class="dash-panel__title">How to read this page</h3>
       <ul>
         <li>${escapeHtml(notes.channels || "Channel is HubSpot's original source for the contact.")}</li>
         <li>${escapeHtml(notes.stages || "Each stage counts contacts with evidence of reaching it.")}</li>
         <li>${escapeHtml(notes.maturity || "Recent contacts have had less time to progress.")}</li>
-        <li>Spend, cost per SQL, deals and revenue by channel are not on this page yet.</li>
+        ${outcomeBullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
       </ul>
     </div>`;
 }

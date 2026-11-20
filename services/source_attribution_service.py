@@ -766,6 +766,501 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-168A — closed-won outcomes per channel, for the Channels page
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The Channels page's funnel (``channel_funnel_service``) counts contacts
+# ACQUIRED in an evidence window. This half counts the deals that CLOSED in the
+# same days, per HubSpot original source, through the reader contract. They
+# are two cohorts: no rate is computed between them.
+#
+# Deal → channel: a won deal takes channel X only when EVERY associated
+# contact's ``hubspot_contact_funnel.hs_analytics_source``, normalised by
+# ``channel_funnel_service.source_key``, is X. Anything else is counted on the
+# explicit outcome-only row ``__deal_source_unresolved__`` with its reason.
+# The ledger's ``source_primary_raw`` is NOT read: it is the lowest contact
+# id's source when contacts disagree inside one evidence group — a choice,
+# not a measurement.
+
+CHANNEL_OUTCOMES_SOURCE = "canonical_deal_ledger_by_contact_original_source"
+CHANNEL_OUTCOMES_RULE_VERSION = "channel_outcomes_v1"
+CHANNEL_OUTCOMES_METRIC_FAMILY = "closed_won_outcomes"
+CHANNEL_OUTCOMES_WINDOW_BASIS = "deal_close_date"
+
+UNRESOLVED_SOURCE = "__deal_source_unresolved__"
+UNRESOLVED_LABEL = "Source not resolved"
+
+#: Why a won deal is on the unresolved row. One class per deal, checked in
+#: this order (the first that applies).
+UNRESOLVED_LOOKUP_FAILED = "association_lookup_failed"
+UNRESOLVED_NO_CONTACT = "no_associated_contact"
+UNRESOLVED_ROWS_MISSING = "associated_contacts_not_stored"
+UNRESOLVED_NOT_IN_FUNNEL = "contact_not_in_funnel"
+UNRESOLVED_NO_SOURCE = "contact_has_no_source"
+UNRESOLVED_DISAGREE = "contacts_disagree"
+UNRESOLVED_CLASSES = (UNRESOLVED_LOOKUP_FAILED, UNRESOLVED_NO_CONTACT,
+                      UNRESOLVED_ROWS_MISSING, UNRESOLVED_NOT_IN_FUNNEL,
+                      UNRESOLVED_NO_SOURCE, UNRESOLVED_DISAGREE)
+
+#: Every row of the table withholds its deals, revenue and customers for this
+#: reason when the rows do not add back up to the window's own deal count.
+R_CHANNEL_PARTITION = "channel_partition_does_not_reconcile"
+#: The totals row: no single spend covers every channel.
+R_ALL_CHANNEL_SPEND = "all_channel_spend_not_connected"
+#: The unresolved row is not a channel; no spend source can apply to it.
+R_UNRESOLVED_NO_SPEND = "deal_source_not_resolved"
+#: Google Ads spend whose coverage or FX is not verified.
+R_SPEND_UNVERIFIED = "google_ads_spend_coverage_or_fx_unverified"
+
+#: The only connected spend source sits on the Paid Search row.
+SPEND_CHANNEL = "PAID_SEARCH"
+SPEND_SOURCES = (
+    {"platform": "google_ads", "label": "Google Ads", "channel": "PAID_SEARCH",
+     "connected": True, "reason": None},
+    {"platform": "meta", "label": "Meta (Facebook / Instagram)",
+     "channel": "PAID_SOCIAL", "connected": False,
+     "reason": "spend_export_not_supplied"},
+    {"platform": "linkedin", "label": "LinkedIn", "channel": "PAID_SOCIAL",
+     "connected": False, "reason": "spend_export_not_supplied"},
+    {"platform": "chatgpt", "label": "ChatGPT", "channel": "AI_REFERRALS",
+     "connected": False, "reason": "spend_export_not_supplied"},
+)
+
+CHANNEL_OUTCOME_NOTES = {
+    "cohorts": (
+        "The funnel counts contacts acquired (created) in this period. "
+        "Outcomes count deals that closed in the same days, whenever their "
+        "contacts were acquired. They are two different groups, so no rate is "
+        "calculated between them."),
+    "attribution": (
+        "A won deal is placed on a channel only when every contact associated "
+        "with it has that HubSpot original source. Otherwise it is counted under "
+        "'Source not resolved': its contacts have different sources, it has no "
+        "associated contact, the contact lookup failed, a contact is not in the "
+        "contact data, or a contact has no original source."),
+    "original_source": (
+        "Channel is HubSpot's original source, unchanged. A deal whose contact "
+        "came from a Google ad click (it carries a GCLID) but that HubSpot "
+        "recorded as Direct Traffic is counted under Direct Traffic."),
+    "customers": (
+        "Customers won are distinct HubSpot companies whose deals closed in the "
+        "period. One company can close deals through two channels, so customers "
+        "won are not additive across channels: the total is the period's own "
+        "count, not the sum of the rows."),
+    "spend": (
+        "Google Ads spend is compared only with the 'Google Ads (canonical "
+        "evidence)' line, not with the Paid Search row. Paid Search is "
+        "HubSpot's original source, and Google Ads deals that HubSpot "
+        "recorded under another source sit on that channel's row. The line "
+        "counts deals with a Google click ID (GCLID), wherever HubSpot put "
+        "them, plus deals HubSpot classified as Paid Search, and leaves out "
+        "campaign labels approved as not Google Ads. It still counts a Paid "
+        "Search deal as Google Ads evidence unless its label is approved as "
+        "not Google Ads, so it does not by itself exclude other search "
+        "engines; the line shows how many of its deals carry a click ID. Its "
+        "deals also sit on the channel rows, so it is not part of them and is "
+        "not added to the totals. Meta, LinkedIn and ChatGPT spend are not "
+        "connected (no export has been supplied)."),
+}
+
+GOOGLE_ADS_LINE_SOURCE = "__google_ads_evidence__"
+GOOGLE_ADS_LINE_LABEL = "Google Ads (canonical evidence)"
+#: The evidence-day spend is on the configured account zone's days; the
+#: evidence window's deal days are on ``analysis.account_time.ACCOUNT_TZ``.
+#: When the two differ the spend is not over the deals' days: withheld.
+R_ZONE_MISMATCH = "account_time_zone_differs_from_evidence_days"
+
+
+def deal_channel(deal: dict, contacts) -> tuple:
+    """``(channel_key, None)`` or ``(None, unresolved_class)`` for ONE won deal.
+
+    Pure. ``contacts`` are the deal's ``acquisition_contacts`` rows from the
+    closed-won universe (``contact_id``, ``funnel_row_present``,
+    ``hs_analytics_source``). The ledger's own ``association_status`` decides
+    what an empty list means: only ``none`` (the lookup succeeded and found
+    nobody) is "no associated contact"; a failed lookup, or a deal the ledger
+    says has contacts while none are stored, is not resolved — never a source.
+    """
+    from services.channel_funnel_service import source_key  # noqa: PLC0415
+
+    status = deal.get("association_status")
+    rows = [c for c in (contacts or []) if str(c.get("contact_id") or "").strip()]
+    if status == "lookup_failed":
+        return None, UNRESOLVED_LOOKUP_FAILED
+    if not rows:
+        return None, (UNRESOLVED_NO_CONTACT if status == "none"
+                      else UNRESOLVED_ROWS_MISSING)
+    if any(c.get("funnel_row_present") is not True for c in rows):
+        return None, UNRESOLVED_NOT_IN_FUNNEL
+    if any(not str(c.get("hs_analytics_source") or "").strip() for c in rows):
+        return None, UNRESOLVED_NO_SOURCE
+    keys = {source_key(c) for c in rows}
+    if len(keys) != 1:
+        return None, UNRESOLVED_DISAGREE
+    return next(iter(keys)), None
+
+
+def partition_deals_by_channel(members, contacts) -> dict:
+    """Place every member deal on exactly one row. Pure.
+
+    Returns ``{"channels": {key: [deal rows]}, "unresolved": [deal rows],
+    "unresolved_by_class": {class: n}, "duplicate_deals": n}``.
+    """
+    by_deal: dict = {}
+    for c in contacts or []:
+        by_deal.setdefault(str(c.get("deal_id")), []).append(c)
+    channels: dict = {}
+    unresolved: list = []
+    classes = {k: 0 for k in UNRESOLVED_CLASSES}
+    seen: set = set()
+    duplicates = 0
+    for deal in members or []:
+        did = str(deal.get("deal_id"))
+        if did in seen:
+            duplicates += 1
+            continue
+        seen.add(did)
+        key, why = deal_channel(deal, by_deal.get(did))
+        if key is None:
+            unresolved.append(deal)
+            classes[why] = classes.get(why, 0) + 1
+        else:
+            channels.setdefault(key, []).append(deal)
+    return {"channels": channels, "unresolved": unresolved,
+            "unresolved_by_class": classes, "duplicate_deals": duplicates}
+
+
+def google_ads_spend_metric(spend_truth: dict) -> dict:
+    """The Paid Search row's spend as ``{value, status, reason}``: the verified
+    USD spend (a verified zero is a published 0), otherwise unavailable with
+    the reason the canonical spend truth gives."""
+    from services import revenue_spend_truth_service as sts  # noqa: PLC0415
+
+    st = spend_truth or {}
+    state = st.get("state")
+    if state in (sts.STATE_VERIFIED, sts.STATE_VERIFIED_ZERO) \
+            and st.get("usd_spend") is not None:
+        return cwt.metric(float(st["usd_spend"]), cwt.PUBLISHED,
+                          currency="USD", source="google_ads")
+    if st.get("unsettled_reason"):
+        reason = st["unsettled_reason"]
+    elif state in (sts.STATE_FX_INCOMPLETE, sts.STATE_COVERAGE_INCOMPLETE):
+        reason = R_SPEND_UNVERIFIED
+    else:
+        reason = cwt.R_SPEND_UNAVAILABLE
+    return cwt.metric(None, cwt.UNAVAILABLE, reason, currency="USD",
+                      source="google_ads")
+
+
+def _unconnected_spend(reason: str) -> dict:
+    return cwt.metric(None, cwt.UNAVAILABLE, reason)
+
+
+def _outcome_row(base, rows, *, spend: dict, gate=None,
+                 ratio_gate: dict | None = None) -> dict:
+    """One row's closed-won fields through the reader contract, plus its spend
+    metric. The period ratios read the same spend verdict — unless
+    ``ratio_gate`` withholds them (the row's deals are not the population the
+    spend paid for)."""
+    if ratio_gate is not None:
+        canon = canonical_revenue.reader_row(base, rows, spend_usd=None,
+                                             spend_reason=ratio_gate["reason"],
+                                             gate=gate)
+        for k in cwt.PERIOD_RATIO_KEYS:
+            canon[k] = None
+            canon["metrics"][k] = dict(ratio_gate)
+    else:
+        canon = canonical_revenue.reader_row(
+            base, rows, spend_usd=spend.get("value"),
+            spend_reason=spend.get("reason"), gate=gate)
+    return {**canon, "spend": spend}
+
+
+#: The Paid Search row's ratios: a rate across two populations is
+#: unavailable, by the codebase's convention (``cwt.incompatible_rate``).
+_PAID_SEARCH_RATIO_GATE = cwt.incompatible_rate(cwt.R_CHANNEL_POPULATION_NOT_SPEND)
+#: Its spend cell points to the line instead of sitting beside revenue the
+#: page refuses to divide.
+_PAID_SEARCH_SPEND = cwt.metric(None, cwt.UNAVAILABLE, cwt.R_SPEND_ON_GOOGLE_ADS_LINE)
+
+
+def google_ads_line(base: dict, google_spend: dict, now) -> dict:
+    """The "Google Ads (canonical evidence)" paid-media line: the window's
+    Google Ads evidence members (``campaign_attributable`` +
+    ``google_ads_unplaced``, via ``google_ads_evidence_members``) over Google
+    Ads spend for the same settled days, with both period ratios. NOT part of
+    the channel partition (a GCLID deal HubSpot recorded as Direct is on the
+    Direct row AND here) and never added to the totals. When the truth's
+    partition cannot be read the line is unavailable with its reason."""
+    ev = canonical_revenue.google_ads_evidence_members(base, now=now)
+    gate = (None if ev["rows"] is not None
+            else {"status": ev["status"], "reason": ev["reason"]})
+    row = _outcome_row(base, ev["rows"] or [], spend=google_spend, gate=gate)
+    return {"source": GOOGLE_ADS_LINE_SOURCE, "label": GOOGLE_ADS_LINE_LABEL,
+            "in_channel_partition": False, "added_to_totals": False,
+            "population": "google_ads_evidence: campaign_attributable + "
+                          "google_ads_unplaced (a GCLID, or the deal sync's "
+                          "Paid Search classification, unless the label is "
+                          "approved as not Google Ads)",
+            "evidence": {"status": ev["status"], "reason": ev["reason"]},
+            "evidence_split": _evidence_split(base, ev["rows"], row),
+            **row}
+
+
+def _evidence_split(base: dict, rows, line: dict) -> dict | None:
+    """The line's deals and revenue by evidence kind, from the same members:
+    with a Google click ID (GCLID) vs the Paid Search classification only.
+    Each part inherits the window's verdict; the parts must sum to the line
+    (else None — never a split that does not add up)."""
+    from analysis.revenue_scope import has_gclid  # noqa: PLC0415
+
+    if rows is None:
+        return None
+    with_gclid = [r for r in rows if has_gclid(r)]
+    source_only = [r for r in rows if not has_gclid(r)]
+    parts = {"with_gclid": canonical_revenue.subset_metrics(base, with_gclid),
+             "source_classification_only":
+                 canonical_revenue.subset_metrics(base, source_only)}
+    out = {k: {"closed_won_deals": v["closed_won_deals"],
+               "revenue_usd": v["revenue_usd"]} for k, v in parts.items()}
+    deals = [v["closed_won_deals"]["value"] for v in out.values()]
+    if line.get("closed_won_deals") is not None and \
+            None not in deals and sum(deals) != line["closed_won_deals"]:
+        return None
+    revs = [v["revenue_usd"]["value"] for v in out.values()]
+    if line.get("won_revenue") is not None and None not in revs and \
+            abs(sum(revs) - line["won_revenue"]) > 0.005:
+        return None
+    return out
+
+
+def _totals_block(base, spend: dict) -> dict:
+    """The window's own figures — never a sum of the rows.
+
+    Deals, revenue and customers are the window's canonical metrics
+    (``canonical_metrics``: distinct companies for customers). The ratios are
+    derived from those metrics with the totals' spend verdict, which is always
+    unavailable: no spend source covers every channel."""
+    from analysis import closed_won_truth as _cwt  # noqa: PLC0415
+
+    cm = base.get("canonical_metrics") or {}
+    fallback = canonical_revenue.subset_metrics(base, [])
+    m = {k: (dict(cm[k]) if isinstance(cm.get(k), dict) else fallback[k])
+         for k in _cwt.SUBSET_METRICS}
+    m["customers"] = {**m["customers"], "dedup_key": "hubspot_company_id",
+                      "additive": False}
+    per_spend = _cwt.derive_period_revenue_per_ad_spend(
+        m["revenue_usd"], spend.get("value"), spend_reason=spend.get("reason"))
+    per_customer = _cwt.derive_period_spend_per_customer_won(
+        m["customers"], spend.get("value"), spend_reason=spend.get("reason"))
+    return {
+        "closed_won_deals": m["closed_won_deals"]["value"],
+        "customers": m["customers"]["value"],
+        "won_revenue": m["revenue_usd"]["value"],
+        _cwt.PERIOD_REVENUE_PER_AD_SPEND: per_spend["value"],
+        _cwt.PERIOD_SPEND_PER_CUSTOMER_WON: per_customer["value"],
+        "roas": None,
+        "cac": None,
+        "spend": spend,
+        "metrics": {**m,
+                    _cwt.PERIOD_REVENUE_PER_AD_SPEND: per_spend,
+                    _cwt.PERIOD_SPEND_PER_CUSTOMER_WON: per_customer,
+                    "roas": _cwt.certified_roas(),
+                    "cac": _cwt.certified_cac()},
+    }
+
+
+def _channel_spend(key: str, google: dict) -> dict:
+    if key == SPEND_CHANNEL:
+        # Google Ads spend is shown on the Google Ads line (and the strip),
+        # beside the population it is compared with — never beside Paid
+        # Search revenue, whose ratio the page refuses.
+        return dict(_PAID_SEARCH_SPEND)
+    return _unconnected_spend(cwt.R_CHANNEL_SPEND_NOT_CONNECTED)
+
+
+def build_channel_outcome_rows(base: dict, contacts, google_spend: dict,
+                               extra_sources=()) -> dict:
+    """The per-channel rows, the unresolved row and the partition proof. Pure
+    given ``base`` (a ``load_won_deals`` result whose deal count is published).
+    """
+    from services.channel_funnel_service import NO_SOURCE, SOURCE_LABELS  # noqa: PLC0415
+
+    members = base.get("deals") or []
+    part = partition_deals_by_channel(members, contacts)
+    canonical_deals = ((base.get("canonical_metrics") or {})
+                       .get("closed_won_deals") or {})
+    placed = sum(len(v) for v in part["channels"].values()) + len(part["unresolved"])
+    placed_ids = sorted([str(d.get("deal_id")) for v in part["channels"].values()
+                         for d in v] + [str(d.get("deal_id"))
+                                        for d in part["unresolved"]])
+    member_ids = sorted({str(d.get("deal_id")) for d in members})
+    reconciles = (canonical_deals.get("status") == cwt.PUBLISHED
+                  and canonical_deals.get("value") == placed
+                  and placed_ids == member_ids
+                  and part["duplicate_deals"] == 0)
+    gate = None if reconciles else {"status": cwt.WITHHELD,
+                                    "reason": R_CHANNEL_PARTITION}
+    # Every known channel gets a row (a published 0 is a measurement), plus
+    # any source the deals carry that the label table does not know yet.
+    # The funnel's own sources (``extra_sources``) too, so a source HubSpot
+    # added that the label table does not know reads a measured 0, not a gap.
+    keys = [k for k in SOURCE_LABELS if k != NO_SOURCE]
+    keys += sorted({str(k) for k in extra_sources or ()
+                    if k and k not in keys and k not in (NO_SOURCE, UNRESOLVED_SOURCE)})
+    keys += sorted(k for k in part["channels"] if k not in keys)
+    rows = []
+    for key in keys:
+        row = _outcome_row(base, part["channels"].get(key, []),
+                           spend=_channel_spend(key, google_spend), gate=gate,
+                           ratio_gate=(_PAID_SEARCH_RATIO_GATE
+                                       if key == SPEND_CHANNEL else None))
+        rows.append({"source": key, "label": SOURCE_LABELS.get(key, key),
+                     "outcome_only": False, **row})
+    unresolved = _outcome_row(base, part["unresolved"],
+                              spend=_unconnected_spend(R_UNRESOLVED_NO_SPEND),
+                              gate=gate)
+    rows.append({"source": UNRESOLVED_SOURCE, "label": UNRESOLVED_LABEL,
+                 "outcome_only": True,
+                 "unresolved_by_class": (dict(part["unresolved_by_class"])
+                                         if reconciles else None),
+                 **unresolved})
+    partition = {
+        "rule": ("a won deal takes a channel only when every associated "
+                 "contact has that HubSpot original source"),
+        "canonical_closed_won_deals": canonical_deals.get("value"),
+        "deals_in_rows": placed if reconciles else None,
+        "unresolved_deals": len(part["unresolved"]) if reconciles else None,
+        "unresolved_by_class": (dict(part["unresolved_by_class"])
+                                if reconciles else None),
+        "reconciles": reconciles,
+        "reason": None if reconciles else R_CHANNEL_PARTITION,
+    }
+    return {"channels": rows, "partition": partition}
+
+
+@_canonical_snapshot.single_snapshot
+def build_channel_outcomes(window: str = "180d", *,
+                           now: datetime | None = None,
+                           channel_sources=()) -> dict:
+    """The ``outcomes`` block of ``/api/channel-funnel`` (PR-ADS-168A).
+
+    Closed-won deals, customers won (distinct companies), revenue and — on
+    Paid Search only — Google Ads spend and the two period ratios, per HubSpot
+    original source, over the evidence window's days ENDED AT YESTERDAY (the
+    PR-ADS-167A settled-day rule: today's deals and spend are not settled).
+    Every figure comes from the reader contract inside one snapshot; a row's
+    metrics inherit the window's verdict; the totals are the window's own.
+    ``channel_sources``: the funnel's channel keys, so each gets a row.
+    Raises ``EvidenceWindowError`` for an unknown window.
+    """
+    from analysis.account_time import ACCOUNT_TZ  # noqa: PLC0415
+    from analysis.closed_won_truth import CONFIRMED_WON_STAGE_ID  # noqa: PLC0415
+    from services.canonical_contract import configured_account_time_zone  # noqa: PLC0415
+    from services.canonical_contract import (  # noqa: PLC0415
+        NO_SETTLED_DAY_IN_WINDOW, resolve_settled_evidence_window,
+        settled_revenue_bounds,
+    )
+
+    now = now or datetime.now(timezone.utc)
+    settled = resolve_settled_evidence_window(window, now=now)
+    key = settled["window_key"]
+    start_date = (date.fromisoformat(settled["start_date"])
+                  if settled.get("start_date") else None)
+    through = date.fromisoformat(settled["end_date"])
+    bounds = settled_revenue_bounds(settled)
+    rng = settled.get("window_range") or {}
+    window_block = {
+        "window_type": "evidence", "window_key": key,
+        "start": bounds[0].isoformat() if bounds[0] else None,
+        "end_exclusive": bounds[1].isoformat(),
+        "start_date": settled.get("start_date"),
+        "end_date": settled["end_date"],
+        "account_today": settled.get("account_today"),
+        "is_all_time": start_date is None,
+        "through_reason": settled.get("through_reason"),
+        "disclosure": rng.get("disclosure"),
+        "empty": bool(rng.get("empty")),
+    }
+
+    if rng.get("empty"):
+        base = canonical_revenue.unavailable(NO_SETTLED_DAY_IN_WINDOW, window=key)
+        spend_truth = {"state": "no_settled_day", "unsettled_reason":
+                       NO_SETTLED_DAY_IN_WINDOW}
+    else:
+        base = canonical_revenue.load_won_deals(
+            key, window_type="evidence", now=now, bounds=bounds)
+        spend_truth = revenue_spend_truth_service.build_google_ads_spend_truth_for_days(
+            start_date, through, settled=True, now=now)
+    google = google_ads_spend_metric(spend_truth)
+    zone = configured_account_time_zone()
+    if zone and zone != ACCOUNT_TZ and google.get("status") == cwt.PUBLISHED:
+        # The deals are on ACCOUNT_TZ days, the spend on the configured
+        # zone's: not the same days, so not one comparison.
+        google = cwt.metric(None, cwt.UNAVAILABLE, R_ZONE_MISMATCH,
+                            currency="USD", source="google_ads")
+
+    if google.get("status") != cwt.PUBLISHED and spend_truth.get("state") in (
+            revenue_spend_truth_service.STATE_VERIFIED,
+            revenue_spend_truth_service.STATE_VERIFIED_ZERO):
+        # A gate above made the spend unavailable: the spend block must not
+        # still say "verified" with a native figure beside it.
+        spend_truth = {**spend_truth, "state": "unavailable",
+                       "native_spend": None, "usd_spend": None}
+    channels, partition, gads = None, None, None
+    if base.get("available"):
+        # The deal→contact evidence of THIS snapshot (the universe the
+        # population above was cut from; cached for the page).
+        universe = canonical_revenue.load_closed_won_universe(
+            CONFIRMED_WON_STAGE_ID)
+        built = build_channel_outcome_rows(
+            base, universe.get("acquisition_contacts") or [], google,
+            extra_sources=channel_sources)
+        channels, partition = built["channels"], built["partition"]
+        gads = google_ads_line(base, google, now)
+
+    totals = _totals_block(base, _unconnected_spend(R_ALL_CHANNEL_SPEND))
+    pub = base.get("publication") or {}
+    return {
+        "source": CHANNEL_OUTCOMES_SOURCE,
+        "rule_version": CHANNEL_OUTCOMES_RULE_VERSION,
+        "metric_family": CHANNEL_OUTCOMES_METRIC_FAMILY,
+        "window_basis": CHANNEL_OUTCOMES_WINDOW_BASIS,
+        "window": window_block,
+        "publication": {m: (pub.get(m) or {
+            "status": (totals["metrics"].get(m) or {}).get("status"),
+            "reason": (totals["metrics"].get(m) or {}).get("reason")})
+            for m in ("closed_won_deals", "revenue_usd", "customers")},
+        "totals": totals,
+        # Withheld means absent: no row exists unless the deal count is
+        # published for the window.
+        "channels": channels,
+        "partition": partition,
+        # The measured comparison with Google Ads spend. Not a channel row:
+        # its deals also sit on the rows above, so it is never summed.
+        "google_ads_line": gads,
+        "spend": {
+            "google_ads": google,
+            "google_ads_state": spend_truth.get("state"),
+            "native_currency": spend_truth.get("native_currency"),
+            "native_spend": spend_truth.get("native_spend"),
+            "fx_status": spend_truth.get("fx_status"),
+            "spend_coverage_status": spend_truth.get("spend_coverage_status"),
+            "unsettled_reason": spend_truth.get("unsettled_reason"),
+            "start_date": settled.get("start_date"),
+            "end_date": settled["end_date"],
+        },
+        "spend_sources": [dict(s) for s in SPEND_SOURCES],
+        "notes": dict(CHANNEL_OUTCOME_NOTES),
+        "as_of": base.get("as_of"),
+        "generated_at": now.isoformat(),
+        "hubspot_calls_performed": False,
+        "google_ads_calls_performed": False,
+        "external_writes_performed": False,
+    }
+
+
 def source_attribution_health_counts() -> dict:
     """Durable classification/attribution counts for the source-health summary."""
     import db.writers as db_writers  # noqa: PLC0415
