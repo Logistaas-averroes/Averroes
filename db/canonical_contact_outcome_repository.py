@@ -34,7 +34,8 @@ import logging
 from datetime import date
 
 from db.connection import get_conn
-from db.revenue_repository import _CONTACT_KEY, _as_date, _rows_as_dicts
+from db.revenue_repository import _CONTACT_KEY, _as_date
+from db.row_compaction import rows_as_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -117,10 +118,15 @@ def fetch_canonical_inputs(start: date | None, end: date) -> dict:
                     """,
                     (start, end, end),
                 )
-                lead_rows = _rows_as_dicts(cur)
+                # PR-ADS-169A: one string object per distinct value, shared
+                # across both reads (the same contact keys, sources and dates
+                # appear in each). Values are unchanged; see db.row_compaction.
+                seen: dict = {}
+                lead_rows = rows_as_dicts(cur, seen)
                 for r in lead_rows:
-                    r["contact_created_at"] = _as_date(r.get("contact_created_at"))
-                    r["run_date"] = _as_date(r.get("run_date"))
+                    r["contact_created_at"] = _shared(
+                        _as_date(r.get("contact_created_at")), seen)
+                    r["run_date"] = _shared(_as_date(r.get("run_date")), seen)
 
                 cur.execute("SELECT lead_id FROM lead_truth_exclusions")
                 exclusions = {row[0] for row in cur.fetchall()}
@@ -134,11 +140,13 @@ def fetch_canonical_inputs(start: date | None, end: date) -> dict:
                     FROM contact_source_classification
                     """
                 )
-                classification = _rows_as_dicts(cur)
+                classification = rows_as_dicts(cur, seen)
                 for r in classification:
-                    r["contact_created_at"] = _as_date(r.get("contact_created_at"))
-                    r["classified_at"] = _as_date(r.get("classified_at"))
-                    r["updated_at"] = _as_date(r.get("updated_at"))
+                    r["contact_created_at"] = _shared(
+                        _as_date(r.get("contact_created_at")), seen)
+                    r["classified_at"] = _shared(_as_date(r.get("classified_at")), seen)
+                    r["updated_at"] = _shared(_as_date(r.get("updated_at")), seen)
+                del seen
             return {
                 "available": True,
                 "lead_rows": lead_rows,
@@ -150,6 +158,11 @@ def fetch_canonical_inputs(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_canonical_inputs failed: %s", exc)
         return _unavailable()
+
+
+def _shared(value, seen: dict):
+    """``value``, or the equal string already read (PR-ADS-169A)."""
+    return seen.setdefault(value, value) if type(value) is str else value  # noqa: E721
 
 
 def _unavailable() -> dict:

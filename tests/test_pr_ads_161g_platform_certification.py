@@ -196,7 +196,15 @@ def test_15_real_audits_without_a_database_are_unavailable_not_crashed(
     must print a readable report and exit 2. Proves the parser matches what
     the six audits actually print on their unavailable path."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    report = apc.run(timeout=300)
+    # PR-ADS-169A: the memory environment is stated, like the database one.
+    # Without a cgroup limit the derived budget counts THIS process as the
+    # instance's usage, and a long pytest session is not the web server. The
+    # instance stated here is production's: 512 MB with the server idle at
+    # 297 MB, so the six real audits must also fit that budget (151 MB).
+    readers = {"limit": lambda settings: (512.0, "cgroup_v2"),
+               "usage": lambda source: (297.0, source)}
+    report = apc.run(timeout=300, readers=readers)
     assert [r["outcome"] for r in report["audits"]] == ["unavailable"] * 6, \
         [(r["key"], r.get("detail")) for r in report["audits"]]
     assert report["exit_code"] == apc.EXIT_UNAVAILABLE
+    assert {r["memory_budget_mb"] for r in report["audits"]} == {151}

@@ -45,6 +45,12 @@ STATE_VIOLATION = "violation"
 STATE_NOT_CERTIFIED = "not_certified"
 STATE_NOT_CHECKED = "not_checked"
 STATE_UNAVAILABLE = "unavailable"
+#: PR-ADS-169A — a run in progress. Not a pass, and not yesterday's verdict.
+STATE_RUNNING = "running"
+
+#: Row statuses written by services.platform_certification_service.
+_ROW_RUNNING, _ROW_FINISHED, _ROW_INTERRUPTED = "running", "finished", "interrupted"
+_INTERRUPTED_ERROR = "heartbeat stopped; presumed interrupted"
 
 _STATE_BY_EXIT = {0: STATE_CERTIFIED, 1: STATE_VIOLATION, 2: STATE_NOT_CERTIFIED}
 _HOLDS = "holds"
@@ -92,15 +98,27 @@ def read_latest_certification() -> dict:
                 return {"available": False, "row": None}
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT started_at, finished_at, exit_code, verdict, summary "
+                    "SELECT started_at, finished_at, exit_code, verdict, summary, "
+                    "status, heartbeat_at, clock_timestamp() "
                     "FROM platform_certification_runs "
                     "ORDER BY started_at DESC, id DESC LIMIT 1")
                 r = cur.fetchone()
+                # PR-ADS-169A: the CRM data to fix the last FINISHED run
+                # recorded, shown (with its date) while a run is running or
+                # after one was interrupted — those carry none of their own.
+                cur.execute(
+                    "SELECT finished_at, summary->'crm_data_to_fix' "
+                    "FROM platform_certification_runs WHERE status = 'finished' "
+                    "ORDER BY started_at DESC, id DESC LIMIT 1")
+                last = cur.fetchone()
         if r is None:
             return {"available": True, "row": None}
         return {"available": True, "row": {
             "started_at": r[0], "finished_at": r[1], "exit_code": r[2],
-            "verdict": r[3], "summary": r[4] or {}}}
+            "verdict": r[3], "summary": r[4] or {}, "status": r[5],
+            "heartbeat_at": r[6], "db_now": r[7]},
+            "last_finished": ({"finished_at": last[0], "crm_data_to_fix": last[1]}
+                              if last else None)}
     except Exception as exc:  # noqa: BLE001
         log.warning("[system_overview] certification unreadable: %s", exc)
         return {"available": False, "row": None}
@@ -112,25 +130,67 @@ def certification_block(read: dict, now: datetime) -> dict:
             "age_hours": None, "audits": [], "crm_data_to_fix": None,
             "could_not_run": False,
             "max_age_hours": CERTIFICATION_MAX_AGE_HOURS}
+    base.update(run_status=None, interrupted=False, running_audit=None,
+                crm_data_to_fix_from=None)
     if not read.get("available"):
         return base
     row = read.get("row")
     if not row:
         return {**base, "state": STATE_NOT_CHECKED}
-    age = _age_hours(row.get("finished_at"), now)
+    last = read.get("last_finished") or {}
+    if row.get("status") in (_ROW_RUNNING, _ROW_INTERRUPTED) and \
+            isinstance(last.get("crm_data_to_fix"), dict):
+        base.update(crm_data_to_fix=last["crm_data_to_fix"],
+                    crm_data_to_fix_from=_iso(last.get("finished_at")))
     summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+    status = row.get("status")
+    # PR-ADS-169A — a run row is written before the audits start. Rows from
+    # before that column existed are finished runs (the column's default).
+    if status == _ROW_RUNNING:
+        beat = _utc(row.get("heartbeat_at") or row.get("started_at"))
+        clock = _utc(row.get("db_now")) or now
+        from services.platform_certification_service import (  # noqa: PLC0415
+            interrupted_after_minutes,
+        )
+        if beat is not None and timedelta(0) <= clock - beat <= timedelta(
+                minutes=interrupted_after_minutes()):
+            return {**base, "state": STATE_RUNNING, "verdict": row.get("verdict"),
+                    "run_status": status, "checked_at": _iso(row.get("started_at")),
+                    "age_hours": _age_hours(row.get("started_at"), now),
+                    "running_audit": summary.get("current_audit")}
+        # Its heartbeat stopped: the server running it died. Read it as the
+        # sweep will record it — not certified, nothing checked.
+        return {**base, "state": STATE_NOT_CERTIFIED, "verdict": row.get("verdict"),
+                "run_status": _ROW_INTERRUPTED, "interrupted": True,
+                "could_not_run": True,
+                "checked_at": _iso(row.get("heartbeat_at") or row.get("started_at")),
+                "age_hours": _age_hours(row.get("heartbeat_at")
+                                        or row.get("started_at"), now)}
+    if status not in (None, _ROW_FINISHED, _ROW_INTERRUPTED):
+        # An unrecognised status is not evidence of anything (fail closed).
+        return {**base, "state": STATE_NOT_CERTIFIED, "run_status": status,
+                "verdict": row.get("verdict"), "could_not_run": True}
+    if status == _ROW_INTERRUPTED:
+        base.update(run_status=status, interrupted=True)
+    else:
+        base.update(run_status=status)
+    age = _age_hours(row.get("finished_at"), now)
     audits = [{"key": a.get("key"), "outcome": a.get("outcome")}
               for a in summary.get("audits") or [] if isinstance(a, dict)]
     out = {**base, "verdict": row.get("verdict"),
            "checked_at": _iso(row.get("finished_at")), "age_hours": age,
            "audits": audits,
-           "crm_data_to_fix": summary.get("crm_data_to_fix"),
+           "crm_data_to_fix": (summary.get("crm_data_to_fix")
+                               if summary.get("crm_data_to_fix") is not None
+                               else base["crm_data_to_fix"]),
            # The run itself failed (no audit ran): nothing was checked.
-           "could_not_run": bool(summary.get("error"))}
+           "could_not_run": bool(summary.get("error")) or bool(base["interrupted"])}
     if age is None or age > CERTIFICATION_MAX_AGE_HOURS or age < 0:
         # The recorded verdict is kept for context, but it is not today's.
         return {**out, "state": STATE_NOT_CHECKED}
     state = _STATE_BY_EXIT.get(row.get("exit_code"), STATE_NOT_CERTIFIED)
+    if out["interrupted"]:
+        state = STATE_NOT_CERTIFIED
     if state == STATE_CERTIFIED and not (
             audits and all(a["outcome"] == _HOLDS for a in audits)):
         # A pass is every audit holding. A row that says 0 without that

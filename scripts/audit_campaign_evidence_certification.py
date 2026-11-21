@@ -144,6 +144,39 @@ class Findings:
 # Static checks — the readers that must no longer exist
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: PR-ADS-169A — source text -> {function name: its source position}. The
+#: position of the FIRST definition of each name in ``ast.walk`` order, which
+#: is the one the per-call walk below used to return. ``api/server.py`` (7,600
+#: lines) was parsed whole once per check — five times per run; now once, and
+#: the tree is not kept.
+_POSITIONS_BY_SOURCE: dict[str, dict] = {}
+_POSITION_FIELDS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
+
+
+class _Position:
+    """What ``ast.get_source_segment`` reads from a node, and nothing else."""
+
+    __slots__ = _POSITION_FIELDS
+
+    def __init__(self, node):
+        for field in _POSITION_FIELDS:
+            setattr(self, field, getattr(node, field, None))
+
+
+def _function_position(src: str, name: str):
+    """The position of the first ``name`` definition in ``src``, or None."""
+    index = _POSITIONS_BY_SOURCE.get(src)
+    if index is None:
+        index = {}
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                index.setdefault(node.name, _Position(node))
+        if len(_POSITIONS_BY_SOURCE) >= 4:  # a few files per run; tests mutate copies
+            _POSITIONS_BY_SOURCE.clear()
+        _POSITIONS_BY_SOURCE[src] = index
+    return index.get(name)
+
+
 def _function_code(path: Path, name: str) -> str | None:
     """One function's executable code, comments and docstring stripped.
 
@@ -152,23 +185,22 @@ def _function_code(path: Path, name: str) -> str | None:
     """
     try:
         src = path.read_text()
-        tree = ast.parse(src)
+        position = _function_position(src, name)
     except Exception:  # noqa: BLE001
         return None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            seg = ast.get_source_segment(src, node)
-            if not seg:
-                return None
-            fn = ast.parse(seg).body[0]
-            body = list(getattr(fn, "body", []))
-            if (body and isinstance(body[0], ast.Expr)
-                    and isinstance(body[0].value, ast.Constant)
-                    and isinstance(body[0].value.value, str)):
-                body = body[1:]
-            fn.body = body or [ast.Pass()]
-            return ast.unparse(fn)
-    return None
+    if position is None:
+        return None
+    seg = ast.get_source_segment(src, position)
+    if not seg:
+        return None
+    fn = ast.parse(seg).body[0]
+    body = list(getattr(fn, "body", []))
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    fn.body = body or [ast.Pass()]
+    return ast.unparse(fn)
 
 
 def check_legacy_readers(f: Findings) -> None:

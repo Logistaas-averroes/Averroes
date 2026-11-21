@@ -79,7 +79,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -121,6 +121,7 @@ jobs:
             tests/test_pr_ads_167a_geo_sync_country_codes_pg_integration.py \
             tests/test_pr_ads_167a_settled_coverage_consumers_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
+            tests/test_pr_ads_169a_certification_memory.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
@@ -240,6 +241,14 @@ jobs:
                            # business and evidence days, the audit's
                            # evidence-window pass.
                            "tests.test_pr_ads_168a_channel_outcomes_pg_integration",
+                           # PR-ADS-169A. The certification's run row on a
+                           # real schema: written before the audits start,
+                           # finalized in place, a dead run closed NOT
+                           # CERTIFIED by the startup sweep; an audit over its
+                           # memory cap recorded crashed while the parent
+                           # lives; and the memory reductions return the same
+                           # rows and counts as the reads they replaced.
+                           "tests.test_pr_ads_169a_certification_memory",
                            # PR-ADS-166A. Its PG cases run the real contact
                            # sync, funnel writer and Leads readers: names are
                            # stored, survive a sparse payload, and an existing
