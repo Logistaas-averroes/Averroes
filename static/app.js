@@ -10016,6 +10016,9 @@ const SYSTEM_CERT_TEXT = {
     detail: "The daily check has not recorded a recent result, so the numbers are unverified." },
   unavailable: { tone: "warn", headline: "The check result could not be read",
     detail: "The database did not return the daily check result, so the numbers are unverified." },
+  // PR-ADS-169A — a run in progress is not a pass and not yesterday's verdict.
+  running: { tone: "warn", headline: "Not confirmed yet — the daily check is running",
+    detail: "Today's check has started and has not finished, so the numbers are unverified until it does." },
 };
 
 // Every reason a won deal can block a figure: [who fixes it, one deal, several].
@@ -10077,8 +10080,13 @@ function systemCertCard(cert) {
   const known = Object.prototype.hasOwnProperty.call(SYSTEM_CERT_TEXT, c.state) && c.state !== "unavailable";
   let detail = text.detail;
   if (c.state === "not_certified" && c.could_not_run) detail = "The daily check could not run, so nothing was checked.";
+  if (c.state === "not_certified" && c.interrupted) detail = "The daily check stopped reporting progress before it finished (presumed interrupted), so nothing was checked.";
   let when = "";
-  if (known) {
+  if (c.state === "running") {
+    when = c.checked_at
+      ? `Started ${systemAgo(c.age_hours)} (${escapeHtml(String(c.checked_at).slice(0, 16).replace("T", " "))} UTC).`
+      : "";
+  } else if (known) {
     when = c.checked_at
       ? `Last checked ${systemAgo(c.age_hours)} (${escapeHtml(String(c.checked_at).slice(0, 16).replace("T", " "))} UTC).`
       : "No check has been recorded yet.";
@@ -10175,7 +10183,11 @@ function systemFixCard(cert) {
   const anyItem = groups.hubspot.length || groups.platform.length || groups.other.length;
 
   const parts = [];
-  if (c.checked_at) parts.push(`<p class="system-card__note">As of the last daily check, ${systemAgo(c.age_hours)}.</p>`);
+  if (c.crm_data_to_fix_from) {
+    // PR-ADS-169A — today's check is running or was interrupted: this list is
+    // the last finished check's, labelled with its date.
+    parts.push(`<p class="system-card__note">From the last finished daily check (${escapeHtml(String(c.crm_data_to_fix_from).slice(0, 16).replace("T", " "))} UTC); today's check has not finished.</p>`);
+  } else if (c.checked_at) parts.push(`<p class="system-card__note">As of the last daily check, ${systemAgo(c.age_hours)}.</p>`);
   if (blockers.length) {
     parts.push(`<p><strong>A data problem on our side</strong> (nothing to do in HubSpot):</p><ul class="system-fix-list">${blockers.join("")}</ul>`);
   }

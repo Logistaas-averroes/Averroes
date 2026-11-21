@@ -84,10 +84,24 @@ A new production truth audit belongs in its `AUDITS` tuple.
 
 It also runs **daily inside the app** (PR-ADS-161J): the scheduler job
 `platform_certification` at 10:30 Asia/Amman (07:30 UTC), after the 09:00
-sync, records one row in `platform_certification_runs`. Read the latest
-verdict with `SELECT started_at, verdict, summary FROM
-platform_certification_runs ORDER BY started_at DESC LIMIT 1`. A run that
-cannot execute is recorded as NOT CERTIFIED, never skipped.
+sync, records one row in `platform_certification_runs`. Since PR-ADS-169A
+that row is written BEFORE the audits start (`status = 'running'`, already
+NOT CERTIFIED, `heartbeat_at` moving every minute) and finalized in place
+(`finished`); a `running` row whose heartbeat stopped for 5 minutes is
+closed `interrupted`, NOT CERTIFIED, "heartbeat stopped; presumed
+interrupted" — at startup, again after the grace, and before the next run.
+Each audit runs alone in a fresh interpreter and is started only within the
+headroom that is free when it starts (instance limit − instance usage −
+`safety_margin_mb`; below `min_audit_budget_mb` it is `crashed`
+"insufficient memory headroom", never skipped), and the parent kills it if it
+exceeds that resident budget (`crashed` "exceeded its memory budget (N MB
+resident)"); `RLIMIT_AS` (`audit_address_space_mb`, 320) is only a backstop.
+This bounds the audit, not the server: requests served in-process are not
+bounded. Each audit's budget, its inputs and its `peak_rss_mb` /
+`vm_peak_mb` are in the summary.
+Read the latest verdict with `SELECT started_at, status, verdict, summary
+FROM platform_certification_runs ORDER BY started_at DESC LIMIT 1`. A run
+that cannot execute is recorded as NOT CERTIFIED, never skipped.
 
 ### PostgreSQL tests
 
@@ -555,6 +569,27 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   `AttributeError`, which is loud but not the named error.
   This is not a completeness check — those pulls still page by offset and
   never read `total`, the landmine above, which this did not address.
+
+- **In-app jobs share the 512Mi web instance** (idle ≈ 297 MB). The
+  scheduler runs inside `uvicorn api.server:app`, so a job's memory is the
+  server's memory: the weekly job died at the limit every Monday until it was
+  retired (PR-ADS-165A), and the certification took the whole server down on
+  2026-11-19 and 2026-11-20 with no verdict row written (PR-ADS-169A).
+  Anything heavy runs in a **budgeted subprocess**: a fresh `python -m`
+  interpreter (`scripts/certification_child.py`), one at a time, never
+  `preexec_fn` (it forks the multi-threaded server and runs Python before
+  `exec`). It is started only within the headroom that is free when it
+  starts, the parent kills it past that resident budget, and its own
+  `RLIMIT_AS` is a high backstop (it counts reserved, untouched mappings, so
+  it is not the budget). This bounds the job, not the server. A child that
+  runs out is recorded as a failure. A `MemoryError` an audit swallows is
+  caught only when the peak lands within the 16 MB guard band of the
+  backstop; one swallowed from a single larger allocation is not detected
+  (docs/09 PR-ADS-169A, known gaps). A row that must survive
+  the process is written before the work starts, never only at the end. When
+  a read of 20k rows is on the path, `db.row_compaction.rows_as_dicts` holds
+  one object per distinct string, and a caller that needs only counts should
+  not keep the population (`build_populations(keep_contacts=False)`).
 
 - **`now()` is transaction-start time.** For an instant stamped *after* a read
   inside the same transaction, use `clock_timestamp()`.

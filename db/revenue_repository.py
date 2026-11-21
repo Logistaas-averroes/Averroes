@@ -55,8 +55,9 @@ def _unavailable(table: str, extra: dict | None = None) -> dict:
 
 
 def _rows_as_dicts(cur) -> list[dict]:
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    # PR-ADS-169A: the same dicts, with equal text cells sharing one object.
+    from db.row_compaction import rows_as_dicts  # noqa: PLC0415
+    return rows_as_dicts(cur)
 
 
 def _as_date(value):

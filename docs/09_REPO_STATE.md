@@ -5078,3 +5078,224 @@ production's `acquisition_contacts` rows and its default rows carry
    stands for the other pages).
 4. Not run against production: the extra column in the universe read, and
    the evidence-window audit pass's cost.
+
+## PR-ADS-169A — an audit starts only within the free headroom and is killed if it exceeds it
+
+**Production evidence (Render, read-only, 2026-11-21).** One 512Mi instance
+runs `uvicorn api.server:app` and, inside it, the scheduler; idle memory is
+≈ 297 MB. The `platform_certification` job (07:30 UTC, PR-ADS-161J) runs the
+six audits of `scripts.audit_platform_certification`.
+
+- `server_failed`, `oomKilled` (512Mi) at **2026-11-19T07:39:19Z** and
+  **2026-11-20T07:44:30Z**: the whole web server restarted mid-certification
+  and **no `platform_certification_runs` row was written** for either day —
+  contrary to "a run that cannot execute is recorded as NOT CERTIFIED".
+- 2026-11-21: memory 297 → 369 MB (07:32) → 384 MB (07:38) → 490 MB (07:40);
+  `campaign_evidence` then ended with exit −9 after 106.8 s ("unrecognised
+  exit code -9", crashed); verdict NOT CERTIFIED. `reader_cutover` took
+  529.6 s (447 s on 11-18; PR-ADS-168A added an evidence-window pass).
+- Production sizes: `hubspot_contact_funnel` 21,847; `hubspot_deal_ledger`
+  578 (190 won); `google_ads_geo_daily_spend` ≈ 35k; campaign daily spend of
+  the same order; ≈ 1,410 open SQL coverage incidents.
+
+**Memory model (before).** The audits already ran sequentially, each in its
+own `subprocess.run([python, -m, audit, --json])` — a fresh interpreter
+(`vfork` + `exec`: the server's pages are never copied), with stdout captured
+in the parent. So the instance held the server (≈ 297 MB) **plus one audit
+child at a time**, and nothing bounded the child. The cgroup limit is the
+instance's, not the child's: when the child grew past ≈ 215 MB the kernel
+OOM-killed either the child (11-21, exit −9) or the whole container (11-19,
+11-20). The row was written only after all six audits finished, so a dead
+container left nothing.
+
+**Measured** on a production-sized synthetic PostgreSQL dataset (21,847
+contacts with 24,944 history rows and 21,847 leads and classifications;
+36,040 campaign and 35,000 geo spend rows over 900/350 days; 578 deals, 190
+won, with companies and a complete scan; 1,410 open incidents). Every audit
+holds on it. Peak resident memory (`VmHWM`), peak address space (`VmPeak`)
+and wall time, each audit alone:
+
+| audit | RSS before | RSS after | VmPeak before | VmPeak after | wall after |
+| --- | --- | --- | --- | --- | --- |
+| reader_cutover | 133.3 MB | 97.6 MB | 165 MB | 128 MB | 55 s |
+| closed_won_truth | 36.5 MB | 36.6 MB | 68 MB | 68 MB | 0.8 s |
+| deal_company_associations | 28.4 MB | 28.3 MB | 61 MB | 61 MB | 0.1 s |
+| crm_truth_exceptions | 41.2 MB | 41.3 MB | 73 MB | 73 MB | 1.4 s |
+| marketing_outcome_cohorts | 100.4 MB | 69.9 MB | 132 MB | 102 MB | 2.0 s |
+| campaign_evidence | 130.4 MB | 97.1 MB | 161 MB | 131 MB | 4.5 s |
+
+The whole run's parent (the CLI) peaked at 15 MB; in the app the parent is
+the server, which only reads each audit's report (≤ 110 kB). Production's
+child was larger than these figures (≥ 190 MB at 07:40 on 11-21, against
+130 MB here before the fix): real text is longer and the `leads` history is
+deeper. The ratio is not measurable from here.
+
+**Hotspots found** (main-thread stack sampled at each RSS high-water mark):
+
+1. `canonical_contact_outcome_service.page_reconciliation` — called by every
+   page builder an audit exercises, for every window — ran the full `build`:
+   `fetch_canonical_inputs` (all latest `leads` rows and all 21,847
+   `contact_source_classification` rows as dicts, ≈ 43 MB of Python heap)
+   plus a 21k-dict `contacts` population (≈ 24 MB), only to read three
+   counts. Callers hold their own data while it runs, so it stacked.
+2. psycopg2 builds a new `str` per text cell: 21,847 copies of each status,
+   source, source type, campaign name and run date per read, and the whole
+   tuple list existed beside the dicts until the conversion finished.
+3. `audit_campaign_evidence_certification._function_code` parsed the 7,600-
+   line `api/server.py` whole once per structural check (five per run).
+4. Not changed: each window and each page builder re-reads its universe
+   (no cross-call cache); caching would change what each reader observes.
+
+**The fix.**
+
+a. *An audit is started only within the headroom that is free, and is
+   killed if it exceeds it.* This bounds the audit, not the server: requests
+   served in-process are not bounded.
+   `scripts/certification_child.py` (new): each audit runs as `python -m
+   scripts.certification_child --memory-mb A <audit> --json`, a fresh
+   interpreter that sets its own `RLIMIT_AS` to A before importing the audit
+   and reports `VmPeak`/`VmHWM` in a marker line. Not `preexec_fn`: that
+   forces `fork()` of the multi-threaded server and runs Python in the child
+   before `exec` (documented unsafe with threads). Measured with a 310 MB
+   threaded parent: `Popen` returns in 5.8 ms with `preexec_fn` (fork) and
+   0.25 ms without (vfork); both exec a fresh interpreter.
+   * **Budget, derived when each audit starts** (`derive_budget`): instance
+     limit (cgroup v2 `memory.max` when numeric, else cgroup v1
+     `memory.limit_in_bytes` when below the v1 "unlimited" value, else
+     `instance_memory_mb: 512`) − instance usage now (the same cgroup's
+     `memory.current` / `memory.usage_in_bytes`, else the parent's own
+     `VmRSS`) − `safety_margin_mb: 64`. Its inputs are stored per audit
+     (`summary.audits[].memory`). In production that is ≈ 512 − 297 − 64 =
+     **151 MB resident**; on this machine (cgroup v1, unlimited → config,
+     parent 26 MB) it derived **421 MB**. With usage injected at 297 MB the
+     six audits on the production-sized dataset all hold under 151 MB (peak
+     97.6 MB, 35% headroom).
+   * **Floor** `min_audit_budget_mb: 96`: below it (or with an unreadable
+     usage) the audit is not started and is crashed "insufficient memory
+     headroom (N MB available …): not started" — never skipped.
+   * **Watchdog**: the wait loop reads the child's `/proc/<pid>/status`
+     `VmRSS` every 0.25 s and SIGKILLs it past the budget: crashed "exceeded
+     its memory budget (N MB resident): M MB resident when the watchdog
+     stopped it". A child whose own reported peak exceeded the budget between
+     two reads is crashed the same way.
+   * **Backstop** `audit_address_space_mb: 320` (`RLIMIT_AS`): only for a
+     spike faster than the poll. `RLIMIT_AS` counts reserved, untouched
+     mappings (VmPeak − VmHWM ≈ 30–35 MB here; `campaign_evidence` is ≈ 97 MB
+     of address space after its imports alone), which is why it is not the
+     budget. A `MemoryError` that reached the top → crashed "exceeded its
+     memory backstop"; a peak within 16 MB of the backstop → crashed, "an
+     allocation may have failed inside the audit and its report is not
+     trusted"; a missing marker → crashed; −9 → "killed by SIGKILL (signal 9)
+     — out of memory".
+   * Sequential, never parallel; output to temp files; each audit's budget,
+     inputs, `peak_rss_mb` and `vm_peak_mb` are stored and printed.
+b. *A row exists from the start.* Schema: `status` (`running` | `finished` |
+   `interrupted`, default `finished` for existing rows), `heartbeat_at`,
+   `finished_at` nullable. `run_and_record` sweeps, opens the row
+   (`running`, exit 2, NOT CERTIFIED, `current_audit`), beats every 60 s
+   and at each audit start, and finalizes the same row (a late finish
+   replaces an "interrupted" guess with the real verdict).
+   `close_interrupted_runs` closes a `running` row whose heartbeat is older
+   than `interrupted_after_minutes` (5): NOT CERTIFIED, "heartbeat stopped;
+   presumed interrupted" (the cause is not observed). It runs at startup (`start_scheduler`), again after
+   the grace (a restarted server is back inside it), and before every run.
+   The System page: a live `running` row is the new state `running` ("Not
+   confirmed yet — the daily check is running"), never yesterday's verdict
+   and never a pass; a stale `running` row or an `interrupted` row is
+   `not_certified` with `interrupted`/`could_not_run`; an unknown status is
+   not certified. While a run is running or after one was interrupted, the
+   "What needs fixing" card shows the last FINISHED run's CRM data to fix,
+   labelled with that run's date.
+c. *Hotspots reduced, no verdict logic changed.* `db/row_compaction.py`
+   (new): `rows_as_dicts` returns the same dicts with equal `str` cells
+   sharing one object, reading a real psycopg2 cursor in `fetchmany` chunks
+   of 2,000 (test doubles still via `fetchall`); used by
+   `revenue_repository._rows_as_dicts`, `crm_funnel_repository._rows_as_dicts`
+   and `fetch_canonical_inputs` (shared across its two reads, dates
+   included). `crm_funnel_repository._normalised_rows` shares equal `date`
+   objects. `build_populations(keep_contacts=False)` accumulates the same
+   scope counts without keeping contacts (`contacts`/`excluded` are None,
+   not empty); `page_reconciliation` uses it. `build` narrows classification
+   rows to the four fields the population reads. `_function_code` parses
+   each file once and keeps only positions. Equivalence: the six reports on
+   the synthetic dataset are identical before and after (clock fields
+   aside); the existing fixture suites (152, 157, 157-F1, 158, 161B, 161E,
+   161G, 161J, 162C, monitoring, system status) pass unchanged; new pure
+   and PG equivalence cases (test_10–13, 20–22).
+d. *The 04:02Z / 05:15Z OOMs.* 2026-11-16 04:02Z was a Monday: the weekly
+   job (Mondays 04:00 UTC), killed at the limit about two minutes in every
+   Monday (PR-ADS-162H) — retired by PR-ADS-165A on 2026-11-19, so nothing
+   runs then now. 2026-11-17 05:15Z (a Tuesday) matches no scheduled job:
+   the daily pulse is 03:00 UTC, the incremental sync 06:00 UTC, the monthly
+   refresh only on the 1st, and the certification was not yet deployed.
+   That is the day the contact scan was rebuilt (PR-ADS-161I; incidents
+   334 → 1,401), so a manual `/run/incremental-sync` or a long daily pulse is
+   the likely candidate, unproven from the repository. **Next fix:** read the
+   Render log around 05:15Z on 11-17 for the job that started, then move it
+   onto the same capped-subprocess pattern.
+
+**Tests.** `tests/test_pr_ads_169a_certification_memory.py` (38 cases; in
+CI's PostgreSQL step and did-run list), with the stand-in audit
+`tests/pr_ads_169a_fake_audit.py`: the watchdog kills a fake audit that makes
+pages resident past a 64 MB budget (the parent lives; with room it holds);
+the budget shrinks as the reported usage grows and is re-derived at each
+audit's start, with its inputs recorded; below the floor an audit is crashed,
+not started, not skipped; the backstop still stops a fast reservation; a
+swallowed `MemoryError` within the guard band is not a pass; SIGKILL is
+named; audits never overlap; no `preexec_fn`; the settings are configured;
+classify reads memory evidence before the exit code; the cgroup readers
+prefer v2, then v1, then config; the periodic heartbeat beats ≥ 5 times in a
+1.5 s audit at 0.2 s; the row exists while running and is finalized in place;
+the heartbeat names the audit; a stale row is closed by the startup sweep and
+a live one is not; the next run sweeps first; the System page reads
+running/interrupted honestly, stays `running` throughout a 2 s audit with a
+1.2 s staleness limit, and shows the last finished CRM data; the end-to-end
+over-budget run is recorded NOT CERTIFIED; the startup sweep runs now and
+after the grace; the equivalence cases. On 7273b73 36 of 38 fail (the two
+that pass are equivalence cases); on the first 169A commit (df89cb2) 18 fail
+— every budget, watchdog, floor, backstop-wording, cgroup-reader, summary,
+message and CRM-card case. With the periodic beat replaced by `pass`,
+test_09d and test_24 fail. 161G's test_15 (the six real audits through the
+real subprocesses) now states its memory environment as it states its
+database one — production's 512 MB with 297 MB used — and asserts the six fit
+that 151 MB budget: run late in a full suite without a cgroup limit, the
+derivation counted the ~380 MB pytest process as the instance and refused
+every audit at the floor, which is the rule working, not a fit.
+Through main's runner the allocating and the
+swallowing fake audits each certify (`CERTIFIED holds`).
+
+**Known gaps.**
+
+1. Production peaks are not measurable from here. The first production run
+   should show, per audit in `summary->'audits'`, `memory.limit_source`
+   `cgroup_v2` (or v1), `memory_budget_mb` ≈ 150, and `peak_rss_mb` under it;
+   instance memory should peak near usage + the largest `peak_rss_mb`. An
+   audit that now shows `crashed` "exceeded its memory budget (N MB
+   resident)" or "insufficient memory headroom" is the production-size gap
+   made visible, not a regression: the audit is stopped and the day reads
+   NOT CERTIFIED; the next step is that audit's own reads.
+1a. cgroup `memory.current` counts page cache, so where it is read the
+   budget is conservative (smaller than the truly free memory); a day with
+   much cache may refuse an audit at the floor.
+1c. Where no cgroup limit is readable, the parent's own VmRSS stands for the
+   instance's usage. On Render the server is the parent; elsewhere (a CLI
+   run inside a large process) the budget is that process's view.
+1b. Only the audit is bounded. Requests the server serves in-process during
+   the run are not, and the budget is fixed at each audit's start: memory
+   the server takes later is not taken back from the running audit.
+2. A `MemoryError` that an audit swallows from a single allocation larger
+   than the 16 MB guard band is not detected by the band; that audit then
+   reports whatever its own exception handler reports (unavailable on the
+   read paths, as for any failed read).
+3. `reader_cutover` still takes ≈ 530 s in production: its statement count
+   (6,400 on an empty database) times network latency. Not addressed here.
+4. Other in-app jobs (daily pulse, incremental sync, monthly refresh) still
+   run in the server's own process, uncapped.
+5. A guard-band (or over-budget) hit on an audit that exited 1 (VIOLATION)
+   is reported `crashed`, so the run reads NOT CERTIFIED rather than
+   VIOLATION: an unproven report is not used, even to report a violation.
+6. Follow-up: `audit_campaign_evidence_certification.py:348`
+   (`check_section_contracts_are_complete`, the ownership check) reads
+   `_function_code(_API_SERVER, name) or ""`, so a function it cannot find
+   reads as one that hand-builds no section dictionary and passes — fail
+   open for that structural check. Unchanged here.

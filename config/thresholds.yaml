@@ -163,3 +163,33 @@ customer_identity:
   # multi-day backfill's finish does not — PR-ADS-161D2-F2). The scan runs
   # daily; 48h tolerates one
   # missed run. Beyond it, totals are withheld (customer_identity_scan_not_current).
+
+platform_certification:
+  # PR-ADS-169A — the daily certification runs inside the 512Mi web instance
+  # (idle ~297 MB). Each audit runs alone in a fresh interpreter and is
+  # started only within the headroom that is free when it starts:
+  #   budget = instance limit − instance usage now − safety_margin_mb
+  # The limit is the cgroup's (v2 memory.max, else v1 limit_in_bytes) when it
+  # is a number, else instance_memory_mb; the usage is the cgroup's
+  # (memory.current / usage_in_bytes), else this process's own VmRSS. Below
+  # min_audit_budget_mb the audit is not started (crashed, "insufficient
+  # memory headroom"), never skipped. The parent reads the child's resident
+  # memory every 0.25 s and kills it past the budget (crashed, "exceeded its
+  # memory budget (N MB resident)"). Either makes the run NOT CERTIFIED.
+  instance_memory_mb: 512
+  safety_margin_mb: 64
+  min_audit_budget_mb: 96
+  # Address-space backstop (RLIMIT_AS, set by the child on itself) for a
+  # spike faster than the watchdog. High on purpose: RLIMIT_AS also counts
+  # reserved, never-touched mappings (~35 MB above resident here), and the
+  # campaign_evidence child imports api.server (~97 MB of address space
+  # before it reads a row). Measured peak on a production-sized dataset:
+  # 131 MB of address space, 98 MB resident (docs/09 PR-ADS-169A).
+  audit_address_space_mb: 320
+  # Per audit. A run that exceeds it is killed and recorded crashed.
+  audit_timeout_seconds: 900
+  # The running row's heartbeat. A `running` row whose heartbeat is older
+  # than interrupted_after_minutes is closed NOT CERTIFIED "heartbeat
+  # stopped; presumed interrupted" (the cause is not observed).
+  heartbeat_seconds: 60
+  interrupted_after_minutes: 5

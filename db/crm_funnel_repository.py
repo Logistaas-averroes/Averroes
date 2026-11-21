@@ -170,8 +170,9 @@ _effective_date_sql = effective_date_sql
 
 
 def _rows_as_dicts(cur) -> list[dict]:
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    # PR-ADS-169A: the same dicts, with equal text cells sharing one object.
+    from db.row_compaction import rows_as_dicts  # noqa: PLC0415
+    return rows_as_dicts(cur)
 
 
 def _as_date(value):
@@ -188,11 +189,22 @@ def _as_date(value):
         return None
 
 
-def _normalise_row(row: dict) -> dict:
+def _normalise_row(row: dict, seen: dict | None = None) -> dict:
     for field in _TIMESTAMP_FIELDS:
         if field in row:
-            row[field] = _as_date(row[field])
+            value = _as_date(row[field])
+            # PR-ADS-169A: equal calendar dates share one object per read (a
+            # ``date`` is immutable; exact type only, never a datetime).
+            if seen is not None and type(value) is date:  # noqa: E721
+                value = seen.setdefault(value, value)
+            row[field] = value
     return row
+
+
+def _normalised_rows(cur) -> list[dict]:
+    """``[_normalise_row(r) for r in _rows_as_dicts(cur)]``, equal dates shared."""
+    seen: dict = {}
+    return [_normalise_row(r, seen) for r in _rows_as_dicts(cur)]
 
 
 def _unavailable(**extra) -> dict:
@@ -243,7 +255,7 @@ def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
                     """,
                     params,
                 )
-                rows = [_normalise_row(r) for r in _rows_as_dicts(cur)]
+                rows = _normalised_rows(cur)
         return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
                 "recovery_table": RECOVERY_TABLE}
     except Exception as exc:  # noqa: BLE001
@@ -265,7 +277,7 @@ def fetch_all_funnel_contacts() -> dict:
                     {_recovery_join()}
                     """
                 )
-                rows = [_normalise_row(r) for r in _rows_as_dicts(cur)]
+                rows = _normalised_rows(cur)
         return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
                 "recovery_table": RECOVERY_TABLE}
     except Exception as exc:  # noqa: BLE001
@@ -1597,7 +1609,7 @@ def fetch_funnel_contact_page(
                     LIMIT %s OFFSET %s
                     """,
                     params + [size, offset])
-                rows = [_normalise_row(r) for r in _rows_as_dicts(cur)]
+                rows = _normalised_rows(cur)
         return {
             "available": True,
             "rows": rows,

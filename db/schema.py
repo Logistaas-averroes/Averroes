@@ -2278,6 +2278,21 @@ CREATE TABLE IF NOT EXISTS platform_certification_runs (
 CREATE INDEX IF NOT EXISTS idx_platform_certification_runs_started
   ON platform_certification_runs(started_at DESC);
 
+-- PR-ADS-169A: a run row is written BEFORE the audits start and finalized
+-- after, so a server that dies mid-run (Render OOM-killed the 512Mi instance
+-- at 2026-11-19T07:39Z and 2026-11-20T07:44Z) still leaves a row. While it
+-- runs the row already reads NOT CERTIFIED (exit 2) with status `running`
+-- and no finished_at; `heartbeat_at` moves every minute. A `running` row
+-- whose heartbeat stopped is closed `interrupted` — NOT CERTIFIED, "heartbeat
+-- stopped; presumed interrupted" — never left looking live, never a pass.
+-- Existing rows are finished runs: the default `finished` describes them.
+ALTER TABLE platform_certification_runs
+  ADD COLUMN IF NOT EXISTS status       TEXT NOT NULL DEFAULT 'finished',  -- running|finished|interrupted
+  ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+ALTER TABLE platform_certification_runs ALTER COLUMN finished_at DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_platform_certification_runs_running
+  ON platform_certification_runs(status) WHERE status = 'running';
+
 -- ── PR-ADS-163C — contacts deleted or merged away in HubSpot ───────────────
 -- `hubspot_contact_funnel` is filled by a modified-since sync, and a contact
 -- that is DELETED or MERGED AWAY in HubSpot is never "modified": its row

@@ -203,6 +203,46 @@ def _run_platform_certification_scheduled() -> None:
             _job_state["platform_certification"] = False
 
 
+def _close_interrupted_certification_runs() -> None:
+    """PR-ADS-169A — close certification rows a dead server left `running`.
+
+    The certification runs inside this process; a server that died mid-run
+    (Render OOM-killed the instance on 2026-11-19 and 2026-11-20) leaves its
+    row `running` with a heartbeat that stopped. Closing it records the day
+    as NOT CERTIFIED, "heartbeat stopped; presumed interrupted". Never raises.
+    """
+    try:
+        from services.platform_certification_service import (  # noqa: PLC0415
+            close_interrupted_runs,
+        )
+        closed = close_interrupted_runs()
+        if closed:
+            log.warning("[scheduler/platform_certification] closed %s interrupted "
+                        "run(s) as NOT CERTIFIED", closed)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[scheduler/platform_certification] interrupted-run sweep "
+                  "failed: %s", exc)
+
+
+def _schedule_interrupted_run_sweeps() -> None:
+    """Sweep now, and once more after the heartbeat grace has passed.
+
+    A server restarted by an OOM kill comes back within about a minute, while
+    the dead run's last heartbeat is still inside the grace window; only the
+    second sweep can close it. Daemon threads: they never block startup or
+    shutdown.
+    """
+    from services.platform_certification_service import (  # noqa: PLC0415
+        interrupted_after_minutes,
+    )
+    threading.Thread(target=_close_interrupted_certification_runs,
+                     name="certification-sweep", daemon=True).start()
+    later = threading.Timer(interrupted_after_minutes() * 60 + 30,
+                            _close_interrupted_certification_runs)
+    later.daemon = True
+    later.start()
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle helpers — called by api/server.py lifespan handler.
 # ---------------------------------------------------------------------------
@@ -258,6 +298,11 @@ def start_scheduler() -> None:
     )
 
     _scheduler.start()
+    # PR-ADS-169A: a certification row the previous process left `running`.
+    try:
+        _schedule_interrupted_run_sweeps()
+    except Exception as exc:  # noqa: BLE001
+        log.error("[scheduler] could not schedule the interrupted-run sweep: %s", exc)
     log.info(
         "[scheduler] started — daily 06:00, monthly 1st 08:00, "
         "daily_incremental_sync 09:00, platform_certification 10:30 "

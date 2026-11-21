@@ -245,6 +245,7 @@ def build_populations(
     end: date | None,
     *,
     campaign_resolver=None,
+    keep_contacts: bool = True,
 ) -> dict:
     """Build the canonical contact-outcome population from raw ingredients. Pure.
 
@@ -260,6 +261,11 @@ def build_populations(
     in-window, non-excluded canonical contact dicts (each carrying its scope flags
     and admin-safe reason codes), and ``excluded`` is the list of in-window
     excluded contacts (for the audit).
+
+    ``keep_contacts=False`` (PR-ADS-169A) computes the SAME ``counts`` from the
+    SAME per-contact derivation but keeps no contact lists: ``contacts`` and
+    ``excluded`` are then ``None`` (not computed — never an empty population).
+    A caller that needs only the counts holds no 20k-row population for them.
     """
     exclusions = exclusions or set()
     resolver = campaign_resolver or default_campaign_resolver
@@ -270,6 +276,10 @@ def build_populations(
 
     contacts: list[dict] = []
     excluded: list[dict] = []
+    # PR-ADS-169A — counts-only: the scope counts _scope_counts() would take
+    # from the kept list, accumulated contact by contact instead.
+    scope_tally = {"total_all_source_sqls": 0, "google_ads_source_sqls": 0,
+                   "campaign_attributable_sqls": 0}
     excluded_sql_count = 0
     missing_business_date_sql = 0
     stale_classification = 0
@@ -286,7 +296,8 @@ def build_populations(
             if in_win:
                 if is_sql:
                     excluded_sql_count += 1
-                excluded.append(_excluded_contact(row, is_sql))
+                if keep_contacts:
+                    excluded.append(_excluded_contact(row, is_sql))
             continue
 
         # Missing business date: an SQL that cannot land in a bounded window.
@@ -305,9 +316,13 @@ def build_populations(
             missing_classification += 1
 
         contact = _canonical_contact(row, group, is_sql, stored, class_state, resolver)
-        contacts.append(contact)
+        if keep_contacts:
+            contacts.append(contact)
+        else:
+            for k, v in _scope_counts([contact]).items():
+                scope_tally[k] += v
 
-    counts = _scope_counts(contacts)
+    counts = _scope_counts(contacts) if keep_contacts else scope_tally
     counts.update({
         "excluded_sql_contacts": excluded_sql_count,
         "missing_business_date_sql_contacts": missing_business_date_sql,
@@ -315,8 +330,8 @@ def build_populations(
         "missing_classification_contacts": missing_classification,
     })
     return {
-        "contacts": contacts,
-        "excluded": excluded,
+        "contacts": contacts if keep_contacts else None,
+        "excluded": excluded if keep_contacts else None,
         "counts": counts,
     }
 
@@ -609,12 +624,15 @@ def _window_block(window_type, window_key, start: date | None, end: date) -> dic
 
 
 # ── DB-backed entry point ────────────────────────────────────────────────────
-def build(window_type: str, window_key: str, now: datetime | None = None) -> dict:
+def build(window_type: str, window_key: str, now: datetime | None = None, *,
+          keep_contacts: bool = True) -> dict:
     """Resolve the window, fetch the read-only inputs, and build the canonical
     populations + reconciliation metadata. The ONE place this module touches the
     database.
 
     Returns ``{available, window, counts, contacts, excluded, reconciliation}``.
+    ``keep_contacts=False`` returns the same counts with ``contacts`` and
+    ``excluded`` None (see :func:`build_populations`).
     """
     from db import canonical_contact_outcome_repository as repo  # noqa: PLC0415
 
@@ -625,10 +643,12 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
     populations = build_populations(
         inputs.get("lead_rows") or [],
         inputs.get("exclusions") or set(),
-        inputs.get("classification") or [],
+        _classification_fields_read(inputs.get("classification") or []),
         win["start"], win["end"],
         campaign_resolver=resolver,
+        keep_contacts=keep_contacts,
     )
+    del inputs  # PR-ADS-169A: the raw rows are not needed past this point
     # Campaign attribution is UNAVAILABLE (null), not zero, when the identity
     # contract could not be consulted — google_ads_source stays available.
     if not identity_available:
@@ -644,6 +664,23 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
             populations, SCOPE_GOOGLE_ADS_SOURCE, available=available),
         "generated_at": (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+#: The stored-classification fields build_populations reads (the index key,
+#: _classification_state and _canonical_contact). PR-ADS-169A.
+_CLASSIFICATION_FIELDS_READ = ("contact_key", "status_category",
+                               "contact_created_at", "acquisition_group")
+
+
+def _classification_fields_read(rows: list[dict]) -> list[dict]:
+    """The classification rows narrowed to the fields the population reads.
+
+    ``build`` returns no classification row, so nothing it returns changes; it
+    just stops holding six unread columns of 20k rows while it builds.
+    """
+    out = [{k: r.get(k) for k in _CLASSIFICATION_FIELDS_READ} for r in rows]
+    rows.clear()
+    return out
 
 
 def unavailable_campaign_resolver(_campaign_name) -> tuple[bool, str | None]:
@@ -697,7 +734,9 @@ def page_reconciliation(window_type: str, window_key: str, scope: str,
     page's uniquely-keyword-attributed count when relevant (Keyword Evidence).
     """
     try:
-        result = build(window_type, window_key, now=now)
+        # PR-ADS-169A: only the counts are read here, so no contact list is
+        # kept for them (same counts; see build_populations).
+        result = build(window_type, window_key, now=now, keep_contacts=False)
         block = reconciliation_metadata(
             {"counts": result["counts"]}, scope,
             available=result["available"], consumer_count=consumer_count,
