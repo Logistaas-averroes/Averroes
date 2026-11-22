@@ -8,6 +8,13 @@ Meta.
 This PR adds the data and its truth function. **No page shows Meta spend yet**
 — the Channels page is PR-ADS-171B. The System page gains one line.
 
+**PR-ADS-171B** puts the spend on the Channels page and the Dashboard's
+Channels tab as a separate "Meta Ads (spend)" line, read only through
+`build_meta_ads_spend_truth_for_days` (via
+`services/meta_ads_spend_line_service.py`), with the retirement disclosure
+beside the figure and no ratio to any HubSpot count:
+`docs/55_META_SPEND_ON_CHANNELS.md`.
+
 **PR-ADS-171C** adds the ad-set detail of this spend — one row per ad set per
 day, with Meta's own lead-related action counts — in its own tables, ledger
 and sync step: `docs/53_META_ADS_ADSET_DETAIL.md`. Nothing in this document
@@ -288,6 +295,9 @@ nothing after that day". The platform cannot read that from Meta, so:
 `owner_declared_retired` is non-empty must show
 `owner_declared_retired_disclosure` beside it, and 171B must add an audit/AST
 guard that fails when a surface reads the figure without the disclosure.
+Done: checks 19 (`meta_spend_disclosure_carried`) and 20
+(`no_rate_over_meta_spend`) of `scripts/audit_customer_revenue_reader_cutover.py`
+(`docs/55` §5).
 
 Backfill every account from the **same** first day. A period is published only
 when every account is covered for all of it; an account with no ads in a

@@ -108,6 +108,10 @@ class _PgCluster:
     def stop(self):
         _run(["sudo", "-u", "postgres", os.path.join(_PG_BIN, "pg_ctl"),
               "-D", self.data, "-w", "stop"])
+        # The data directory belongs to `postgres`, so an unprivileged runner
+        # cannot delete it and rmtree(ignore_errors=True) silently leaves
+        # ~50 MB behind per cluster. On CI that filled the disk mid-suite.
+        _run(["sudo", "-n", "rm", "-rf", "--", self.tmp])
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 

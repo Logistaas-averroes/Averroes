@@ -153,6 +153,12 @@ STATUS_SPEND_CONNECTED = "Spend-connected"
 STATUS_REVENUE_ONLY = "Revenue-only — no connected spend source"
 STATUS_OFFLINE = "Offline / CRM imported — attribution not reliable"
 STATUS_NEEDS_REVIEW = "Attribution needs review"
+#: PR-ADS-171B: Paid Social (and its Meta platform row) once Meta is set up.
+STATUS_META_SEPARATE = "Revenue-only — Meta spend is on its own line, not matched to these deals"
+#: PR-ADS-171B review: the Meta line could not tell whether Meta is set up
+#: (``connected`` None) — neither "connected" nor "not connected".
+STATUS_META_UNKNOWN = ("Revenue-only — could not tell whether Meta spend is set up "
+                       "for this window")
 
 
 def exec_channel_for(classifier_channel: str) -> str:
@@ -634,7 +640,7 @@ def _fmt_usd_short(value) -> str:
 
 
 def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
-                          readiness: dict) -> list:
+                          readiness: dict, meta_line: dict | None = None) -> list:
     cards = []
     by_channel = {c["channel"]: c for c in channel_rows}
     google = by_channel.get(CX_GOOGLE_ADS)
@@ -729,19 +735,58 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
             "target_page": "revenue-health", "target_label": "Open Revenue Health",
         })
 
-    # Unavailable — non-Google spend is not connected (always true today).
+    # Unavailable — no spend ratio outside Google Ads. PR-ADS-171B: Meta spend
+    # is shown on its own line once Meta is set up, but it is not matched to
+    # HubSpot's Paid Social deals, so no ratio is published over it either.
+    # Three claims, never two: set up, not set up, could not tell.
+    meta_connected = (meta_line or {}).get("connected")
+    if meta_connected is True:
+        body = ("Only Google Ads spend is compared with revenue. Meta Ads spend is "
+                "shown on its own line and is not matched to HubSpot's Paid Social "
+                "deals, so Paid Social and Organic channels stay revenue-only — no "
+                "spend ratio is published for them.")
+    elif meta_connected is None:
+        body = ("Only Google Ads spend is compared with revenue. Whether Meta Ads "
+                "spend is set up could not be told for this window, and Meta spend "
+                "is never matched to HubSpot's Paid Social deals — no spend ratio "
+                "is published for Paid Social or Organic channels.")
+    else:
+        body = ("Only Google Ads spend is connected. Paid Social and Organic channels "
+                "are revenue-only in this dashboard — no spend ratio is published.")
     cards.append({
         "type": "unavailable", "title": "Unavailable",
         "headline": "Non-Google platform spend unavailable",
-        "body": ("Only Google Ads spend is connected. Paid Social and Organic channels "
-                 "are revenue-only in this dashboard — no spend ratio is published."),
+        "body": body,
         "target_page": "revenue-health", "target_label": "Open Revenue Health",
     })
     return cards
 
 
+def _paid_social_ratio_reason(meta_connected) -> str:
+    if meta_connected is True:
+        return "Meta Ads spend is not matched to HubSpot's Paid Social deals, so no ratio is published."
+    if meta_connected is None:
+        return ("Could not tell whether Meta Ads spend is set up for this window; "
+                "Meta spend is never matched to HubSpot's Paid Social deals, so no "
+                "ratio is published.")
+    return "Paid Social spend source is not connected."
+
+
+def _meta_spend_status(meta_line: dict | None) -> str:
+    """The truth footer's Meta chip: what the Meta line could publish."""
+    line = meta_line or {}
+    status = (line.get("spend") or {}).get("status")
+    if status == "published":
+        return "ready"
+    if line.get("connected") is False:
+        return "not_connected"
+    if line.get("connected") is True:
+        return "partial"          # set up; this window is withheld
+    return "unavailable"
+
+
 def _build_truth_status(mart: dict, google_spend: dict, channel_rows: list,
-                        readiness: dict) -> dict:
+                        readiness: dict, meta_line: dict | None = None) -> dict:
     revenue = "ready" if readiness.get("canonical_revenue_available") else "blocked"
 
     fx = google_spend["fx_status"]
@@ -762,14 +807,17 @@ def _build_truth_status(mart: dict, google_spend: dict, channel_rows: list,
         "source_attribution": "partial" if has_unclassified else "ready",
         "revenue": revenue,
         "google_ads_spend": google_ads_spend,
-        # Non-Google spend is structurally not connected today — honest constant.
+        # No spend outside Google Ads is compared with channel revenue — an
+        # honest constant. PR-ADS-171B: Meta spend has its own line and chip.
         "non_google_spend": "unavailable",
+        "meta_ads_spend": _meta_spend_status(meta_line),
         "platform_classification": "partial" if has_unclassified else "ready",
     }
 
 
 def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
-                       readiness: dict, period_change: dict) -> list:
+                       readiness: dict, period_change: dict,
+                       meta_line: dict | None = None) -> list:
     out = []
     if not readiness.get("canonical_revenue_available"):
         out.append({"metric": "closed_won_revenue_usd",
@@ -782,9 +830,9 @@ def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
                     "reason": "Google Ads USD spend requires verified spend coverage and FX."})
     # Non-Google spend and any ratio over it are structurally unavailable.
     out.append({"metric": "paid_social_period_revenue_per_ad_spend",
-                "reason": "Paid Social spend source is not connected."})
+                "reason": _paid_social_ratio_reason((meta_line or {}).get("connected"))})
     out.append({"metric": "non_google_spend",
-                "reason": "Only Google Ads spend is connected; other channels are revenue-only."})
+                "reason": "Only Google Ads spend is compared with revenue; other channels are revenue-only."})
     if trend.get("status") != "ready":
         out.append({"metric": "channel_trend",
                     "reason": trend.get("reason") or "Channel trend unavailable."})
@@ -862,6 +910,22 @@ def build_dashboard_channels(window: str = "current_quarter",
         source_groups, google_spend, exec_unknown, platform_unknown,
         amounts_verifiable=amounts_verifiable)
 
+    # PR-ADS-171B: Meta spend over the window's SETTLED days (the PR-ADS-167A
+    # rule: an open window ends at yesterday), each ad account on its own
+    # calendar — the truth function's rule, nothing added. Its own line: no
+    # channel row carries it and nothing is divided by it. The Paid Social
+    # rows say where it is instead of "no connected spend source".
+    meta_line = _meta_ads_line(window, now)
+    meta_status = {True: STATUS_META_SEPARATE, None: STATUS_META_UNKNOWN}.get(
+        meta_line.get("connected"))           # False: "no connected spend source"
+    if meta_status:
+        for r in channel_rows:
+            if r["channel"] == CX_PAID_SOCIAL:
+                r["status"] = meta_status
+        for p in platforms:
+            if p["channel"] == CX_PAID_SOCIAL and p.get("platform") == "meta":
+                p["status"] = meta_status
+
     if not revenue_connected:
         # Closed-won customers AND revenue both come from the revenue integration,
         # so both are unknown when it is disconnected — blank them (Leads / SQLs
@@ -922,9 +986,12 @@ def build_dashboard_channels(window: str = "current_quarter",
     # without a connected revenue integration, so it is withheld rather than
     # plotting channels at a fabricated zero.
     quality_matrix = _build_quality_matrix(channel_rows) if revenue_connected else []
-    decision_cards = _build_decision_cards(channel_rows, kpis, google_spend, readiness)
-    truth_status = _build_truth_status(mart, google_spend, channel_rows, readiness)
-    unavailable = _build_unavailable(kpis, google_spend, trend, readiness, period_change)
+    decision_cards = _build_decision_cards(channel_rows, kpis, google_spend, readiness,
+                                           meta_line)
+    truth_status = _build_truth_status(mart, google_spend, channel_rows, readiness,
+                                       meta_line)
+    unavailable = _build_unavailable(kpis, google_spend, trend, readiness, period_change,
+                                     meta_line)
 
     # PR-ADS-154C-F2 §3: per-metric provenance. Until now this page was built by
     # the cross-page audit, had its window checked, and certified nothing — so it
@@ -994,4 +1061,24 @@ def build_dashboard_channels(window: str = "current_quarter",
         "truth_status": truth_status,
         "readiness": readiness,
         "unavailable": unavailable,
+        "meta_ads_line": meta_line,
     }
+
+
+def _meta_ads_line(window: str, now: datetime | None) -> dict:
+    """The "Meta Ads (spend)" line for one business window's settled days."""
+    from services import meta_ads_spend_line_service as meta_line  # noqa: PLC0415
+
+    settled = canonical_contract.resolve_settled_window(window, now=now)
+    rng = settled.get("window_range") or {}
+    start = (date.fromisoformat(str(settled["start_date"]))
+             if settled.get("start_date") else None)
+    through = date.fromisoformat(str(settled["end_date"]))
+    line = meta_line.build_meta_ads_spend_line(
+        start, through, now=_coerce_utc(now), page_zone=settled.get("timezone"),
+        empty_reason=(canonical_contract.NO_SETTLED_DAY_IN_WINDOW
+                      if rng.get("empty") else None))
+    # The settle rule's own words, without the revenue pages' sentence.
+    line["through_disclosure"] = (
+        (rng.get("disclosure") or "").split(" Other revenue pages")[0] or None)
+    return line

@@ -124,6 +124,7 @@ jobs:
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
+            tests/test_pr_ads_171b_meta_on_channels_pg_integration.py \
             tests/test_pr_ads_169a_certification_memory.py \
             tests/test_pr_ads_172a_campaign_evidence_memory.py \
             tests/test_pr_ads_173a_search_terms_pages_memory.py \
@@ -264,6 +265,11 @@ jobs:
                            # withholding ad-set rows that no longer sum to the
                            # campaign rows.
                            "tests.test_pr_ads_171c_meta_adsets_pg_integration",
+                           # PR-ADS-171B. The Meta Ads (spend) line over the
+                           # real sync, store and truth: published, withheld
+                           # with no figure left in it, not connected; and the
+                           # Paid Social split from the stored drill-down.
+                           "tests.test_pr_ads_171b_meta_on_channels_pg_integration",
                            # PR-ADS-169A. The certification's run row on a
                            # real schema: written before the audits start,
                            # finalized in place, a dead run closed NOT
@@ -332,6 +338,7 @@ jobs:
 
       - name: Full suite (known-failing-on-main deselected)
         run: |
+          df -h /tmp
           python -m pytest -q \
             --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty"
 

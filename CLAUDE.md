@@ -546,7 +546,12 @@ disclosure. A re-read never takes a day with verified spend to zero
   GCLID on any row, plus the Paid Search classification, minus labels
   approved as not Google Ads. It does NOT by itself exclude other search
   engines — never describe it as if it did; its `evidence_split` shows how
-  much rests on a click ID. Every other row is `channel_spend_not_connected`.
+  much rests on a click ID. Every other row is `channel_spend_not_connected`
+  — except Paid Social once Meta is set up (PR-ADS-171B, `docs/55_*`): its
+  spend reads `spend_shown_on_meta_ads_line` and its ratios
+  `channel_population_is_not_meta_spend_population`; Meta spend sits only on
+  the separate "Meta Ads (spend)" line and the strip's Meta cell, never
+  divided by a HubSpot count.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

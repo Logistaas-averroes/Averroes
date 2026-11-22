@@ -163,8 +163,18 @@ one account on Europe/London, the same as `ACCOUNT_TZ`.
   so both period ratios are unavailable. The unresolved row:
   `deal_source_not_resolved`. Totals: `all_channel_spend_not_connected`, so
   the totals' ratios are unavailable.
-* `spend_sources` names Google Ads (connected) and Meta, LinkedIn, ChatGPT
-  (not connected: `spend_export_not_supplied`).
+* `spend_sources` names Google Ads (connected), Meta (PR-ADS-171B: whatever
+  the Meta line found — `connected` True / False / None, shown on the Meta
+  line) and LinkedIn, ChatGPT (not connected: `spend_export_not_supplied`).
+* **PR-ADS-171B — Meta.** Meta spend is on its own "Meta Ads (spend)" line
+  (`outcomes.meta_ads_line`), from the Meta spend truth over the same settled
+  dates, each ad account on its own calendar, and compared with nothing.
+  Once Meta is set up the Paid Social row's spend cell is
+  `spend_shown_on_meta_ads_line` and its ratios are
+  `incompatible_rate(channel_population_is_not_meta_spend_population)`; Meta
+  not set up, it stays `channel_spend_not_connected`. Paid Social's funnel
+  row gains a platform split from drill-down 1. See
+  `docs/55_META_SPEND_ON_CHANNELS.md`.
 
 The ratios are the two period operational ratios (`docs/48` §4) with their
 disclosure; certified attribution ratios stay unavailable.
@@ -180,11 +190,15 @@ reader terms.
 `outcomes` keys: `source`, `rule_version`, `metric_family`, `window_basis`,
 `window {window_type, window_key, start, end_exclusive, start_date, end_date,
 account_today, through_reason, disclosure}`, `publication`, `totals`,
-`channels`, `partition`, `spend`, `spend_sources`, `notes`. Never
+`channels`, `partition`, `google_ads_line`, `meta_ads_line` (PR-ADS-171B,
+`docs/55`), `spend`, `spend_sources`, `notes`. Never
 `company_ids_by_deal`.
 
 `renderChannelFunnel` adds an outcome strip (Closed-won deals, Customers won,
-Revenue, Google Ads spend) via `canonicalMetricHtml`, and the outcome and
+Revenue, Google Ads spend — and, PR-ADS-171B, a Meta Ads spend cell from the
+Meta line) via `canonicalMetricHtml`. Once Meta is set up, the Paid Social
+row's spend reads `spend_shown_on_meta_ads_line` and its ratios
+`channel_population_is_not_meta_spend_population` (`docs/55`); and the outcome and
 paid-media columns via `rowMetricHtml` with `{windowType: "evidence",
 windowKey}` (admins get View blockers into the workbench). Drill rows carry
 no outcome figure; the unresolved row's funnel cells read "n/a — not a

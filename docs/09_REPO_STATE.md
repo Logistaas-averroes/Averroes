@@ -6141,3 +6141,94 @@ Every existing test passes unmodified.
    identity, FX rates, reviews or SQL contacts.
 5. The Flagged page still builds the complete population (`docs/51` §6.1).
 6. Production peaks are not measurable from here.
+
+## PR-ADS-171B — Meta spend on the Channels page and the Dashboard (November 2026)
+
+**What this adds.** A separate "Meta Ads (spend)" line on the Channels page,
+beside the "Google Ads (canonical evidence)" line, and the same line as a panel
+on the Dashboard's Channels tab. It republishes
+`meta_ads_spend_truth_service.build_meta_ads_spend_truth_for_days` — the only
+reader of Meta spend totals — over the page's settled dates, and nothing else:
+USD spend, the native total when the truth gives one, each account's own
+figures when the total is published, each account's zone and verified-through
+day, and the owner's retirement disclosure whenever the figure rests on it.
+HubSpot's Paid Social contacts are split by drill-down 1 into Meta (facebook +
+instagram), LinkedIn, other and unknown. **No ratio** joins Meta spend to a
+HubSpot count. Doctrine: `docs/55_META_SPEND_ON_CHANNELS.md`. Depends on
+PR-ADS-171A (`docs/52`) and PR-ADS-168A (`docs/50`); `docs/50` §5–6 and
+`docs/52` (header, §6) cross-reference it.
+
+| Piece | Where |
+|---|---|
+| The line (pure `line_from_truth`; `build_meta_ads_spend_line`; `paid_social_spend`) | `services/meta_ads_spend_line_service.py` |
+| Channels: `outcomes.meta_ads_line`, the Paid Social row's spend/ratios, `spend_sources` | `services/source_attribution_service.py::build_channel_outcomes` |
+| Paid Social platform split (`platform_split`, `platform_key`, reconcile) | `services/channel_funnel_service.py` |
+| Dashboard: `meta_ads_line`, `truth_status.meta_ads_spend`, Paid Social status | `services/dashboard_channels_service.py` |
+| Reasons `spend_shown_on_meta_ads_line`, `channel_population_is_not_meta_spend_population` | `analysis/closed_won_truth.py` |
+| Rendering (`metaLineSpendMetric` gate, Meta row, strip cell, platform sub-rows, Dashboard panel, footer chip) | `static/app.js`, `static/styles.css` |
+| Checks 19 `meta_spend_disclosure_carried`, 20 `no_rate_over_meta_spend` | `scripts/audit_customer_revenue_reader_cutover.py` |
+
+**Days.** The line passes the page's settled dates (Channels: the evidence
+window ended at London's yesterday; Dashboard: the business window ended at
+yesterday when open) to the truth with `settled=True`; the truth reads and
+settles each ad account on its own calendar. No second date rule. Disclosed
+on the line. Consequence today: the Los Angeles account is always verified one
+date behind London's yesterday at the 06:00 UTC sync, so every such window is
+**withheld** ("account 4730305973961806 is not verified for every day through
+… (verified through …)") until the owner moves it to UK time and re-runs its
+backfill.
+
+**Drill-down 1** (`hs_analytics_source_data_1`) was already stored in
+`hubspot_contact_funnel` and selected by `fetch_channel_funnel_contacts`: no
+sync or schema change. Matched whole (no substring); no value is `unknown`,
+never Meta.
+
+**Cost per lead** is not shown (171C's `meta_reported_leads` has its own
+unverified gate; omitted in this PR).
+
+**Shown failing first.** The new modules fail 38/38 on e07cf45. Mutations
+(each run, each caught): per-account figures exposed under a withheld total
+(`test_03` ×3, `test_03d`, `test_06c`, `test_09b`); the Paid Social row left at
+`channel_spend_not_connected` with Meta set up (`test_06`); a missing
+drill-down guessed as Meta (`test_05c`); a cost-per-contact key, a HubSpot
+count, a published comparison on the line (`test_06b`); the page gate ignoring
+the declaration (`test_07c` counterfactual, `test_10b`); a renderer reading
+`.spend` around the gate, the Dashboard panel bypassing it, a "per contact"
+label (`test_10b`); an unregistered module reading the truth (`test_10c`); a
+reader dropping the disclosure (`test_10d`).
+
+**Existing tests changed** — one module, no assertion loosened:
+`tests/test_pr_ads_168a_channel_outcomes.py` gains an autouse fixture stating
+the Meta state its tests assume (no Meta variable, nothing stored →
+`not_connected`). Without it the Meta store is unreadable in those tests,
+which the line correctly reads as "could not tell" and the Paid Social row as
+"shown on the Meta line".
+
+**Tests.** `tests/test_pr_ads_171b_meta_on_channels.py` (38);
+`tests/test_pr_ads_171b_meta_on_channels_pg_integration.py` (4, registered in
+the PostgreSQL step and its did-run list).
+
+**Known gaps** (`docs/55` §7): withheld while the LA account is on LA time;
+the Dashboard platform matrix's substring classifier can disagree with the
+exact Channels split; no join between Meta campaigns and HubSpot contacts.
+
+**Full suite.** 6407 passed, 1 skipped, 1 deselected (the documented
+baseline), 8 failed on the first run: all eight were the SQL doctrine
+inventory reading two regex literals in the new audit check as SQL field
+references. Reworded (`sq[l]s`); those eight modules, the 158 PostgreSQL
+module and 161E re-run green (167 + 82 passed).
+
+**Review round 1** (independent review, no blocker; one new commit). The
+Dashboard read the Meta line's `connected` None (could not tell — an
+unreadable store, or the first day of a quarter with no settled day) as "not
+connected"; it is now three-way (set up / not set up / could not tell) in the
+Paid Social statuses, the decision card and the unavailable list, and the
+footer dot for `not_connected` differs from `unavailable`. The Channels
+strip's Meta cell now says each account is read on its own calendar days.
+Check 20 also catches singular and abbreviated labels (`/ lead`, `/ SQL`,
+`CPL`, `cost per`). `test_10c` no longer writes a probe module into the
+source tree. `CLAUDE.md` (Channels landmine) and `docs/50` name the Paid
+Social reasons and the strip's Meta cell. New tests `test_14`–`test_16`
+(11 cases); 8 of them fail on 4d1e929 (the strip zone text, both "could not
+tell" cases, the footer dot, four singular/abbreviated labels; three labels
+the old pattern already caught pass there).
