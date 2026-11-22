@@ -90,6 +90,47 @@ CHANNEL_NOTE = (
     "sources under a channel are HubSpot's original-source detail (for "
     "example linkedin, facebook, chatgpt.com or a campaign name).")
 
+# ── PR-ADS-171B: Paid Social by platform ─────────────────────────────────────
+# HubSpot's Paid Social channel holds Meta (Facebook, Instagram) AND LinkedIn
+# contacts. Its contacts are split by the original-source drill-down
+# (``hs_analytics_source_data_1``) exactly as HubSpot stores it — compared
+# whole, after the funnel's own ``drilldown_key`` (trimmed, lower case). No
+# substring match and no guess: ``facebook`` and ``instagram`` are Meta,
+# ``linkedin`` is LinkedIn, any other value is ``other`` (listed by value),
+# and a contact with no drill-down is ``unknown`` — never Meta.
+PLATFORM_SPLIT_CHANNEL = "PAID_SOCIAL"
+PLATFORM_META = "meta"
+PLATFORM_LINKEDIN = "linkedin"
+PLATFORM_OTHER = "other"
+PLATFORM_UNKNOWN = "unknown"
+PLATFORM_DRILLDOWNS = {"facebook": PLATFORM_META, "instagram": PLATFORM_META,
+                       "linkedin": PLATFORM_LINKEDIN}
+PLATFORM_ORDER = (PLATFORM_META, PLATFORM_LINKEDIN, PLATFORM_OTHER, PLATFORM_UNKNOWN)
+PLATFORM_LABELS = {
+    PLATFORM_META: "Meta (facebook + instagram)",
+    PLATFORM_LINKEDIN: "LinkedIn",
+    PLATFORM_OTHER: "Other drill-down value",
+    PLATFORM_UNKNOWN: "Drill-down not recorded (unknown)",
+}
+PLATFORM_RULE = ("Paid Social contacts by HubSpot's original-source drill-down, "
+                 "compared whole: facebook or instagram is Meta, linkedin is "
+                 "LinkedIn, any other value is other, and no value is unknown "
+                 "— never Meta.")
+PLATFORM_NOTE = (
+    "Paid Social is split by HubSpot's original-source drill-down as HubSpot "
+    "stores it: facebook and instagram are Meta, linkedin is LinkedIn. A "
+    "contact with no drill-down is counted as unknown, never as Meta. These "
+    "are HubSpot contacts, not Meta's own figures, and nothing from Meta is "
+    "divided by them.")
+
+
+def platform_key(row: dict) -> str:
+    """The Paid Social platform of one contact, from its drill-down only."""
+    value = drilldown_key(row)
+    if value == NO_DRILLDOWN:
+        return PLATFORM_UNKNOWN
+    return PLATFORM_DRILLDOWNS.get(value, PLATFORM_OTHER)
+
 
 def source_key(row: dict) -> str:
     value = str(row.get("hs_analytics_source") or "").strip().upper()
@@ -138,9 +179,18 @@ def build_funnel(rows: list) -> dict:
         seen.add(cid)
         flags = {s["key"]: reached(row, s["event"]) for s in STAGES}
         _bump(totals, flags)
-        ch = channels.setdefault(source_key(row), {**_slot(), "drill": {}})
+        key = source_key(row)
+        ch = channels.setdefault(key, {**_slot(), "drill": {}})
         _bump(ch, flags)
         _bump(ch["drill"].setdefault(drilldown_key(row), _slot()), flags)
+        if key == PLATFORM_SPLIT_CHANNEL:
+            # From the contact itself, not from the (capped) drill-down list.
+            split = ch.setdefault("split", {p: {**_slot(), "values": set()}
+                                            for p in PLATFORM_ORDER})
+            platform = platform_key(row)
+            _bump(split[platform], flags)
+            if platform == PLATFORM_OTHER:
+                split[platform]["values"].add(drilldown_key(row))
 
     out = []
     for key, ch in channels.items():
@@ -154,8 +204,23 @@ def build_funnel(rows: list) -> dict:
                 for k in other:
                     other[k] += slot[k]
             top.append({"value": f"(other: {len(rest)} values)", **other})
-        out.append({"source": key, "label": SOURCE_LABELS.get(key, key),
-                    **ch, "drilldowns": top})
+        split = ch.pop("split", None)
+        row = {"source": key, "label": SOURCE_LABELS.get(key, key),
+               **ch, "drilldowns": top}
+        if split is not None:
+            row["platform_split"] = [
+                {"platform": p, "label": PLATFORM_LABELS[p],
+                 "drilldown_values": (sorted(v for v, pl in PLATFORM_DRILLDOWNS.items()
+                                             if pl == p)
+                                      if p in (PLATFORM_META, PLATFORM_LINKEDIN)
+                                      else sorted(split[p]["values"])[:MAX_DRILLDOWNS]
+                                      if p == PLATFORM_OTHER else []),
+                 "drilldown_value_count": (len(split[p]["values"])
+                                           if p == PLATFORM_OTHER else None),
+                 **{k: split[p][k] for k in ("contacts",) + STAGE_KEYS}}
+                for p in PLATFORM_ORDER]
+            row["platform_split_rule"] = PLATFORM_RULE
+        out.append(row)
     out.sort(key=lambda c: (-c["contacts"], c["source"]))
     return {"totals": totals, "channels": out, "duplicate_rows": duplicates}
 
@@ -177,6 +242,11 @@ def reconcile(funnel: dict) -> list:
         for key in STAGE_KEYS:
             if c[key] > c["contacts"]:
                 problems.append(f"{c['source']}: {key} exceeds contacts")
+        if "platform_split" in c:
+            for key in ("contacts",) + STAGE_KEYS:
+                if sum(p[key] for p in c["platform_split"]) != c[key]:
+                    problems.append(
+                        f"platforms do not sum to {c['source']} for {key}")
     return problems
 
 
@@ -239,6 +309,7 @@ def build_channel_funnel(window: str = DEFAULT_WINDOW, *,
             contacts.get("missing_created_at") if published else None),
         "reconciliation_problems": problems,
         "notes": {"stages": STAGE_NOTE, "channels": CHANNEL_NOTE,
+                  "platforms": PLATFORM_NOTE,
                   "maturity": cohort_service.COHORT_MATURITY_NOTE},
         "hubspot_calls_performed": False,
         "external_writes_performed": False,

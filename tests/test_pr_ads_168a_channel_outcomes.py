@@ -54,6 +54,22 @@ THIS_MORNING = datetime(2026, 11, 20, 6, 2, tzinfo=timezone.utc)
 # ═════════════════════════════════════════════════════════════════════════════
 # Fixtures
 # ═════════════════════════════════════════════════════════════════════════════
+@pytest.fixture(autouse=True)
+def _meta_not_set_up(monkeypatch):
+    """PR-ADS-171B: the page now reads Meta spend too. These tests are about
+    the page as it was before Meta was set up, so they say so: no Meta
+    variable, nothing stored — the truth's ``not_connected``. Without this
+    the store is unreadable here, which the Meta line reads, correctly, as
+    "could not tell" (tests/test_pr_ads_171b_meta_on_channels.py)."""
+    from db import meta_ads_repository as meta_repo
+    from tests import meta_ads_fakes
+    meta_ads_fakes.unconfigure(monkeypatch)
+    monkeypatch.setattr(meta_repo, "fetch_meta_accounts",
+                        lambda: {"available": True, "accounts": []})
+    monkeypatch.setattr(meta_repo, "fetch_meta_account_sync_states",
+                        lambda: {"available": True, "states": {}})
+
+
 def _contact(deal, cid, source, *, in_funnel=True):
     """One row of production's ``acquisition_contacts`` read."""
     return {"deal_id": str(deal), "contact_id": str(cid),

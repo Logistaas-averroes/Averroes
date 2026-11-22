@@ -7345,6 +7345,12 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .channel-funnel-total td { font-weight: 600; border-bottom: 2px solid var(--border, #e2e8f0); }
 .channel-funnel-pct { color: var(--text-muted); font-size: 0.85em; }
 .channel-funnel-drill { padding-left: calc(var(--space-5) + 14px); color: var(--text-secondary); }
+/* PR-ADS-171B: Paid Social by platform (always shown, under its channel). */
+.channel-funnel-platform { display: inline-block; padding-left: calc(var(--space-5) + 4px); color: var(--text-secondary); font-weight: 500; }
+.channel-funnel-platform-row td { background: var(--surface-subtle, #fafbfc); }
+/* PR-ADS-171B: the Meta Ads (spend) line when the outcome table is withheld. */
+.channel-meta-panel__value { padding: 0 var(--space-5) var(--space-4); font-size: 18px; font-weight: 600; }
+.chan-meta-panel .chan-meta-panel__accounts { margin: var(--space-2) 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 
 /* ── Channels outcomes (PR-ADS-168A) ────────────────────────────────────── */
 .channel-funnel-table th.channel-funnel-group { text-align: center; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border, #e2e8f0); }

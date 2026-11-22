@@ -42,6 +42,13 @@ decide any verdict. It proves:
                                           figure; no UI calls a period ratio
                                           ROAS or CAC; certified ROAS/CAC are
                                           unavailable
+19  meta_spend_disclosure_carried         PR-ADS-171B: every reader of the Meta
+                                          spend truth carries the owner's
+                                          retirement disclosure; pages read it
+                                          only through the Meta line; the UI
+                                          shows no figure without it
+20  no_rate_over_meta_spend               the Meta line carries no HubSpot count
+                                          and no ratio; withheld means absent
 
 PR-ADS-168A: the same reader checks also run over the Channels page's
 EVIDENCE windows (30d / 60d / 180d / all_time, ``report["evidence_windows"]``):
@@ -584,6 +591,9 @@ def structural_checks(a: Audit) -> dict:
     ui_bad = ui_ratio_label_violations(js, _text("static/index.html"))
     a.check("no_period_ratio_named_roas_or_cac", not ui_bad, "; ".join(ui_bad[:8]))
 
+    # 19 / 20 — PR-ADS-171B: Meta spend.
+    meta_structural_checks(a, js)
+
     # 17 — the audit's derivation does not call the module it audits.
     own = _text(AUDIT_FILE)
     body = own[own.find("# ── independent derivation"):
@@ -593,6 +603,132 @@ def structural_checks(a: Audit) -> dict:
             and "canonical_customer_revenue_service" not in body,
             "the independent derivation must not call the audited module")
     return {"readers": readers}
+
+
+# ── 19 / 20: Meta spend (PR-ADS-171B) ─────────────────────────────────────────
+
+#: The ONLY reader of Meta spend totals, and the readers allowed to call it.
+#: Each must carry ``owner_declared_retired_disclosure`` beside the figure.
+META_SPEND_TRUTH = "services/meta_ads_spend_truth_service.py"
+META_TRUTH_ENTRY = "build_meta_ads_spend_truth_for_days"
+META_SPEND_READERS = (
+    {"consumer": "services/meta_ads_spend_line_service.py",
+     "surface": "the Meta Ads (spend) line (Channels, Dashboard Channels)"},
+    {"consumer": "services/meta_ads_adset_truth_service.py",
+     "surface": "ad-set breakdown (no page yet, PR-ADS-171C)"},
+)
+#: Pages show Meta spend only through the line, which gates on the disclosure.
+META_LINE_ENTRY = "build_meta_ads_spend_line"
+META_LINE_PAGES = (
+    {"consumer": "services/source_attribution_service.py",
+     "surface": "/api/channel-funnel `outcomes.meta_ads_line`; Channels"},
+    {"consumer": "services/dashboard_channels_service.py",
+     "surface": "/api/dashboard/channels `meta_ads_line`; Dashboard Channels"},
+)
+#: The JS that renders the line, and the one gate every renderer goes through.
+META_JS_GATE = "metaLineSpendMetric"
+META_JS_RENDERERS = ("channelMetaSpendCellHtml", "channelOutcomeStripHtml",
+                     "renderChanMetaPanel")
+#: Keys the line must never carry: a HubSpot count, or a figure over one.
+#: (``[l]`` keeps the SQL doctrine scanner from reading a field name here.)
+META_LINE_FORBIDDEN_KEYS = re.compile(
+    r"(?:^|_)(?:contacts?|sq[l]s?|mq[l]s?|leads?|deals?|customers?|revenue|won|"
+    r"cpl|cpa|ratio|per)(?:$|_)")
+#: Keys the line carries that name a forbidden word but hold no count: the
+#: comparison verdict and the per-account metadata.
+_META_LINE_ALLOWED_KEYS = ("compared_with_outcomes", "meta_reported_leads_not_used")
+
+
+def _string_constants(rel: str) -> set:
+    return {n.value for n in ast.walk(ast.parse(_text(rel)))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+
+def meta_structural_checks(a: Audit, js: str) -> None:
+    readers = {r["consumer"] for r in META_SPEND_READERS}
+    pages = {r["consumer"] for r in META_LINE_PAGES}
+    for rel in _production_py():
+        if rel in (META_SPEND_TRUTH, AUDIT_FILE):
+            continue
+        names = _code_names(rel)
+        if META_TRUTH_ENTRY in names:
+            a.check("meta_spend_disclosure_carried", rel in readers,
+                    f"{rel} reads the Meta spend truth and is not in META_SPEND_READERS")
+        if META_LINE_ENTRY in names and rel != "services/meta_ads_spend_line_service.py":
+            a.check("meta_spend_disclosure_carried", rel in pages,
+                    f"{rel} builds the Meta line and is not in META_LINE_PAGES")
+    for rel in sorted(readers | pages):
+        # A registered file that is gone is a broken register, not a crash.
+        a.check("meta_spend_disclosure_carried", (_ROOT / rel).exists(),
+                f"registered Meta spend reader {rel} does not exist")
+    for rel in sorted(r for r in readers if (_ROOT / r).exists()):
+        a.check("meta_spend_disclosure_carried",
+                "owner_declared_retired_disclosure" in _string_constants(rel),
+                f"{rel} reads the Meta spend truth without carrying "
+                "owner_declared_retired_disclosure")
+    gate = _js_function(js, META_JS_GATE)
+    a.check("meta_spend_disclosure_carried",
+            "owner_declared_retired_disclosure" in gate
+            and "meta_retired_disclosure_missing" in gate,
+            f"{META_JS_GATE} must withhold a figure whose declaration has no disclosure")
+    for fn in META_JS_RENDERERS:
+        body = _js_function(js, fn)
+        a.check("meta_spend_disclosure_carried", bool(body) and META_JS_GATE in body,
+                f"{fn} must read the Meta figure through {META_JS_GATE}")
+    # No renderer reads the line's spend around the gate: outside it, the
+    # Meta line's variables never have ``.spend`` read.
+    outside = js.replace(gate, "") if gate else js
+    bypass = [m.group(0) for m in re.finditer(
+        r"\b(?:metaLine|meta_ads_line|meta)\.spend\b", outside)]
+    a.check("meta_spend_disclosure_carried", not bypass,
+            f"app.js reads the Meta line's spend outside {META_JS_GATE}: {bypass[:4]}")
+    # 20 — no column or cell divides Meta spend by a HubSpot count.
+    a.check("no_rate_over_meta_spend",
+            not re.search(r"(?i)meta[^\n]{0,80}(?:per (?:lead|contact|sql|deal|customer)"
+                          r"|/\s*(?:contacts|leads|sq[l]s))", js),
+            "app.js labels a Meta spend rate over a HubSpot count")
+
+
+def meta_line_violations(line) -> list:
+    """Pure. What is wrong with one payload's Meta line."""
+    if line is None:
+        return []
+    out = []
+    spend = (line or {}).get("spend") or {}
+    published = spend.get("status") == "published"
+    if published and line.get("owner_declared_retired") \
+            and not line.get("owner_declared_retired_disclosure"):
+        out.append("a published Meta figure rests on the owner's declaration "
+                   "without its disclosure")
+    if not published:
+        figures = [f"spend={spend.get('value')}"] if spend.get("value") is not None else []
+        native = line.get("native_spend") or {}
+        if native.get("value") is not None and native.get("status") != "published":
+            figures.append(f"native_spend={native.get('value')}")
+        for acct in line.get("accounts") or []:
+            for k in ("native_spend", "usd_spend"):
+                if (acct.get(k) or {}).get("value") is not None:
+                    figures.append(f"{acct.get('account_id')}.{k}")
+        if figures:
+            out.append(f"withheld Meta spend carries figures: {figures[:4]}")
+    for path, d in _walk(line):
+        for k in d:
+            if k in _META_LINE_ALLOWED_KEYS:
+                continue
+            if META_LINE_FORBIDDEN_KEYS.search(str(k)):
+                out.append(f"the Meta line carries {path}.{k}")
+    comparison = line.get("comparison") or {}
+    if comparison.get("status") == "published" or comparison.get("value") is not None:
+        out.append(f"the Meta line publishes a comparison: {comparison}")
+    return out
+
+
+def meta_line_checks(a: Audit, where: str, line) -> None:
+    bad = meta_line_violations(line)
+    disclosure = [b for b in bad if "declaration" in b]
+    a.check("meta_spend_disclosure_carried", not disclosure, f"{where}: {disclosure}")
+    rest = [b for b in bad if b not in disclosure]
+    a.check("no_rate_over_meta_spend", not rest, f"{where}: {rest[:4]}")
 
 
 # ── independent derivation ────────────────────────────────────────────────────
@@ -807,6 +943,8 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
         page_leak_checks(a, key, name, (page_pubs or {}).get(name) or pub,
                          payload, placement)
         _ratio_name_check(a, f"{key} {name}", payload)
+        if isinstance(payload, dict) and "meta_ads_line" in payload:
+            meta_line_checks(a, f"{key} {name}", payload["meta_ads_line"])
     return {"window": key, "publication": {m: pub.get(m) for m in
                                            ("closed_won_deals", "revenue_usd",
                                             "customers")},

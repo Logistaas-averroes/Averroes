@@ -826,6 +826,18 @@ R_CHANNEL_POPULATION_NOT_SPEND = "channel_population_is_not_spend_population"
 #: PR-ADS-168A: the Paid Search row's spend cell — Google Ads spend is shown
 #: on the Google Ads line, beside the population it is compared with.
 R_SPEND_ON_GOOGLE_ADS_LINE = "spend_shown_on_google_ads_line"
+#: PR-ADS-171B: the Paid Social row's spend cell once Meta is set up — Meta
+#: spend is shown on the "Meta Ads (spend)" line, never beside HubSpot's Paid
+#: Social contacts or deals (LinkedIn is in that row too, and HubSpot's Meta
+#: campaign names drift from Meta's).
+R_SPEND_ON_META_ADS_LINE = "spend_shown_on_meta_ads_line"
+#: PR-ADS-171B: no rate joins Meta spend to a HubSpot count. HubSpot's Paid
+#: Social contacts are not proven to be the population Meta spend paid for
+#: (a renamed campaign keeps its old name in HubSpot), so the Paid Social
+#: row's period ratios and the Meta line's comparison are unavailable for
+#: this reason. The Meta counterpart of ``R_CHANNEL_POPULATION_NOT_SPEND``,
+#: whose wording names Google Ads.
+R_CHANNEL_POPULATION_NOT_META_SPEND = "channel_population_is_not_meta_spend_population"
 R_NO_SPEND_IN_WINDOW = "no_google_ads_spend_in_window"
 R_NO_CUSTOMERS_IN_WINDOW = "no_customers_in_window"
 #: A rate whose numerator is close-date won deals / customers and whose

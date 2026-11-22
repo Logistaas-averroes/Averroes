@@ -35,6 +35,7 @@ from analysis import revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from services import revenue_spend_truth_service
+from services import meta_ads_spend_line_service
 
 log = logging.getLogger(__name__)
 
@@ -813,14 +814,21 @@ R_UNRESOLVED_NO_SPEND = "deal_source_not_resolved"
 #: Google Ads spend whose coverage or FX is not verified.
 R_SPEND_UNVERIFIED = "google_ads_spend_coverage_or_fx_unverified"
 
-#: The only connected spend source sits on the Paid Search row.
+#: The only spend source compared with deals sits beside the Paid Search row.
 SPEND_CHANNEL = "PAID_SEARCH"
+#: PR-ADS-171B: HubSpot's channel for Meta (and LinkedIn) contacts. Meta spend
+#: is on its own line, never beside this row's contacts or deals.
+META_SPEND_CHANNEL = "PAID_SOCIAL"
 SPEND_SOURCES = (
     {"platform": "google_ads", "label": "Google Ads", "channel": "PAID_SEARCH",
      "connected": True, "reason": None},
+    # PR-ADS-171B: the connector exists (PR-ADS-171A); whether it is set up
+    # is the Meta line's to say (``spend_sources(meta_line)``). Shown on the
+    # Meta line, never on the Paid Social row.
     {"platform": "meta", "label": "Meta (Facebook / Instagram)",
-     "channel": "PAID_SOCIAL", "connected": False,
-     "reason": "spend_export_not_supplied"},
+     "channel": "PAID_SOCIAL", "connected": None,
+     "reason": "meta_ads_spend_source_unavailable",
+     "shown_on": "__meta_ads_spend__", "compared_with_outcomes": False},
     {"platform": "linkedin", "label": "LinkedIn", "channel": "PAID_SOCIAL",
      "connected": False, "reason": "spend_export_not_supplied"},
     {"platform": "chatgpt", "label": "ChatGPT", "channel": "AI_REFERRALS",
@@ -860,8 +868,15 @@ CHANNEL_OUTCOME_NOTES = {
         "not Google Ads, so it does not by itself exclude other search "
         "engines; the line shows how many of its deals carry a click ID. Its "
         "deals also sit on the channel rows, so it is not part of them and is "
-        "not added to the totals. Meta, LinkedIn and ChatGPT spend are not "
+        "not added to the totals. LinkedIn and ChatGPT spend are not "
         "connected (no export has been supplied)."),
+    "meta_spend": (
+        "Meta Ads spend, where it is set up, is shown only on the 'Meta Ads "
+        "(spend)' line, read from Meta's own ad accounts. It is not matched to "
+        "the Paid Social row or to any HubSpot count: Paid Social also holds "
+        "LinkedIn, and HubSpot keeps the campaign name a contact arrived under "
+        "after the campaign is renamed in Meta. No rate is calculated between "
+        "them. Each ad account is read on its own calendar days."),
 }
 
 GOOGLE_ADS_LINE_SOURCE = "__google_ads_evidence__"
@@ -1081,7 +1096,7 @@ def _channel_spend(key: str, google: dict) -> dict:
 
 
 def build_channel_outcome_rows(base: dict, contacts, google_spend: dict,
-                               extra_sources=()) -> dict:
+                               extra_sources=(), meta_line: dict | None = None) -> dict:
     """The per-channel rows, the unresolved row and the partition proof. Pure
     given ``base`` (a ``load_won_deals`` result whose deal count is published).
     """
@@ -1112,10 +1127,16 @@ def build_channel_outcome_rows(base: dict, contacts, google_spend: dict,
     keys += sorted(k for k in part["channels"] if k not in keys)
     rows = []
     for key in keys:
+        if key == META_SPEND_CHANNEL:
+            # PR-ADS-171B: once Meta is set up its spend is on the Meta line —
+            # never beside HubSpot's Paid Social deals, which are not proven
+            # to be the population it paid for (and include LinkedIn's).
+            spend, ratio_gate = meta_ads_spend_line_service.paid_social_spend(meta_line)
+        else:
+            spend = _channel_spend(key, google_spend)
+            ratio_gate = _PAID_SEARCH_RATIO_GATE if key == SPEND_CHANNEL else None
         row = _outcome_row(base, part["channels"].get(key, []),
-                           spend=_channel_spend(key, google_spend), gate=gate,
-                           ratio_gate=(_PAID_SEARCH_RATIO_GATE
-                                       if key == SPEND_CHANNEL else None))
+                           spend=spend, gate=gate, ratio_gate=ratio_gate)
         rows.append({"source": key, "label": SOURCE_LABELS.get(key, key),
                      "outcome_only": False, **row})
     unresolved = _outcome_row(base, part["unresolved"],
@@ -1184,6 +1205,12 @@ def build_channel_outcomes(window: str = "180d", *,
         "empty": bool(rng.get("empty")),
     }
 
+    # PR-ADS-171B: Meta spend over the same settled dates, each ad account on
+    # its own calendar (the truth's rule). Independent of the deals: it
+    # renders when they are withheld, and nothing divides by it.
+    meta_line = meta_ads_spend_line_service.build_meta_ads_spend_line(
+        start_date, through, now=now, page_zone=ACCOUNT_TZ,
+        empty_reason=NO_SETTLED_DAY_IN_WINDOW if rng.get("empty") else None)
     if rng.get("empty"):
         base = canonical_revenue.unavailable(NO_SETTLED_DAY_IN_WINDOW, window=key)
         spend_truth = {"state": "no_settled_day", "unsettled_reason":
@@ -1216,7 +1243,7 @@ def build_channel_outcomes(window: str = "180d", *,
             CONFIRMED_WON_STAGE_ID)
         built = build_channel_outcome_rows(
             base, universe.get("acquisition_contacts") or [], google,
-            extra_sources=channel_sources)
+            extra_sources=channel_sources, meta_line=meta_line)
         channels, partition = built["channels"], built["partition"]
         gads = google_ads_line(base, google, now)
 
@@ -1240,6 +1267,9 @@ def build_channel_outcomes(window: str = "180d", *,
         # The measured comparison with Google Ads spend. Not a channel row:
         # its deals also sit on the rows above, so it is never summed.
         "google_ads_line": gads,
+        # PR-ADS-171B: Meta spend, on its own. No HubSpot count on it and no
+        # rate from it; never part of the rows or the totals.
+        "meta_ads_line": meta_line,
         "spend": {
             "google_ads": google,
             "google_ads_state": spend_truth.get("state"),
@@ -1251,14 +1281,33 @@ def build_channel_outcomes(window: str = "180d", *,
             "start_date": settled.get("start_date"),
             "end_date": settled["end_date"],
         },
-        "spend_sources": [dict(s) for s in SPEND_SOURCES],
+        "spend_sources": spend_sources(meta_line),
         "notes": dict(CHANNEL_OUTCOME_NOTES),
         "as_of": base.get("as_of"),
         "generated_at": now.isoformat(),
         "hubspot_calls_performed": False,
         "google_ads_calls_performed": False,
+        "meta_calls_performed": False,
         "external_writes_performed": False,
     }
+
+
+def spend_sources(meta_line: dict | None = None) -> list:
+    """``SPEND_SOURCES`` with Meta's row stating what the Meta line found:
+    ``connected`` True / False, or None when it could not tell."""
+    out = []
+    for s in SPEND_SOURCES:
+        row = dict(s)
+        if row["platform"] == "meta" and meta_line is not None:
+            connected = meta_line.get("connected")
+            row.update({
+                "connected": connected,
+                "reason": (None if connected else
+                           (meta_line.get("spend") or {}).get("reason")),
+                "shown_on": meta_line.get("source"),
+                "compared_with_outcomes": False})
+        out.append(row)
+    return out
 
 
 def source_attribution_health_counts() -> dict:

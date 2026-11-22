@@ -2164,6 +2164,18 @@ const CANONICAL_REASON_LABELS = {
   account_time_zone_unknown: "the Google Ads account time zone is not on record",
   spend_days_not_settled: "the spend days are not settled yet",
   no_settled_day_in_window: "this window has no completed day yet",
+  // PR-ADS-171B: the Meta Ads (spend) line and the Paid Social row beside it.
+  spend_shown_on_meta_ads_line: "Meta Ads spend is shown on its own line, not beside HubSpot's Paid Social deals",
+  channel_population_is_not_meta_spend_population:
+    "HubSpot's Paid Social contacts and deals are not proven to be the population Meta spend paid for",
+  meta_ads_not_connected: "Meta Ads is not set up",
+  meta_ads_spend_source_unavailable: "stored Meta spend could not be read, or Meta is set up incorrectly",
+  meta_ads_spend_coverage_incomplete: "some ad account's spend is not verified and settled for every day",
+  fx_rates_missing: "a day with Meta spend has no USD exchange rate",
+  fx_currency_not_supported: "an ad account's currency has no USD exchange rate source",
+  meta_accounts_in_different_currencies: "the ad accounts use different currencies, so there is no single native total",
+  meta_retired_disclosure_missing: "the figure rests on the owner's retirement declaration and its disclosure is missing",
+  meta_ads_spend_line_failed: "the Meta spend line could not be loaded",
   roas_requires_revenue_and_spend_in_one_acquisition_cohort: "attribution ROAS needs revenue and spend over one acquisition cohort",
   cac_requires_spend_and_customers_in_one_acquisition_cohort: "CAC needs spend and customers over one acquisition cohort",
 };
@@ -4132,7 +4144,7 @@ function renderDashboardChannels() {
   root.innerHTML = `
     <div class="dash-tab-intro dash-anim">
       <h2 class="dash-tab-intro__title">Channels &amp; Platforms</h2>
-      <p class="dash-tab-intro__sub">Which channels and platforms produce SQLs, closed-won deals and revenue — and which are revenue-only because spend is not connected. Only Google Ads is spend-connected.</p>
+      <p class="dash-tab-intro__sub">Which channels and platforms produce SQLs, closed-won deals and revenue — and which are revenue-only because spend is not connected. Only Google Ads spend is compared with revenue; Meta Ads spend is shown on its own line.</p>
     </div>
     ${renderChanKpiRow(d)}
     <div class="dash-main-grid">
@@ -4149,6 +4161,9 @@ function renderDashboardChannels() {
     <section class="dash-panel dash-anim chan-platform-panel" aria-label="Platform matrix">
       ${renderChanPlatformMatrix(d)}
     </section>
+    ${d.meta_ads_line ? `<section class="dash-panel dash-anim chan-meta-panel" aria-label="Meta Ads spend">
+      ${renderChanMetaPanel(d.meta_ads_line)}
+    </section>` : ""}
     <section class="dash-panel dash-anim chan-channels-panel" aria-label="Channel detail">
       ${renderChanChannelList(d)}
     </section>
@@ -4744,6 +4759,29 @@ function wireChanChannelDrawers(root, d) {
   });
 }
 
+// PR-ADS-171B: the Meta Ads (spend) line — the same line, gating and
+// disclosures as the Channels page, in this tab's panel style. Spend only:
+// it sits apart from the channel rows and nothing is divided by it.
+function renderChanMetaPanel(line) {
+  const l = line || {};
+  const native = metaLineNativeHtml(l);
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">${escapeHtml(l.label || "Meta Ads (spend)")}</h3>
+        <p class="dash-panel__sub">Meta's own ad accounts, for the settled days of this window · not matched to HubSpot's Paid Social contacts or deals, so no ratio is shown</p>
+      </div>
+    </div>
+    <div class="dash-outcomes chan-meta-panel__figures">
+      <div class="dash-outcomes__cell">
+        <div class="dash-outcomes__label">Meta Ads spend</div>
+        <div class="dash-outcomes__value">${canonicalMetricHtml(metaLineSpendMetric(l), fmtMoney)}</div>
+        <div class="dash-outcomes__sub">USD${native ? ` · ${native}` : ""}</div>
+      </div>
+    </div>
+    <ul class="chan-meta-panel__accounts">${metaLineNotes(l).map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`;
+}
+
 function renderChanTruthFooter(d) {
   const ts = d.truth_status || {};
   const chip = (label, status) => `
@@ -4758,10 +4796,11 @@ function renderChanTruthFooter(d) {
       ${chip("Source attr.", ts.source_attribution)}
       ${chip("Google Ads spend", ts.google_ads_spend)}
       ${chip("Non-Google spend", ts.non_google_spend)}
+      ${ts.meta_ads_spend ? chip("Meta Ads spend", ts.meta_ads_spend) : ""}
       ${chip("Platform class.", ts.platform_classification)}
       <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
       ${allGood
-        ? '<span class="dash-footer-note">Channel truth verified — only Google Ads is spend-connected; other channels are revenue-only by design.</span>'
+        ? '<span class="dash-footer-note">Channel truth verified — only Google Ads spend is compared with revenue; other channels are revenue-only by design.</span>'
         : (dashCanNavigate("revenue-health")
           ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
           : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
@@ -9606,6 +9645,8 @@ function channelFunnelRowHtml(row, stages, opts) {
   let name;
   if (o.drill) {
     name = `<span class="channel-funnel-drill">${escapeHtml(row.value)}</span>`;
+  } else if (o.platform) {
+    name = `<span class="channel-funnel-platform">${escapeHtml(row.value)}</span>`;
   } else if (o.children) {
     name = `<button type="button" class="channel-funnel-toggle" data-channel-toggle="${escapeHtml(row.source)}" aria-expanded="false">
         <span class="channel-funnel-caret" aria-hidden="true">▸</span><strong>${escapeHtml(row.label)}</strong>
@@ -9613,7 +9654,7 @@ function channelFunnelRowHtml(row, stages, opts) {
   } else {
     name = `<span class="channel-funnel-leaf"><strong>${escapeHtml(row.label)}</strong></span>`;
   }
-  if (!o.total && !o.drill && channelFunnelIsSmall(row)) name += channelFunnelSmallBadge();
+  if (!o.total && !o.drill && !o.platform && channelFunnelIsSmall(row)) name += channelFunnelSmallBadge();
   if (o.sub) name += `<div class="channel-funnel-sub">${escapeHtml(o.sub)}</div>`;
   const cells = stages.map((st, i) => {
     const color = CHANNEL_FUNNEL_STAGE_COLORS[i % CHANNEL_FUNNEL_STAGE_COLORS.length];
@@ -9622,6 +9663,7 @@ function channelFunnelRowHtml(row, stages, opts) {
   }).join("");
   const attrs = o.total ? ' class="channel-funnel-total"'
     : o.drill ? ` class="channel-funnel-child" data-channel-child="${escapeHtml(o.parent)}" hidden`
+    : o.platform ? ' class="channel-funnel-platform-row"'
     : o.unresolved ? ' class="channel-outcome-unresolved"'
     : o.gads ? ' class="channel-outcome-gads"' : "";
   // PR-ADS-168A: `funnel` replaces the funnel cells (a row that is not a
@@ -9710,6 +9752,80 @@ function channelOutcomeSplitText(line) {
   return `${total.toLocaleString()} ${total === 1 ? "deal" : "deals"}: ${g.toLocaleString()} with a Google click ID, ${h.toLocaleString()} by HubSpot source only`;
 }
 
+// ── PR-ADS-171B — the Meta Ads (spend) line ─────────────────────────────────
+// Meta spend from Meta's own ad accounts, republished as the API decided it.
+// Spend only: no HubSpot count sits beside it and nothing is divided by it.
+// When the figure rests on the owner's retirement declaration the disclosure
+// is shown beside it — and a figure whose disclosure is missing is not shown.
+function metaLineRetired(line) {
+  return Array.isArray((line || {}).owner_declared_retired) && line.owner_declared_retired.length > 0;
+}
+
+function metaLineSpendMetric(line) {
+  const l = line || {};
+  if (metaLineRetired(l) && !l.owner_declared_retired_disclosure) {
+    return { value: null, status: "withheld", reason: "meta_retired_disclosure_missing" };
+  }
+  return l.spend || { value: null, status: "unavailable", reason: "meta_ads_spend_line_failed" };
+}
+
+function metaNativeMoney(v, currency) {
+  return `${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency || ""}`.trim();
+}
+
+const META_ACCOUNT_STATE_LABELS = {
+  verified: "verified", verified_zero_spend: "verified, no spend",
+  coverage_incomplete: "not verified for every day", fx_incomplete: "no USD rate for every day",
+  source_unavailable: "could not be read",
+};
+
+// One line per ad account: its own currency, its own time zone and the last
+// day verified in that zone. A figure only when the line's total is published.
+function metaLineAccountTexts(line) {
+  const l = line || {};
+  const spendOk = metaLineSpendMetric(l).status === "published";
+  return (l.accounts || []).map((a) => {
+    const parts = [`Ad account ${a.account_id}${a.account_name ? ` (${a.account_name})` : ""}`,
+      a.currency || "currency unknown",
+      `${a.time_zone || "time zone unknown"} days`,
+      `verified through ${a.verified_through || "no day"}`];
+    const st = META_ACCOUNT_STATE_LABELS[a.state];
+    if (a.state && a.state !== "verified" && a.state !== "verified_zero_spend") parts.push(st || String(a.state).replace(/_/g, " "));
+    if (a.owner_declared_retired) parts.push("declared retired by the owner");
+    const n = a.native_spend || {};
+    if (spendOk && n.status === "published" && n.value !== null && n.value !== undefined) {
+      parts.push(metaNativeMoney(n.value, n.currency || a.currency));
+    }
+    return parts.join(" · ");
+  });
+}
+
+// Everything said beside the figure, in order: the accounts, the days each is
+// read on, the owner's declaration (whenever the figure rests on it), why it
+// is withheld, and that nothing on the page is divided by it.
+function metaLineNotes(line) {
+  const l = line || {};
+  const out = metaLineAccountTexts(l);
+  if (l.day_basis_disclosure) out.push(l.day_basis_disclosure);
+  if (l.through_disclosure) out.push(l.through_disclosure);
+  if (metaLineRetired(l) && l.owner_declared_retired_disclosure) out.push(l.owner_declared_retired_disclosure);
+  if (l.withheld_detail) out.push(l.withheld_detail);
+  out.push("Not matched to HubSpot's Paid Social contacts or deals — no rate is calculated from it");
+  return out;
+}
+
+function metaLineNativeHtml(line) {
+  const l = line || {};
+  if (metaLineRetired(l) && !l.owner_declared_retired_disclosure) return "";
+  const n = l.native_spend || {};
+  if (metaLineSpendMetric(line).status !== "published" && n.status === "published") {
+    // fx_incomplete: the native total is published while USD is not.
+    return canonicalMetricHtml(n, (v) => metaNativeMoney(v, n.currency));
+  }
+  if (n.status !== "published") return "";
+  return escapeHtml(metaNativeMoney(n.value, n.currency));
+}
+
 function channelOutcomeRange(o) {
   const w = (o && o.window) || {};
   return w.is_all_time || !w.start_date ? `in all time, to ${w.end_date}` : `${w.start_date} to ${w.end_date}`;
@@ -9729,12 +9845,22 @@ function channelOutcomeStripHtml(o) {
     ["Closed-won deals", metricOf("closed_won_deals"), channelOutcomeInt, "deals closed in these days"],
     ["Customers won", metricOf("customers"), channelOutcomeInt, "distinct companies · not additive across channels"],
     ["Revenue", metricOf("revenue_usd"), channelOutcomeMoney, "closed-won, USD"],
-    ["Google Ads spend", google, channelOutcomeMoney, "the only connected spend source"],
-  ].map(([label, metric, fmt, sub]) => `<div class="dash-outcomes__cell channel-outcome-stat">
+    ["Google Ads spend", google, channelOutcomeMoney, "compared only with the Google Ads line"],
+  ];
+  // PR-ADS-171B: Meta spend, from Meta's own accounts. Its cell carries the
+  // owner's declaration whenever the figure rests on it.
+  const meta = o.meta_ads_line;
+  if (meta) {
+    cells.push(["Meta Ads spend", metaLineSpendMetric(meta), channelOutcomeMoney,
+      ["Meta's own ad accounts · not matched to any HubSpot count",
+        metaLineRetired(meta) && meta.owner_declared_retired_disclosure ? meta.owner_declared_retired_disclosure : ""]
+        .filter(Boolean).join(" · ")]);
+  }
+  const html = cells.map(([label, metric, fmt, sub]) => `<div class="dash-outcomes__cell channel-outcome-stat">
       <div class="dash-outcomes__label">${escapeHtml(label)}</div>
       <div class="dash-outcomes__value">${canonicalMetricHtml(metric, fmt, opts)}</div>
       <div class="dash-outcomes__sub">${escapeHtml(sub)}</div></div>`);
-  return `<div class="dash-outcomes channel-outcome-totals">${cells.join("")}</div>`;
+  return `<div class="dash-outcomes channel-outcome-totals">${html.join("")}</div>`;
 }
 
 // The totals strip: how many contacts were acquired, and how far they got.
@@ -9801,6 +9927,30 @@ function channelFunnelSorted(channels, view, stages) {
   return rows.sort((a, b) => (channelFunnelCount(b[key]) || 0) - (channelFunnelCount(a[key]) || 0));
 }
 
+// The Meta line's spend cell: USD as the API decided it, the native total
+// beside it when one currency (or when only the native total is published).
+function channelMetaSpendCellHtml(line, opts) {
+  const usd = canonicalMetricHtml(metaLineSpendMetric(line), channelOutcomeMoney, opts);
+  const native = metaLineNativeHtml(line);
+  return native ? `${usd} <small class="metric-reason">${native}</small>` : usd;
+}
+
+// PR-ADS-171B: Paid Social's contacts by platform, from HubSpot's drill-down
+// as stored. Same funnel columns; a contact with no drill-down is unknown.
+function channelPlatformSplitHtml(ch, stages, outcome) {
+  const split = (ch || {}).platform_split;
+  if (!Array.isArray(split) || !split.length) return "";
+  return split.map((p) => {
+    const vals = (p.drilldown_values || []).join(", ");
+    const sub = p.platform === "other"
+      ? (vals ? `drill-down: ${vals}${p.drilldown_value_count > (p.drilldown_values || []).length ? ` (+${p.drilldown_value_count - p.drilldown_values.length} more)` : ""}` : "")
+      : p.platform === "unknown" ? "no drill-down recorded — never counted as Meta"
+      : vals ? `drill-down: ${vals}` : "";
+    return channelFunnelRowHtml({ value: p.label, ...p }, stages, {
+      platform: true, sub, outcome });
+  }).join("");
+}
+
 function renderChannelFunnel(data, view) {
   const v = view || {};
   const pub = data.publication || {};
@@ -9865,6 +10015,7 @@ function renderChannelFunnel(data, view) {
       funnelSources[ch.source] = true;
       const drill = channelFunnelHasDrill(ch) ? ch.drilldowns : [];
       return channelFunnelRowHtml(ch, stages, { children: drill.length, outcome: outcomeFor(ch.source) })
+        + channelPlatformSplitHtml(ch, stages, outRows ? channelOutcomeNoteCells("n/a — deals are counted per channel, not per platform") : "")
         + drill.map((d) => channelFunnelRowHtml(d, stages, { drill: true, parent: ch.source, outcome: blankOutcome })).join("");
     }).join("");
     total = channelFunnelRowHtml({ label: "All channels", ...data.totals }, stages,
@@ -9900,6 +10051,24 @@ function renderChannelFunnel(data, view) {
         .filter(Boolean).join(" · "),
       funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — paid-media line, not a contact source</td>` : "",
       outcome: channelOutcomeCellsHtml(o.google_ads_line, oOpts) }) : "";
+  // PR-ADS-171B: Meta spend on its own line, beside the Google Ads line.
+  // Spend only — the outcome and ratio cells say why nothing is beside it.
+  const metaLine = o && o.meta_ads_line;
+  const meta = outRows && metaLine ? channelFunnelRowHtml(
+    { label: metaLine.label || "Meta Ads (spend)" }, stages, {
+      gads: true,
+      sub: metaLineNotes(metaLine).join(" · "),
+      funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — paid-media line, not a contact source</td>` : "",
+      outcome: `<td class="channel-outcome-na" colspan="3">n/a — Meta spend is not matched to HubSpot deals</td>`
+        + `<td class="num channel-outcome-cell">${channelMetaSpendCellHtml(metaLine, oOpts)}</td>`
+        + `<td class="channel-outcome-na" colspan="2">n/a — no rate: ${escapeHtml(canonicalReasonLabel((metaLine.comparison || {}).reason || "channel_population_is_not_meta_spend_population"))}</td>` }) : "";
+  const metaPanel = !outRows && metaLine ? `
+    <div class="dash-panel dash-anim channel-meta-panel">
+      <div class="dash-panel__header"><div>
+        <h3 class="dash-panel__title">${escapeHtml(metaLine.label || "Meta Ads (spend)")}</h3>
+        <p class="dash-panel__sub">${escapeHtml(metaLineNotes(metaLine).join(" · "))}</p></div></div>
+      <div class="channel-meta-panel__value">${channelMetaSpendCellHtml(metaLine, oOpts)}</div>
+    </div>` : "";
   const anyDrill = funnelOk && data.channels.some(channelFunnelHasDrill);
   const thead = outRows
     ? `<thead><tr><th rowspan="2">Channel</th>${funnelOk ? `<th class="channel-funnel-group" colspan="${funnelSpan}">Funnel · contacts acquired</th>` : ""}
@@ -9918,7 +10087,7 @@ function renderChannelFunnel(data, view) {
       <div style="overflow-x:auto">
         <table class="data-table channel-funnel-table">
           ${thead}
-          <tbody>${total}${body}${gads}</tbody>
+          <tbody>${total}${body}${gads}${meta}</tbody>
         </table>
       </div>
     </div>` : "";
@@ -9933,6 +10102,7 @@ function renderChannelFunnel(data, view) {
     on.original_source || "Channel is HubSpot's original source, unchanged.",
     on.customers || "Customers won are distinct companies and are not additive across channels.",
     on.spend || "Google Ads spend is compared with the Google Ads line, not the Paid Search row.",
+    on.meta_spend || "Meta Ads spend is shown on its own line and is not matched to any HubSpot count.",
     `${PERIOD_RATIO_LABEL} and ${PERIOD_SPEND_PER_CUSTOMER_LABEL}: ${PERIOD_RATIO_DISCLOSURE}.`,
   ] : ["Deals, revenue and spend by channel could not be loaded."];
   return `
@@ -9945,12 +10115,14 @@ function renderChannelFunnel(data, view) {
     ${stage ? `<div class="channel-funnel-compare"><span class="channel-funnel-compare__label">Compare channels on:</span>${stagePicker}</div>` : ""}
     ${rankings}
     ${table}
+    ${metaPanel}
     <div class="dash-panel channel-funnel-howto">
       <h3 class="dash-panel__title">How to read this page</h3>
       <ul>
         <li>${escapeHtml(notes.channels || "Channel is HubSpot's original source for the contact.")}</li>
         <li>${escapeHtml(notes.stages || "Each stage counts contacts with evidence of reaching it.")}</li>
         <li>${escapeHtml(notes.maturity || "Recent contacts have had less time to progress.")}</li>
+        ${notes.platforms ? `<li>${escapeHtml(notes.platforms)}</li>` : ""}
         ${outcomeBullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
       </ul>
     </div>`;
