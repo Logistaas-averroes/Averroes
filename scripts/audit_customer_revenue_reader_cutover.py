@@ -639,6 +639,16 @@ META_LINE_FORBIDDEN_KEYS = re.compile(
 _META_LINE_ALLOWED_KEYS = ("compared_with_outcomes", "meta_reported_leads_not_used")
 
 
+#: A Meta spend rate over a HubSpot count, in any wording: plural, singular or
+#: abbreviated (``per lead``, ``/ contact``, ``/ SQL``, ``CPL``, ``cost per``),
+#: any case, within 80 characters after a mention of Meta on the same line.
+#: (``[l]`` keeps the SQL doctrine scanner from reading a field name here.)
+META_RATE_LABEL = re.compile(
+    r"(?i)meta[^\n]{0,80}?(?:\bper\s+(?:leads?|contacts?|sq[l]s?|mq[l]s?|deals?|customers?)\b"
+    r"|/\s*(?:leads?|contacts?|sq[l]s?|mq[l]s?|deals?|customers?)\b"
+    r"|\bcpl\b|\bcpa\b|\bcost[\s_-]*per\b)")
+
+
 def _string_constants(rel: str) -> set:
     return {n.value for n in ast.walk(ast.parse(_text(rel)))
             if isinstance(n, ast.Constant) and isinstance(n.value, str)}
@@ -683,10 +693,10 @@ def meta_structural_checks(a: Audit, js: str) -> None:
     a.check("meta_spend_disclosure_carried", not bypass,
             f"app.js reads the Meta line's spend outside {META_JS_GATE}: {bypass[:4]}")
     # 20 — no column or cell divides Meta spend by a HubSpot count.
-    a.check("no_rate_over_meta_spend",
-            not re.search(r"(?i)meta[^\n]{0,80}(?:per (?:lead|contact|sql|deal|customer)"
-                          r"|/\s*(?:contacts|leads|sq[l]s))", js),
-            "app.js labels a Meta spend rate over a HubSpot count")
+    rate = META_RATE_LABEL.search(js)
+    a.check("no_rate_over_meta_spend", rate is None,
+            "app.js labels a Meta spend rate over a HubSpot count: "
+            + (repr(rate.group(0)[-120:]) if rate else ""))
 
 
 def meta_line_violations(line) -> list:

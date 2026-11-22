@@ -119,8 +119,10 @@ yet.
   `incompatible_rate(channel_population_is_not_meta_spend_population)`. A
   Meta-specific reason was needed: `channel_population_is_not_spend_population`
   is the same idea, but its page wording names Google Ads.
-* **Channels strip** gains a "Meta Ads spend" cell (the disclosure in its
-  sub-line when a declaration is relied on). The Google Ads cell's sub-line
+* **Channels strip** gains a "Meta Ads spend" cell; its sub-line says each
+  ad account is read on its own calendar days (the line's
+  `day_basis_disclosure`) and carries the disclosure when a declaration is
+  relied on. The Google Ads cell's sub-line
   now reads "compared only with the Google Ads line" (was "the only connected
   spend source").
 * **When the outcome table is withheld**, the line renders as its own panel.
@@ -132,7 +134,11 @@ yet.
   read "Revenue-only — Meta spend is on its own line, not matched to these
   deals" instead of "no connected spend source"; their spend and ratio stay
   null. The "Unavailable" decision card and the unavailable list say the
-  same. `non_google_spend` stays `unavailable` (no spend outside Google Ads is
+  same. Three claims, never two: when the line could not tell (`connected`
+  None — an unreadable store, or a window with no settled day) they say "could
+  not tell whether Meta spend is set up", never "not connected"; only
+  `connected` False reads "no connected spend source". The footer dot for
+  `not_connected` (`dash-dot--neutral`) differs from `unavailable`. `non_google_spend` stays `unavailable` (no spend outside Google Ads is
   compared with revenue).
 * **Dashboard → Overview** shows no channel spend figure (its source mix
   carries a status only), so it is unchanged. The System page is unchanged.
@@ -159,7 +165,9 @@ can be added later, Meta spend ÷ Meta's own count only, on its own gate.
 * **20 `no_rate_over_meta_spend`** — the line carries no key naming a HubSpot
   count, a deal, revenue or a ratio; a withheld line carries no figure; the
   comparison is never published; and no page text labels Meta spend per
-  lead, contact, SQL, deal or customer.
+  lead, contact, SQL, deal or customer — plural, singular or abbreviated
+  (`/ lead`, `per contact`, `/ SQL`, `CPL`, `CPA`, `cost per`), any case
+  (`META_RATE_LABEL`).
 * Check 18 runs over both payloads unchanged.
 
 ## 6. Tests
@@ -175,9 +183,11 @@ and the line correctly reads "could not tell".
 
 1. While the Los Angeles account is on Los Angeles time, every Channels and
    Dashboard window ending yesterday is withheld (§1).
-2. The Dashboard's platform matrix still uses the substring classifier for
-   its `meta` platform; the Channels split is exact. They can disagree on a
-   drill-down such as `facebook ads`.
+2. The Dashboard's platform matrix still uses the substring classifier
+   (`analysis.source_classification._social_platform`) for its `meta`
+   platform, while the Channels split is exact, so they can differ on a
+   drill-down such as `facebook ads`; production's values (facebook,
+   instagram, linkedin) agree today.
 3. Meta spend and HubSpot Paid Social are not joined. A join needs Meta's
    campaign ids on the contacts (or a reviewed name map that survives a
    rename) — a later PR.

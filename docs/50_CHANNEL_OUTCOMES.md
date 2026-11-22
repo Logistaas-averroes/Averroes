@@ -195,7 +195,10 @@ account_today, through_reason, disclosure}`, `publication`, `totals`,
 `company_ids_by_deal`.
 
 `renderChannelFunnel` adds an outcome strip (Closed-won deals, Customers won,
-Revenue, Google Ads spend) via `canonicalMetricHtml`, and the outcome and
+Revenue, Google Ads spend — and, PR-ADS-171B, a Meta Ads spend cell from the
+Meta line) via `canonicalMetricHtml`. Once Meta is set up, the Paid Social
+row's spend reads `spend_shown_on_meta_ads_line` and its ratios
+`channel_population_is_not_meta_spend_population` (`docs/55`); and the outcome and
 paid-media columns via `rowMetricHtml` with `{windowType: "evidence",
 windowKey}` (admins get View blockers into the workbench). Drill rows carry
 no outcome figure; the unresolved row's funnel cells read "n/a — not a

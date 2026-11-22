@@ -155,6 +155,10 @@ STATUS_OFFLINE = "Offline / CRM imported — attribution not reliable"
 STATUS_NEEDS_REVIEW = "Attribution needs review"
 #: PR-ADS-171B: Paid Social (and its Meta platform row) once Meta is set up.
 STATUS_META_SEPARATE = "Revenue-only — Meta spend is on its own line, not matched to these deals"
+#: PR-ADS-171B review: the Meta line could not tell whether Meta is set up
+#: (``connected`` None) — neither "connected" nor "not connected".
+STATUS_META_UNKNOWN = ("Revenue-only — could not tell whether Meta spend is set up "
+                       "for this window")
 
 
 def exec_channel_for(classifier_channel: str) -> str:
@@ -734,11 +738,18 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
     # Unavailable — no spend ratio outside Google Ads. PR-ADS-171B: Meta spend
     # is shown on its own line once Meta is set up, but it is not matched to
     # HubSpot's Paid Social deals, so no ratio is published over it either.
-    if (meta_line or {}).get("connected"):
+    # Three claims, never two: set up, not set up, could not tell.
+    meta_connected = (meta_line or {}).get("connected")
+    if meta_connected is True:
         body = ("Only Google Ads spend is compared with revenue. Meta Ads spend is "
                 "shown on its own line and is not matched to HubSpot's Paid Social "
                 "deals, so Paid Social and Organic channels stay revenue-only — no "
                 "spend ratio is published for them.")
+    elif meta_connected is None:
+        body = ("Only Google Ads spend is compared with revenue. Whether Meta Ads "
+                "spend is set up could not be told for this window, and Meta spend "
+                "is never matched to HubSpot's Paid Social deals — no spend ratio "
+                "is published for Paid Social or Organic channels.")
     else:
         body = ("Only Google Ads spend is connected. Paid Social and Organic channels "
                 "are revenue-only in this dashboard — no spend ratio is published.")
@@ -749,6 +760,16 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         "target_page": "revenue-health", "target_label": "Open Revenue Health",
     })
     return cards
+
+
+def _paid_social_ratio_reason(meta_connected) -> str:
+    if meta_connected is True:
+        return "Meta Ads spend is not matched to HubSpot's Paid Social deals, so no ratio is published."
+    if meta_connected is None:
+        return ("Could not tell whether Meta Ads spend is set up for this window; "
+                "Meta spend is never matched to HubSpot's Paid Social deals, so no "
+                "ratio is published.")
+    return "Paid Social spend source is not connected."
 
 
 def _meta_spend_status(meta_line: dict | None) -> str:
@@ -809,10 +830,7 @@ def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
                     "reason": "Google Ads USD spend requires verified spend coverage and FX."})
     # Non-Google spend and any ratio over it are structurally unavailable.
     out.append({"metric": "paid_social_period_revenue_per_ad_spend",
-                "reason": ("Meta Ads spend is not matched to HubSpot's Paid Social "
-                           "deals, so no ratio is published."
-                           if (meta_line or {}).get("connected")
-                           else "Paid Social spend source is not connected.")})
+                "reason": _paid_social_ratio_reason((meta_line or {}).get("connected"))})
     out.append({"metric": "non_google_spend",
                 "reason": "Only Google Ads spend is compared with revenue; other channels are revenue-only."})
     if trend.get("status") != "ready":
@@ -898,13 +916,15 @@ def build_dashboard_channels(window: str = "current_quarter",
     # channel row carries it and nothing is divided by it. The Paid Social
     # rows say where it is instead of "no connected spend source".
     meta_line = _meta_ads_line(window, now)
-    if meta_line.get("connected"):
+    meta_status = {True: STATUS_META_SEPARATE, None: STATUS_META_UNKNOWN}.get(
+        meta_line.get("connected"))           # False: "no connected spend source"
+    if meta_status:
         for r in channel_rows:
             if r["channel"] == CX_PAID_SOCIAL:
-                r["status"] = STATUS_META_SEPARATE
+                r["status"] = meta_status
         for p in platforms:
             if p["channel"] == CX_PAID_SOCIAL and p.get("platform") == "meta":
-                p["status"] = STATUS_META_SEPARATE
+                p["status"] = meta_status
 
     if not revenue_connected:
         # Closed-won customers AND revenue both come from the revenue integration,

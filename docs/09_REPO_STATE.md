@@ -6217,3 +6217,18 @@ baseline), 8 failed on the first run: all eight were the SQL doctrine
 inventory reading two regex literals in the new audit check as SQL field
 references. Reworded (`sq[l]s`); those eight modules, the 158 PostgreSQL
 module and 161E re-run green (167 + 82 passed).
+
+**Review round 1** (independent review, no blocker; one new commit). The
+Dashboard read the Meta line's `connected` None (could not tell — an
+unreadable store, or the first day of a quarter with no settled day) as "not
+connected"; it is now three-way (set up / not set up / could not tell) in the
+Paid Social statuses, the decision card and the unavailable list, and the
+footer dot for `not_connected` differs from `unavailable`. The Channels
+strip's Meta cell now says each account is read on its own calendar days.
+Check 20 also catches singular and abbreviated labels (`/ lead`, `/ SQL`,
+`CPL`, `cost per`). `test_10c` no longer writes a probe module into the
+source tree. `CLAUDE.md` (Channels landmine) and `docs/50` name the Paid
+Social reasons and the strip's Meta cell. New tests `test_14`–`test_16`
+(11 cases); 8 of them fail on 4d1e929 (the strip zone text, both "could not
+tell" cases, the footer dot, four singular/abbreviated labels; three labels
+the old pattern already caught pass there).

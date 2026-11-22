@@ -730,22 +730,21 @@ def test_10b_each_guard_fails_on_its_mutation(old, new):
     assert a.violations, (old, new)
 
 
-def test_10c_a_new_module_reading_the_meta_truth_must_be_registered(monkeypatch, tmp_path):
+def test_10c_a_new_module_reading_the_meta_truth_must_be_registered(monkeypatch):
+    """The rogue module exists only in the audit's view of the tree (its file
+    list and its reader), never on disk: a killed run leaves nothing behind."""
     import scripts.audit_customer_revenue_reader_cutover as audit
-    real = audit._production_py
-    rogue = ROOT / "services" / "_pr_ads_171b_rogue_probe.py"
-    rogue.write_text("from services.meta_ads_spend_truth_service import "
-                     "build_meta_ads_spend_truth_for_days\n"
-                     "def total():\n    return build_meta_ads_spend_truth_for_days(None, None)['usd_spend']\n",
-                     encoding="utf-8")
-    try:
-        monkeypatch.setattr(audit, "_production_py",
-                            lambda: real() + ["services/_pr_ads_171b_rogue_probe.py"])
-        a = _structural()
-        assert any("_pr_ads_171b_rogue_probe.py reads the Meta spend truth" in v
-                   for v in a.violations)
-    finally:
-        rogue.unlink()
+    rel = "services/_pr_ads_171b_rogue_probe.py"
+    source = ("from services.meta_ads_spend_truth_service import "
+              "build_meta_ads_spend_truth_for_days\n"
+              "def total():\n    return build_meta_ads_spend_truth_for_days(None, None)['usd_spend']\n")
+    real_files, real_text = audit._production_py, audit._text
+    monkeypatch.setattr(audit, "_production_py", lambda: real_files() + [rel])
+    monkeypatch.setattr(audit, "_text", lambda r: source if r == rel else real_text(r))
+    a = _structural()
+    assert any("_pr_ads_171b_rogue_probe.py reads the Meta spend truth" in v
+               for v in a.violations)
+    assert not (ROOT / rel).exists()
 
 
 def test_10d_a_registered_reader_that_drops_the_disclosure_fails(monkeypatch):
@@ -788,3 +787,82 @@ def test_13_the_line_is_read_only():
     for forbidden in ("connectors.meta_ads", "db.writers", "requests", "INSERT",
                       "UPDATE ", "DELETE"):
         assert forbidden not in src
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 10. Review round 1
+# ═════════════════════════════════════════════════════════════════════════════
+def _strip(html):
+    return _text(html[html.index("channel-outcome-totals"):html.index("channel-outcome-totals") + 4000])
+
+
+def test_14_the_strip_cell_says_each_account_is_read_on_its_own_days(monkeypatch):
+    published(monkeypatch)
+    strip = _strip(_render_channels(_page(monkeypatch, _outcomes(monkeypatch))))
+    cell = strip[strip.index("Meta Ads spend"):]
+    assert "Each ad account is read on its own calendar days" in cell
+    assert "Asia/Amman" in cell and "America/Los_Angeles" in cell
+    assert "not the Europe/London days" in cell
+    # With no account on record the cell still says so.
+    _state_store(monkeypatch, "not_connected")
+    bare = _strip(_render_channels(_page(monkeypatch, _outcomes(monkeypatch))))
+    assert ("Each ad account is read on its own calendar days, not this page's "
+            "Europe/London days") in bare[bare.index("Meta Ads spend"):]
+
+
+def _dashboard_at(monkeypatch, now, window="current_quarter"):
+    import tests.test_pr_ads_136_dashboard_channels as t136
+    t136._patch_durable(monkeypatch)
+    from services.dashboard_channels_service import build_dashboard_channels
+    return json.loads(json.dumps(build_dashboard_channels(window, now=now), default=str))
+
+
+@pytest.mark.parametrize("case", ["first_day_of_quarter", "store_unreadable"])
+def test_15_could_not_tell_is_never_worded_as_not_connected(monkeypatch, case):
+    if case == "first_day_of_quarter":
+        # Meta IS configured; 1 Oct has no settled day in the current quarter.
+        meta_store(monkeypatch, [amman(), los_angeles()])
+        d = _dashboard_at(monkeypatch, datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc))
+        assert d["meta_ads_line"]["spend"]["reason"] == "no_settled_day_in_window"
+    else:
+        meta_store(monkeypatch, [amman(), los_angeles()], available=False)
+        d = _dashboard_at(monkeypatch, datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc))
+    assert d["meta_ads_line"]["connected"] is None
+    text = json.dumps(d).lower()
+    assert "not connected" not in text
+    assert "only google ads spend is connected" not in text
+    social = next(c for c in d["channel_mix"] if c["channel"] == "paid_social")
+    assert "no connected spend source" not in social["status"]
+    from services.dashboard_channels_service import STATUS_META_UNKNOWN
+    assert social["status"] == STATUS_META_UNKNOWN
+    assert "no connected spend source" not in social["status"]
+    for p in d["platform_matrix"]:
+        if p["channel"] == "paid_social" and p["platform"] == "meta":
+            assert p["status"] == STATUS_META_UNKNOWN
+    card = next(c for c in d["decision_cards"] if c["type"] == "unavailable")
+    assert "could not be told" in card["body"]
+    reason = next(u["reason"] for u in d["unavailable"]
+                  if u["metric"] == "paid_social_period_revenue_per_ad_spend")
+    assert reason.startswith("Could not tell whether Meta Ads spend is set up")
+    assert d["truth_status"]["meta_ads_spend"] == "unavailable"
+
+
+def test_15b_the_footer_dot_tells_not_set_up_from_unavailable():
+    dots = APP_JS[APP_JS.index("const DASH_STATUS_DOT = {"):]
+    dots = dots[:dots.index("};")]
+    not_connected = re.search(r'not_connected:\s*"([^"]+)"', dots).group(1)
+    unavailable = re.search(r'unavailable:\s*"([^"]+)"', dots).group(1)
+    assert not_connected != unavailable
+    css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+    assert f".{not_connected} " in css
+
+
+@pytest.mark.parametrize("label", [
+    "Meta spend / lead", "Meta spend / contact", "Meta spend / SQL",
+    "Meta spend per lead", "Meta CPL", "Meta cost per lead", "meta COST-PER contact"])
+def test_16_check_20_catches_singular_and_abbreviated_rate_labels(label):
+    old = 'function channelPaidHeads() { return ["Spend",'
+    assert old in APP_JS
+    a = _structural(APP_JS.replace(
+        old, f'function channelPaidHeads() {{ const x = "{label}"; return ["Spend",'))
+    assert any(v.startswith("no_rate_over_meta_spend") for v in a.violations), label

@@ -3414,6 +3414,8 @@ const DASH_STATUS_DOT = {
   partial: "dash-dot--warn",
   blocked: "dash-dot--bad",
   unavailable: "dash-dot--muted",
+  // PR-ADS-171B: "not set up" is a fact, not a failure to read — its own dot.
+  not_connected: "dash-dot--neutral",
 };
 
 function renderDashTruthFooter(d) {
@@ -9853,6 +9855,9 @@ function channelOutcomeStripHtml(o) {
   if (meta) {
     cells.push(["Meta Ads spend", metaLineSpendMetric(meta), channelOutcomeMoney,
       ["Meta's own ad accounts · not matched to any HubSpot count",
+        // Each account is read on its own calendar days — say so here too.
+        meta.day_basis_disclosure
+          || "Each ad account is read on its own calendar days, not this page's Europe/London days",
         metaLineRetired(meta) && meta.owner_declared_retired_disclosure ? meta.owner_declared_retired_disclosure : ""]
         .filter(Boolean).join(" · ")]);
   }

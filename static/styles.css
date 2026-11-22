@@ -6450,6 +6450,8 @@ body.is-revenue-page #monitoring-banner {
 .dash-dot--warn { background: var(--c-warning); }
 .dash-dot--bad { background: var(--c-danger); }
 .dash-dot--muted { background: var(--text-muted); }
+/* PR-ADS-171B: a source that is not set up (vs unavailable: could not read). */
+.dash-dot--neutral { background: transparent; box-shadow: inset 0 0 0 1.5px var(--text-muted); }
 .dash-footer-note {
   margin-left: auto;
   font-size: 11px;
