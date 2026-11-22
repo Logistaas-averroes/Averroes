@@ -338,6 +338,7 @@ jobs:
 
       - name: Full suite (known-failing-on-main deselected)
         run: |
+          df -h /tmp
           python -m pytest -q \
             --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty"
 
