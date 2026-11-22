@@ -64,6 +64,10 @@ services:
         sync: false
       - key: META_AD_ACCOUNT_ID_2
         sync: false
+      # Not a secret: `<account id>:<last spend day>` for an account Meta no
+      # longer lets us read (docs/52 §6). Leave unset otherwise.
+      - key: META_AD_ACCOUNT_RETIRED
+        sync: false
       - key: META_API_VERSION
         sync: false
       - key: META_APP_SECRET

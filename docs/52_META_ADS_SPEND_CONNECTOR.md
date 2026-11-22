@@ -42,10 +42,13 @@ exception raised by `requests` prints the URL it was calling. So:
 * a token is sent **only** in the `Authorization: Bearer` header;
 * `paging.next` is never requested, stored or logged — only its presence is
   read;
-* no error text contains a URL or `str(exc)` of a transport error. A transport
-  failure is named by its class; an API failure by the HTTP status and the
-  fields of Meta's `error` object, with every configured token and app secret
-  removed from any text Meta sent back.
+* no error text contains the **request URL** or `str(exc)` of a transport
+  error. A transport failure is named by its class; an API failure by the HTTP
+  status and Meta's `error` fields. `error.code` and `error_subcode` are used
+  only as integers. Meta's own `message` text **is** included — it is Meta's
+  wording, not ours, so it can say anything Meta chooses to say — after every
+  configured token and app secret, and anything shaped like a token parameter,
+  has been removed from it, and it is cut to 300 characters.
 
 `tests/test_pr_ads_171a_meta_ads_connector.py::test_47j` pushes two different
 tokens through every failure path of both credential sets and finds neither in
@@ -73,6 +76,7 @@ A **credential set** is one access token plus the ad accounts that token reads.
 | `META_ADS_ACCESS_TOKEN` | set 1's token: a System User token with `ads_read` |
 | `META_AD_ACCOUNT_ID` | set 1's ad account id, or several separated by commas. Digits; a leading `act_` and spaces are accepted; a repeated id is used once |
 | `META_ADS_ACCESS_TOKEN_2`, `META_AD_ACCOUNT_ID_2` (… `_5`) | further sets — for an account in another Business portfolio, which needs its own System User and token |
+| `META_AD_ACCOUNT_RETIRED` | optional, not a secret. `<account id>:<last spend day>` pairs, comma-separated — the owner's declaration that an account stopped spending (§6) |
 | `META_API_VERSION` | optional. Overrides `meta_ads.api_version` in `config/thresholds.yaml` (`v27.0`) |
 | `META_APP_SECRET` (`_2` …) | optional. That set's calls carry `appsecret_proof` (an HMAC of the token) |
 
@@ -81,11 +85,18 @@ A **credential set** is one access token plus the ad accounts that token reads.
 | nothing set | **not connected**. No network call, no batch, no row, no zero. The sync step is `skipped` and does not vote on the run |
 | a set has one of its two variables | that set is not called. The complete sets sync; the run is `partial` and names the set |
 | an account id is listed in two sets | nothing syncs: `meta_ads_misconfigured`, naming the id |
+| an entry of `META_AD_ACCOUNT_RETIRED` is not `<id>:<YYYY-MM-DD>` | it is ignored, never guessed; the run is `partial` and names it |
 | no complete set, a malformed id, or no valid API version | nothing syncs: `meta_ads_misconfigured` |
 
 An account is only ever called with its own set's token. `config_status()`
 reports, per set, whether a token is present and which accounts it lists —
 never a token.
+
+**An account listed in a broken set is still a configured account.** It does
+not sync, and it is never read as removed: every period past its last verified
+day is withheld until the set is repaired (§6). If an account list holds an
+entry that is not an id, the configured accounts are not fully known and no
+Meta total is published at all (`source_unavailable`).
 
 No API version is written in the connector. When Meta retires the configured
 one the sync fails with `meta_api_version_deprecated` and the message names the
@@ -113,7 +124,17 @@ response; replace the account-day rows; record the range `verified` with
 `fetched_at = clock_timestamp()`. Any failure rolls all of it back and leaves
 the range as it was. The counts returned are the database's own.
 
-* An empty response is a **verified zero** for the range.
+* An empty response is a **verified zero** for a range that held no verified
+  spend.
+* **A day with verified spend is never taken to zero by a re-read.** An empty
+  200 at both levels reconciles with itself, so reconciliation cannot tell
+  "Meta un-spent the day" from "Meta answered wrongly". A response that would
+  leave a day a verified chunk covers, with stored spend above zero, with no
+  campaign spend at all is refused (`meta_restatement_implausible`); stored
+  rows and the ledger are untouched. Changed amounts, and a campaign-day that
+  goes while its day keeps spend, are ordinary restatements and pass. The only
+  override is the backfill script's `--accept-zero-restatement`, for an
+  operator who has checked in Meta; the daily sync has none.
 * A row with no name keeps the newest name stored for that campaign in that
   account.
 * A **failed** fetch stores no spend, deletes nothing, and records a `failed`
@@ -151,7 +172,13 @@ date on the batch is the **earliest** of the accounts' last days, and is set
 only when every account was verified.
 
 No new run type: the step is part of `daily_incremental_sync`, and
-`RUN_TYPE_CADENCE` is unchanged. The backfill writes `sync_batches` rows only.
+`RUN_TYPE_CADENCE` is unchanged.
+
+**The backfill writes no `sync_batches` row and no `runs` row** — like the
+Google Ads spend and geo backfills. `sync_state` and the dataset's freshness
+belong to the daily step alone, so backfilling one account cannot make a
+failed daily feed read fresh, and a partial backfill cannot move the daily
+feed's proven-through date. What a backfill did is in the coverage ledger.
 
 ### The two production accounts and 06:00 UTC
 
@@ -192,25 +219,49 @@ account.
 
 ### Which accounts a range needs
 
-* A **configured** account must be covered for **every** day of the range. One
-  that was never read, or that Meta no longer lets us read, therefore withholds
-  every range that reaches past its last verified day.
-* An account that is **stored but no longer configured** keeps counting: it
-  must be covered for every day of the range up to its **last verified day**,
-  and after that day it contributes nothing and requires nothing.
-* For all time, each account counts from its own first verified day.
-* With nothing configured, stored history still counts for the days it covers;
-  a range no stored account reaches is `not_connected`.
+* Every account **listed in any credential set** — complete or broken — and
+  every account that is **stored** must be covered for **every** day of the
+  range. An account that was never read, that Meta no longer lets us read,
+  whose credential set is broken, or that was dropped from the configuration
+  therefore withholds every range that reaches past its last verified day.
+* **Being absent from the configuration means nothing.** It is not evidence
+  that an account stopped spending.
+* For all time, each account counts from its own first verified day; the
+  payload lists them (`first_verified_days`).
+* `not_connected` only when no account is listed and none is stored.
 
-**Removing an account from the configuration is the owner's statement that it
-has stopped spending.** The platform cannot check that: after an account is
-removed, days after its last verified day are treated as holding no spend for
-it. The payload discloses it (`accounts[].configured: false`,
-`required_through`). Remove an account only once it is closed.
+### Retiring an account: the owner's declaration
+
+The one way an account stops being required is an explicit declaration:
+
+```
+META_AD_ACCOUNT_RETIRED=944370805110952:2026-12-20
+```
+
+`<account id>:<last spend day>`, comma-separated for several; the day is a day
+of that account's own time zone. It is the owner saying "this account spent
+nothing after that day". The platform cannot read that from Meta, so:
+
+* it is honoured **only when the ledger bears it out**: the account's verified
+  coverage reaches at least that day, and no stored spend is dated after it.
+  Otherwise it is not honoured and the reason names the day
+  (`retired_declaration_not_covered`, `retired_declaration_contradicted`);
+* an entry that is not `<id>:<YYYY-MM-DD>`, one id with two different days, or
+  an id that was never read is ignored — never guessed — and reported;
+* when honoured, the account is required through its last verified day and
+  contributes nothing after it;
+* **a total that rests on a declaration says so at the top level**:
+  `owner_declared_retired: [{account_id, last_spend_day}]` and
+  `owner_declared_retired_disclosure` ("This total assumes ad account … spent
+  nothing after … — the owner's declaration (META_AD_ACCOUNT_RETIRED), not a
+  reading from Meta."). Both are empty/None when the figure does not rest on
+  one. **A page that shows the figure must show the disclosure.**
+* an account that is both configured and declared keeps syncing for as long as
+  Meta answers; the declaration only matters past its last verified day.
 
 Backfill every account from the **same** first day. A period is published only
-when every configured account is covered for all of it; an account with no ads
-in a month is recorded as a verified zero in seconds.
+when every account is covered for all of it; an account with no ads in a
+month is recorded as a verified zero in seconds.
 
 ### An account that can no longer be read
 
@@ -222,8 +273,8 @@ When Meta refuses an account (suspended, closed, permission removed):
 * the System page reads
   `account not readable since <date> (HTTP n, code n); history through <last verified day> is kept`;
 * ranges up to its last verified day still publish; ranges past it are
-  withheld until the owner removes the account from its list. Its history then
-  stays stored and keeps counting, as above.
+  withheld until the owner declares it retired (above). Taking it out of the
+  configuration does not do that.
 
 ### A changed currency or time zone
 
@@ -284,12 +335,24 @@ stays verified and the run is `partial`. A row of zero spend needs no rate.
 * An unknown currency is None — never a default.
 
 The System page line (`services/system_overview_service._meta_spend_source`)
-is one row for all accounts, each listed in its own words. It is `current`
-only when every configured account is complete through its own yesterday;
-otherwise it carries the worst account's status (`token_rejected`,
-`not_readable`, `late`, `not_proven`), or `misconfigured`. `not_connected` is
-rendered neutral — the one status that is neither healthy nor a warning, and
-only for this row.
+is one row for all accounts, each listed in its own words.
+
+* An account is judged against **the last day its most recent due sync could
+  settle in its own zone** — not against the moment the page is viewed. The
+  sync starts at 06:00 UTC and is "due" three hours later
+  (`meta_ads.sync_grace_hours`). Judged at page-view time, the Los Angeles
+  account would read "late" from 08:00 UTC until the next morning after a
+  perfectly clean sync. If a later day is already held, that day is reported.
+* The line is `current` only when every syncing account is complete **and
+  convertible to US dollars**, no credential set is broken, no declaration is
+  unreadable, and no stored account is left unresolved.
+* `misconfigured` is shown whatever the other accounts say. Otherwise the line
+  carries the most serious account status: `token_rejected`, `not_readable`,
+  `late`, `not_proven`, `usd_unavailable` (spend recorded, no US-dollar value
+  — never "Complete through"), `account_unresolved` (a stored account that is
+  neither configured nor validly declared retired).
+* `not_connected` is rendered neutral — the one status that is neither healthy
+  nor a warning, and only for this row.
 
 ---
 
@@ -303,7 +366,7 @@ only for this row.
 | `Authorization: Bearer` is accepted on the account node and on Insights | both returned 200 with the header and no token in the URL |
 | Account fields `name`, `currency`, `timezone_name`, `account_status`, `id` | `{'name': 'Logistaas Limited', 'currency': 'GBP', 'timezone_name': 'America/Los_Angeles', 'account_status': 1, 'id': 'act_…'}` |
 | The two accounts | set 1: `4730305973961806` "Logistaas Limited", GBP, America/Los_Angeles, status 1, no delivery. Set 2 (own token, another Business portfolio): `944370805110952` "Logistaas", USD, Asia/Amman, status 1 |
-| No delivery is an empty list | Insights `level=account` → `{'data': []}` |
+| No delivery is an empty list | Insights `level=account` → `{'data': []}` for the account with no campaigns. Seen for an account that has never spent; it is **not** evidence that an empty list always means no spend, which is why a re-read that would zero a day with verified spend is refused (§3) |
 | `spend` is a decimal string; `date_start` / `date_stop` are ISO dates | `[{'spend': '1909.34', 'date_start': '2026-10-23', 'date_stop': '2026-11-21'}]` (old account, `last_30d`, read on 11-22 at about 10:00 Amman: the preset ended yesterday) |
 
 The tests' fake API is built from exactly these two accounts.
@@ -318,7 +381,12 @@ noted. The smoke test (§10) exercises 1–8.
 2. `level=campaign` returns `campaign_id`, `campaign_name`, `impressions`,
    `clicks`, `account_currency` and `date_stop` as requested.
 3. Whether `level=campaign` includes archived and deleted campaigns' spend.
-   If it does not, reconciliation fails that range (§5) — loudly, not silently.
+   No filter parameter is sent, because none could be verified from here. If
+   Meta leaves such campaigns out, their spend is in the account total and
+   missing from the rows, and reconciliation fails that range (§5) — loudly,
+   not silently. **Check it before the backfill** with
+   `python -m scripts.meta_ads_smoke_test --month YYYY-MM` for a month that
+   contains an archived or deleted campaign (§10 step 3).
 4. The per-day campaign rows add up to the account-level row within one minor
    unit. If Meta rounds each row, a day with many campaigns could differ by
    more and fail reconciliation.
@@ -397,7 +465,20 @@ META_AD_ACCOUNT_ID_2    = 944370805110952
    Exit code 0. `Campaign sum` must equal `Account total` on each account. A
    `FAILED` line gives Meta's HTTP status and error code; `MISMATCH` means
    VERIFY item 3 or 4 is false for this account — stop and report it.
-3. **Backfill**, both accounts from the same first day (pick the first day
+3. **Check a month with an archived campaign** — before any backfill. Pick a
+   month in which a campaign that is now archived or deleted was running:
+
+   ```
+   python -m scripts.meta_ads_smoke_test --month 2026-03
+   ```
+
+   Per account it prints the range, the campaign rows, `Campaign sum`,
+   `Account total`, `Days compared`, and
+   `RESULT : OK — every day's campaign rows sum to the account total`; exit 0.
+   A `MISMATCH <date>` line means the campaign-level read is leaving spend out
+   for that day (VERIFY item 3 or 4): **do not backfill**; report the output.
+   It writes nothing.
+4. **Backfill**, both accounts from the same first day (pick the first day
    Meta spend is wanted from):
 
    ```
@@ -406,33 +487,55 @@ META_AD_ACCOUNT_ID_2    = 944370805110952
    ```
 
    Re-run with `--resume` after an interruption. Exit 0 = every month of both
-   accounts verified.
-4. **Check** the System page: the "Meta Ads spend" line should read
+   accounts verified. (The backfill does not change the dataset's freshness;
+   the next daily sync does.)
+5. **Check** the System page: the "Meta Ads spend" line should read
    `Complete through <date>` with one line per account, each on its own date.
-   The next 06:00 UTC sync keeps it current.
-5. **Before the new account's first ad**: if its time zone is going to be
+   The 06:00 UTC sync keeps it current.
+6. **Before the new account's first ad**: if its time zone is going to be
    changed to UK time, change it now, then re-run the backfill for it
    (`--account 4730305973961806`). Once it has stored spend a zone change is
    refused.
-6. **When the old account is closed for good**: after its last successful
-   sync, remove `META_ADS_ACCESS_TOKEN_2` and `META_AD_ACCOUNT_ID_2` from
-   Render. Its history stays stored and keeps counting through its last
-   verified day. Until then the daily run is `partial` and ranges past that
-   day are withheld.
+7. **The old account — keep it configured.** Leave `META_ADS_ACCESS_TOKEN_2`
+   and `META_AD_ACCOUNT_ID_2` in place for as long as Meta still answers for
+   it. It keeps being measured, including the 28 days of restatements after
+   its last ad. Do **not** remove it when the ads stop.
+
+   Only when Meta refuses it for good (the System page reads
+   `account not readable since …; history through <day> is kept`, and the
+   daily run is `partial`):
+
+   1. set `META_AD_ACCOUNT_RETIRED=944370805110952:<its last spend day>`. The
+      day must be on or before the "history through" day shown, and on or
+      after the last day it actually spent;
+   2. check the System page: the account reads `declared retired by the owner
+      (last spend day …); history through … is kept`;
+   3. only then remove `META_ADS_ACCESS_TOKEN_2` and `META_AD_ACCOUNT_ID_2`
+      (which ends the `partial` runs).
+
+   Its history stays stored. Totals for periods after that day are published
+   with the disclosure that they rest on this declaration.
 
 ---
 
 ## 11. Decisions to review
 
-* **A removed account is assumed to have stopped spending** (§6). This is the
-  one place a value is taken from the owner's action rather than from Meta.
+* **The retirement declaration is the one value taken from the owner rather
+  than from Meta** (§6). It is explicit, checked against the ledger, and
+  disclosed at the top level of every total that rests on it.
 * **A zone change with no stored spend deletes that account's ledger rows.**
   They are re-read in the new zone; until the backfill is re-run, older ranges
   for that account read `coverage_incomplete`.
+* **A re-read that would zero a day with verified spend fails that account's
+  sync** until someone looks. If Meta ever legitimately removes a whole day's
+  spend, the daily run is `partial` for that account until the backfill is run
+  with `--accept-zero-restatement`.
 * **An account whose currency the FX provider does not price makes the daily
   run `partial` every day.** Neither production account is in that position
   (USD, GBP).
 * **Reconciliation tolerance is one minor unit** (VERIFY 4).
-* **A configured-but-unreadable account withholds recent ranges for every
-  account's total** until it is removed. That is deliberate: its recent spend
-  is unknown.
+* **Any account that is not verified for a day withholds the total for that
+  day** — unreadable, in a broken set, never read, or dropped from the
+  configuration. That is deliberate: its spend is unknown.
+* **The System page allows a sync three hours to finish** before it calls an
+  account late (`meta_ads.sync_grace_hours`).

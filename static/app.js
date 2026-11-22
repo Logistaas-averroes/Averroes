@@ -10161,6 +10161,8 @@ function systemSourceLine(src) {
     else if (s.status === "misconfigured") state = `Set up incorrectly — check the Meta settings${s.reason_detail ? ` (${escapeHtml(String(s.reason_detail))})` : ""}`;
     else if (s.status === "token_rejected") state = "Meta rejected the access token — it must be renewed";
     else if (s.status === "not_readable") state = "An ad account is not readable — its history is kept";
+    else if (s.status === "account_unresolved") state = "An ad account is neither connected nor declared retired — later periods are withheld";
+    else if (s.status === "usd_unavailable") state = "Spend is recorded, but its US-dollar value is not available";
     else if (s.reason === "meta_api_version_deprecated") {
       state = `Meta no longer accepts the API version in use${s.reason_detail ? ` — ${escapeHtml(String(s.reason_detail))}` : ""}`;
     }

@@ -29,19 +29,23 @@ States (of an account, and of the total)
 
 Which accounts are relevant, and for which days
 -----------------------------------------------
-* A CONFIGURED account must be covered for every day of the range. One that
-  was never read, or that Meta no longer lets us read, therefore withholds
-  every range that reaches past its last verified day — until the owner
-  removes it from the configuration.
-* An account that is stored but NO LONGER CONFIGURED (removed by the owner
-  when it was closed) keeps counting: it must be covered for every day of the
-  range up to its last verified day, and after that day it contributes
-  nothing and requires nothing. Removing an account is the owner's statement
-  that it has stopped spending; the payload discloses it
-  (``accounts[].configured`` is False, ``required_through`` is that day).
-  Remove an account only once it has stopped spending.
+* Every account LISTED in any credential set — complete or broken — and every
+  account that is stored is required for EVERY day of the range. One that was
+  never read, that Meta no longer lets us read, whose credential set is
+  broken, or that was simply dropped from the configuration therefore
+  withholds every range that reaches past its last verified day. Being absent
+  from the configuration means nothing.
+* The one exception is the owner's explicit declaration
+  (``META_AD_ACCOUNT_RETIRED=<id>:<last spend day>``) that an account stopped
+  spending. It is honoured only when the ledger bears it out — verified
+  coverage reaching that day, and no stored spend after it. Then the account
+  is required only through its last verified day. A total that rests on a
+  declaration says so at the top level (``owner_declared_retired`` and
+  ``owner_declared_retired_disclosure``); a consumer must show it.
 * For all time (``start`` None) each account counts from its own first
-  verified day.
+  verified day (``first_verified_days``).
+* ``not_connected`` only when no account is listed and none is stored (or
+  every stored one is validly declared retired before the range starts).
 
 Rules
 -----
@@ -190,8 +194,17 @@ def _frame(start_date, end_date, settled) -> dict:
             "unsettled_reason": None, "settled_rule_applied": bool(settled)}
 
 
-_NO_ACCOUNTS = {"accounts": [], "account_ids": [], "time_zones": [],
-                "mixed_time_zones": False, "mixed_currencies": False}
+PUBLISHING_STATES = (STATE_VERIFIED, STATE_VERIFIED_ZERO, STATE_FX_INCOMPLETE)
+
+#: A declaration names a day the account's verified coverage does not reach.
+DECLARATION_NOT_COVERED = "retired_declaration_not_covered"
+#: The account has stored spend AFTER the day it was declared to stop on.
+DECLARATION_CONTRADICTED = "retired_declaration_contradicted"
+#: A declaration names an account that was never read.
+DECLARATION_UNKNOWN_ACCOUNT = "retired_declaration_unknown_account"
+
+DISCLOSURE = ("This total assumes {accounts} — the owner's declaration "
+              "(META_AD_ACCOUNT_RETIRED), not a reading from Meta.")
 
 
 def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
@@ -202,8 +215,13 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
     returned only in a state that publishes it.
 
     ``accounts`` lists each relevant account: id, name, currency, time zone,
-    whether it is still configured, its own state and figures, the last day it
-    is required for, and what its latest sync said.
+    whether it is configured and whether it syncs, its own state and figures,
+    the last day it is required for, its first verified day, and what its
+    latest sync said.
+
+    ``owner_declared_retired`` is non-empty exactly when the published figure
+    relies on the owner's declaration that an account stopped spending; a
+    consumer must show ``owner_declared_retired_disclosure`` beside it.
     """
     from db import meta_ads_repository as repo  # noqa: PLC0415
     from services import meta_ads_spend_service as meta  # noqa: PLC0415
@@ -211,42 +229,98 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
         analyze_coverage, analyze_settled_coverage, zone_or_none,
     )
 
-    def finish(truth, accounts=()):
+    problems: list = []
+
+    def finish(truth, accounts=(), relied=()):
         zones = sorted({a["time_zone"] for a in accounts if a.get("time_zone")})
         currencies = {a["currency"] for a in accounts if a.get("currency")}
-        return {**truth, **_frame(start_date, end_date, settled),
-                "accounts": list(accounts),
-                "account_ids": [a["account_id"] for a in accounts],
-                "time_zones": zones, "mixed_time_zones": len(zones) > 1,
-                "mixed_currencies": len(currencies) > 1,
-                **{k: truth[k] for k in ("unsettled_reason",) if k in truth}}
+        relied = list(relied) if truth["state"] in PUBLISHING_STATES else []
+        disclosure = None
+        if relied:
+            disclosure = DISCLOSURE.format(accounts="; ".join(
+                f"ad account {r['account_id']} spent nothing after "
+                f"{r['last_spend_day']}" for r in relied))
+        out = {**truth, **_frame(start_date, end_date, settled),
+               "accounts": list(accounts),
+               "account_ids": [a["account_id"] for a in accounts],
+               "time_zones": zones, "mixed_time_zones": len(zones) > 1,
+               "mixed_currencies": len(currencies) > 1,
+               "first_verified_days": [
+                   {"account_id": a["account_id"],
+                    "first_verified_day": a.get("first_verified_day")}
+                   for a in accounts],
+               "owner_declared_retired": relied,
+               "owner_declared_retired_disclosure": disclosure,
+               "retired_declaration_problems": list(problems)}
+        if "unsettled_reason" in truth:
+            out["unsettled_reason"] = truth["unsettled_reason"]
+        out["withheld_detail"] = (
+            truth.get("withheld_detail")
+            if truth["state"] == STATE_COVERAGE_INCOMPLETE else None)
+        return out
 
     unavailable = derive_meta_ads_spend_truth({"connected": True, "available": False})
     cfg = meta.config_status()
-    if cfg.get("misconfigured"):
-        # Set up, but wrongly. Not "not connected": something is broken.
+    if cfg.get("misconfigured") or cfg.get("unparsed_account_entries"):
+        # Set up, but wrongly — or an account list that cannot be read, so the
+        # configured accounts are not known. Not "not connected".
         return finish(unavailable)
-    configured = list(cfg.get("account_ids") or [])
+    # Configured = LISTED in any credential set, complete or broken. An
+    # account in a broken set does not sync; it is not thereby removed.
+    listed = list(cfg.get("listed_account_ids") or [])
+    syncing = set(cfg.get("account_ids") or [])
+    declared = {d["account_id"]: date.fromisoformat(d["last_spend_day"])
+                for d in cfg.get("retired") or []}
     read = repo.fetch_meta_accounts()
     if not read.get("available"):
         # Whether history exists is unknown: that is not "not connected".
         return finish(unavailable)
     stored = {a["account_id"]: a for a in read.get("accounts") or []}
     states = (repo.fetch_meta_account_sync_states().get("states") or {})
+    for account_id, day in declared.items():
+        if account_id not in stored:
+            problems.append({"account_id": account_id,
+                             "reason": DECLARATION_UNKNOWN_ACCOUNT,
+                             "detail": f"account {account_id} was never read; "
+                                       "its declaration is ignored"})
 
-    # (account_id, row|None, required_end)
-    retired = []
-    for account_id, row in stored.items():
-        if account_id in configured or not row.get("covered_through"):
-            continue
-        last = date.fromisoformat(row["covered_through"])
-        if start_date is None or start_date <= last:
-            retired.append((account_id, row, min(end_date, last)))
-    relevant = []
-    if retired or any(a in stored for a in configured):
-        # Once anything is on record, EVERY configured account is required —
-        # including one that has never been read.
-        relevant = [(a, stored.get(a), end_date) for a in configured] + retired
+    # Every listed account and every stored account is REQUIRED through the
+    # last day asked for. The one exception is an account the owner has
+    # declared retired, and only when the declaration is borne out by the
+    # ledger: verified coverage reaching the declared day, and no stored
+    # spend after it. Being absent from the configuration means nothing.
+    relevant, relied = [], []          # (account_id, row|None, required_end)
+    for account_id in listed + [a for a in stored if a not in listed]:
+        row = stored.get(account_id)
+        required_end = end_date
+        day = declared.get(account_id)
+        if row is not None and day is not None:
+            last = (date.fromisoformat(row["covered_through"])
+                    if row.get("covered_through") else None)
+            spent = (date.fromisoformat(row["last_spend_date"])
+                     if row.get("last_spend_date") else None)
+            if last is None or last < day:
+                problems.append({
+                    "account_id": account_id, "reason": DECLARATION_NOT_COVERED,
+                    "detail": f"account {account_id} is declared to have last "
+                              f"spent on {day.isoformat()}, but its verified "
+                              "coverage ends "
+                              + (last.isoformat() if last else "nowhere")})
+            elif spent is not None and spent > day:
+                problems.append({
+                    "account_id": account_id, "reason": DECLARATION_CONTRADICTED,
+                    "detail": f"account {account_id} is declared to have last "
+                              f"spent on {day.isoformat()}, but has stored "
+                              f"spend on {spent.isoformat()}"})
+            elif end_date > last:
+                # Honoured, and this range reaches past the ledger: the days
+                # after `last` rest on the declaration alone.
+                relied.append({"account_id": account_id,
+                               "last_spend_day": day.isoformat()})
+                if start_date is not None and start_date > last:
+                    continue           # no day of this range is the account's
+                required_end = last
+        relevant.append((account_id, row, required_end))
     if not relevant:
         return finish(derive_meta_ads_spend_truth({"connected": False}))
 
@@ -258,9 +332,13 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
                  "account_name": (row or {}).get("account_name"),
                  "currency": (row or {}).get("currency_code") or None,
                  "time_zone": (row or {}).get("time_zone_name") or None,
-                 "configured": account_id in configured,
+                 "configured": account_id in listed,
+                 "syncing": account_id in syncing,
+                 "owner_declared_retired": any(
+                     r["account_id"] == account_id for r in relied),
                  "required_through": required_end.isoformat(),
                  "covered_through": (row or {}).get("covered_through"),
+                 "first_verified_day": (row or {}).get("covered_from"),
                  "last_sync_status": state.get("last_status"),
                  "last_sync_reason": state.get("last_reason"),
                  "not_readable_since": (state["not_readable_since"].isoformat()
@@ -294,8 +372,7 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
             "fx_status": "verified" if fx_ok else "incomplete",
             "fx_reason": fx_reason})
         entry["usd_identity"] = currency == repo.REPORTING_CURRENCY
-        if settled and truth["state"] in (STATE_VERIFIED, STATE_VERIFIED_ZERO,
-                                          STATE_FX_INCOMPLETE):
+        if settled and truth["state"] in PUBLISHING_STATES:
             settle = analyze_settled_coverage(
                 start_date, required_end, chunks,
                 zone_or_none(entry["time_zone"]), now=now)
@@ -313,7 +390,17 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
         total["unsettled_reason"] = next(
             (e["unsettled_reason"] for e in entries if e.get("unsettled_reason")),
             None)
+        short = [e for e in entries if e["state"] == STATE_COVERAGE_INCOMPLETE]
+        named = {p["account_id"]: p["detail"] for p in problems}
+        total["withheld_detail"] = "; ".join(
+            named.get(e["account_id"])
+            or (f"account {e['account_id']} has never been read"
+                if e.get("never_read") else
+                f"account {e['account_id']} is not verified for every day "
+                f"through {e['required_through']} (verified through "
+                f"{e.get('covered_through') or 'no day'})")
+            for e in short)
     for entry in entries:
         entry.pop("meta_ads_spend_source", None)
         entry.pop("native_currency", None)
-    return finish(total, entries)
+    return finish(total, entries, relied)

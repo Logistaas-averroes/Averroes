@@ -20,9 +20,21 @@ no ads in a month is recorded as a verified zero in seconds.
 ``--dry-run``  reads the account from Meta, prints the plan, writes nothing.
 ``--resume``   skips a month already recorded ``verified`` with these bounds.
 
-An account stops at its first failed month; the others still run. Each month opens its own
-``sync_batches`` row (``sync_type='backfill'``); no ``runs`` row is written, so
-this job is not a monitoring cadence.
+``--accept-zero-restatement``  A re-read that would take a day with verified
+               spend to zero is refused (``meta_restatement_implausible``) and
+               changes nothing. Pass this ONLY after checking in Meta that the
+               day really has no spend. The daily sync has no such switch.
+
+An account stops at its first failed month; the others still run.
+
+The backfill writes no ``sync_batches`` row and no ``runs`` row (like the
+Google Ads spend and geo backfills): the dataset's freshness and its
+proven-through date belong to the daily sync alone, so a backfill can neither
+make a failed daily feed look fresh nor move its date. What the backfill did
+is in the coverage ledger, month by month. It is not a monitoring cadence.
+
+BEFORE the first backfill, check a month that contains an archived or deleted
+campaign with ``python -m scripts.meta_ads_smoke_test --month YYYY-MM``.
 
 Exit code: 0 every month of every account verified and convertible to USD (or
 nothing to do); 1 every account failed, or Meta is misconfigured; 2 the
@@ -51,6 +63,9 @@ def _parse(argv=None) -> argparse.Namespace:
                              "default: every configured account)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--accept-zero-restatement", action="store_true",
+                        help="allow a re-read to take days with verified spend "
+                             "to zero (check in Meta first)")
     return parser.parse_args(argv)
 
 
@@ -76,7 +91,8 @@ def main(argv=None) -> int:
                               "error": ", ".join(invalid)}, indent=2))
             return 1
     result = meta.run_backfill(args.date_from, args.date_to, account_ids=accounts,
-                               dry_run=args.dry_run, resume=args.resume)
+                               dry_run=args.dry_run, resume=args.resume,
+                               accept_zero_restatement=args.accept_zero_restatement)
     print(json.dumps(result, indent=2, default=str))
     status = result.get("status")
     if status == "success":

@@ -75,7 +75,8 @@ def fetch_meta_accounts() -> dict:
     each with its coverage extent and whether it holds any spend row.
 
     ``covered_from`` / ``covered_through`` are the first and last day inside a
-    VERIFIED chunk (None when the account has none). They describe the
+    VERIFIED chunk (None when the account has none); ``last_spend_date`` is the
+    last stored day with spend above zero. They describe the
     ledger's extent only; whether a window is covered is decided by the
     coverage functions over the chunks themselves.
     """
@@ -90,7 +91,11 @@ def fetch_meta_accounts() -> dict:
                                       for c in _ACCOUNT_COLUMNS.split(","))},
                            c.covered_from, c.covered_through,
                            EXISTS (SELECT 1 FROM meta_ads_campaign_daily_spend s
-                                   WHERE s.account_id = a.account_id)
+                                   WHERE s.account_id = a.account_id),
+                           (SELECT MAX(s.spend_date)
+                            FROM meta_ads_campaign_daily_spend s
+                            WHERE s.account_id = a.account_id
+                              AND s.cost_micros > 0)
                     FROM meta_ads_account a
                     LEFT JOIN (
                         SELECT account_id, MIN(chunk_start) AS covered_from,
@@ -101,7 +106,8 @@ def fetch_meta_accounts() -> dict:
                     """)
                 accounts = [{**_account(r), "covered_from": _iso(r[8]),
                              "covered_through": _iso(r[9]),
-                             "has_spend_rows": bool(r[10])}
+                             "has_spend_rows": bool(r[10]),
+                             "last_spend_date": _iso(r[11])}
                             for r in cur.fetchall()]
         return {"available": True, "accounts": accounts}
     except Exception as exc:  # noqa: BLE001

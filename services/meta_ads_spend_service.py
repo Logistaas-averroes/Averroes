@@ -45,6 +45,8 @@ REASON_MISCONFIGURED = "meta_ads_misconfigured"
 REASON_IDENTITY_CHANGED = "account_identity_changed"
 REASON_RECONCILIATION = "meta_reconciliation_mismatch"
 REASON_PERSISTENCE = "meta_persistence_error"
+#: A re-read would take a day with verified spend to zero. Refused.
+REASON_RESTATEMENT = "meta_restatement_implausible"
 REASON_ROW_LIMIT = "meta_chunk_row_limit"
 REASON_MALFORMED = "meta_malformed_response"
 REASON_TOKEN_REJECTED = "meta_token_rejected"
@@ -112,6 +114,33 @@ def reconciliation_tolerance_micros(currency_code: str | None) -> int:
     if (currency_code or "").upper() in THREE_DECIMAL_CURRENCIES:
         return 1_000
     return 10_000
+
+
+def last_due_sync(now: datetime | None = None) -> datetime:
+    """The most recent daily sync that should have FINISHED by ``now`` (UTC).
+
+    The daily incremental sync starts at ``sync.daily_incremental``'s
+    ``schedule_hour:schedule_minute`` in its ``timezone`` (09:00 Asia/Amman =
+    06:00 UTC). A run is "due" once ``meta_ads.sync_grace_hours`` have passed
+    since its start, so a page viewed while this morning's run is still
+    working is judged against yesterday morning's.
+    """
+    cfg = _config()
+    daily = ((cfg.get("sync") or {}).get("daily_incremental") or {})
+    try:
+        hour, minute = int(daily.get("schedule_hour", 9)), int(daily.get("schedule_minute", 0))
+        grace = float((cfg.get("meta_ads") or {}).get("sync_grace_hours", 3))
+    except (TypeError, ValueError):
+        hour, minute, grace = 9, 0, 3.0
+    tz = zone_or_none(daily.get("timezone") or "Asia/Amman") or timezone.utc
+    base = now or datetime.now(tz=timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    cutoff = (base - timedelta(hours=grace)).astimezone(tz)
+    due = cutoff.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if due > cutoff:
+        due -= timedelta(days=1)
+    return due.astimezone(timezone.utc)
 
 
 # ── the account and its days ──────────────────────────────────────────────
@@ -256,6 +285,8 @@ def describe_failure(exc: Exception) -> dict:
             out["readable"] = True
     elif isinstance(exc, MetaChunkFailed):
         out.update(reason=exc.reason, error=str(exc), readable=True)
+    elif isinstance(exc, db_writers.MetaRestatementImplausible):
+        out.update(reason=REASON_RESTATEMENT, error=str(exc), readable=True)
     elif isinstance(exc, db_writers.MetaAccountIdentityChanged):
         out.update(reason=REASON_IDENTITY_CHANGED, error=str(exc), readable=True)
     elif isinstance(exc, db_writers.MetaAdsPersistenceError):
@@ -264,12 +295,20 @@ def describe_failure(exc: Exception) -> dict:
 
 
 def sync_chunk(account: dict, start: date, end: date, *,
-               sync_run_id: str | None = None) -> dict:
+               sync_run_id: str | None = None,
+               accept_zero_restatement: bool = False) -> dict:
     """Fetch, reconcile and replace ``[start, end]`` for ``account``.
 
     Never raises. ``status`` is ``success`` (verified, USD convertible),
     ``partial`` (verified; USD rates missing or the currency not priced) or
     ``failed`` (nothing replaced; a ``failed`` coverage row recorded).
+
+    A response that would take a day with verified spend to zero fails the
+    chunk (``meta_restatement_implausible``) and changes nothing — an empty
+    200 reconciles with an empty 200, so reconciliation alone cannot tell
+    "Meta un-spent the day" from "Meta answered wrongly".
+    ``accept_zero_restatement`` is the backfill script's explicit override;
+    the daily step never sets it.
     """
     from connectors import meta_ads  # noqa: PLC0415
     import db.writers as db_writers  # noqa: PLC0415
@@ -317,7 +356,8 @@ def sync_chunk(account: dict, start: date, end: date, *,
             currency_code=currency, account_time_zone=zone,
             pages_read=stats["pages_read"], http_status=stats.get("http_status"),
             source_query_version=meta_ads.SOURCE_QUERY_VERSION,
-            sync_run_id=sync_run_id)
+            sync_run_id=sync_run_id,
+            allow_zero_restatement=bool(accept_zero_restatement))
     except Exception as exc:  # noqa: BLE001
         failure = describe_failure(exc)
         recorded = db_writers.record_meta_spend_coverage_failure(
@@ -359,6 +399,7 @@ def sync_chunk(account: dict, start: date, end: date, *,
             "pages_read": stats["pages_read"],
             "days_reconciled": verdict["days_compared"],
             "days_restated": written["days_restated"],
+            "days_zeroed": written.get("days_zeroed", 0),
             "max_restated_delta_micros": written["max_restated_delta_micros"],
             "names_preserved": written["names_preserved"],
             "fx_status": fx["status"], "fx_missing_dates": fx["missing_dates"]}
@@ -497,17 +538,27 @@ def month_chunks(start: date, end: date) -> list:
 
 def run_backfill(date_from: date, date_to: date | None = None, *,
                  account_ids: list | None = None, dry_run: bool = False,
-                 resume: bool = False, now: datetime | None = None) -> dict:
+                 resume: bool = False, accept_zero_restatement: bool = False,
+                 now: datetime | None = None) -> dict:
     """Backfill ``[date_from, date_to]`` in monthly chunks, per account.
 
     ``account_ids`` defaults to every configured account; an id that is not
     configured is refused. For each account ``date_to`` defaults to, and is
     capped at, yesterday in THAT account's zone. ``resume`` skips a chunk
     already recorded ``verified`` with exactly these bounds. ``dry_run`` plans
-    and writes nothing (the account is read from Meta but not stored). Each
-    chunk opens its own ``sync_batches`` row with ``sync_type='backfill'``; no
-    ``runs`` row is written. An account stops at its first failed chunk; the
-    other accounts still run.
+    and writes nothing (the account is read from Meta but not stored). An
+    account stops at its first failed chunk; the other accounts still run.
+
+    The backfill writes NO ``sync_batches`` row and no ``runs`` row, like the
+    Google Ads spend and geo backfills. ``sync_state`` and the dataset's
+    freshness belong to the daily step alone: a backfill of one account (or a
+    partial one) must not make a failed daily feed read fresh, nor move the
+    daily feed's proven-through date. What the backfill did is on record in
+    the coverage ledger, chunk by chunk.
+
+    ``accept_zero_restatement`` lets a chunk take days with verified spend to
+    zero (see :func:`sync_chunk`). It exists for an operator who has checked
+    that Meta really reports nothing; the daily step has no such switch.
     """
     cfg = config_status()
     out = {"status": "failed", "reason": None, "error": None, "accounts": [],
@@ -525,7 +576,7 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
     for account_id in wanted:
         out["accounts"].append(_backfill_account(
             account_id, date_from, date_to, dry_run=dry_run, resume=resume,
-            now=now))
+            accept_zero_restatement=accept_zero_restatement, now=now))
     statuses = [a["status"] for a in out["accounts"]]
     bad = [a for a in out["accounts"] if a["status"] != "success"]
     if not bad:
@@ -536,12 +587,10 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
 
 
 def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
-                      dry_run: bool, resume: bool, now: datetime | None) -> dict:
+                      dry_run: bool, resume: bool, accept_zero_restatement: bool,
+                      now: datetime | None) -> dict:
     from connectors import meta_ads  # noqa: PLC0415
     from db import meta_ads_repository as repo  # noqa: PLC0415
-    from services.dataset_keys import (  # noqa: PLC0415
-        META_ADS_SOURCE, META_ADS_SPEND_DATASET,
-    )
     import db.writers as db_writers  # noqa: PLC0415
 
     out = {"account_id": account_id, "status": "failed", "reason": None,
@@ -587,19 +636,8 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
         if dry_run:
             out["chunks"].append({**entry, "status": "planned"})
             continue
-        batch_id = db_writers.start_sync_batch(
-            source=META_ADS_SOURCE, dataset=META_ADS_SPEND_DATASET,
-            sync_type="backfill", date_from=start, date_to=stop, run_id=None)
-        if not batch_id:
-            out["chunks"].append({**entry, "status": "failed",
-                                  "reason": REASON_BATCH,
-                                  "error": "the sync batch could not be opened"})
-            statuses.append("failed")
-            break
-        result = sync_chunk(account, start, stop)
-        finish_batch(batch_id, {**result, "error": (
-            _account_text(result) if result["status"] != "success" else None)},
-            stop if result["status"] == "success" else None)
+        result = sync_chunk(account, start, stop,
+                            accept_zero_restatement=accept_zero_restatement)
         out["chunks"].append(result)
         statuses.append(result["status"])
         if result["status"] == "failed":

@@ -5281,6 +5281,16 @@ class MetaAccountIdentityChanged(MetaAdsPersistenceError):
     """
 
 
+class MetaRestatementImplausible(MetaAdsPersistenceError):
+    """A re-read would take a day with verified, non-zero spend to nothing.
+
+    Meta restates amounts; it does not un-spend a whole day. A response that
+    says so is far more likely a wrong answer (an account that has stopped
+    answering properly, a wrong window) than the truth, and replacing the
+    range with it would destroy stored history. Refused; nothing changes.
+    """
+
+
 #: A failed fetch's own words are stored for the operator; bounded.
 _META_ERROR_MESSAGE_MAX = 500
 
@@ -5405,6 +5415,7 @@ def replace_meta_campaign_spend_chunk(
     pages_read: Optional[int] = None, http_status: Optional[int] = None,
     source_query_version: Optional[str] = None,
     sync_run_id: Optional[str] = None,
+    allow_zero_restatement: bool = False,
 ) -> dict:
     """Atomically REPLACE one account's Meta spend range and mark it verified.
 
@@ -5416,7 +5427,15 @@ def replace_meta_campaign_spend_chunk(
 
     Replace, not merge: Meta restates recent days, and a campaign-day absent
     from a later response must stop counting. An empty ``rows`` is a verified
-    zero for the range.
+    zero for a range that held no verified spend.
+
+    One restatement is refused: a day that a verified chunk already covers,
+    with stored spend above zero, whose campaign rows would now be absent or
+    sum to zero. That raises :class:`MetaRestatementImplausible` and changes
+    nothing. A changed amount, and a campaign-day that disappears while its
+    day still has spend, are ordinary restatements and pass.
+    ``allow_zero_restatement`` lifts the refusal; only the backfill script's
+    explicit flag sets it.
 
     ``rows``: ``{account_id, campaign_id, campaign_name, spend_date,
     cost_micros, spend_raw, currency_code, impressions, clicks}``. A row with
@@ -5496,7 +5515,7 @@ def replace_meta_campaign_spend_chunk(
                     "AND chunk_end >= %s AND chunk_start <= %s",
                     (account_id, start, end))
                 proven = [(r[0], r[1]) for r in cur.fetchall()]
-                restated, max_delta = 0, 0
+                restated, max_delta, zeroed = 0, 0, []
                 for day in sorted(set(old_sums) | set(new_sums)):
                     if not any(cs <= day <= ce for cs, ce in proven):
                         continue            # a first read is not a restatement
@@ -5504,6 +5523,14 @@ def replace_meta_campaign_spend_chunk(
                     if delta:
                         restated += 1
                         max_delta = max(max_delta, delta)
+                    if old_sums.get(day, 0) > 0 and new_sums.get(day, 0) == 0:
+                        zeroed.append(day)
+                if zeroed and not allow_zero_restatement:
+                    raise MetaRestatementImplausible(
+                        f"{len(zeroed)} day(s) with verified spend would become "
+                        f"zero (first {zeroed[0].isoformat()}: "
+                        f"{old_sums[zeroed[0]]} micros stored); nothing was "
+                        "changed")
 
                 unnamed = sorted({p[0] for p in prepared if p[1] is None})
                 names_preserved = 0
@@ -5609,6 +5636,7 @@ def replace_meta_campaign_spend_chunk(
                 if cur.rowcount != 1:
                     raise MetaAdsPersistenceError("coverage row was not written")
         return {"replaced": True, "deleted": deleted, "written": written,
+                "days_zeroed": len(zeroed),
                 "account_days_written": days_written,
                 "cost_micros_total": int(total),
                 "days_restated": restated,
@@ -5682,10 +5710,12 @@ def record_meta_account_sync(
 ) -> bool:
     """Record the outcome of one account's sync attempt. Never raises.
 
-    ``status``: ``success`` | ``partial`` | ``failed``. ``readable``: True when
-    Meta answered for this account on this attempt, False when Meta REFUSED it
-    (suspended, closed, permission removed), None when the attempt says
-    nothing either way (a throttle, a rejected token, a network failure).
+    ``status``: ``success`` | ``partial`` | ``failed``. ``readable`` is what
+    ``meta_ads_spend_service.describe_failure`` reports: True when Meta
+    answered for this account on this attempt; False when Meta REFUSED the
+    read (a 4xx that is not throttling — suspended, closed, permission removed
+    — or a rejected token); None when the attempt says nothing either way (a
+    throttle, a network failure, a retired API version).
 
     ``not_readable_since`` is set on the first refusal and kept until Meta
     answers again. Writes only this table: no spend row, no coverage row.

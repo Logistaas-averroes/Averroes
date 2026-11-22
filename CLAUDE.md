@@ -178,11 +178,20 @@ The Meta connector (`connectors/meta_ads.py`, PR-ADS-171A, `docs/52_*`) is GET
 only: `_request` refuses any other method, so no asynchronous report run. A
 token goes in the `Authorization` header only — Meta's `paging.next` is a URL
 with the token in it and is never requested, stored or logged, and no error
-text may include a URL or `str()` of a `requests` exception. There may be
+text may include the request URL or `str()` of a `requests` exception (Meta's
+own `message` is included only after secrets are scrubbed from it). There may be
 several ad accounts and several credential sets: everything is per account
 (its own currency, its own time zone, its own ledger), an account is called
 only with its own set's token, and a failed or unreadable account never
-deletes its stored history.
+deletes its stored history. Every listed or stored account is required for
+every day of a range: being absent from the configuration, or sitting in a
+broken credential set, is **not** evidence that an account stopped spending.
+The only exemption is the owner's `META_AD_ACCOUNT_RETIRED=<id>:<day>`,
+honoured only when the ledger bears it out, and a total that rests on it
+carries `owner_declared_retired` — a page showing the figure must show the
+disclosure. A re-read never takes a day with verified spend to zero
+(`meta_restatement_implausible`), and the Meta backfill writes no
+`sync_batches` row: freshness belongs to the daily step.
 
 ---
 

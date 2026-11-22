@@ -93,6 +93,10 @@ meta_ads:
   # and names the version to move to. META_API_VERSION (env) overrides this.
   # A value that is not `vNN.N` leaves the connector `misconfigured`.
   api_version: "v27.0"
+  # The System page judges each account against the last daily sync that
+  # should have finished. A sync is expected to have finished this many hours
+  # after its scheduled start (sync.daily_incremental above).
+  sync_grace_hours: 3
   # Campaign rows per Insights page.
   page_limit: 500
   # Currencies the FX provider (ECB reference rates) publishes. Spend in any

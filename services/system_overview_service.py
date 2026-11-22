@@ -77,8 +77,14 @@ SOURCE_TOKEN_REJECTED = "token_rejected"
 #: Meta refuses to let an account be read (suspended, closed, permission
 #: removed). Its stored history is kept.
 SOURCE_NOT_READABLE = "not_readable"
-#: A per-account status only: stored, no longer configured, history kept.
+#: A per-account status only: stored, declared retired by the owner (and the
+#: ledger bears the declaration out). Its history is kept.
 META_ACCOUNT_HISTORY_KEPT = "history_kept"
+#: A stored account that is neither configured nor validly declared retired:
+#: every period past its last verified day is withheld until one is done.
+META_ACCOUNT_UNRESOLVED = "account_unresolved"
+#: Spend is recorded for every day, but some of it has no US-dollar value.
+SOURCE_USD_UNAVAILABLE = "usd_unavailable"
 
 
 def _utc(value):
@@ -294,8 +300,20 @@ def _spend_source(now: datetime) -> dict:
             "unresolved_failed_chunks": len(verdict.get("failed_chunks") or [])}
 
 
-def _meta_account_line(account_id, row, state, configured, now) -> dict:
-    """One Meta ad account, judged in its own zone. No call to Meta."""
+def _meta_account_line(account_id, row, state, role, now, *, declared=None,
+                       broken_set=None) -> dict:
+    """One Meta ad account, judged in its own zone. No call to Meta.
+
+    ``role``: ``syncing`` (in a complete credential set), ``broken_set``
+    (listed in a set that is incomplete), or ``unlisted`` (stored, in no set).
+
+    A syncing account is judged against the last day the most recent DUE daily
+    sync could have settled in the account's zone
+    (``meta_ads_spend_service.last_due_sync``) — not against the moment the
+    page is viewed. The Los Angeles account's yesterday ends at 08:00 UTC, two
+    hours after the sync: judged at page-view time it would read "late" for
+    most of every day after a clean sync.
+    """
     from db import meta_ads_repository as repo  # noqa: PLC0415
     from services import meta_ads_spend_service as meta  # noqa: PLC0415
     from services.google_ads_spend_service import analyze_coverage  # noqa: PLC0415
@@ -304,11 +322,13 @@ def _meta_account_line(account_id, row, state, configured, now) -> dict:
     history = row.get("covered_through")
     out = {"account_id": account_id, "account_name": row.get("account_name"),
            "currency": row.get("currency_code"),
-           "time_zone": row.get("time_zone_name"), "configured": bool(configured),
+           "time_zone": row.get("time_zone_name"),
+           "configured": role != "unlisted", "syncing": role == "syncing",
            "status": SOURCE_UNAVAILABLE, "reason": None, "reason_detail": None,
            "complete_through": None, "history_through": history,
            "window_start": None, "window_end": None, "missing_ranges": [],
-           "unresolved_failed_chunks": None,
+           "unresolved_failed_chunks": None, "usd_missing_days": None,
+           "declared_last_spend_day": declared,
            "not_readable_since": _iso(state.get("not_readable_since")),
            "http_status": None, "error_code": None,
            "last_success_at": _iso(state.get("last_success_at")),
@@ -316,9 +336,28 @@ def _meta_account_line(account_id, row, state, configured, now) -> dict:
     kept = (f"history through {history} is kept" if history
             else "no history is stored")
     name = f"{row.get('account_name') or 'Account'} ({account_id})"
-    if not configured:
-        return {**out, "status": META_ACCOUNT_HISTORY_KEPT,
-                "summary": f"{name}: no longer connected; {kept}"}
+    if role == "broken_set":
+        return {**out, "status": SOURCE_MISCONFIGURED,
+                "reason": (broken_set or {}).get("reason"),
+                "summary": f"{name}: credential set {(broken_set or {}).get('set')} "
+                           f"is incomplete ({(broken_set or {}).get('reason')}), "
+                           f"so it is not updated; {kept}; later periods are "
+                           "withheld"}
+    if role == "unlisted":
+        last_spend = row.get("last_spend_date")
+        borne_out = bool(declared and history and history >= declared
+                         and not (last_spend and last_spend > declared))
+        if borne_out:
+            return {**out, "status": META_ACCOUNT_HISTORY_KEPT,
+                    "summary": f"{name}: declared retired by the owner (last "
+                               f"spend day {declared}); {kept}"}
+        why = ("it is not declared retired" if not declared else
+               f"its declared last spend day {declared} is not borne out by "
+               "what is stored")
+        return {**out, "status": META_ACCOUNT_UNRESOLVED,
+                "reason": "account_not_configured_not_retired",
+                "summary": f"{name}: not in the configuration, and {why}; "
+                           f"{kept}; later periods are withheld"}
     failed = state.get("last_status") == "failed"
     if failed:
         out.update(reason=state.get("last_reason"),
@@ -335,7 +374,8 @@ def _meta_account_line(account_id, row, state, configured, now) -> dict:
         return {**out, "status": SOURCE_NOT_READABLE,
                 "summary": f"{name}: account not readable since {since} "
                            f"{codes}; {kept}"}
-    end = meta.account_local_yesterday(row.get("time_zone_name"), now)
+    end = meta.account_local_yesterday(row.get("time_zone_name"),
+                                       meta.last_due_sync(now))
     if end is None:
         # Never read, or its zone is not a zone: "the last complete days" has
         # no meaning, so nothing is proven.
@@ -344,14 +384,40 @@ def _meta_account_line(account_id, row, state, configured, now) -> dict:
                 "summary": f"{name}: no successful update yet"
                            + (f" — {out['reason_detail']}"
                               if out["reason_detail"] else "")}
-    start = end - timedelta(days=SPEND_WINDOW_DAYS - 1)
-    out.update(window_start=start.isoformat(), window_end=end.isoformat())
-    coverage = repo.fetch_meta_spend_coverage(start, end, account_id)
-    if not coverage.get("available"):
-        return {**out, "summary": f"{name}: could not be read"}
-    verdict = analyze_coverage(start, end, coverage.get("chunks") or [])
+    # `end` is the day the account is JUDGED against. If a later day is
+    # already held (the page is viewed after the account's day ended and a
+    # sync has since read it), that later day is the one reported.
     zone = row.get("time_zone_name")
+    viewed = meta.account_local_yesterday(zone, now)
+    verdict = None
+    candidates = [end]
+    while viewed and candidates[0] < viewed:
+        candidates.insert(0, candidates[0] + timedelta(days=1))
+    for candidate in candidates:           # the latest day first, down to `end`
+        start = candidate - timedelta(days=SPEND_WINDOW_DAYS - 1)
+        coverage = repo.fetch_meta_spend_coverage(start, candidate, account_id)
+        if not coverage.get("available"):
+            return {**out, "summary": f"{name}: could not be read"}
+        verdict = analyze_coverage(start, candidate, coverage.get("chunks") or [])
+        out.update(window_start=start.isoformat(), window_end=candidate.isoformat())
+        if verdict.get("complete") is True:
+            end = candidate
+            break
     if verdict.get("complete") is True:
+        unpriced = repo.fetch_meta_fx_missing_dates(account_id, start, end)
+        if not unpriced.get("available"):
+            return {**out, "summary": f"{name}: could not be read"}
+        if unpriced.get("dates"):
+            # The spend is recorded; its US-dollar value is not. Not "complete".
+            days = unpriced["dates"]
+            return {**out, "status": SOURCE_USD_UNAVAILABLE,
+                    "reason": (state.get("last_reason")
+                               if str(state.get("last_reason") or "").startswith("fx_")
+                               else meta.REASON_FX_MISSING),
+                    "usd_missing_days": len(days),
+                    "summary": f"{name}: spend recorded through {end.isoformat()} "
+                               f"({zone}); no US-dollar value for {len(days)} "
+                               f"day(s) in {row.get('currency_code')}"}
         return {**out, "status": SOURCE_CURRENT, "reason": None,
                 "reason_detail": None, "complete_through": end.isoformat(),
                 "summary": f"{name}: complete through {end.isoformat()} ({zone})"}
@@ -370,12 +436,13 @@ def _meta_account_line(account_id, row, state, configured, now) -> dict:
 def _meta_spend_source(now: datetime) -> dict:
     """The Meta Ads spend line (PR-ADS-171A). No call to Meta.
 
-    One line for every ad account, with each account in ``accounts``. An
-    account is judged over the last :data:`SPEND_WINDOW_DAYS` complete days of
-    ITS OWN zone. The line is ``current`` only when every configured account
-    is; otherwise it carries the worst account's status. An account that is
-    stored but no longer configured is listed (its history is kept) and does
-    not affect the status.
+    One line for every ad account, with each account in ``accounts``. The
+    line is ``current`` only when every account that syncs is complete in US
+    dollars through the last day its latest due sync could settle, AND no
+    credential set is broken, AND no stored account is left unresolved
+    (neither configured nor validly declared retired). Otherwise it carries
+    the most serious account status; a broken configuration is shown whatever
+    the other accounts say.
     """
     from db import meta_ads_repository as repo  # noqa: PLC0415
     from services import meta_ads_spend_service as meta  # noqa: PLC0415
@@ -386,8 +453,9 @@ def _meta_spend_source(now: datetime) -> dict:
            "complete_through": None, "missing_ranges": [],
            "unresolved_failed_chunks": None,
            "last_success_at": None, "age_hours": None,
-           "accounts": [], "misconfigured_sets": []}
+           "accounts": [], "misconfigured_sets": [], "retired_invalid": []}
     cfg = meta.config_status()
+    out["retired_invalid"] = list(cfg.get("retired_invalid") or [])
     if cfg.get("misconfigured"):
         detail = cfg.get("reason")
         if cfg.get("duplicate_account_ids"):
@@ -397,47 +465,69 @@ def _meta_spend_source(now: datetime) -> dict:
         return {**out, "status": SOURCE_MISCONFIGURED, "reason": cfg.get("reason"),
                 "reason_detail": detail,
                 "misconfigured_sets": cfg.get("misconfigured_sets") or []}
-    configured = list(cfg.get("account_ids") or [])
+    syncing = list(cfg.get("account_ids") or [])
+    listed = list(cfg.get("listed_account_ids") or [])
+    declared = {d["account_id"]: d["last_spend_day"] for d in cfg.get("retired") or []}
     read = repo.fetch_meta_accounts()
     states = repo.fetch_meta_account_sync_states()
     if not read.get("available") or not states.get("available"):
-        return out if configured else {**out, "status": SOURCE_NOT_CONNECTED}
+        return out if listed else {**out, "status": SOURCE_NOT_CONNECTED}
     stored = {a["account_id"]: a for a in read.get("accounts") or []}
     states = states.get("states") or {}
-    lines = [_meta_account_line(a, stored.get(a), states.get(a), True, now)
-             for a in configured]
-    lines += [_meta_account_line(a, row, states.get(a), False, now)
-              for a, row in stored.items() if a not in configured]
+    broken_by_account = {a: s for s in cfg.get("misconfigured_sets") or []
+                         for a in s.get("account_ids") or []}
+    lines = []
+    for account_id in listed + [a for a in stored if a not in listed]:
+        role = ("syncing" if account_id in syncing else
+                "broken_set" if account_id in listed else "unlisted")
+        lines.append(_meta_account_line(
+            account_id, stored.get(account_id), states.get(account_id), role,
+            now, declared=declared.get(account_id),
+            broken_set=broken_by_account.get(account_id)))
     out["accounts"] = lines
-    if not configured:
-        return {**out, "status": SOURCE_NOT_CONNECTED}
-
-    live = [line for line in lines if line["configured"]]
-    statuses = [line["status"] for line in live]
-    for status in (SOURCE_UNAVAILABLE, SOURCE_TOKEN_REJECTED, SOURCE_NOT_READABLE,
-                   SOURCE_LATE, SOURCE_NOT_PROVEN):
-        if status in statuses:
-            break
-    else:
-        status = SOURCE_CURRENT
     broken = cfg.get("misconfigured_sets") or []
     out["misconfigured_sets"] = broken
-    worst = next((line for line in live if line["status"] == status), {})
+    unresolved = [line for line in lines
+                  if line["status"] == META_ACCOUNT_UNRESOLVED]
+    live = [line for line in lines if line["syncing"]]
     successes = [line["last_success_at"] for line in live]
     if successes and all(successes):
         oldest = min(successes)
         out.update(last_success_at=oldest, age_hours=_age_hours(oldest, now))
-    if status == SOURCE_CURRENT and broken:
-        # Every account that syncs is current, and a credential set is broken.
-        return {**out, "status": SOURCE_MISCONFIGURED,
-                "reason": broken[0]["reason"],
-                "reason_detail": f"credential set {broken[0]['set']}: "
-                                 f"{broken[0]['reason']}"}
+
+    # A broken configuration is shown whatever the other accounts say.
+    if broken or out["retired_invalid"] or cfg.get("unparsed_account_entries"):
+        if broken:
+            reason, detail = broken[0]["reason"], (
+                f"credential set {broken[0]['set']}: {broken[0]['reason']}")
+        else:
+            reason = "retired_declaration_invalid"
+            detail = ("META_AD_ACCOUNT_RETIRED has an entry that is not "
+                      "<account id>:<YYYY-MM-DD>: "
+                      + ", ".join(out["retired_invalid"]))
+        return {**out, "status": SOURCE_MISCONFIGURED, "reason": reason,
+                "reason_detail": detail}
+    if not live:
+        if unresolved:
+            return {**out, "status": META_ACCOUNT_UNRESOLVED,
+                    "reason": unresolved[0]["reason"]}
+        return {**out, "status": SOURCE_NOT_CONNECTED}
+
+    statuses = [line["status"] for line in live]
+    for status in (SOURCE_UNAVAILABLE, SOURCE_TOKEN_REJECTED, SOURCE_NOT_READABLE,
+                   SOURCE_LATE, SOURCE_NOT_PROVEN, SOURCE_USD_UNAVAILABLE):
+        if status in statuses:
+            break
+    else:
+        status = META_ACCOUNT_UNRESOLVED if unresolved else SOURCE_CURRENT
+    if status == META_ACCOUNT_UNRESOLVED:
+        return {**out, "status": status, "reason": unresolved[0]["reason"]}
     if status == SOURCE_CURRENT:
         ends = [line["complete_through"] for line in live]
         starts = [line["window_start"] for line in live]
         return {**out, "status": status, "complete_through": min(ends),
                 "window_start": min(starts), "window_end": min(ends)}
+    worst = next(line for line in live if line["status"] == status)
     return {**out, "status": status, "reason": worst.get("reason"),
             "reason_detail": worst.get("reason_detail"),
             "missing_ranges": worst.get("missing_ranges") or [],

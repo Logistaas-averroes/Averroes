@@ -14,6 +14,15 @@ GET requests with that account's own token and prints what Meta answered:
 So you can see at a glance which account has the ads. It writes nothing
 anywhere and never prints an access token.
 
+    python -m scripts.meta_ads_smoke_test --month 2026-03
+
+With ``--month`` it instead compares, for every day of that month and for each
+account, the sum of the campaign rows with the account-level total — the same
+check the sync makes before it stores anything. Run it for a month that
+contains an ARCHIVED or DELETED campaign before the first backfill: if the
+campaign-level read leaves such a campaign out, that month shows a MISMATCH
+here (and would fail to backfill), and nothing has been written.
+
 Exit code: 0 every account was read and reconciles; 1 Meta refused a request
 for some account, or two totals differ, or a credential set is incomplete;
 2 Meta is not configured.
@@ -87,8 +96,75 @@ def _account(account_id: str) -> bool:
     return True
 
 
-def main() -> int:
+def _month(account_id: str, first, last) -> bool:
+    """Campaign rows against the account total for every day of a month."""
     from connectors import meta_ads  # noqa: PLC0415
+    from services import meta_ads_spend_service as meta  # noqa: PLC0415
+
+    print(f"--- Ad account {account_id} ---")
+    try:
+        account = meta_ads.fetch_account(account_id)
+        currency = account["currency_code"]
+        yesterday = meta.account_local_yesterday(account["time_zone_name"])
+        if yesterday is None:
+            print("FAILED           : the account time zone is not a known zone")
+            return False
+        end = min(last, yesterday)
+        print(f"Name             : {account['account_name']}")
+        print(f"Range            : {first.isoformat()} to {end.isoformat()} "
+              f"({account['time_zone_name']})")
+        if end < first:
+            print("RESULT           : nothing to check — the month has not started "
+                  "for this account")
+            return True
+        stats: dict = {}
+        rows = [r for page in meta_ads.iter_campaign_daily_spend(
+            account_id, first.isoformat(), end.isoformat(), stats) for r in page]
+        totals = meta_ads.fetch_account_daily_spend(
+            account_id, first.isoformat(), end.isoformat())
+    except meta_ads.MetaAdsError as exc:
+        print(f"FAILED           : {exc.reason}: {exc}")
+        return False
+    verdict = meta.reconcile_days(
+        rows, totals, meta.reconciliation_tolerance_micros(currency))
+    campaigns = len({r["campaign_id"] for r in rows})
+    print(f"Campaign rows    : {len(rows)} rows, {campaigns} campaign(s), "
+          f"{stats.get('pages_read')} page(s)")
+    print(f"Campaign sum     : {_amount(sum(r['cost_micros'] for r in rows))} {currency}")
+    print(f"Account total    : {_amount(sum(r['cost_micros'] for r in totals))} {currency}")
+    print(f"Days compared    : {verdict['days_compared']}")
+    for miss in verdict["mismatches"][:10]:
+        print(f"  MISMATCH {miss['spend_date']}: campaign rows "
+              f"{_amount(miss['campaign_micros'])}, account total "
+              f"{_amount(miss['account_micros'])} {currency}")
+    if not verdict["reconciled"]:
+        print(f"RESULT           : MISMATCH on {len(verdict['mismatches'])} day(s) — "
+              "the campaign rows do not sum to the account total; do not backfill "
+              "this month")
+        return False
+    print("RESULT           : OK — every day's campaign rows sum to the account total")
+    return True
+
+
+def main(argv=None) -> int:
+    import argparse  # noqa: PLC0415
+    from datetime import date  # noqa: PLC0415
+    from connectors import meta_ads  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(description="Meta Ads smoke test (read-only).")
+    parser.add_argument("--month", default=None, metavar="YYYY-MM",
+                        help="compare campaign rows with the account total for "
+                             "every day of this month, per account")
+    args = parser.parse_args(argv)
+    month = None
+    if args.month:
+        try:
+            first = date.fromisoformat(f"{args.month}-01")
+        except ValueError:
+            print(f"NOT A MONTH      : {args.month!r} (use YYYY-MM)")
+            return 2
+        last = (first + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        month = (first, last)
 
     cfg = meta_ads.config_status()
     print(f"API version      : {cfg['api_version']} (from {cfg['api_version_source']})")
@@ -104,7 +180,8 @@ def main() -> int:
             why += f": {', '.join(cfg['duplicate_account_ids'])}"
         print(f"NOT CONFIGURED   : {why}")
         return 2
-    results = [_account(account_id) for account_id in cfg["account_ids"]]
+    results = [(_month(account_id, *month) if month else _account(account_id))
+               for account_id in cfg["account_ids"]]
     good = sum(1 for ok in results if ok)
     print(f"=== {good} of {len(results)} account(s) OK"
           + (f"; {len(cfg['misconfigured_sets'])} credential set(s) not usable"

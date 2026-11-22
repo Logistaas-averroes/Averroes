@@ -283,7 +283,8 @@ def transport_error(token=SENTINEL_TOKEN):
 ENV_NAMES = tuple(f"{name}{suffix}"
                   for suffix in ("", "_2", "_3", "_4", "_5")
                   for name in ("META_ADS_ACCESS_TOKEN", "META_AD_ACCOUNT_ID",
-                               "META_APP_SECRET")) + ("META_API_VERSION",)
+                               "META_APP_SECRET")) + ("META_API_VERSION",
+                                                       "META_AD_ACCOUNT_RETIRED")
 
 
 def unconfigure(monkeypatch):

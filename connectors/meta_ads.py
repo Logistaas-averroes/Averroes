@@ -16,10 +16,11 @@ Governance
   exists", and the next page is requested with our own parameters plus
   ``after=<paging.cursors.after>``.
 * An exception raised by ``requests`` carries the request URL in its text, so
-  no error built here includes ``str(exc)``: transport failures are named by
-  exception class only, and API refusals by HTTP status and the fields of
-  Meta's ``error`` object. Any text taken from a response is scrubbed of the
-  configured secrets before it is used.
+  no error built here includes ``str(exc)`` or the request URL: transport
+  failures are named by exception class only, and API refusals by HTTP status
+  and the fields of Meta's ``error`` object. Meta's own ``message`` is
+  included; it is Meta's text, so it is scrubbed of every configured secret
+  and of anything shaped like a token parameter, and truncated, first.
 
 Credentials (environment)
 -------------------------
@@ -34,6 +35,10 @@ Credentials (environment)
                            Business portfolio. An account is only ever called
                            with its own set's token. An account listed in two
                            sets makes the configuration invalid.
+``META_AD_ACCOUNT_RETIRED`` optional, not a secret. ``<account id>:<last spend
+                           day>`` pairs, comma-separated: the owner's
+                           declaration that an account Meta no longer lets us
+                           read spent nothing after that day (docs/52 §6).
 ``META_API_VERSION``       optional override of ``meta_ads.api_version``
                            (config/thresholds.yaml). No version is written in
                            this file.
@@ -235,8 +240,43 @@ def _credential_sets() -> list:
             reason = None
         sets.append({"set": number, "token": token, "app_secret": secret,
                      "account_ids": ids if reason is None else [],
-                     "listed_account_ids": ids, "reason": reason})
+                     "listed_account_ids": ids, "invalid_entries": invalid,
+                     "reason": reason})
     return sets
+
+
+def parse_retired(raw: str) -> tuple[list, list]:
+    """``(declarations, invalid)`` from ``META_AD_ACCOUNT_RETIRED``.
+
+    A comma-separated list of ``<account id>:<YYYY-MM-DD>`` — the owner's
+    declaration that the account spent nothing after that day (a day of the
+    account's own time zone). An entry that is not exactly that, or an id
+    declared twice with different days, is ``invalid`` and is never guessed.
+    """
+    from datetime import date as _date  # noqa: PLC0415
+    seen, invalid = {}, []
+    for part in str(raw or "").split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        account, sep, day = entry.partition(":")
+        account = account.strip()
+        if account.lower().startswith("act_"):
+            account = account[4:].strip()
+        day = day.strip()
+        try:
+            ok = bool(sep) and bool(_ACCOUNT_RE.match(account)) and (
+                _date.fromisoformat(day).isoformat() == day)
+        except ValueError:
+            ok = False
+        if not ok or seen.get(account, day) != day:
+            invalid.append(entry)
+            continue
+        seen[account] = day
+    for entry in invalid:                  # a contradicted id is not honoured
+        seen.pop(entry.partition(":")[0].strip().removeprefix("act_"), None)
+    return ([{"account_id": a, "last_spend_day": d} for a, d in seen.items()],
+            invalid)
 
 
 def page_limit() -> int:
@@ -254,6 +294,16 @@ def config_status() -> dict:
     ``{set, has_access_token, has_app_secret, account_ids, configured,
     reason}``. ``account_ids`` — every account of every complete set, in
     order; these are the accounts that sync.
+
+    ``listed_account_ids`` — every well-formed account id listed in ANY set,
+    complete or not. An account in a broken set is still an account the owner
+    configured: it does not sync, and it is never read as removed.
+    ``unparsed_account_entries`` — True when some set's account list holds an
+    entry that is not an id, so the configured accounts are not fully known.
+
+    ``retired`` — the owner's declarations (``META_AD_ACCOUNT_RETIRED``):
+    ``[{account_id, last_spend_day}]``. ``retired_invalid`` — the entries that
+    could not be read; they are ignored, reported, and make the run partial.
 
     ``configured`` — at least one complete set, an API version resolved, and
     no account listed in two sets. ``misconfigured`` — something is set and
@@ -277,8 +327,15 @@ def config_status() -> dict:
             seen.setdefault(account_id, s["set"])
     complete = [s for s in sets if s["reason"] is None]
     broken = [e for e in public if not e["configured"]]
+    listed = []
+    for s in sets:
+        listed += [a for a in s["listed_account_ids"] if a not in listed]
+    retired, retired_invalid = parse_retired(_env("META_AD_ACCOUNT_RETIRED"))
     out = {"configured": False, "misconfigured": False, "reason": None,
            "sets": public, "account_ids": [], "misconfigured_sets": [],
+           "listed_account_ids": listed,
+           "unparsed_account_entries": any(s["invalid_entries"] for s in sets),
+           "retired": retired, "retired_invalid": retired_invalid,
            "duplicate_account_ids": duplicates,
            "has_access_token": any(e["has_access_token"] for e in public),
            "api_version": version, "api_version_source": version_source}
@@ -377,11 +434,25 @@ def _wait_seconds(attempt: int, headers=None) -> float:
     return min(wait, float(MAX_WAIT_SECONDS))
 
 
+def _int_or_none(value):
+    """An integer error code, or None. Meta's codes are integers; anything
+    else is not interpolated into a message or stored."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _describe(status: int, error: dict) -> str:
     """``HTTP 400, code 100, subcode 33, type OAuthException: message``."""
-    parts = [f"HTTP {status}", f"code {error.get('code')}"]
-    if error.get("error_subcode") is not None:
-        parts.append(f"subcode {error.get('error_subcode')}")
+    parts = [f"HTTP {status}", f"code {_int_or_none(error.get('code'))}"]
+    subcode = _int_or_none(error.get("error_subcode"))
+    if subcode is not None:
+        parts.append(f"subcode {subcode}")
     if error.get("type"):
         parts.append(f"type {_scrub(error.get('type'))}")
     text = ", ".join(parts)
@@ -449,8 +520,8 @@ def _request(account_id: str, edge: str = "", params: Optional[dict] = None, *,
                     http_status=status)
             return body
 
-        code = error.get("code") if error else None
-        subcode = error.get("error_subcode") if error else None
+        code = _int_or_none(error.get("code")) if error else None
+        subcode = _int_or_none(error.get("error_subcode")) if error else None
         described = _describe(status, error) if error else f"HTTP {status}, code None"
         if code == AUTH_ERROR_CODE:
             raise MetaAdsAuthError(

@@ -289,8 +289,12 @@ def test_03_the_next_mornings_sync_moves_the_window_one_los_angeles_day(
             "GBP") in _rows(live_db)
     line = overview._meta_spend_source(NOW + timedelta(days=1))
     assert line["status"] == "current" and line["complete_through"] == "2026-11-17"
-    # A missed morning reads late, and names the Los Angeles day it lacks.
-    late = overview._meta_spend_source(NOW + timedelta(days=2))
+    # The next morning's sync is not due until 09:00 UTC: still current.
+    early = overview._meta_spend_source(NOW + timedelta(days=2, hours=2))
+    assert early["status"] == "current" and early["complete_through"] == "2026-11-17"
+    # A missed morning reads late once that sync was due, and names the Los
+    # Angeles day it lacks.
+    late = overview._meta_spend_source(NOW + timedelta(days=2, hours=3))
     assert late["status"] == "late" and late["complete_through"] is None
     assert late["missing_ranges"] == [{"start": "2026-11-18", "end": "2026-11-18"}]
     assert late["accounts"][0]["summary"] == (
@@ -385,20 +389,25 @@ def test_07_a_row_without_a_name_keeps_the_stored_name(live_db, monkeypatch):
     _fx(monkeypatch)
     _run()
 
-    def row(campaign_id, name):
+    def row(campaign_id, name, day="2026-11-16"):
         return {"account_id": NEW, "campaign_id": campaign_id,
-                "campaign_name": name, "spend_date": "2026-11-16",
+                "campaign_name": name, "spend_date": day,
                 "cost_micros": 1_000_000, "spend_raw": "1.00",
                 "currency_code": "GBP"}
+    # (The 15th keeps a row: a re-read may not take a verified day to zero.)
     out = db_writers.replace_meta_campaign_spend_chunk(
         NEW, WINDOW_START, YESTERDAY,
-        [row(CAMPAIGN_A, None), row(CAMPAIGN_B, "  "), row(CAMPAIGN_C, None)],
-        [{"spend_date": "2026-11-16", "cost_micros": 3_000_000}],
+        [row(CAMPAIGN_A, "Lead Gen — MENA", "2026-11-15"),
+         row(CAMPAIGN_A, None), row(CAMPAIGN_B, "  "), row(CAMPAIGN_C, None)],
+        [{"spend_date": "2026-11-15", "cost_micros": 1_000_000},
+         {"spend_date": "2026-11-16", "cost_micros": 3_000_000}],
         currency_code="GBP")
-    assert out["names_preserved"] == 2 and out["written"] == 3
-    assert [(r[0], r[4]) for r in _rows(live_db)] == [
-        (CAMPAIGN_A, "Lead Gen — MENA"), (CAMPAIGN_B, "Retargeting — EU"),
-        (CAMPAIGN_C, None)]                          # never named: stays unknown
+    assert out["names_preserved"] == 2 and out["written"] == 4
+    assert [(r[0], r[1], r[4]) for r in _rows(live_db)] == [
+        (CAMPAIGN_A, "2026-11-15", "Lead Gen — MENA"),
+        (CAMPAIGN_A, "2026-11-16", "Lead Gen — MENA"),
+        (CAMPAIGN_B, "2026-11-16", "Retargeting — EU"),
+        (CAMPAIGN_C, "2026-11-16", None)]            # never named: stays unknown
 
 
 def test_08_a_replace_of_one_account_never_touches_another(live_db, monkeypatch):
@@ -417,7 +426,8 @@ def test_08_a_replace_of_one_account_never_touches_another(live_db, monkeypatch)
     assert _rows(live_db, OLD) == OLD_ROWS
     # A name is kept per account: the old account's name is not borrowed.
     assert [(r[0], r[4]) for r in _rows(live_db, NEW)] == [(CAMPAIGN_A, None)]
-    db_writers.replace_meta_campaign_spend_chunk(NEW, WINDOW_START, YESTERDAY, [], [])
+    db_writers.replace_meta_campaign_spend_chunk(
+        NEW, WINDOW_START, YESTERDAY, [], [], allow_zero_restatement=True)
     assert _rows(live_db, NEW) == [] and _rows(live_db, OLD) == OLD_ROWS
 
 
@@ -450,18 +460,75 @@ def test_09_no_delivery_is_a_verified_zero_and_an_unfetched_range_is_not(
     assert overview._meta_spend_source(NOW)["status"] == "current"
 
 
-def test_10_an_empty_response_empties_a_range_that_held_spend(live_db, monkeypatch):
-    graph = _seeded()
+def test_10_an_empty_200_never_deletes_verified_spend(live_db, monkeypatch):
+    """Review item 4. Meta answers 200 with no rows at BOTH levels for an
+    account that has verified, non-zero spend stored. Nothing reconciles with
+    nothing, so reconciliation passes — and the range would be emptied and
+    called verified. It is refused instead; the other account still syncs."""
+    graph = _pair()
     fakes.configure(monkeypatch, graph)
     _fx(monkeypatch)
     _run()
-    graph.rows.clear()
-    out, _ = _run()
-    account = out["accounts"][0]
-    assert out["status"] == "success" and account["rows_deleted"] == 3
-    assert _rows(live_db) == []
-    assert account["days_restated"] == 2             # the 15th and the 16th
-    assert _truth()["state"] == "verified_zero_spend"
+    rows, ledger = _rows(live_db, OLD), _coverage(live_db, OLD)
+    days = q(live_db, "SELECT * FROM meta_ads_account_daily_spend ORDER BY id")
+    assert rows == OLD_ROWS
+
+    graph.accounts[OLD].rows.clear()                   # 200, `data: []`, both levels
+    out, errors = _run()
+    assert out["status"] == "partial" and out["reason"] == "meta_restatement_implausible"
+    assert [a["status"] for a in out["accounts"]] == ["success", "failed"]
+    assert errors == [
+        f"meta_ads_api/meta_campaign_spend: account {OLD}: 3 day(s) with verified "
+        "spend would become zero (first 2026-11-15: 70000000 micros stored); "
+        "nothing was changed"]
+    assert _rows(live_db, OLD) == rows                 # stored spend untouched
+    assert _coverage(live_db, OLD) == ledger           # the verified chunk stands
+    assert q(live_db, "SELECT * FROM meta_ads_account_daily_spend ORDER BY id") == days
+    assert _batches(live_db)[-1][1] == "partial"
+    assert _sync_state(live_db)[OLD][:2] == ("failed", "meta_restatement_implausible")
+    assert _truth(end=OLD_YESTERDAY - timedelta(days=1))["usd_spend"] == 130.34
+
+    # One day going to zero is refused just the same...
+    old = graph.accounts[OLD]
+    old.spend(CAMPAIGN_A, "2026-11-15", "70.00").spend(CAMPAIGN_A, "2026-11-16", "60.34")
+    out, _ = _run()                                    # the 17th is now absent
+    assert out["accounts"][1]["reason"] == "meta_restatement_implausible"
+    assert "1 day(s) with verified spend would become zero (first 2026-11-17" in (
+        out["accounts"][1]["error"])
+    assert _rows(live_db, OLD) == rows
+    # ...while an ordinary restatement — amounts changing, a campaign-day
+    # going while its day keeps spend — still passes.
+    old.spend(CAMPAIGN_A, "2026-11-17", "3.00").spend(CAMPAIGN_A, "2026-11-16", "61.00")
+    out, errors = _run()
+    assert out["status"] == "success" and errors == []
+    assert _rows(live_db, OLD) == [
+        (CAMPAIGN_A, "2026-11-15", 70_000_000, "70.00", "Lead Gen — MENA", "USD"),
+        (CAMPAIGN_A, "2026-11-16", 61_000_000, "61.00", "Lead Gen — MENA", "USD"),
+        (CAMPAIGN_A, "2026-11-17", 3_000_000, "3.00", "Lead Gen — MENA", "USD")]
+    assert out["accounts"][1]["days_restated"] == 2
+    assert out["accounts"][1]["days_zeroed"] == 0
+
+
+def test_10b_only_the_backfills_explicit_flag_accepts_a_zero_restatement(
+        live_db, monkeypatch, capsys):
+    from scripts import backfill_meta_ads_spend as script
+    graph = _pair()
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    args = ["--from", "2026-11-01", "--to", "2026-11-17", "--account", OLD]
+    assert script.main(args) == 0
+    capsys.readouterr()
+    graph.accounts[OLD].rows.clear()
+    assert script.main(args) == 1                      # refused without the flag
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["accounts"][0]["reason"] == "meta_restatement_implausible"
+    assert _rows(live_db, OLD) == OLD_ROWS
+    assert script.main(args + ["--accept-zero-restatement"]) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["accounts"][0]["chunks"][0]["days_zeroed"] == 3
+    assert _rows(live_db, OLD) == []
+    assert [c[:5] for c in _coverage(live_db, OLD)] == [
+        ("2026-11-01", "2026-11-17", "verified", 0, 0)]
 
 
 def test_11_days_without_delivery_between_days_with_spend(live_db, monkeypatch):
@@ -578,7 +645,8 @@ def test_13_an_account_suspended_mid_life_keeps_its_history(live_db, monkeypatch
     kept = _truth(date(2026, 11, 12), date(2026, 11, 17), now=day3)
     assert kept["state"] == "verified" and kept["usd_spend"] == 142.34
 
-    # The owner removes it from the configuration (set 2's variables).
+    # Dropping it from the configuration does NOT retire it: nobody has said
+    # it stopped spending, so later days stay withheld.
     monkeypatch.delenv("META_ADS_ACCESS_TOKEN_2")
     monkeypatch.delenv("META_AD_ACCOUNT_ID_2")
     graph.calls.clear()
@@ -586,16 +654,88 @@ def test_13_an_account_suspended_mid_life_keeps_its_history(live_db, monkeypatch
     assert out["status"] == "success" and errors == []
     assert {c["account_id"] for c in graph.calls} == {NEW}
     assert _rows(live_db, OLD) == history            # still there
-    after = _truth(date(2026, 11, 12), date(2026, 11, 18), now=day3)
+    week = (date(2026, 11, 12), date(2026, 11, 18))
+    dropped = _truth(*week, now=day3)
+    assert dropped["state"] == "coverage_incomplete" and dropped["usd_spend"] is None
+    assert dropped["owner_declared_retired"] == []
+    line = overview._meta_spend_source(day3)
+    assert line["status"] == "account_unresolved"
+    assert line["accounts"][1]["summary"] == (
+        f"Logistaas ({OLD}): not in the configuration, and it is not declared "
+        "retired; history through 2026-11-17 is kept; later periods are withheld")
+
+    # A declaration the ledger does not reach is not honoured either.
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD}:2026-11-18")
+    early = _truth(*week, now=day3)
+    assert early["state"] == "coverage_incomplete" and early["usd_spend"] is None
+    assert ("declared to have last spent on 2026-11-18, but its verified coverage "
+            "ends 2026-11-17") in early["withheld_detail"]
+    assert overview._meta_spend_source(day3)["status"] == "account_unresolved"
+
+    # The owner declares its last spend day; the ledger bears it out.
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD}:2026-11-17")
+    after = _truth(*week, now=day3)
     assert after["state"] == "verified" and after["usd_spend"] == 142.34
+    assert after["owner_declared_retired"] == [
+        {"account_id": OLD, "last_spend_day": "2026-11-17"}]
+    assert after["owner_declared_retired_disclosure"] == (
+        f"This total assumes ad account {OLD} spent nothing after 2026-11-17 — "
+        "the owner's declaration (META_AD_ACCOUNT_RETIRED), not a reading from "
+        "Meta.")
     old = after["accounts"][1]
     assert (old["configured"], old["required_through"], old["usd_spend"]) == (
         False, "2026-11-17", 142.34)
     line = overview._meta_spend_source(day3)
     assert line["status"] == "current"
     assert line["accounts"][1]["summary"] == (
-        f"Logistaas ({OLD}): no longer connected; history through 2026-11-17 is kept")
+        f"Logistaas ({OLD}): declared retired by the owner (last spend day "
+        "2026-11-17); history through 2026-11-17 is kept")
+    # A declared day BEFORE stored spend is contradicted by the data.
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD}:2026-11-16")
+    wrong = _truth(*week, now=day3)
+    assert wrong["state"] == "coverage_incomplete"
+    assert "has stored spend on 2026-11-17" in wrong["withheld_detail"]
     _no_token(_dump(live_db), line, after)
+
+
+def test_13b_a_lost_token_does_not_turn_a_spending_account_into_a_removed_one(
+        live_db, monkeypatch):
+    """Review item 1. Both accounts sync; then META_ADS_ACCESS_TOKEN_2 is lost
+    while META_AD_ACCOUNT_ID_2 still lists the old account. The old account
+    is still spending; nothing may be published past its last verified day."""
+    graph = _pair()
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    _run()
+    monkeypatch.delenv("META_ADS_ACCESS_TOKEN_2")
+    later = NOW + timedelta(days=9)                    # the 27th, 06:00 UTC
+    graph.spend(CAMPAIGN_A, "2026-11-24", "8.00")      # the new account spends
+    out, errors = _run(later)
+    assert out["status"] == "partial" and out["reason"] == "meta_ads_misconfigured"
+    assert {c["account_id"] for c in graph.calls
+            if c["url"].endswith("/insights")} >= {NEW}
+    assert _coverage(live_db, OLD)[-1][1] == "2026-11-17"   # old: no new chunk
+    for start in (date(2026, 11, 12), date(2026, 11, 18)):
+        truth = _truth(start, date(2026, 11, 25), now=later)
+        assert truth["state"] == "coverage_incomplete", start
+        assert truth["state"] not in ("verified", "verified_zero_spend")
+        assert truth["usd_spend"] is None and truth["native_spend"] is None
+        old = truth["accounts"][1]
+        assert (old["account_id"], old["configured"], old["syncing"]) == (
+            OLD, True, False)
+    # Its verified days still publish.
+    assert _truth(date(2026, 11, 12), date(2026, 11, 16), now=later)["usd_spend"] == 130.34
+    line = overview._meta_spend_source(later)
+    assert line["status"] == "misconfigured"
+    assert line["accounts"][1]["summary"] == (
+        f"Logistaas ({OLD}): credential set 2 is incomplete (access_token_missing), "
+        "so it is not updated; history through 2026-11-17 is kept; later periods "
+        "are withheld")
+    # An id typo that empties the list: the configured accounts are unknown.
+    monkeypatch.setenv("META_AD_ACCOUNT_ID_2", "94437O805110952")
+    typo = _truth(date(2026, 11, 12), date(2026, 11, 16), now=later)
+    assert typo["state"] == "source_unavailable" and typo["usd_spend"] is None
+    _no_token(line, out, errors)
 
 
 def test_14_a_readable_attempt_clears_not_readable_since(live_db):
@@ -692,7 +832,10 @@ def test_17_a_deprecated_api_version_on_the_first_run(live_db, monkeypatch):
     assert line["status"] == "not_proven"
     assert line["reason"] == "meta_api_version_deprecated"
     assert line["reason_detail"] == text
-    assert _truth()["state"] == "not_connected"      # no account was ever read
+    # Configured, and never read: not proven — not "not connected".
+    first = _truth()
+    assert first["state"] == "coverage_incomplete" and first["usd_spend"] is None
+    assert first["accounts"][0]["never_read"] is True
 
 
 # ── FX ────────────────────────────────────────────────────────────────────
@@ -903,10 +1046,17 @@ def test_26_half_set_up_set_up_but_never_run_and_one_broken_set(live_db, monkeyp
     assert line["status"] == "misconfigured"
     assert line["reason_detail"] == "credential set 2: access_token_missing"
     assert line["accounts"][0]["status"] == "current"
+    assert line["accounts"][1]["status"] == "misconfigured"
+    # ...and it is shown whatever the other account says: here, late.
+    late = overview._meta_spend_source(NOW + timedelta(days=3))
+    assert late["accounts"][0]["status"] == "late"
+    assert late["status"] == "misconfigured"
+    assert late["reason_detail"] == "credential set 2: access_token_missing"
     _no_token(line, out, errors, _dump(live_db))
 
 
-def test_27_with_nothing_configured_stored_history_still_counts(live_db, monkeypatch):
+def test_27_with_nothing_configured_stored_accounts_are_still_required(
+        live_db, monkeypatch):
     graph = _pair()
     fakes.configure(monkeypatch, graph)
     _fx(monkeypatch)
@@ -916,17 +1066,85 @@ def test_27_with_nothing_configured_stored_history_still_counts(live_db, monkeyp
     truth = _truth()
     assert truth["state"] == "verified" and truth["usd_spend"] == 130.34
     assert [a["configured"] for a in truth["accounts"]] == [False, False]
-    # A range after every account's last verified day: nothing reaches it.
+    assert truth["owner_declared_retired"] == []
+    # A range after every account's last verified day: withheld. Nobody has
+    # said these accounts stopped spending.
     later = _truth(date(2026, 12, 1), date(2026, 12, 7),
                    now=NOW + timedelta(days=30))
-    assert later["state"] == "not_connected" and later["usd_spend"] is None
+    assert later["state"] == "coverage_incomplete" and later["usd_spend"] is None
+    line = overview._meta_spend_source(NOW)
+    assert line["status"] == "account_unresolved"
+    assert [a["status"] for a in line["accounts"]] == ["account_unresolved"] * 2
+    # Declared, and borne out: then Meta is simply not connected.
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED",
+                       f"{NEW}:2026-11-16,{OLD}:2026-11-17")
+    gone = _truth(date(2026, 12, 1), date(2026, 12, 7), now=NOW + timedelta(days=30))
+    assert gone["state"] == "not_connected" and gone["usd_spend"] is None
     line = overview._meta_spend_source(NOW)
     assert line["status"] == "not_connected"
     assert [a["summary"] for a in line["accounts"]] == [
-        f"Logistaas Limited ({NEW}): no longer connected; history through "
-        "2026-11-16 is kept",
-        f"Logistaas ({OLD}): no longer connected; history through 2026-11-17 is kept"]
+        f"Logistaas Limited ({NEW}): declared retired by the owner (last spend "
+        "day 2026-11-16); history through 2026-11-16 is kept",
+        f"Logistaas ({OLD}): declared retired by the owner (last spend day "
+        "2026-11-17); history through 2026-11-17 is kept"]
     assert _rows(live_db, OLD) == OLD_ROWS           # nothing is deleted
+
+
+def test_27b_a_clean_sync_never_reads_late_at_any_hour_of_the_day(
+        live_db, monkeypatch):
+    """Review item 5. Each account is judged against the last day its latest
+    DUE sync could settle in its own zone — not against page-view time. At
+    06:00 UTC Los Angeles' yesterday has two hours left to run; judged at
+    page-view time that account read "late" from 08:00 UTC until the next
+    morning, after a perfectly clean sync."""
+    graph = _pair()
+    graph.spend(CAMPAIGN_A, "2026-11-16", "5.00")
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    synced = NOW + timedelta(minutes=5)                # 06:05 UTC on the 18th
+    out, _ = _run(synced)
+    assert out["status"] == "success"
+    seen = set()
+    for minutes in range(0, 24 * 60 + 1, 30):          # 06:05 → 06:05 next day
+        at = synced + timedelta(minutes=minutes)
+        line = overview._meta_spend_source(at)
+        by = {a["account_id"]: a for a in line["accounts"]}
+        assert line["status"] == "current", (at, line["accounts"])
+        assert by[NEW]["status"] == by[OLD]["status"] == "current", at
+        seen.add((by[NEW]["complete_through"], by[OLD]["complete_through"]))
+    # All day: Los Angeles through the 16th, Amman through the 17th.
+    assert seen == {("2026-11-16", "2026-11-17")}
+    # The next morning's sync never ran. Once it was due (09:00 UTC), both
+    # accounts read late — each naming its own missing day.
+    missed = overview._meta_spend_source(synced + timedelta(days=1, hours=3))
+    by = {a["account_id"]: a for a in missed["accounts"]}
+    assert missed["status"] == "late"
+    assert by[NEW]["missing_ranges"] == [{"start": "2026-11-17", "end": "2026-11-17"}]
+    assert by[OLD]["missing_ranges"] == [{"start": "2026-11-18", "end": "2026-11-18"}]
+    # It ran: current again, each one day further on.
+    _run(synced + timedelta(days=1))
+    line = overview._meta_spend_source(synced + timedelta(days=1, hours=3))
+    assert line["status"] == "current"
+    assert [a["complete_through"] for a in line["accounts"]] == [
+        "2026-11-17", "2026-11-18"]
+
+
+def test_27c_complete_through_is_not_said_while_usd_is_unavailable(
+        live_db, monkeypatch):
+    graph = _seeded()
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch, fail=("2026-11-16",))
+    out, _ = _run()
+    assert out["status"] == "partial" and out["reason"] == "fx_rates_missing"
+    line = overview._meta_spend_source(NOW)
+    assert line["status"] == "usd_unavailable" and line["complete_through"] is None
+    assert line["reason"] == "fx_rates_missing"
+    assert line["accounts"][0]["summary"] == (
+        f"Logistaas Limited ({NEW}): spend recorded through 2026-11-16 "
+        "(America/Los_Angeles); no US-dollar value for 1 day(s) in GBP")
+    _fx(monkeypatch)
+    _run()
+    assert overview._meta_spend_source(NOW)["status"] == "current"
 
 
 # ── backfill ──────────────────────────────────────────────────────────────
@@ -964,14 +1182,73 @@ def test_28_the_backfill_writes_monthly_chunks_per_account_and_no_run(
         ("2026-09-10", "2026-09-30", "verified", 0),
         ("2026-10-01", "2026-10-31", "verified", 0),
         ("2026-11-01", "2026-11-16", "verified", 0)]   # capped at LA's yesterday
-    assert {(b[0], b[1]) for b in _batches(live_db)} == {("backfill", "success")}
-    assert len(_batches(live_db)) == 6
+    # No sync batch, no sync_state row and no run: only the daily step moves
+    # this dataset's freshness.
+    assert _batches(live_db) == []
+    assert q(live_db, "SELECT COUNT(*) FROM sync_state "
+                      "WHERE source = 'meta_ads_api'") == [(0,)]
     assert q(live_db, "SELECT COUNT(*) FROM runs") == [(0,)]
     whole = _truth(date(2026, 9, 10), YESTERDAY)
     assert whole["state"] == "verified" and whole["usd_spend"] == 211.34
     # The days before the backfill's first day were never fetched.
     assert _truth(date(2026, 9, 1), YESTERDAY)["state"] == "coverage_incomplete"
     _no_token(_dump(live_db), out)
+
+
+def test_28b_a_backfill_cannot_make_a_failed_daily_feed_read_fresh(
+        live_db, monkeypatch):
+    """Review item 6, through the freshness the product publishes
+    (`compute_canonical_freshness`, via /api/datasets/freshness)."""
+    import api.server as server
+    from datetime import datetime as _dt
+
+    def freshness():
+        payload = server.api_datasets_freshness(
+            user={"username": "tester", "role": "admin"}, days=60)
+        row = {d["dataset_key"]: d for d in payload["datasets"]}[
+            "meta_ads_api/meta_campaign_spend"]
+        state = q(live_db, "SELECT status, last_source_date::text, last_batch_id "
+                           "FROM sync_state WHERE source = 'meta_ads_api'")
+        return row["canonical_status"], row.get("status"), state
+
+    now = _dt.now(tz=timezone.utc).replace(hour=6, minute=0)
+    graph = FakeGraph()
+    old = graph.add_account(OLD)
+    for account, zone in ((graph.default, "America/Los_Angeles"), (old, "Asia/Amman")):
+        day = meta.account_local_yesterday(zone, now)
+        account.spend(CAMPAIGN_A, day, "10.00")
+        account.spend(CAMPAIGN_A, day - timedelta(days=40), "4.00")
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    out, _ = _run(now)
+    assert out["status"] == "success"
+    good = freshness()
+    assert good[0] == "fresh_with_data"
+
+    # The next daily run fails for BOTH accounts (the token for each is
+    # refused), so the daily feed is failed.
+    for account in graph.accounts.values():
+        account.refusal = error_response(400, 190, subcode=463)
+    out, _ = _run(now + timedelta(days=1))
+    assert out["status"] == "failed"
+    failed = freshness()
+    assert failed[0] != "fresh_with_data" and failed[2][0][0] == "failed"
+    assert failed[2][0][1] == good[2][0][1]            # the watermark did not move
+
+    # A backfill of ONE account, which succeeds.
+    graph.default.refusal = None
+    result = meta.run_backfill(now.date() - timedelta(days=50), None,
+                               account_ids=[NEW], now=now + timedelta(days=1))
+    assert result["status"] == "success"
+    assert len(_coverage(live_db, NEW)) >= 3           # it did write its ledger
+    assert freshness() == failed                       # and changed nothing here
+
+    # A partial backfill (the old account still refused) changes nothing either.
+    result = meta.run_backfill(now.date() - timedelta(days=50), None,
+                               now=now + timedelta(days=1), resume=True)
+    assert result["status"] == "partial"
+    assert freshness() == failed
+    assert len(_batches(live_db)) == 2                 # the two daily runs only
 
 
 def test_29_the_backfill_script_takes_an_account_and_skips_when_not_configured(
@@ -1010,7 +1287,7 @@ def test_30_the_smoke_test_prints_each_account_and_never_a_token(
     old.spend(CAMPAIGN_A, day - timedelta(days=40), "999.00")     # outside 30 days
     fakes.configure(monkeypatch, graph)
     before = _dump(live_db)
-    assert smoke.main() == 0
+    assert smoke.main([]) == 0
     text = capsys.readouterr().out
     assert f"--- Ad account {NEW} ---" in text and f"--- Ad account {OLD} ---" in text
     for expected in (
@@ -1034,11 +1311,11 @@ def test_30_the_smoke_test_prints_each_account_and_never_a_token(
 
     # One account refused: it says which, plainly, and exits 1.
     old.refusal = error_response(403, 200, message="(#200) Permissions error")
-    assert smoke.main() == 1
+    assert smoke.main([]) == 1
     text = capsys.readouterr().out
     assert "FAILED           : meta_api_refused: Meta API refused the request: " \
            "HTTP 403, code 200" in text
     assert "=== 1 of 2 account(s) OK ===" in text
     fakes.unconfigure(monkeypatch)
-    assert smoke.main() == 2
+    assert smoke.main([]) == 2
     _no_token(text, capsys.readouterr().out)
