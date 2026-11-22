@@ -350,6 +350,8 @@ READER_ENTRY_POINTS = (
     "fetch_durable_outcome_populations", "fetch_won_revenue",
     "fetch_campaign_deal_details", "fetch_country_deal_details",
     "fetch_revenue_deals", "fetch_source_revenue", "fetch_source_revenue_daily",
+    # PR-ADS-168B review: fetch_source_deal_details is deleted; the name stays
+    # (as build_unit_economics does) so a module that brings it back is a reader.
     "fetch_source_deal_details", "fetch_sql_lead_details",
     "source_attribution_health_counts",
 )

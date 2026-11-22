@@ -6281,3 +6281,14 @@ updated to the remaining pages.
 **Known gaps.** Channels has no per-deal list behind a channel and no
 PR-ADS-133 platform split; the Dashboard Revenue tab still titles a panel
 "Revenue by Source" (`docs/56` §7).
+
+**Review round 1.** Dashboard links to Channels promised evidence Channels
+cannot reproduce (business windows by source group vs evidence windows by
+original source): every one now reads "Open Channels (different windows and
+grouping)" (`canonical_contract.CHANNELS_LINK_LABEL`), the Overview signal
+tiles print that label, and the Revenue tab panel is retitled "Closed-won by
+source group · this window". The Revenue Health parity banner names the pages
+it compares ("Campaign, Country and Deals pages agree with the mart"). The
+uncalled `revenue_repository.fetch_source_deal_details` is deleted (its name
+stays banned in the audit lists). `docs/56` §7.2 notes PR-ADS-171B's Paid
+Social contact split.

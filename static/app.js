@@ -52,6 +52,11 @@ const RETIRED_PAGE_REDIRECTS = {
 // PR-ADS-153C: Leads is a CRM/business page — business windows, clean chrome.
 // PR-ADS-162A: Channels has its own acquisition-window selector — clean chrome.
 // PR-ADS-162C: System is a plain status page — clean chrome.
+// PR-ADS-168B review round 1: the one label on every link from a
+// business-window Dashboard figure to Channels (services/canonical_contract.
+// CHANNELS_LINK_LABEL). Channels does not reproduce those figures.
+const CHANNELS_LINK_LABEL = "Open Channels (different windows and grouping)";
+
 const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"];
 
 function isRevenuePage(pageId) {
@@ -3381,7 +3386,7 @@ function renderDashSignals(d) {
         <div class="dash-signal__label">${escapeHtml(label)}</div>
         <div class="dash-signal__value">${escapeHtml(body.value || "—")}</div>
         <div class="dash-signal__line">${escapeHtml(body.line || "")}</div>
-        <span class="dash-signal__cta" aria-hidden="true">View evidence →</span>
+        <span class="dash-signal__cta" aria-hidden="true">${escapeHtml(s.target_label || "View evidence")} →</span>
       </a>`;
   }).join("");
 
@@ -3858,7 +3863,7 @@ function renderRevBreakdownPanel(title, sub, rows, nameKey, targetPage, opts) {
         </li>`;
       }).join("")}</ul>`;
   const link = dashCanNavigate(targetPage)
-    ? `<a class="rev-breakdown-link" href="#/${escapeHtml(targetPage)}">Open evidence →</a>`
+    ? `<a class="rev-breakdown-link" href="#/${escapeHtml(targetPage)}">${escapeHtml(opts.linkLabel || "Open evidence")} →</a>`
     : '<span class="rev-breakdown-link rev-breakdown-link--muted">Admin only</span>';
   return `
     <div class="dash-panel rev-breakdown-panel dash-anim">
@@ -3883,8 +3888,11 @@ function renderRevBreakdowns(d) {
     <div class="rev-breakdown-grid">
       ${renderRevBreakdownPanel("Revenue by Campaign", "Top 5 by closed-won revenue",
         b.by_campaign, "campaign", "roas-campaigns", common)}
-      ${renderRevBreakdownPanel("Revenue by Source", "Top 5 · Google Ads spend-connected only",
-        b.by_source, "source_group", "channels", { ...common, spendConnected: true })}
+      ${renderRevBreakdownPanel("Closed-won by source group · this window", "Top 5 · Google Ads spend-connected only",
+        b.by_source, "source_group", "channels",
+        // PR-ADS-168B review: Channels uses evidence windows grouped by HubSpot
+        // original source, so the link must not promise these figures there.
+        { ...common, spendConnected: true, linkLabel: CHANNELS_LINK_LABEL })}
       ${renderRevBreakdownPanel("Revenue by Country", "Top 5 by closed-won revenue",
         b.by_country, "country", "roas-countries", common)}
     </div>`;
@@ -8503,7 +8511,7 @@ function renderRevenuePageParity(audit) {
       <div class="panel__header">Revenue Page Parity</div>
       <div class="panel__body panel__body--flush">
         <div class="revenue-parity-summary revenue-parity-summary--${allAgree ? "ok" : "warning"}">
-          <div class="revenue-parity-summary__verdict">All revenue pages agree with mart: <strong>${allAgree ? "Yes" : "No"}</strong></div>
+          <div class="revenue-parity-summary__verdict">Campaign, Country and Deals pages agree with the mart: <strong>${allAgree ? "Yes" : "No"}</strong></div>
           ${driftHtml}
         </div>
         <div class="revenue-table-shell">

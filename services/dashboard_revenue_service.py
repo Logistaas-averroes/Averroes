@@ -476,6 +476,7 @@ def _build_source_breakdown(window: str, now, *, revenue_connected: bool) -> lis
             "status": ("Spend-connected" if g.get("has_spend")
                        else "Revenue-only"),
             "target_page": "channels",
+            "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     rows.sort(key=lambda r: r["revenue_usd"] or 0.0, reverse=True)
     return rows[:_BREAKDOWN_LIMIT]
@@ -698,7 +699,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "headline": "Revenue with incomplete attribution",
             "body": ("; ".join(blockers) + ". The revenue is real but not fully attributed — "
                      "it is kept under Unclassified, never forced into a source."),
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     else:
         cards.append({
@@ -706,7 +707,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "headline": "Attribution looks complete" if revenue_connected else "Attribution unavailable",
             "body": ("Every closed-won deal this window carries a campaign and country." if revenue_connected
                      else "Revenue attribution cannot be verified without a connected revenue integration."),
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
     # Unavailable — truth blockers.

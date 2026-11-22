@@ -743,7 +743,8 @@ def test_revenue_reuses_pr134_design_system():
 def test_breakdown_panels_and_proof_columns_render():
     breakdown = _slice(JS, "function renderRevBreakdowns", 1200)
     assert "Revenue by Campaign" in breakdown
-    assert "Revenue by Source" in breakdown
+    # PR-ADS-168B review: retitled — the page "Revenue by Source" is deleted.
+    assert "Closed-won by source group · this window" in breakdown
     assert "Revenue by Country" in breakdown
     cols = JS[JS.find("const REV_DEAL_COLUMNS"):JS.find("const REV_DEAL_COLUMNS") + 600]
     for label in ("Company", "Company ID", "Main Contact", "Contact ID", "Deal",

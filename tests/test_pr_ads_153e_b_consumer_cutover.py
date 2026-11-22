@@ -493,8 +493,9 @@ def test_13_no_migrated_consumer_falls_back_to_a_legacy_ledger(monkeypatch):
 
     for name in ("fetch_revenue_deals", "fetch_won_revenue",
                  "fetch_source_revenue", "fetch_source_revenue_daily",
-                 "fetch_campaign_deal_details", "fetch_country_deal_details",
-                 "fetch_source_deal_details"):
+                 "fetch_campaign_deal_details", "fetch_country_deal_details"):
+        # PR-ADS-168B review: fetch_source_deal_details is deleted, so there is
+        # nothing left to forbid; PROHIBITED_LEGACY_PROVIDERS still bans the name.
         monkeypatch.setattr(repo, name, _forbidden)
 
     from services.revenue_attribution_service import build_revenue_deals
@@ -713,6 +714,8 @@ PROHIBITED_LEGACY_TABLES = ("gclid_attribution", "deal_source_attribution")
 PROHIBITED_LEGACY_PROVIDERS = frozenset({
     "fetch_revenue_deals", "fetch_won_revenue", "fetch_source_revenue",
     "fetch_source_revenue_daily", "fetch_campaign_deal_details",
+    # fetch_source_deal_details is deleted (PR-ADS-168B review); its name stays
+    # banned so a reintroduced call fails here.
     "fetch_country_deal_details", "fetch_source_deal_details",
     "compute_all_campaign_roas", "compute_all_country_roas",
     "_load_windsor_spend",

@@ -61,6 +61,13 @@ SOURCE_CANONICAL_FUNNEL = "hubspot.canonical_contact_funnel"
 SOURCE_CANONICAL_DEAL_LEDGER = "hubspot.canonical_deal_ledger"
 SOURCE_REVENUE_DECISION_MART = "canonical.revenue_decision_mart"
 SOURCE_REVENUE_BY_SOURCE = "canonical.revenue_by_source"
+
+#: PR-ADS-168B review round 1. The label on every Dashboard link to Channels
+#: from a business-window figure. Channels uses evidence windows (ending
+#: yesterday) grouped by HubSpot original source; the Dashboard source figures
+#: are business windows grouped by source group. The link must not promise
+#: that Channels reproduces the figure.
+CHANNELS_LINK_LABEL = "Open Channels (different windows and grouping)"
 SOURCE_FX = "canonical.fx_rates"
 
 CANONICAL_SOURCES = frozenset({

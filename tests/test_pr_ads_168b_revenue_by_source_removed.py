@@ -323,3 +323,108 @@ def test_14_channels_carries_per_channel_deals_customers_and_revenue():
     assert "load_won_deals" in src
     assert "reader_row" in inspect.getsource(sas)
     assert "build_channel_outcomes" in SERVER
+
+
+# ── review round 1 ────────────────────────────────────────────────────────
+# The Dashboard source figures are BUSINESS windows grouped by PR-ADS-133
+# source group (build_revenue_by_source). Channels shows EVIDENCE windows
+# ending yesterday grouped by HubSpot original source. A link from one to the
+# other must not promise the same number.
+
+LINK_LABEL = "Open Channels (different windows and grouping)"
+BUSINESS_WINDOW_SERVICES = (
+    "services/dashboard_overview_service.py", "services/dashboard_revenue_service.py",
+    "services/dashboard_deals_service.py", "services/dashboard_channels_service.py",
+)
+
+
+def _channels_targets(rel: str) -> list:
+    """Every dict literal in ``rel`` with ``"target_page": "channels"``, as the
+    source text of its ``target_label`` value (None when it has none)."""
+    src = (ROOT / rel).read_text()
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value if isinstance(k, ast.Constant) else None for k in node.keys]
+        if "target_page" not in keys:
+            continue
+        page = node.values[keys.index("target_page")]
+        if not (isinstance(page, ast.Constant) and page.value == "channels"):
+            continue
+        label = (ast.get_source_segment(src, node.values[keys.index("target_label")])
+                 if "target_label" in keys else None)
+        out.append((node.lineno, label))
+    return out
+
+
+def test_15_every_dashboard_link_to_channels_discloses_the_difference():
+    from services import canonical_contract
+    assert canonical_contract.CHANNELS_LINK_LABEL == LINK_LABEL
+    assert f'const CHANNELS_LINK_LABEL = "{LINK_LABEL}";' in JS
+    total = 0
+    for rel in BUSINESS_WINDOW_SERVICES:
+        targets = _channels_targets(rel)
+        total += len(targets)
+        for line, label in targets:
+            assert label == "canonical_contract.CHANNELS_LINK_LABEL", f"{rel}:{line} {label}"
+        assert '"Open Channels"' not in (ROOT / rel).read_text(), rel
+    assert total == 16
+
+
+def test_16_the_overview_best_source_signal_carries_the_label(monkeypatch):
+    from tests.test_pr_ads_134_dashboard_overview import _overview
+    sig = _overview(monkeypatch)["top_signals"]["best_source"]
+    assert sig["target_page"] == "channels"
+    assert sig["target_label"] == LINK_LABEL
+    # The tile prints the label it is given, not a fixed "View evidence".
+    assert '${escapeHtml(s.target_label || "View evidence")} →' in JS
+
+
+def test_17_the_revenue_tab_source_panel_says_what_it_is():
+    script = "\n".join([
+        "const escapeHtml = (s) => String(s);",
+        "const dashCanNavigate = () => true;",
+        "const canonicalMetricHtml = () => '', rowMetricHtml = () => '', revAttrBadge = () => '';",
+        "const fmtCount = 0, fmtMoney = 0;",
+        f'const CHANNELS_LINK_LABEL = "{LINK_LABEL}";',
+        _fn("renderRevBreakdownPanel"),
+        _fn("renderRevBreakdowns"),
+        "process.stdout.write(JSON.stringify(renderRevBreakdowns({ breakdowns: {} })));",
+    ])
+    html = json.loads(_node(script))
+    assert "Closed-won by source group · this window" in html
+    assert f'href="#/channels">{LINK_LABEL} →</a>' in html
+    assert "Revenue by Source" not in html
+    # No surviving UI string titles anything "Revenue by Source": the words
+    # remain only in comments.
+    code = re.sub(r"//[^\n]*", "", JS)
+    assert "Revenue by Source" not in code
+    assert "Revenue by Source" not in re.sub(r"<!--.*?-->", "", HTML, flags=re.S)
+
+
+def test_18_the_parity_banner_names_the_pages_it_compares():
+    script = "\n".join([
+        "const escapeHtml = (s) => String(s);",
+        "const fmtMoney = (v) => String(v);",
+        _fn("renderRevenuePageParity"),
+        "process.stdout.write(JSON.stringify(renderRevenuePageParity({"
+        " all_pages_agree: true, pages: [{page: 'Deals', status: 'pass'}] })));",
+    ])
+    html = json.loads(_node(script))
+    assert "Campaign, Country and Deals pages agree with the mart" in html
+    assert "All revenue pages agree" not in html
+    from services.revenue_decision_mart import build_revenue_performance_audit
+    import inspect
+    pages = re.findall(r'\("(\w+)", "([^"]+)", "(?:spend|revenue)"',
+                       inspect.getsource(build_revenue_performance_audit))
+    assert [k for k, _ in pages] == ["roas_by_campaign", "roas_by_country", "deals"]
+
+
+def test_19_the_uncalled_source_deal_details_read_is_deleted():
+    tree = ast.parse((ROOT / "db/revenue_repository.py").read_text())
+    assert "fetch_source_deal_details" not in {
+        n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    # The name stays banned so a reintroduction is caught.
+    from scripts import audit_customer_revenue_reader_cutover as audit
+    assert "fetch_source_deal_details" in audit.READER_ENTRY_POINTS

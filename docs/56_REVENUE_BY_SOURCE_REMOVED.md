@@ -20,7 +20,7 @@ it, following the PR-ADS-162D rule: no half of a deleted page is left behind.
 | CSS | the PR-ADS-133/140 `.revenue-source-section`, `.source-group-*`, `.source-taxonomy-table`, `.source-channel-*`, `.source-platform-*`, `.source-status`, `.source-expand-button`, `.source-drilldown-*`, `.source-proof-chip`, `.source-spend-native` block |
 | Routes | `GET /api/revenue-by-source`, `GET /api/revenue-performance/source-platform-detail` |
 | Services | `source_attribution_service.build_source_platform_detail`, `_source_detail_row`, `_source_contact_row` |
-| Repository | `revenue_repository.fetch_source_contact_details` (its only caller was the drawer) |
+| Repository | `revenue_repository.fetch_source_contact_details` (its only caller was the drawer) and `fetch_source_deal_details` (uncalled since PR-ADS-153E-B; deleted in review round 1) |
 | Mart | the `source` view of `build_revenue_decision_mart` (`VALID_VIEWS` is `campaign, country, deal`), its `source_spend_scope` diagnostic, the response key `source_spend_truth`, and the `revenue_by_source` row of `build_revenue_performance_audit` (the Revenue Health parity panel) |
 
 **Kept**, because something else reads it: `build_revenue_by_source` and its
@@ -29,8 +29,10 @@ taxonomy helpers (the Dashboard Overview, Revenue, Deals and Channels tabs and
 (the provenance name those Dashboard figures carry), the
 `revenue_by_source` contract of `sql_truth_audit_service` (a diagnostic of the
 google-ads-source scope), and the Source Attribution Backfill job and its
-endpoints. `fetch_source_deal_details` was already uncalled before this PR and
-is left for a separate cleanup.
+endpoints. The NAME `fetch_source_deal_details` stays in the reader audit's
+`READER_ENTRY_POINTS` and in 153E-B's `PROHIBITED_LEGACY_PROVIDERS`, as
+`build_unit_economics` did after PR-ADS-165A: a module that brings it back is
+caught.
 
 ## 2. Convention for the retired routes
 
@@ -64,17 +66,24 @@ would otherwise send an unknown key to the Dashboard.
 | "Google Ads-source SQLs" chip (campaign-attributable subset) | the Paid Search funnel row; campaign-level SQLs stay on Campaign Evidence |
 | Platform drawer: the deals behind a platform | the **Deals** page, which lists every won deal with its source group (Channels has no per-deal drill — known gap §7.1) |
 | Platform drawer: the leads / SQLs behind a platform | the Leads page filtered by acquisition group |
-| Spend-truth strip and mart diagnostics | Revenue Health (Spend Truth panel, parity panel) and Campaign / Country Revenue & Spend, which still render them |
+| Spend-truth strip and mart diagnostics | Campaign / Country Revenue & Spend, which still render the same strip and diagnostics. (Revenue Health's Spend Truth panel is a separate forensic audit; its parity panel now compares only the Campaign, Country and Deals pages and says so.) |
 | Window selector (business windows) | Channels' evidence windows (30 / 60 / 180 days / all time); business-window source mixes stay on the Dashboard tabs |
 
 ## 5. Links retargeted to Channels
 
 Every `target_page: "revenue-by-source"` / "Open Revenue by Source" now reads
-`target_page: "channels"` / "Open Channels": the Dashboard Overview's
+`target_page: "channels"` with `target_label` "Open Channels (different
+windows and grouping)" (`canonical_contract.CHANNELS_LINK_LABEL`, mirrored as
+`CHANNELS_LINK_LABEL` in `static/app.js`). The figures are business windows
+grouped by source group and Channels shows evidence windows grouped by HubSpot
+original source, so the link says that it does not show the same number. The
+links: the Dashboard Overview's
 best-source signal, period-change movers and the "no unproven SQL pipelines"
 card; the Revenue tab's per-source rows and attribution cards; the Deals tab's
 source cards; the Dashboard Channels decision cards; and the Revenue tab's
-"Revenue by Source" breakdown panel's "Open evidence" link.
+source breakdown panel, retitled "Closed-won by source group · this window".
+The Overview's signal tiles now print the link's `target_label` instead of a
+fixed "View evidence".
 
 ## 6. Registries
 
@@ -100,11 +109,16 @@ source cards; the Dashboard Channels decision cards; and the Revenue tab's
    source are read on the Deals page (by source group, business windows),
    not filtered to one channel.
 2. The platform split (e.g. LinkedIn vs Facebook inside Organic Social) is
-   not on Channels, which groups by HubSpot original source. Channels'
-   expandable source rows split a channel by its raw source, not by the
-   PR-ADS-133 platform taxonomy.
-3. The Dashboard Revenue tab still has a breakdown panel titled "Revenue by
-   Source" (top 5 source groups); only its link changed.
+   not on Channels, which groups by HubSpot original source. PR-ADS-171B
+   (PR 223, pending) adds a platform split of Paid Social **contacts** on
+   Channels. After both merge there is still no platform split of **deals or
+   revenue**, and no Organic Social split at all.
+3. The Dashboard source figures (business windows, PR-ADS-133 source
+   groups) link to Channels (evidence windows ending yesterday, HubSpot
+   original source), which does not reproduce them. Every such link reads
+   "Open Channels (different windows and grouping)"
+   (`canonical_contract.CHANNELS_LINK_LABEL`), and the Revenue tab panel is
+   titled "Closed-won by source group · this window".
 
 ## 8. Proof
 

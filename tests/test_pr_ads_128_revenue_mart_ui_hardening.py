@@ -193,7 +193,8 @@ def test_no_old_endpoint_fallback():
 def test_revenue_health_parity_summary():
     panel = _slice("function renderRevenuePageParity", span=2800)
     assert "Revenue Page Parity" in panel
-    assert "All revenue pages agree with mart" in panel
+    # PR-ADS-168B review: the banner names the pages it compares.
+    assert "Campaign, Country and Deals pages agree with the mart" in panel
     assert "Pages with drift" in panel
     for col in (">Page<", ">Metric<", ">Current<", ">Mart<", ">Difference<", ">Status<", ">Reason<"):
         assert col in panel, f"parity table missing column {col}"

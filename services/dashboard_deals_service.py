@@ -525,7 +525,7 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
             "body": (f"{top['source_detail']} generated {_fmt_usd_short(top['closed_won_revenue_usd'])} "
                      f"closed-won revenue from {top.get('closed_won_deals') or 0} won deal"
                      f"{'s' if (top.get('closed_won_deals') or 0) != 1 else ''} this window."),
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     elif any(s.get("closed_won_deals") is None
              or s.get("closed_won_revenue_usd") is None for s in source_rows):
@@ -534,14 +534,14 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
             "headline": "Source closed-won outcomes are withheld",
             "body": ("Closed-won deals or revenue are withheld for this window, so no "
                      "source is claimed to have produced none."),
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "No source has closed-won revenue yet",
             "body": "No source produced closed-won deals in this window.",
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
     # Watch — a source with SQL volume but weak customer conversion.
@@ -553,7 +553,7 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
             "headline": f"{top['source_detail']} has SQL volume but no won deals",
             "body": (f"{top['source_detail']} produced {top['sqls']} SQLs but no closed-won "
                      "deals in this window. Review lead quality and sales follow-up."),
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     elif any((s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") is None
              for s in source_rows):
@@ -562,7 +562,7 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
             "headline": "SQL conversion cannot be judged",
             "body": ("Closed-won deals are withheld for sources with SQL volume, so "
                      "unconverted SQL volume is not claimed."),
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     else:
         cards.append({
@@ -570,7 +570,7 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
             "headline": "No source with unconverted SQL volume",
             "body": "Every source with meaningful SQL volume produced at least one won deal, "
                     "or there is not enough SQL volume to judge.",
-            "target_page": "channels", "target_label": "Open Channels",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
     # Investigate — qualified SQLs that have not become customers.
