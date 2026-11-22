@@ -284,6 +284,10 @@ def _spend_truth_block(core: dict) -> dict:
         "geo_coverage_missing_ranges": health.get("geo_coverage_missing_ranges") or [],
         "failed_geo_dates": health.get("failed_geo_dates") or [],
         "country_gap_reason": health.get("country_gap_reason"),
+        # PR-ADS-170A: the window's geo criteria the owner labelled with a
+        # country (Google reports them without one), and any mismatch.
+        "owner_labelled_geo": health.get("owner_labelled_geo")
+        or {"criteria": [], "mismatches": []},
         # PR-ADS-129: exact geo↔canonical variance so the Country blocked card shows
         # real totals (campaign vs geo, variance, tolerance) — never fabricated.
         "campaign_spend_total": native_spend,

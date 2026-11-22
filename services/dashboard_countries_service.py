@@ -1101,6 +1101,14 @@ def _assemble(window: str, now: datetime | None) -> dict:
     country_rows = _build_country_rows(
         mart_real_rows, geo_maps, geo_available, deals_by_key, unknown_amount_keys,
         country_roas_unblockable, revenue_connected, native_currency)
+    # PR-ADS-170A: a market whose geo spend is under it because the owner
+    # labelled the Google criterion (Google reports it without a country) says
+    # so — from the SAME geo read that supplied its spend.
+    from services.revenue_attribution_service import (  # noqa: PLC0415
+        stamp_owner_labelled_countries,
+    )
+    owner_labelled_geo = (geo.get("owner_labelled_geo") or {}) if geo_available else {}
+    country_rows = stamp_owner_labelled_countries(country_rows, owner_labelled_geo)
 
     # PR-ADS-155-F1. The country-attributed revenue TOTAL gets its verdict from
     # its own population, via the canonical rule — not from geo readiness. Geo
@@ -1148,6 +1156,10 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "spend_truth": spend_truth,
         "readiness": readiness,
         "country_rows": country_rows,
+        "owner_labelled_geo": {
+            "criteria": list(owner_labelled_geo.get("criteria") or []),
+            "mismatches": list(owner_labelled_geo.get("mismatches") or []),
+        },
         "residual": residual,
         "kpis": kpis,
         "country_roas_unblockable": country_roas_unblockable,
@@ -1476,6 +1488,11 @@ def build_dashboard_countries(window: str = "current_quarter",
         "kpis": kpis,
         "period_change": period_change,
         "countries": country_rows,
+        # PR-ADS-170A: the window's Google criteria whose country is the
+        # owner's label, and any labelled criterion a stored Google code
+        # overrode. A row it applies to carries `spend_country_provenance`.
+        "owner_labelled_geo": core.get("owner_labelled_geo")
+        or {"criteria": [], "mismatches": []},
         "residual": residual,
         "regional_mix": regional_mix,
         "decision_cards": decision_cards,

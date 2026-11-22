@@ -35,9 +35,14 @@ from tests.test_pr_ads_165a_countries_pg_integration import (  # noqa: E402,F401
     _visible, _window, _write_fx, _write_spend, live_db,
 )
 
-#: Production's two criteria that carry no code on any row.
-C2192 = ("2192", None, None)
-C2364 = ("2364", None, None)
+#: Two criteria that carry no code on any row and that nothing names — the
+#: state production's `2192` and `2364` were in when PR-ADS-167A was written.
+#: PR-ADS-170A: the owner has since labelled those two (Cuba, Iran), so they no
+#: longer exercise "spend no stored row names". These ids are NOT in
+#: config/geo_owner_labels.yaml; every assertion below is unchanged. The
+#: labelled pair is covered in tests/test_pr_ads_170a_*.
+LOOSE_A = ("2997", None, None)
+LOOSE_B = ("2998", None, None)
 #: A country Google has reported under its own criterion — but not lately.
 JORDAN = ("2400", "JO", "Jordan")
 UNAVAILABLE_NO_COUNTRY = "Unavailable — some spend in this window has no country"
@@ -45,15 +50,15 @@ UNAVAILABLE_NO_COUNTRY = "Unavailable — some spend in this window has no count
 
 def _production_shape(cluster, *, loose_in_window: bool):
     """UK spend every day; Jordan's only rows 20 days before the window;
-    2192 and 2364 code-less (2192 inside the window when asked); Pakistan
+    two unlabelled code-less criteria (one inside the window when asked); Pakistan
     with leads and no geo spend ever."""
     start, end = _window(7)
     old = start - timedelta(days=20)
     _write_fx(old, end)
     rows = [_spend_rows(UK, start + timedelta(days=i), 20.0) for i in range(7)]
     rows.append(_spend_rows(JORDAN, old, 12.0))
-    rows.append(_spend_rows(C2364, old + timedelta(days=1), 4.0))
-    rows.append(_spend_rows(C2192, end if loose_in_window else old, 3.0))
+    rows.append(_spend_rows(LOOSE_B, old + timedelta(days=1), 4.0))
+    rows.append(_spend_rows(LOOSE_A, end if loose_in_window else old, 3.0))
     _write_spend(rows)
     _verify(old, end)
     _seed_leads(cluster, [("u1", "United Kingdom", "qualified"),

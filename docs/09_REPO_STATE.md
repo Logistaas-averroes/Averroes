@@ -3834,7 +3834,10 @@ spend falls in 162 ISO codes, with lead countries stored lower-case
 - spend whose criterion no stored row names is one "(unresolved location)"
   row, in the total. The payload counts the criteria (`unresolved_spend`).
   Production holds two such criteria, `2192` and `2364` (25 rows, about £11,
-  none ever named): a standing state, not only a failed lookup;
+  none ever named): a standing state, not only a failed lookup.
+  *(PR-ADS-170A: the owner labelled these two — `2192` Cuba, `2364` Iran — in
+  `config/geo_owner_labels.yaml`. They read under those countries, marked
+  "set by owner". An unlisted code-less criterion is still unresolved.)*;
 - lead text resolves through the complete ISO 3166-1 table —
   `country_identity.resolve_iso_country_text` over `analysis/iso_countries.py`
   (249 codes as repo data, no new dependency; ISO's inverted names, former
@@ -4066,6 +4069,9 @@ and in `.github/workflows/pr-ads-153d-checks.yml`.
      `2192` and `2364`. By Google's convention a country criterion id is
      2000 + the ISO numeric code; that convention is not in the stored data
      and is not applied. Whether to name them that way is the owner's call.
+     *Closed by PR-ADS-170A (owner decision 2026-11-22): `2192` is Cuba and
+     `2364` is Iran, as two explicit entries in `config/geo_owner_labels.yaml`.
+     The convention is still not applied: only a listed id is labelled.*
    - **No settle margin.** A day counts once a verified fetch was made at or
      after account-midnight. A manual sync minutes after midnight settles
      yesterday on whatever Google had attributed by then, until the 06:00 UTC
@@ -4498,6 +4504,9 @@ and catches a scheduler that stopped running.
 Scope: the PR-ADS-165A known gaps for the Countries page and the surfaces that
 share its geo data. No change to the SQLs column (legacy, separate slice).
 Criteria `2192` and `2364` are not labelled (owner decision pending).
+*(Decided 2026-11-22 and implemented in PR-ADS-170A: owner-labelled Cuba and
+Iran, `config/geo_owner_labels.yaml`. The zero rule below is unchanged; those
+two criteria now count as carriers of `CU` / `IR` and no longer as unresolved.)*
 
 **Production facts (read-only, 2026-11-19).** `google_ads_geo_daily_spend`:
 35,297 rows with a country code over 212 criteria carrying 212 codes, strictly
@@ -5299,3 +5308,111 @@ swallowing fake audits each certify (`CERTIFIED holds`).
    `_function_code(_API_SERVER, name) or ""`, so a function it cannot find
    reads as one that hand-builds no section dictionary and passes — fail
    open for that structural check. Unchanged here.
+
+## PR-ADS-170A — the owner labels two Google Ads locations that Google reports without a country (November 2026)
+
+Scope: the open item PR-ADS-165A and 167A both recorded — "criteria `2192` /
+`2364` stay unlabelled; owner decision".
+
+**Production facts (read-only).** `google_ads_geo_daily_spend` holds two
+criteria with no country code on any row: `2192` (17 rows, about £7.64) and
+`2364` (8 rows, about £3.34). Google's geo_target_constant lookup answers for
+them with no country. They read as "(unresolved location)", and while their
+spend was in a window a lead country never seen in Google Ads spend read
+"Unavailable — some spend in this window has no country".
+
+**Owner decision, 2026-11-22.** `2192` is Cuba (`CU`); `2364` is Iran (`IR`).
+
+**What changed.**
+
+- `config/geo_owner_labels.yaml` — `owner_labelled_geo_criteria`, one entry
+  per criterion: `code`, `approved`, `by`. Only a listed id is labelled.
+  Google's "2000 + ISO numeric" id convention is still not applied anywhere:
+  an unlisted code-less criterion (`2368`, say) resolves to nothing.
+- `analysis/geo_owner_labels.py` loads and validates it. An entry is ignored,
+  with a logged warning, unless its key is a criterion id, `code` is in
+  `analysis/iso_countries.ISO_COUNTRY_NAMES`, `approved` is a date and `by` is
+  non-empty; one criterion listed twice is ignored. A missing, empty or
+  unparseable file means no labels. Loading never raises.
+- `db/geo_identity_sql.criterion_identity` is the one rule, used by every
+  reader (`fetch_geo_daily_spend_by_country`, `fetch_geo_criterion_identities`,
+  `fetch_geo_code_carriers`, `country_evidence_service.identify_spend_rows`):
+  stored codes are judged first, exactly as before (one resolves; two that
+  disagree resolve to nothing); only a criterion with NO stored code takes its
+  owner label, with `provenance: "owner_labelled"`.
+- **A stored Google code always wins.** If a labelled criterion has a stored
+  code that is not the label's, the stored code is used, the label is not
+  applied, and the mismatch is logged (`[geo-identity] … NOT applied`) and
+  published as `owner_label_mismatch` on the row and in
+  `owner_labelled_geo.mismatches`. Nothing is merged.
+- **The label is never written.** The range writer
+  (`replace_geo_daily_spend_range`) and the sync's
+  `_resolve_country_metadata` still use `resolved_code` (stored codes only), so
+  the table stays what Google sent, Google is still asked about a labelled
+  criterion on every sync, and an answer it gives later is stored and wins.
+  The sync's chunk report names the code-less criteria the readers will label
+  (`country_identity.owner_labelled`); `unresolved` still lists every
+  criterion stored with no code.
+- Countries (`/api/geo`): the two criteria are rows "Cuba" and "Iran" with
+  `country_provenance: "owner_labelled"` and `owner_labelled_criteria`; lead
+  text resolving to `CU` / `IR` joins them. The payload carries
+  `owner_labelled_geo: {criteria, mismatches, note}`. With nothing else
+  unresolved, the "(unresolved location)" row and the notice are gone.
+- The zero rule (167A) is unchanged; its inputs changed. An owner-labelled
+  criterion is not unresolved spend, and it is a carrier of its code
+  (`fetch_geo_code_carriers` returns it with `provenance: "owner_labelled"`
+  when it has rows on record and none carries a code). A zero that stands on
+  such a carrier is marked `owner_labelled` on the row.
+- Country Revenue & Spend and Dashboard Countries read the same repo function,
+  so the two criteria arrive named. A market row whose geo spend rests on a
+  label carries `spend_country_provenance: "owner_labelled"` and
+  `owner_labelled_criteria`; `spend_truth.owner_labelled_geo` (mart) and
+  `owner_labelled_geo` (dashboard) list the criteria and any mismatch.
+- UI: `ownerLabelledCountryNote` prints "set by owner" beside the country
+  name on all three pages, with the title "Country set by owner — Google Ads
+  reports this location without a country".
+
+**To label another criterion:** add an entry to
+`config/geo_owner_labels.yaml` with the owner's approval date and approver,
+and a line here. Do not add an id the owner has not approved, and do not add a
+rule that derives a code from the id.
+
+**Existing tests changed, and why.** Five 165A / 167A cases used `2192` /
+`2364` as "a criterion no stored row names". By the owner's decision those two
+are no longer that. The fixtures now use ids that are not in the owner table
+(`2997`, `2998`); every assertion about the rule is unchanged. One assertion
+gained a field: a carrier now states its `provenance`
+(`test_12_the_countries_geo_reads_share_one_snapshot`).
+
+**Tests.** `tests/test_pr_ads_170a_owner_labelled_geo_pg_integration.py` (20
+cases; in CI's PostgreSQL step and did-run list): the table holds exactly the
+two approved entries; nothing is inferred from an id; a stored code beats the
+label and the mismatch is logged and returned; malformed entries and
+unreadable files are ignored without raising; the production shape through
+the real handler and `loadGeo` (Cuba `$10`, Iran `$4`, both "set by owner",
+no "(unresolved location)", no notice, Pakistan `$0`, total conserved, stored
+rows still NULL); an unlisted code-less criterion still unresolved and still
+withholding; the owner-labelled criterion as the carrier of its code; Google
+later reporting `2192` as Mexico; a malformed config through the page; the
+real sync storing NULL, still asking Google, and Google's later answer
+winning; neither writer reading the owner table; the mart country view and
+Dashboard Countries; the UI helper evaluated in node.
+
+**Known gaps.**
+
+1. On Country Revenue & Spend and Dashboard Countries, countries are grouped on
+   the 96-market registry (`country_identity.SUPPORTED_COUNTRIES`, unchanged).
+   Iran is in it and is a market row. Cuba is not: its spend is in the
+   "Unknown / Unattributed country" residual on Country Revenue & Spend and on
+   no market row on Dashboard Countries — as for every Google country outside
+   the registry, and as it was before the label. Only the Countries page shows
+   a Cuba row.
+2. A market row is marked by its country code. If a code were carried by both
+   an owner-labelled criterion and a Google-named one, the row's note would
+   cover spend of both. Production has no such code.
+3. The labels are read once per process: a config change takes effect on the
+   next deploy / restart.
+4. Not run against production. The row counts and amounts above are the
+   read-only figures recorded for this task; the first production read should
+   show Cuba and Iran rows on the Countries page for a window holding their
+   spend, and `owner_labelled_geo.mismatches` empty.

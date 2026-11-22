@@ -297,8 +297,10 @@ def test_06_country_spend_readers_name_a_criterion_by_its_identity_on_record(
         # One criterion stored under two codes names nothing.
         _spend_rows(("2999", "FR", "France"), end - timedelta(days=35), 1.0),
         _spend_rows(("2999", "DE", "Germany"), end, 30.0),
-        # Production's 2192: no code on any row.
-        _spend_rows(("2192", None, None), end, 0.45),
+        # No code on any row, and not owner-labelled (PR-ADS-170A labelled
+        # production's 2192, which this fixture used; the reader's rule for an
+        # unnamed criterion is what is asserted, so the id is an unlabelled one).
+        _spend_rows(("2997", None, None), end, 0.45),
     ])
     out = repo.fetch_geo_daily_spend_by_country(end - timedelta(days=6), end)
     by = {r["country_criterion_id"]: r for r in out["rows"]}
@@ -306,7 +308,7 @@ def test_06_country_spend_readers_name_a_criterion_by_its_identity_on_record(
         "AE", "United Arab Emirates")
     assert by["2784"]["spend"] == 50.0                  # only the window's spend
     assert (by["2999"]["country_code"], by["2999"]["identity_codes"]) == (None, ["DE", "FR"])
-    assert (by["2192"]["country_code"], by["2192"]["identity_codes"]) == (None, [])
+    assert (by["2997"]["country_code"], by["2997"]["identity_codes"]) == (None, [])
     assert by[UK[0]]["country_code"] == "GB"
     assert out["total_spend"] == pytest.approx(180.45)
 
@@ -531,27 +533,33 @@ def test_11_revenue_days_are_account_days(live_db, monkeypatch):
 
 def test_12_the_countries_geo_reads_share_one_snapshot(live_db):
     """Final review C (audit167a/test_probe_snap). Inside
-    ``repo.geo_read_snapshot()`` a sync committing a code for criterion 2192
-    on another connection is NOT seen by the identities or carriers reads —
+    ``repo.geo_read_snapshot()`` a sync committing a code for a code-less
+    criterion on another connection is NOT seen by the identities or carriers reads —
     the case that could turn "Unavailable" into a false $0 — and is seen
     after. An error inside makes the readers unavailable (fail closed); a
-    write inside is refused (READ ONLY)."""
+    write inside is refused (READ ONLY).
+
+    PR-ADS-170A: the criterion was production's 2192, which the owner has
+    since labelled Cuba — it would now carry CU before any commit, and the
+    test would no longer show what the snapshot hides. The criterion is an
+    unlabelled one; a carrier now also states its provenance."""
     from db import revenue_repository as repo
     d = _today() - timedelta(days=3)
     _write_fx(d - timedelta(days=2), d + timedelta(days=1))
-    _write_spend([_spend_rows(("2192", None, None), d, 3.0)])
+    _write_spend([_spend_rows(("2997", None, None), d, 3.0)])
     with repo.geo_read_snapshot():
-        before = repo.fetch_geo_criterion_identities(["2192"])
-        # Another connection commits a row naming 2192 as Cuba.
-        _write_spend([_spend_rows(("2192", "CU", "Cuba"), d - timedelta(days=1), 1.0)],
+        before = repo.fetch_geo_criterion_identities(["2997"])
+        # Another connection commits a row naming the criterion as Cuba.
+        _write_spend([_spend_rows(("2997", "CU", "Cuba"), d - timedelta(days=1), 1.0)],
                      run="sync-2")
         carriers_inside = repo.fetch_geo_code_carriers(["CU"])
-        identities_inside = repo.fetch_geo_criterion_identities(["2192"])
+        identities_inside = repo.fetch_geo_criterion_identities(["2997"])
     after = repo.fetch_geo_code_carriers(["CU"])
-    assert before["identities"]["2192"]["codes"] == []
-    assert identities_inside["identities"]["2192"]["codes"] == []
+    assert before["identities"]["2997"]["codes"] == []
+    assert identities_inside["identities"]["2997"]["codes"] == []
     assert carriers_inside == {"available": True, "carriers": {}}
-    assert after["carriers"]["CU"] == [{"criterion_id": "2192", "codes": ["CU"]}]
+    assert after["carriers"]["CU"] == [
+        {"criterion_id": "2997", "codes": ["CU"], "provenance": "google_ads"}]
 
     with repo.geo_read_snapshot():
         conn = repo._GEO_SNAPSHOT_CONN.get()
@@ -559,7 +567,7 @@ def test_12_the_countries_geo_reads_share_one_snapshot(live_db):
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM no_such_table")
         assert repo.fetch_geo_code_carriers(["CU"])["available"] is False
-        assert repo.fetch_geo_criterion_identities(["2192"])["available"] is False
+        assert repo.fetch_geo_criterion_identities(["2997"])["available"] is False
 
     import psycopg2
     with pytest.raises(psycopg2.Error, match="read-only"):

@@ -751,6 +751,34 @@ def _build_country_rows(
     return rows
 
 
+def stamp_owner_labelled_countries(rows: list, owner_labelled_geo: dict,
+                                   code_field: str = "country_code") -> list:
+    """Mark the country rows whose geo spend is theirs on the OWNER's word.
+
+    PR-ADS-170A. ``owner_labelled_geo`` is the geo read's own disclosure
+    (``repo.fetch_geo_daily_spend_by_country``): the window's criteria that
+    carry no Google country code and that the owner labelled. A real country
+    row with one of those codes gets ``spend_country_provenance:
+    "owner_labelled"`` and the criterion ids; every other row is returned
+    unchanged. The residual row is never marked — it is not a country.
+    """
+    by_code: dict = {}
+    for c in (owner_labelled_geo or {}).get("criteria") or []:
+        if c.get("country_code"):
+            by_code.setdefault(str(c["country_code"]).upper(), []).append(
+                str(c.get("criterion_id")))
+    if not by_code:
+        return rows
+    out = []
+    for r in rows or []:
+        code = str(r.get(code_field) or "").upper()
+        if code in by_code and not r.get("is_residual"):
+            r = {**r, "spend_country_provenance": "owner_labelled",
+                 "owner_labelled_criteria": sorted(by_code[code])}
+        out.append(r)
+    return out
+
+
 def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> dict:
     spend = round(sum(_spend_value(r) for r in spend_rows), 2)
     leads = len(contacts)
@@ -1497,6 +1525,9 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             if not name:
                 continue  # unresolved criterion id → not country-named
             country_source_rows.append({
+                # PR-ADS-170A: an owner-labelled criterion arrives here with
+                # the label's code and ISO name (repo, the one identity rule)
+                # and is placed exactly as any Google-named country is.
                 "campaign_name": None, "country": name,
                 "spend": r.get("spend"), "spend_usd": r.get("spend_usd"),
                 "fx_complete": r.get("fx_complete"),
@@ -1658,6 +1689,11 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
                                 if (use_usd and fx_effective_rate is not None) else None)
         countries = _apply_geo_spend_residual(
             countries, _res_native, country_residual_usd, use_usd)
+    # PR-ADS-170A: a country row whose geo spend is under it on the owner's
+    # word says so. Canonical geo rows only — the legacy table has no criteria.
+    owner_labelled_geo = ((geo_by_country.get("owner_labelled_geo") or {})
+                          if canonical_geo_country else {})
+    countries = stamp_owner_labelled_countries(countries, owner_labelled_geo)
     summary = _build_db_summary(
         campaign_spend_rows, lead_rows, revenue_rows,
         revenue_available=revenue_available,
@@ -1839,6 +1875,12 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "country_residual_reason_code": country_residual["reason"],
         "canonical_customer_id": canonical_customer_id,
         "canonical_currency": canonical_currency,
+        # PR-ADS-170A: the window's geo criteria whose country is the owner's
+        # label, and any labelled criterion Google's stored code overrode.
+        "owner_labelled_geo": {
+            "criteria": list(owner_labelled_geo.get("criteria") or []),
+            "mismatches": list(owner_labelled_geo.get("mismatches") or []),
+        },
         # PR-ADS-119 currency contract: native GBP truth + USD reporting via daily
         # FX. ROAS renders only when canonical coverage complete AND FX complete.
         "spend_native_total": spend_native_total,

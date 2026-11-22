@@ -5809,7 +5809,7 @@ function renderCtryLeaderboard(d) {
   const body = real.map((r, i) => `
     <tr class="ctry-row" data-ctry-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.country_name || "country")} detail">
       <td class="ctry-td ctry-td--name">
-        <span class="ctry-dot ${(CTRY_STATUS_META[r.status] || {}).dot || "ctry-dot--muted"}"></span>${escapeHtml(r.country_name || "—")}
+        <span class="ctry-dot ${(CTRY_STATUS_META[r.status] || {}).dot || "ctry-dot--muted"}"></span>${escapeHtml(r.country_name || "—")}${spendOwnerNote(r)}
       </td>
       <td class="ctry-td--region">${escapeHtml(r.region || "—")}</td>
       <td class="ctry-num">${ctrySpendCell(r)}</td>
@@ -11036,6 +11036,26 @@ function geoFmtSpend(v) {
   return fmtDollar(v);
 }
 
+// PR-ADS-170A: Google Ads reports a few locations with no country at all. The
+// owner labelled them (config/geo_owner_labels.yaml); the server marks every
+// row whose country rests on that label. The same words on all three country
+// pages — the row never passes an owner's label off as Google's.
+const OWNER_LABELLED_COUNTRY_NOTE = "Country set by owner — Google Ads reports this location without a country";
+
+/** The small note beside an owner-labelled country name, or "". `provenance`
+ *  is the row's `country_provenance` (Countries) or `spend_country_provenance`
+ *  (Country Revenue & Spend, Dashboard Countries). */
+function ownerLabelledCountryNote(provenance) {
+  if (provenance !== "owner_labelled") return "";
+  return ` <span class="owner-label-note" title="${escapeHtml(OWNER_LABELLED_COUNTRY_NOTE)}">set by owner</span>`;
+}
+
+/** The same note for a Country Revenue & Spend / Dashboard Countries row,
+ *  whose geo spend the server marks with `spend_country_provenance`. */
+function spendOwnerNote(row) {
+  return ownerLabelledCountryNote((row || {}).spend_country_provenance);
+}
+
 const GEO_ROW_SPEND_REASONS = {
   spend_location_unresolved: "some spend in this window has no country",
   country_not_matched: "country not matched",
@@ -11349,7 +11369,7 @@ function renderGeoTable(rows) {
       <tr data-country="${escapeHtml(r.country)}"
           data-campaign="${escapeHtml(r.top_campaign || "")}"
           data-keyword="${escapeHtml(r.top_keyword || "")}">
-        <td class="td--name">${escapeHtml(r.country)}</td>
+        <td class="td--name">${escapeHtml(r.country)}${ownerLabelledCountryNote(r.country_provenance)}</td>
         <td class="td--num">${geoSpendCell(r)}</td>
         <td class="td--num">${geoLeadCell(r.total_leads)}</td>
         <td class="td--num">${geoLeadCell(r.confirmed_sqls)}</td>
@@ -18582,7 +18602,7 @@ function renderRoasCountryTable(rows) {
     }
     return `
     <tr>
-      <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}</td>
+      <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}${spendOwnerNote(r)}</td>
       <td>${fmtMoney(r.spend)}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>

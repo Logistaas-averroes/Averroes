@@ -4311,6 +4311,17 @@ body.is-revenue-page #monitoring-banner {
   font-style: italic;
 }
 .revenue-residual-name { font-style: normal; color: #475569; }
+/* PR-ADS-170A: "set by owner" beside a country the owner labelled. */
+.owner-label-note {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted, #6b7280);
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
+  white-space: nowrap;
+}
+
 .revenue-residual-badge {
   display: inline-block;
   font-size: 11px;

@@ -1740,10 +1740,17 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
     every code on record so a caller can tell "none" from "two that disagree".
 
     Returns {available, has_rows, rows:[{country_criterion_id, country_code,
-             country_name, identity_codes, cost_micros, spend (native),
+             country_name, identity_codes, identity_provenance, owner_label,
+             owner_label_mismatch, cost_micros, spend (native),
              spend_usd, fx_complete}],
              total_cost_micros, total_spend, total_spend_usd, fx_complete,
-             currency_code, customer_id, reporting_currency}.
+             currency_code, customer_id, reporting_currency,
+             owner_labelled_geo: {criteria, mismatches}}.
+
+    PR-ADS-170A: a criterion with NO stored code that the owner labelled
+    (``config/geo_owner_labels.yaml``) carries the label's code and ISO name,
+    with ``identity_provenance == "owner_labelled"``. A stored code always
+    wins; a stored code that differs from the label is ``owner_label_mismatch``.
     """
     try:
         with _geo_conn() as conn:
@@ -1784,8 +1791,11 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                     (FX_REPORTING_CURRENCY, start, start, end,
                      customer_id, customer_id),
                 )
-                from db.geo_identity_sql import resolved_code  # noqa: PLC0415
+                from db.geo_identity_sql import (  # noqa: PLC0415
+                    criterion_identity, owner_label_summary,
+                )
                 rows = []
+                resolved_identities = []
                 total = 0
                 total_usd = 0.0
                 any_fx_missing = False
@@ -1799,14 +1809,25 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                     else:
                         any_fx_missing = True
                     codes = sorted(r.get("identity_codes") or [])
-                    code = resolved_code(codes)
+                    # PR-ADS-170A: the ONE identity rule. A stored code wins;
+                    # a criterion with none takes its owner label, if listed.
+                    ident = criterion_identity(
+                        r.get("country_criterion_id"), codes, r.get("identity_name"))
+                    resolved_identities.append(ident)
+                    code = ident["code"]
                     rows.append({
                         "country_criterion_id": r.get("country_criterion_id"),
                         # None unless exactly one code is on record for the
-                        # criterion: none, or two that disagree, name nothing.
+                        # criterion (none, or two that disagree, name nothing)
+                        # or, with none on record, the owner labelled it.
                         "country_code": code,
-                        "country_name": r.get("identity_name") if code else None,
+                        "country_name": ident["name"] if code else None,
+                        # STORED codes only — never the owner label.
                         "identity_codes": codes,
+                        # "google_ads" | "owner_labelled" | None.
+                        "identity_provenance": ident["provenance"],
+                        "owner_label": ident["owner_label"],
+                        "owner_label_mismatch": ident["owner_label_mismatch"],
                         "cost_micros": micros,
                         "spend": micros / 1_000_000,
                         "spend_usd": usd,
@@ -1834,6 +1855,9 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                 "currency_code": meta[1],
                 "customer_id": meta[0],
                 "reporting_currency": FX_REPORTING_CURRENCY,
+                # PR-ADS-170A: which of the window's criteria take their
+                # country from the owner, and any Google code that overrode one.
+                "owner_labelled_geo": owner_label_summary(resolved_identities),
             }
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_daily_spend_by_country failed: %s", exc)
@@ -1850,7 +1874,10 @@ def fetch_geo_criterion_identities(criterion_ids) -> dict:
     that same location — read here over the WHOLE table, every account and
     every date, not just a window.
 
-    Returns ``{available, identities: {criterion_id: {codes: [..], name}}}``.
+    Returns ``{available, identities: {criterion_id: {codes: [..], name,
+    resolved}}}``. ``resolved`` (PR-ADS-170A) is
+    ``db.geo_identity_sql.criterion_identity`` for the criterion — the stored
+    code, or the owner label when no code is stored — with its provenance.
     ``codes`` is every DISTINCT non-blank code on record for the criterion:
     empty when no row ever carried one, and more than one when the rows
     disagree — the caller decides what a disagreement means; nothing is
@@ -1868,15 +1895,22 @@ def fetch_geo_criterion_identities(criterion_ids) -> dict:
             with conn.cursor() as cur:
                 # PR-ADS-167A: the ONE statement of the rule, shared with the
                 # spend readers below and the sync's writer.
-                from db.geo_identity_sql import criterion_identity_sql  # noqa: PLC0415
+                from db.geo_identity_sql import (  # noqa: PLC0415
+                    criterion_identity, criterion_identity_sql,
+                )
                 cur.execute(criterion_identity_sql("%s"), (ids,))
-                identities = {
-                    str(r.get("country_criterion_id")): {
-                        "codes": sorted(r.get("codes") or []),
-                        "name": r.get("name"),
+                identities = {}
+                for r in _rows_as_dicts(cur):
+                    cid = str(r.get("country_criterion_id"))
+                    codes = sorted(r.get("codes") or [])
+                    # PR-ADS-170A: ``codes`` / ``name`` stay the STORED
+                    # evidence (the sync and the writer read only those);
+                    # ``resolved`` is the one identity rule's verdict, owner
+                    # label included, for the readers.
+                    identities[cid] = {
+                        "codes": codes, "name": r.get("name"),
+                        "resolved": criterion_identity(cid, codes, r.get("name")),
                     }
-                    for r in _rows_as_dicts(cur)
-                }
             return {"available": True, "identities": identities}
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_criterion_identities failed: %s", exc)
@@ -1895,7 +1929,11 @@ def fetch_geo_code_carriers(codes) -> dict:
     criteria carries (``db.geo_identity_sql``, the rule every reader uses), over
     the whole table.
 
-    Returns ``{available, carriers: {code: [{criterion_id, codes}]}}``. A code
+    PR-ADS-170A: a criterion with rows on record, no stored code and an owner
+    label carries the label's code (``provenance: "owner_labelled"``).
+
+    Returns ``{available, carriers: {code: [{criterion_id, codes,
+    provenance}]}}``. A code
     with no carrier is absent. ``available: False`` means the read failed — the
     caller must then treat no country as carried.
     """
@@ -1907,22 +1945,40 @@ def fetch_geo_code_carriers(codes) -> dict:
             if conn is None:
                 return {"available": False, "carriers": {}}
             with conn.cursor() as cur:
-                from db.geo_identity_sql import criterion_identity_sql  # noqa: PLC0415
+                from analysis import geo_owner_labels  # noqa: PLC0415
+                from db.geo_identity_sql import (  # noqa: PLC0415
+                    criterion_identity, criterion_identity_sql,
+                )
+                # PR-ADS-170A: an owner-labelled criterion carries its label's
+                # code when it has rows on record and none of them carries a
+                # code. It is read by id here and judged by the one identity
+                # rule below (a stored code still wins).
+                labelled = sorted(
+                    cid for cid, label in geo_owner_labels.owner_labels().items()
+                    if label["code"] in want)
                 cur.execute(
                     "WITH c AS (SELECT DISTINCT country_criterion_id "
                     "FROM google_ads_geo_daily_spend "
-                    "WHERE UPPER(BTRIM(country_code)) = ANY(%s)) "
+                    "WHERE UPPER(BTRIM(country_code)) = ANY(%s) "
+                    "OR country_criterion_id = ANY(%s)) "
                     + criterion_identity_sql("ARRAY(SELECT country_criterion_id FROM c)"),
-                    (want,),
+                    (want, labelled),
                 )
                 carriers: dict = {}
                 for r in _rows_as_dicts(cur):
+                    cid = str(r.get("country_criterion_id"))
                     held = sorted(r.get("codes") or [])
+                    provenance = geo_owner_labels.PROVENANCE_GOOGLE_ADS
+                    if not held:
+                        ident = criterion_identity(cid, held, r.get("name"))
+                        if ident["provenance"] != geo_owner_labels.PROVENANCE_OWNER_LABELLED:
+                            continue
+                        held, provenance = [ident["code"]], ident["provenance"]
                     for code in held:
                         if code in want:
                             carriers.setdefault(code, []).append({
-                                "criterion_id": str(r.get("country_criterion_id")),
-                                "codes": held})
+                                "criterion_id": cid, "codes": held,
+                                "provenance": provenance})
             return {"available": True, "carriers": carriers}
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_code_carriers failed: %s", exc)
