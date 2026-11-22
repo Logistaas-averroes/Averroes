@@ -206,16 +206,80 @@ def fetch_keyword_aggregates(start: date | None, end: date, *,
     return {"available": True, "rows": rows, "source": source}
 
 
+#: PR-ADS-172A — rows a server-side cursor hands over per round trip. The
+#: result of a streamed read exists in this process one batch at a time.
+STREAM_BATCH_ROWS = 2000
+
+
+def fold_daily_cost_rows(rows) -> dict:
+    """``{(customer_id, campaign_id, ad_group_id, criterion_id): {iso_date:
+    cost_micros}}`` from ``(customer_id, campaign_id, ad_group_id, criterion_id,
+    source_date, cost_micros)`` tuples (PR-ADS-172A).
+
+    The same facts ``fetch_keyword_daily_costs`` returns one dict per
+    (criterion, day) for, kept as one small mapping per criterion. A NULL cost
+    is skipped (unavailable is not zero); nothing is rounded or converted, so
+    the per-date FX arithmetic downstream is unchanged. The key is the
+    criterion grain the evidence service looks units up by — each id as text,
+    a missing one as ``''``. Equal ISO dates share one string.
+    """
+    out: dict = {}
+    iso_of: dict = {}
+    for customer_id, campaign_id, ad_group_id, criterion_id, source_date, micros in rows:
+        if micros is None:
+            continue
+        iso = iso_of.get(source_date)
+        if iso is None:
+            iso = iso_of[source_date] = (
+                source_date.isoformat() if hasattr(source_date, "isoformat")
+                else (str(source_date) if source_date is not None else None))
+        grain = (str(customer_id or ""), str(campaign_id or ""),
+                 str(ad_group_id or ""), str(criterion_id or ""))
+        days = out.get(grain)
+        if days is None:
+            days = out[grain] = {}
+        days[iso] = days.get(iso, 0) + int(micros)
+    return out
+
+
 def fetch_keyword_daily_costs(start: date | None, end: date, *,
-                              customer_ids: list[str] | None = None) -> dict:
+                              customer_ids: list[str] | None = None,
+                              folded: bool = False) -> dict:
     """Per-(criterion, source_date) native cost so the service can FX-convert at
     EACH date's own rate (never a window-average). Returns ``{available, rows}``.
 
     ``customer_ids`` narrows to one account in SQL, matching
     ``fetch_keyword_aggregates`` — the two must describe the SAME population or
     the FX conversion would be computed over rows the aggregates excluded.
+
+    ``folded=True`` (PR-ADS-172A) returns ``{available, rows: [],
+    daily_micros}``: the same per-date amounts, read through a server-side
+    cursor and kept as ``fold_daily_cost_rows`` keeps them, instead of one dict
+    (with two provenance lists nothing downstream reads) per criterion per day.
+    That list was the largest single allocation of the keyword evidence build.
     """
     where, scope_params = _scope(customer_ids)
+    if folded:
+        folded_sql = f"""
+            SELECT
+              customer_id, campaign_id, ad_group_id, criterion_id, source_date,
+              SUM(cost_micros)::bigint AS cost_micros
+            FROM keyword_daily_facts
+            WHERE {where}
+            GROUP BY customer_id, campaign_id, ad_group_id, criterion_id, source_date
+        """
+        try:
+            with get_conn() as conn:
+                if conn is None:
+                    return {"available": False, "rows": []}
+                with conn.cursor(name="kw_daily_costs_172a") as cur:
+                    cur.itersize = STREAM_BATCH_ROWS
+                    cur.execute(folded_sql, (start, start, end) + scope_params)
+                    daily_micros = fold_daily_cost_rows(cur)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_keyword_daily_costs failed: %s", exc)
+            return {"available": False, "rows": []}
+        return {"available": True, "rows": [], "daily_micros": daily_micros}
     sql = f"""
         SELECT
           customer_id, campaign_id, ad_group_id, criterion_id, source_date,

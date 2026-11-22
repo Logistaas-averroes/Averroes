@@ -795,14 +795,37 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
     }
 
 
-def _build_population(start, end) -> dict:
+#: Which units a population holds (PR-ADS-172A).
+#:
+#: ``complete``            every term × campaign unit in the window. What the
+#:                         Terms, Patterns and Flagged pages are built on.
+#: ``flagged_candidates``  only the units of terms that durable evidence can
+#:                         flag (see ``db.search_term_repository.
+#:                         fetch_search_term_aggregates``). Every FLAGGED unit, its
+#:                         complete metrics, the annotation join and the truth
+#:                         state are identical to the complete population's;
+#:                         units that cannot be flagged are simply not loaded.
+POPULATION_COMPLETE = "complete"
+POPULATION_FLAGGED_CANDIDATES = "flagged_candidates"
+POPULATIONS = (POPULATION_COMPLETE, POPULATION_FLAGGED_CANDIDATES)
+
+
+def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
     """Fetch + merge the selected-window population at (search_term,
     canonical-campaign) grain. Returns {available, units, source, identity_available,
-    canonical (spend result), aliases_by_id, currency_info}."""
+    canonical (spend result), aliases_by_id, currency_info}.
+
+    ``flagged_candidates`` (PR-ADS-172A) narrows the read IN SQL to the terms
+    that can belong to a flagged unit; the merge below is the same code either
+    way, so a unit that is loaded is the unit the complete population holds.
+    """
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
-    agg = st_repo.fetch_search_term_aggregates(start, end)
+    if flagged_candidates:
+        agg = st_repo.fetch_search_term_aggregates(start, end, flagged_candidates=True)
+    else:
+        agg = st_repo.fetch_search_term_aggregates(start, end)
     if not agg.get("available"):
         return {"available": False, "units": [], "source": {},
                 "identity_available": False, "canonical": {"available": False},
@@ -814,7 +837,15 @@ def _build_population(start, end) -> dict:
     identity_by_label, aliases_by_id = _identity_label_index(identity)
 
     units: dict = {}
-    for g in (agg.get("rows") or []):
+    # PR-ADS-172A: the grouped rows are consumed by this loop and nothing after
+    # it reads them, so this function lets go of them before the per-date costs
+    # are read instead of holding them beside the units for the rest of the
+    # build. (The repository's result is not mutated — only no longer held.)
+    group_rows = agg.get("rows") or []
+    source_totals = agg.get("source") or {}
+    narrowed_terms = agg.get("search_terms")
+    del agg
+    for g in group_rows:
         term = g.get("search_term")
         if not term:
             continue
@@ -857,7 +888,27 @@ def _build_population(start, end) -> dict:
     # Attach per-SOURCE-DATE native cost to each unit so FX converts at each
     # day's own rate (PR-ADS-144 §2) — routed through the SAME identity
     # resolution so two same-named campaign ids never share a day's spend.
-    daily_costs = st_repo.fetch_search_term_daily_costs(start, end)
+    g = None
+    del group_rows
+    if flagged_candidates:
+        # The SAME exact term list the aggregates were narrowed to, and the
+        # per-date amounts folded per (term, campaign) by the repository rather
+        # than returned as one dict per (unit, day).
+        daily_costs = st_repo.fetch_search_term_daily_costs(
+            start, end, search_terms=narrowed_terms or [], folded=True)
+    else:
+        daily_costs = st_repo.fetch_search_term_daily_costs(start, end)
+    for (term, campaign_name, campaign_id), days in (
+            daily_costs.get("daily_micros") or {}).items():
+        if not term:
+            continue
+        _, key, _ = _resolve_campaign_identity(
+            campaign_id, campaign_name, spend_by_id, norm_to_ids, identity_by_label)
+        unit = units.get((normalize_search_term(term), key))
+        if unit is None:
+            continue
+        for iso, micros in days.items():
+            unit["_daily_micros"][iso] = unit["_daily_micros"].get(iso, 0) + micros
     for d in (daily_costs.get("rows") or []):
         term = d.get("search_term")
         if not term:
@@ -875,6 +926,7 @@ def _build_population(start, end) -> dict:
         micros = d.get("cost_micros")
         if micros is not None:
             unit["_daily_micros"][iso] = unit["_daily_micros"].get(iso, 0) + int(micros)
+    del daily_costs
 
     # Assess provenance and perform INDEPENDENT per-unit FX conversion — an
     # unproven legacy unit never poisons a verified unit (PR-ADS-145 §2).
@@ -894,7 +946,7 @@ def _build_population(start, end) -> dict:
     return {
         "available": True,
         "units": unit_list,
-        "source": agg.get("source") or {},
+        "source": source_totals,
         "identity_available": bool(identity.get("available")),
         "canonical": canonical,
         "aliases_by_id": aliases_by_id,
@@ -1803,8 +1855,18 @@ def build_flagged_search_terms(
     review_state: str | None = None, flag_reason: str | None = None,
     min_spend: float | None = None, sql_state: str | None = None,
     sort: str = "priority", high_spend_usd: float = 100.0,
+    population: str = POPULATION_COMPLETE,
     now: datetime | None = None) -> dict[str, Any]:
     """The canonical Flagged / Waste view. Read-only.
+
+    ``population`` (PR-ADS-172A). ``complete`` (default) builds every term ×
+    campaign unit in the window, which the Flagged page's audit block
+    reconciles row-for-row against the source. ``flagged_candidates`` loads
+    only the units durable evidence can flag: the flagged rows, their metrics,
+    ``total_count``, the KPIs, the facets, the annotation join and the truth
+    state are the same values, computed by the same code, without holding the
+    window's unflagged terms. The response then says so in ``population_scope``
+    and its ``audit`` block reconciles that narrowed population.
 
     A term appears here because DURABLE evidence says so — either
     ``search_terms.is_flagged_waste = true`` or safely campaign-scoped
@@ -1837,8 +1899,14 @@ def build_flagged_search_terms(
     except (TypeError, ValueError) as exc:
         raise SearchTermQueryError("Invalid pagination.") from exc
 
+    if population not in POPULATIONS:
+        raise SearchTermQueryError(
+            f"Unsupported population '{population}'. Valid: {', '.join(POPULATIONS)}.")
+
     start, end, base = _base(window, now)
-    pop = _build_population(start, end)
+    pop, sql_attr, population = _flagged_population(start, end, population)
+    if population != POPULATION_COMPLETE:
+        base = {**base, "population_scope": population}
 
     echo_filters = {
         "q": q, "campaign": campaign, "review_state": review_state,
@@ -1861,7 +1929,6 @@ def build_flagged_search_terms(
         }
 
     units = pop["units"]
-    sql_attr = _search_term_sql_attribution(pop, start, end)
     _apply_search_term_sql(units, sql_attr)
 
     # ── Mismatch quarantine (PR-ADS-153D §32) ────────────────────────────────
@@ -1974,6 +2041,34 @@ def build_flagged_search_terms(
         },
         "audit": _audit_block(base, pop, coverage_status="ok"),
     }
+
+
+def _flagged_population(start, end, population: str) -> tuple[dict, dict | None, str]:
+    """``(population, sql_attribution, population_actually_built)`` for the
+    flagged view. ``sql_attribution`` is None when the population is unavailable.
+
+    The narrowed ``flagged_candidates`` population is sufficient for everything
+    the flagged view publishes EXCEPT search-term SQL attribution once the CRM
+    carries an exact user query: a contact is then attributed to a unit only
+    when exactly ONE unit matches it, and the attributed share is counted over
+    every unit — including ones that are not flagged. That cannot be decided
+    from the candidates alone, so in that case the complete population is built
+    instead and the response reports ``complete``. While no contact carries a
+    query (``leads`` persists none today), every unit's attribution is decided
+    by its own mapping status alone and the narrowed population changes nothing.
+    """
+    if population == POPULATION_FLAGGED_CANDIDATES:
+        pop = _build_population(start, end, flagged_candidates=True)
+        if not pop["available"]:
+            return pop, None, population
+        sql_attr = _search_term_sql_attribution(pop, start, end)
+        if not sql_attr.get("population_has_text"):
+            return pop, sql_attr, population
+        del pop, sql_attr
+    pop = _build_population(start, end)
+    if not pop["available"]:
+        return pop, None, POPULATION_COMPLETE
+    return pop, _search_term_sql_attribution(pop, start, end), POPULATION_COMPLETE
 
 
 def _quarantined_flagged_payload(base, pop, truth_state, echo_filters,
@@ -2979,7 +3074,12 @@ def build_campaign_flagged_preview(window: str, campaign_key: str | None, *,
     try:
         payload = build_flagged_search_terms(
             window, page=1, page_size=max(1, int(limit)),
-            campaign=campaign_key, sort="spend", now=now)
+            campaign=campaign_key, sort="spend",
+            # PR-ADS-172A — a drawer section publishes flagged units only, so
+            # it does not build the window's unflagged terms to show ten rows.
+            # `total_count`, the truth state and the annotation join are still
+            # computed over the whole flagged population, not over the preview.
+            population=POPULATION_FLAGGED_CANDIDATES, now=now)
     except EvidenceWindowError:
         raise
     except Exception as exc:  # noqa: BLE001

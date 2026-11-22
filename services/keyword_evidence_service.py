@@ -237,8 +237,15 @@ def _build_population(start: date | None, end: date, *,
     identity_by_label, aliases_by_id = _identity_label_index(identity)
 
     # Per-(criterion, source_date) native cost for genuine per-date FX.
-    daily = kw_repo.fetch_keyword_daily_costs(start, end, customer_ids=customer_ids)
-    daily_by_grain: dict = {}
+    #
+    # PR-ADS-172A: asked for FOLDED — one {iso_date: micros} mapping per
+    # criterion, built by the repository from a server-side cursor — because one
+    # dict per (criterion, day) for the whole window was the largest allocation
+    # of this build. A reader that answers with per-day rows instead is folded
+    # here by the loop below; both are the same amounts under the same keys.
+    daily = kw_repo.fetch_keyword_daily_costs(start, end, customer_ids=customer_ids,
+                                              folded=True)
+    daily_by_grain: dict = dict(daily.get("daily_micros") or {})
     for d in (daily.get("rows") or []):
         grain = _criterion_grain(d)
         micros = d.get("cost_micros")

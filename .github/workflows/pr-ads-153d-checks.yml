@@ -79,7 +79,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A + 172A)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -124,6 +124,7 @@ jobs:
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_169a_certification_memory.py \
+            tests/test_pr_ads_172a_campaign_evidence_memory.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
@@ -262,6 +263,13 @@ jobs:
                            # lives; and the memory reductions return the same
                            # rows and counts as the reads they replaced.
                            "tests.test_pr_ads_169a_certification_memory",
+                           # PR-ADS-172A. The Campaign Evidence drawer sections
+                           # on a production-scale synthetic dataset: each
+                           # section's resident growth is bounded, the real
+                           # audit holds under the real cap, and the narrowed
+                           # flagged population publishes the same view as the
+                           # complete one, value for value.
+                           "tests.test_pr_ads_172a_campaign_evidence_memory",
                            # PR-ADS-166A. Its PG cases run the real contact
                            # sync, funnel writer and Leads readers: names are
                            # stored, survive a sparse payload, and an existing

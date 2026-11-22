@@ -56,6 +56,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from analysis.search_term_identity import normalize_search_term
 from analysis.search_term_scope import (
     REASON_CUSTOMER_NOT_CONFIGURED,
     SEARCH_TERMS_NATURAL_KEY,
@@ -71,9 +72,33 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "SEARCH_TERMS_NATURAL_KEY",
     "fetch_search_term_aggregates", "fetch_search_term_daily_costs",
+    "fold_daily_cost_rows",
     "fetch_search_term_daily_for_campaign", "fetch_search_term_daily",
     "fetch_legacy_currency_audit",
 ]
+
+#: PR-ADS-172A — rows a server-side cursor hands over per round trip. The
+#: result of a streamed read exists in this process one batch at a time.
+STREAM_BATCH_ROWS = 2000
+
+# PR-ADS-172A — OPTIONAL exact term predicate, applied in SQL.
+#
+# A caller that needs only SOME search terms' units (the flagged view of a
+# campaign drawer needs the terms that durable evidence flags, not all of them)
+# passes the exact raw spellings here, so grouping, the source totals and the
+# per-date costs are all computed over the same narrowed population. Exact
+# `= ANY` over the caller's list: never a pattern, never a normalization done in
+# SQL. An EMPTY list selects nothing — it is "no term", not "no filter".
+_TERMS = "search_term = ANY(%s)"
+
+
+def _term_scope(scope, search_terms) -> tuple[str, tuple]:
+    """``(where_sql, params)``: the canonical scope, optionally narrowed to an
+    exact list of raw search terms. ``None`` = every term in the scope."""
+    if search_terms is None:
+        return scope.sql, tuple(scope.params)
+    return (scope.sql + " AND " + _TERMS,
+            tuple(scope.params) + ([str(t) for t in search_terms],))
 
 
 def _rows_as_dicts(cur) -> list[dict]:
@@ -93,7 +118,8 @@ def _scope_unavailable(what: str, reason: str) -> dict:
     return {"available": False, "rows": [], "reason": reason}
 
 
-def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
+def fetch_search_term_aggregates(start: date | None, end: date, *,
+                                 flagged_candidates: bool = False) -> dict:
     """Selected-window aggregates at (search_term, campaign_name, campaign_id)
     grain, bounded by ``source_date`` (``start`` None == all_time, no lower
     bound). Read-only.
@@ -122,15 +148,72 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
     PR-ADS-156-F3 §2: bounded by the ACCOUNT-SCOPED canonical population, so the
     pre-cutover null-account twins that coexist with their complete replacements
     are excluded from every total here rather than summed alongside them.
+
+    PR-ADS-172A: ``flagged_candidates=True`` narrows BOTH statements — the
+    grouped rows and the source totals they reconcile to — in SQL, to the raw
+    terms that can belong to a flagged unit (see the block below), and
+    returns that list as ``search_terms`` so the per-date cost read can take
+    the same predicate. For a reader that publishes flagged units only.
+    Default False = every term, unchanged for every existing caller.
     """
     scope = canonical_scope(start, end)
     if not scope.available:
         return _scope_unavailable("fetch_search_term_aggregates", scope.reason
                                   or REASON_CUSTOMER_NOT_CONFIGURED)
+    search_terms = None
     try:
         with get_conn() as conn:
             if conn is None:
                 return {"available": False, "rows": []}
+            if flagged_candidates:
+                # PR-ADS-172A — every raw term that can belong to a FLAGGED unit.
+                #
+                # A unit of the evidence service is one NORMALIZED term × one
+                # canonical campaign, flagged only by durable evidence: a fact
+                # row with `is_flagged_waste = true`, or a `waste_terms`
+                # annotation stored against one of its raw spellings. So the
+                # terms a flagged unit can be made of are
+                #   1. the raw terms in the canonical scope carrying either
+                #      kind of evidence (one grouped statement, decided by the
+                #      database), and
+                #   2. every OTHER raw spelling in the scope that normalizes to
+                #      the same term — a unit sums all its spellings, and two
+                #      campaigns' units for one term decide between them
+                #      whether an annotation is ambiguous.
+                # Step 2 is decided by `normalize_search_term` itself (NFKC +
+                # casefold + whitespace) over the scope's distinct terms, read
+                # through a server-side cursor — never by an approximation of
+                # it written in SQL. A term outside the result has no flag, no
+                # annotation and no spelling in common with one that has.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT search_term
+                        FROM search_terms
+                        WHERE """ + scope.sql + """
+                        GROUP BY search_term
+                        HAVING BOOL_OR(is_flagged_waste IS TRUE)
+                            OR search_term IN (SELECT search_term FROM waste_terms)
+                        """,
+                        scope.params,
+                    )
+                    evidenced = {normalize_search_term(r[0]) for r in cur.fetchall()}
+                search_terms = []
+                if evidenced:
+                    with conn.cursor(name="st_candidate_terms_172a") as cur:
+                        cur.itersize = STREAM_BATCH_ROWS
+                        cur.execute(
+                            """
+                            SELECT DISTINCT search_term
+                            FROM search_terms
+                            WHERE """ + scope.sql + """
+                            """,
+                            scope.params,
+                        )
+                        for (term,) in cur:
+                            if normalize_search_term(term) in evidenced:
+                                search_terms.append(term)
+            where, where_params = _term_scope(scope, search_terms)
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -169,10 +252,10 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
                                FILTER (WHERE match_type IS NOT NULL)
                                AS match_types
                     FROM search_terms
-                    WHERE """ + scope.sql + """
+                    WHERE """ + where + """
                     GROUP BY search_term, campaign_name, campaign_id
                     """,
-                    scope.params,
+                    where_params,
                 )
                 rows = _rows_as_dicts(cur)
 
@@ -196,9 +279,9 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
                                FILTER (WHERE source_system IS NOT NULL)
                                AS source_systems
                     FROM search_terms
-                    WHERE """ + scope.sql + """
+                    WHERE """ + where + """
                     """,
-                    scope.params,
+                    where_params,
                 )
                 src = _rows_as_dicts(cur)
             source = src[0] if src else {}
@@ -217,7 +300,7 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
                 for k in ("junk_categories", "matched_patterns", "ad_groups",
                           "keywords", "match_types"):
                     row[k] = sorted(row.get(k) or [])
-            return {
+            result = {
                 "available": True,
                 "rows": rows,
                 "source": {
@@ -244,12 +327,47 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
                     "source_systems": sorted(source.get("source_systems") or []),
                 },
             }
+            if search_terms is not None:
+                # Present only on a narrowed read (PR-ADS-172A): the exact raw
+                # terms both statements above were limited to.
+                result["search_terms"] = search_terms
+            return result
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_search_term_aggregates failed: %s", exc)
         return {"available": False, "rows": []}
 
 
-def fetch_search_term_daily_costs(start: date | None, end: date) -> dict:
+def fold_daily_cost_rows(rows) -> dict:
+    """``{(search_term, campaign_name, campaign_id): {iso_date: cost_micros}}``
+    from ``(search_term, campaign_name, campaign_id, source_date, cost_micros)``
+    tuples (PR-ADS-172A).
+
+    The same facts ``fetch_search_term_daily_costs`` returns one dict per
+    (unit, day) for, kept as one small mapping per unit: a NULL cost is skipped
+    (unavailable is not zero) and nothing is rounded or converted. Equal ISO
+    dates share one string.
+    """
+    out: dict = {}
+    iso_of: dict = {}
+    for term, campaign_name, campaign_id, source_date, micros in rows:
+        if micros is None:
+            continue
+        iso = iso_of.get(source_date)
+        if iso is None:
+            iso = iso_of[source_date] = (
+                source_date.isoformat() if hasattr(source_date, "isoformat")
+                else str(source_date))
+        key = (term, campaign_name, campaign_id)
+        days = out.get(key)
+        if days is None:
+            days = out[key] = {}
+        days[iso] = days.get(iso, 0) + int(micros)
+    return out
+
+
+def fetch_search_term_daily_costs(start: date | None, end: date, *,
+                                  search_terms: list | None = None,
+                                  folded: bool = False) -> dict:
     """Per-(search_term, campaign_name, campaign_id, source_date) native cost
     for the whole selected window (PR-ADS-144 §2). Read-only.
 
@@ -266,15 +384,39 @@ def fetch_search_term_daily_costs(start: date | None, end: date) -> dict:
     monetary metrics for mixed/unproven provenance. Never raises.
 
     PR-ADS-156-F3 §2: account-scoped canonical population only.
+
+    PR-ADS-172A: ``search_terms`` narrows the read to an exact list of raw
+    terms in SQL (the same predicate ``fetch_search_term_aggregates`` takes, so
+    the two describe one population). ``folded=True`` returns
+    ``{available, rows: [], daily_micros}`` instead of one dict per (unit, day):
+    the same per-date amounts, read through a server-side cursor and kept as
+    ``fold_daily_cost_rows`` keeps them, so the window's per-day facts are
+    never all held as Python dicts at once.
     """
     scope = canonical_scope(start, end)
     if not scope.available:
         return _scope_unavailable("fetch_search_term_daily_costs", scope.reason
                                   or REASON_CUSTOMER_NOT_CONFIGURED)
+    where, where_params = _term_scope(scope, search_terms)
     try:
         with get_conn() as conn:
             if conn is None:
                 return {"available": False, "rows": []}
+            if folded:
+                with conn.cursor(name="st_daily_costs_172a") as cur:
+                    cur.itersize = STREAM_BATCH_ROWS
+                    cur.execute(
+                        """
+                        SELECT search_term, campaign_name, campaign_id, source_date,
+                               SUM(cost_micros)::bigint AS cost_micros
+                        FROM search_terms
+                        WHERE """ + where + """
+                        GROUP BY search_term, campaign_name, campaign_id, source_date
+                        """,
+                        where_params,
+                    )
+                    daily_micros = fold_daily_cost_rows(cur)
+                return {"available": True, "rows": [], "daily_micros": daily_micros}
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -287,10 +429,10 @@ def fetch_search_term_daily_costs(start: date | None, end: date) -> dict:
                                FILTER (WHERE source_system IS NOT NULL)
                                AS source_systems
                     FROM search_terms
-                    WHERE """ + scope.sql + """
+                    WHERE """ + where + """
                     GROUP BY search_term, campaign_name, campaign_id, source_date
                     """,
-                    scope.params,
+                    where_params,
                 )
                 rows = _rows_as_dicts(cur)
             for row in rows:
