@@ -45,7 +45,8 @@ def _fn(marker):
     return JS[i:j + 3]
 
 
-REVENUE_PAGES_MIN = ["roas-campaigns", "roas-countries", "revenue-by-source", "deals", "revenue-health"]
+# PR-ADS-168B: "revenue-by-source" is deleted (its hash redirects to Channels).
+REVENUE_PAGES_MIN = ["roas-campaigns", "roas-countries", "deals", "revenue-health"]
 
 
 # ── Test 1 — Revenue pages hide the global day-window bar ────────────────────
@@ -101,8 +102,8 @@ def test_shared_clean_spend_truth_card():
     # component. PR-ADS-164A removed it from the Deals page: that page lists
     # ALL-SOURCE won deals, and a Google Ads spend card above them read as the
     # spend behind those deals.
-    for page in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
-                 "function renderRevenueBySourcePage"):
+    # PR-ADS-168B: renderRevenueBySourcePage is deleted with its page.
+    for page in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage"):
         body = _slice(page, span=3000)
         assert "renderMartSpendTruth(" in body, f"{page} must use the shared spend card"
     deals = JS[JS.find("function renderRevenueDealsPage"):
@@ -177,7 +178,7 @@ def test_no_old_endpoint_fallback():
     cases = [
         ("async function loadRoasCampaigns", "campaign", "/api/revenue-attribution?"),
         ("async function loadRoasCountries", "country", "/api/revenue-attribution?"),
-        ("async function loadRevenueBySource", "source", "/api/revenue-by-source?"),
+        # PR-ADS-168B: loadRevenueBySource and the mart `source` view are deleted.
         ("async function loadDeals", "deal", "/api/revenue-deals?"),
     ]
     for loader, view, old_url in cases:

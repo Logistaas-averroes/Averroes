@@ -541,7 +541,7 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
             "revenue_usd": top.get("revenue_usd"),
             "closed_won_deals": top.get("closed_won_deals"),
             "status": "Spend-connected" if top.get("spend_connected") else "Revenue-only",
-            "target_page": "revenue-by-source",
+            "target_page": "channels",
         }
 
     # Waste: campaigns with real matched spend and zero SQLs/customers. Row spend
@@ -592,14 +592,14 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
                 "metric": best_key,
                 "label": PERIOD_CHANGE_METRICS.get(best_key, best_key),
                 "delta_pct": comparable[best_key]["delta_pct"],
-                "target_page": "revenue-by-source",
+                "target_page": "channels",
             }
         if comparable[worst_key]["delta_pct"] < 0:
             biggest_decline = {
                 "metric": worst_key,
                 "label": PERIOD_CHANGE_METRICS.get(worst_key, worst_key),
                 "delta_pct": comparable[worst_key]["delta_pct"],
-                "target_page": "revenue-by-source",
+                "target_page": "channels",
             }
 
     return {
@@ -736,8 +736,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 "title": "Watch",
                 "headline": "No unproven SQL pipelines",
                 "body": "Every campaign with SQLs also has closed-won deals in this window.",
-                "target_page": "revenue-by-source",
-                "target_label": "Open Revenue by Source",
+                "target_page": "channels",
+                "target_label": "Open Channels",
             })
     else:
         cards.append({

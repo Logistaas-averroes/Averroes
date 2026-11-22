@@ -6232,3 +6232,52 @@ Social reasons and the strip's Meta cell. New tests `test_14`–`test_16`
 (11 cases); 8 of them fail on 4d1e929 (the strip zone text, both "could not
 tell" cases, the footer dot, four singular/abbreviated labels; three labels
 the old pattern already caught pass there).
+
+---
+
+## PR-ADS-168B — remove the Revenue by Source page; Channels is the one channel page
+
+**Why.** The owner wants fewer pages; the six-item menu plan merges Revenue by
+Source into Channels. PR-ADS-168A already publishes per-channel closed-won
+deals, customers and revenue on Channels through the reader contract, so the
+page was a duplicate with a second taxonomy. Full write-up:
+`docs/56_REVENUE_BY_SOURCE_REMOVED.md`.
+
+**Removed.** The sidebar entry, `#page-revenue-by-source`, its loader,
+renderers, platform drawer and CSS; `GET /api/revenue-by-source` and
+`GET /api/revenue-performance/source-platform-detail` (deleted → 404, the
+PR-ADS-162B/162D convention); `build_source_platform_detail`,
+`_source_detail_row`, `_source_contact_row` and
+`revenue_repository.fetch_source_contact_details`, which only the drawer used;
+the mart `source` view (`?view=source` → 400), its diagnostic, the
+`source_spend_truth` response key, and the Revenue by Source row of the mart
+page-parity audit. `build_revenue_by_source` stays — the Dashboard Overview,
+Revenue, Deals and Channels tabs read it.
+
+**Redirect.** `#/revenue-by-source` → Channels via `RETIRED_PAGE_REDIRECTS`
+(the only place the key survives in `static/`).
+
+**Moved.** The admin Source Attribution Backfill panel → Revenue Health
+(`#source-backfill-panel`, rendered by `loadRevenueHealth`). Everything else on
+the page was redundant with Channels; `docs/56` §4 lists each item with its
+Channels equivalent.
+
+**Links.** Every Dashboard `target_page: "revenue-by-source"` ("Open Revenue by
+Source") is now `"channels"` ("Open Channels"), and the Revenue tab's source
+breakdown links to Channels.
+
+**Registries.** Reader-cutover `INVENTORY` keeps the
+`source_attribution_service.py` row (still a reader) with its surface
+corrected, and its page pass drops `revenue_decision_mart_source` while still
+building `build_revenue_by_source`. The SQL doctrine registry drops the deleted
+symbols, route and renderers; the static inventory finds no unclassified
+occurrence.
+
+**Tests.** `tests/test_pr_ads_168b_revenue_by_source_removed.py` (14 cases; 11
+fail against the parent commit). Tests whose subject was deleted were deleted
+(listed in `docs/56` and the PR description); lists that named the page were
+updated to the remaining pages.
+
+**Known gaps.** Channels has no per-deal list behind a channel and no
+PR-ADS-133 platform split; the Dashboard Revenue tab still titles a panel
+"Revenue by Source" (`docs/56` §7).

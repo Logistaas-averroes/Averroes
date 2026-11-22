@@ -243,7 +243,7 @@ GENUINE selected-window campaign evidence (PR-ADS-143). The selected Evidence Wi
 Window boundaries are **inclusive of exactly N calendar dates** (`start = end − (N−1)`) and resolved in the Google Ads **account timezone (Europe/London)**, not an implicit UTC date. `all_time` → no lower bound.
 
 **Sources (durable, reconciled):**
-- **Spend** — `db.revenue_repository.fetch_canonical_campaign_spend(start, end)` over `google_ads_campaign_daily_spend`: native GBP always, FX-safe USD (`None` when FX coverage is incomplete — never native relabelled as USD). This is the **same canonical source** Revenue by Source and the Revenue Decision Mart use, so per-window spend reconciles exactly.
+- **Spend** — `db.revenue_repository.fetch_canonical_campaign_spend(start, end)` over `google_ads_campaign_daily_spend`: native GBP always, FX-safe USD (`None` when FX coverage is incomplete — never native relabelled as USD). This is the **same canonical source** the Dashboard source breakdowns and the Revenue Decision Mart use, so per-window spend reconciles exactly.
 - **Lead outcomes** — `fetch_lead_quality(start, end)` over the durable `leads` table, bounded on the HubSpot business-event date (`contact_created_at`, the same grain as `spend_date`), deduplicated per contact, paid-search only, pseudo/email campaigns excluded. Confirmed SQL = status `qualified`; confirmed junk = `junk`. Junk rate uses the **approved denominator unchanged** (`verdicted = qualified + in_progress + junk + wrong_fit`; excludes `unknown`).
 
 The campaign universe is the **UNION** of canonical campaigns with spend and mapped campaigns with lead outcomes — a campaign is never dropped because one side has no record. Campaigns join by the canonical lowercase campaign name (leads carry no `campaign_id`; the `_CAMPAIGN_CANONICAL` write-time vocabulary is authoritative). `all_time` means **NO lower date bound** → genuine cumulative totals, NOT the latest scheduler snapshot.
@@ -324,7 +324,7 @@ The campaign universe is the **UNION** of canonical campaigns with spend and map
 
 **Null / unavailable behaviour (no fabricated zeros).** `spend_native`/`spend_usd` are `None` for a campaign with no canonical spend row (unmapped/unavailable — never £0). Lead metrics are genuine `0` when the lead source is live and the campaign has no rows, but `None` when the lead source is unavailable. `cpql_usd` = window USD spend ÷ confirmed SQLs; `None` when spend/FX or the SQL denominator is unavailable, and a genuine zero SQL count renders `N/A` (never `$0`). `spend_usd` is `None` (withheld) whenever FX coverage is incomplete — native GBP is still returned.
 
-**Summary / KPIs + CPQL scope.** `spend_native`/`spend_usd` come straight from the canonical window totals, so the KPI spend **reconciles exactly** with canonical spend for the window (and, for `all_time`, with the same canonical all-time spend used by Revenue by Source / the Revenue Decision Mart). `confirmed_sqls_total`/`confirmed_junk_total` are the **Google-Ads-mapped** scope only. `overall_cpql_usd` = canonical Google Ads **USD spend ÷ SQLs mapped to those same Google Ads campaigns** — it **excludes** unmatched and not-Google-Ads SQLs, so an unmatched qualified lead can never lower it. `overall_cpql_scope` is `"complete"` when mapping coverage is complete, else `"mapped_only"` (the UI discloses "Mapped campaigns only"), or `"unavailable"`. `mapping_coverage` exposes `mapped_sqls`, `unmatched_sqls`, `excluded_not_google_sqls`, `total_paid_search_sqls`, and `status` (`complete | partial | unavailable`).
+**Summary / KPIs + CPQL scope.** `spend_native`/`spend_usd` come straight from the canonical window totals, so the KPI spend **reconciles exactly** with canonical spend for the window (and, for `all_time`, with the same canonical all-time spend used by the Revenue Decision Mart). `confirmed_sqls_total`/`confirmed_junk_total` are the **Google-Ads-mapped** scope only. `overall_cpql_usd` = canonical Google Ads **USD spend ÷ SQLs mapped to those same Google Ads campaigns** — it **excludes** unmatched and not-Google-Ads SQLs, so an unmatched qualified lead can never lower it. `overall_cpql_scope` is `"complete"` when mapping coverage is complete, else `"mapped_only"` (the UI discloses "Mapped campaigns only"), or `"unavailable"`. `mapping_coverage` exposes `mapped_sqls`, `unmatched_sqls`, `excluded_not_google_sqls`, `total_paid_search_sqls`, and `status` (`complete | partial | unavailable`).
 
 **Audit metadata (machine-verifiable reconciliation — not shown in the UI).** For every window the `audit` block exposes `spend_source`, `lead_source`, `window_start`, `window_end`, `all_time`, `fx_status` (`verified | incomplete | unavailable`), `spend_reconciliation_status` and `lead_reconciliation_status` (`pass | variance | unavailable`). Reconciliation asserts: sum of per-campaign native spend = canonical native total; sum of per-campaign USD = canonical USD total when FX is complete; per-campaign SQL/junk totals = the deduplicated lead aggregate; `all_time` has no lower date bound; no amount is sourced from `AVG()`/`SUM()` over overlapping snapshot rows.
 
@@ -2770,6 +2770,14 @@ These endpoints form the Revenue Truth Layer. Revenue source is HubSpot won deal
 Spend source is the Google Ads API. **Google Ads conversion value is NOT used.**
 All route paths follow the repo convention and are mounted under `/api/...`.
 
+> **Retired in PR-ADS-168B** (`docs/56_REVENUE_BY_SOURCE_REMOVED.md`), with the
+> Revenue by Source page: `GET /api/revenue-by-source` and
+> `GET /api/revenue-performance/source-platform-detail` are deleted and answer
+> **404**; `GET /api/revenue-performance?view=source` answers **400** (the
+> mart's views are now `campaign | country | deal`). Per-channel closed-won
+> deals, customers and revenue are the `outcomes` block of
+> `GET /api/channel-funnel` (`docs/50`).
+
 ---
 
 ### `GET /api/reports/unit-economics`
@@ -2957,7 +2965,7 @@ conversions and coverage — to one acquisition group, and is echoed back as
 list by source must pass the same value here, so the headline and the rows
 describe one population (PR-ADS-153C). Classification uses the full canonical
 contract — HubSpot Original Source **and** its Drill-Down — so a contact lands in
-the same group here as on Revenue by Source.
+the same group here as in the Dashboard source breakdowns (`build_revenue_by_source`; the Revenue by Source page was deleted in PR-ADS-168B).
 
 **Response**
 

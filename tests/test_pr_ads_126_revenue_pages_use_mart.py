@@ -74,15 +74,6 @@ def test_country_page_uses_mart():
 
 # ── 3. Revenue by Source uses the mart ──────────────────────────────────────
 
-def test_source_page_uses_mart():
-    loader = _slice("async function loadRevenueBySource")
-    assert 'fetchRevenuePerformance("source"' in loader
-    assert "/api/revenue-by-source?" not in loader
-    page = _slice("function renderRevenueBySourcePage", span=900)
-    # Source rows ARE the mart rows; only Google Ads carries spend/ROAS.
-    assert "data.rows" in page
-
-
 # ── 4. Deals uses the mart ──────────────────────────────────────────────────
 
 def test_deals_page_uses_mart():
@@ -108,7 +99,7 @@ def test_all_revenue_pages_share_mart_renderers():
     for page in (
         "function renderRoasCampaignsPage",
         "function renderRoasCountriesPage",
-        "function renderRevenueBySourcePage",
+        # PR-ADS-168B: renderRevenueBySourcePage is deleted with its page.
         "function renderRevenueDealsPage",
     ):
         body = _slice(page, span=3000)
@@ -226,7 +217,7 @@ def test_no_silent_old_endpoint_fallback_on_business_pages():
     cases = [
         ("async function loadRoasCampaigns", "/api/revenue-attribution?"),
         ("async function loadRoasCountries", "/api/revenue-attribution?"),
-        ("async function loadRevenueBySource", "/api/revenue-by-source?"),
+        # PR-ADS-168B: loadRevenueBySource is deleted with its page.
         ("async function loadDeals", "/api/revenue-deals?"),
     ]
     for loader, old_url in cases:

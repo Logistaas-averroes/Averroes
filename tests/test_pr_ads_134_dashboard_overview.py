@@ -600,7 +600,8 @@ def test_top_signals_computed_from_real_rows(monkeypatch):
     assert sig["best_campaign"]["target_page"] == "roas-campaigns"
     assert sig["best_country"]["label"] == "United Kingdom"
     assert sig["best_country"]["target_page"] == "roas-countries"
-    assert sig["best_source"]["target_page"] == "revenue-by-source"
+    # PR-ADS-168B: Revenue by Source is deleted; source evidence opens Channels.
+    assert sig["best_source"]["target_page"] == "channels"
 
 
 def test_top_signals_handle_empty_data_safely(monkeypatch):
@@ -876,9 +877,11 @@ def test_signals_and_cards_link_to_evidence_pages():
     cards = _slice(JS, "function renderDashDecisionCards", 1200)
     assert 'href="#/${escapeHtml(c.target_page)}"' in cards
     # Service-side targets are the real evidence pages.
-    for target in ('"roas-campaigns"', '"roas-countries"', '"revenue-by-source"',
+    # PR-ADS-168B: Revenue by Source is deleted; its links now open Channels.
+    for target in ('"roas-campaigns"', '"roas-countries"', '"channels"',
                    '"revenue-health"'):
         assert target in SERVICE
+    assert '"revenue-by-source"' not in SERVICE
     # PR-ADS-162G: the Action Queue page is deleted — no card may point at it.
     assert '"action-queue"' not in SERVICE
     assert "Action Queue" not in SERVICE

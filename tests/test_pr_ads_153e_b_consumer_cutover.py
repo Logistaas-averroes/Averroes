@@ -616,44 +616,8 @@ def test_13c2_the_contract_normalizes_bounds_so_no_consumer_can_recreate_it(monk
         assert got_end == datetime(2026, 7, 1, tzinfo=timezone.utc)
 
 
-def test_13d_source_drilldown_fails_closed_when_the_ledger_is_unreadable(monkeypatch):
-    """An empty deals section reads as "no deals", not as an outage.
-
-    With contacts readable and the ledger down, the drawer previously rendered
-    a healthy-looking shell with zero deals in it.
-    """
-    import db.revenue_repository as repo
-    from services.source_attribution_service import build_source_platform_detail
-
-    monkeypatch.setattr(repo, "fetch_source_contact_details",
-                        lambda s, e: {"available": True, "rows": []})
-    patch_canonical_ledger(monkeypatch, [], available=False)
-
-    # Any legacy revenue provider being reached at all is a failure.
-    def _forbidden(*a, **k):  # pragma: no cover - only runs on a regression
-        raise AssertionError("the drilldown reached for a legacy revenue provider")
-
-    for name in ("fetch_source_deal_details", "fetch_source_revenue",
-                 "fetch_revenue_deals", "fetch_won_revenue"):
-        monkeypatch.setattr(repo, name, _forbidden)
-
-    out = build_source_platform_detail(
-        WINDOW, "google_ads", "paid_search", "google_ads", now=NOW)
-    assert out["revenue_available"] is False
-    assert out["revenue_unavailable_reason"]
-    assert out["legacy_fallback_used"] is False
-    assert out["source_health"]["status"] != "ready"
-    # Counts are withheld, not zeroed — 0 would be a claim about the bucket.
-    assert out["summary"]["deals"] is None
-    assert out["summary"]["contacts"] is None and out["summary"]["sqls"] is None
-    assert out["deals"] == [] and out["rows"] == []
-    # The full quarantine metadata a reader needs to act on.
-    for key in ("revenue_source", "revenue_scope", "window", "as_of",
-                "revenue_violation_codes"):
-        assert key in out, key
-    # Contact evidence comes from a DIFFERENT source and is labelled as its own
-    # availability, never merged into a healthy-looking overall status.
-    assert out["contact_evidence_available"] is True
+# PR-ADS-168B: test_13d (the Revenue by Source drawer fails closed on an
+# unreadable ledger) is deleted with build_source_platform_detail.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

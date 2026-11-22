@@ -122,8 +122,11 @@ INVENTORY = (
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/source_attribution_service.py",
-     "surface": "/api/revenue-by-source; Revenue by Source. PR-ADS-168A: "
-                "/api/channel-funnel `outcomes` (build_channel_outcomes); Channels",
+     "surface": "build_revenue_by_source: the Dashboard Overview / Revenue / "
+                "Deals / Channels source breakdowns (PR-ADS-168B deleted the "
+                "Revenue by Source page, /api/revenue-by-source and the mart "
+                "`source` view). PR-ADS-168A: /api/channel-funnel `outcomes` "
+                "(build_channel_outcomes); Channels",
      "existing_source": "bucket deal count, bucket proven sum",
      "existing_meaning": "won deals as customers; customer rate over leads",
      "canonical_replacement": "reader_row per group / channel / platform; "
@@ -1136,7 +1139,6 @@ def _page_builders():
         return build
     return (
         ("revenue_decision_mart", mart),
-        ("revenue_decision_mart_source", mart_view("source")),
         ("revenue_decision_mart_country", mart_view("country")),
         ("revenue_attribution", mod("services.revenue_attribution_service",
                                     "build_revenue_attribution")),

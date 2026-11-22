@@ -119,7 +119,7 @@ CONSUMERS: list[dict] = [
        "sql_reconciliation. Despite its name it defines SQL as the legacy status.",
        endpoint="(library; surfaced by /api/campaigns, /api/keyword-evidence, "
                 "/api/search-term-evidence, /api/dashboard/overview, "
-                "/api/revenue-by-source, /api/revenue-performance, /api/leads)",
+                "/api/revenue-performance, /api/leads)",
        service_function="services.canonical_contact_outcome_service.build / page_reconciliation",
        repository_source="db.canonical_contact_outcome_repository.fetch_canonical_inputs",
        source_table="leads + lead_truth_exclusions + contact_source_classification",
@@ -384,12 +384,16 @@ CONSUMERS: list[dict] = [
                        "is reachable only on the DB-unavailable fallback.",
        truth_status="sqls None when lead metrics withheld; verdict uses 0 in that case",
        row=True, sorting=True, decision=True, executive=True, operational=True),
-    _c("Revenue by Source (source_attribution_service)",
+    _c("Source breakdown (source_attribution_service.build_revenue_by_source)",
        "Group/channel/platform sqls from contact_source_classification, with the "
        "Google Ads group overridden by the legacy contract's google_ads_source count.",
-       endpoint="GET /api/revenue-by-source, /api/revenue-performance/source-platform-detail",
-       service_function="services.source_attribution_service.build_revenue_by_source / build_source_platform_detail",
-       repository_source="db.revenue_repository.fetch_source_leads / fetch_source_contact_details",
+       # PR-ADS-168B: the Revenue by Source page, its two routes, its drawer and
+       # the mart `source` view are deleted. build_revenue_by_source survives as
+       # the library behind the Dashboard source breakdowns.
+       endpoint="(library; surfaced by /api/dashboard/overview, /api/dashboard/revenue, "
+                "/api/dashboard/deals, /api/dashboard/channels)",
+       service_function="services.source_attribution_service.build_revenue_by_source",
+       repository_source="db.revenue_repository.fetch_source_leads",
        source_table="contact_source_classification (+ leads)",
        sql_definition="row.get('status_category') == 'qualified' (no dedup, no exclusions) "
                       "→ Google Ads group replaced by page_reconciliation google_ads_source_sqls",
@@ -399,7 +403,7 @@ CONSUMERS: list[dict] = [
        migration_notes="Keeps the raw classification count when the contract is unavailable "
                        "(explicit legacy fallback).",
        truth_status="mismatch → None; unavailable → raw legacy count retained",
-       headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
+       headline=True, row=True, decision=True, executive=True, operational=True),
     _c("Dashboard Channels", "Channel/platform sqls rollup, total_sqls KPI, SQL trend.",
        endpoint="GET /api/dashboard/channels",
        service_function="services.dashboard_channels_service._build_channels_and_platforms / _build_kpis / _build_trend",
@@ -877,8 +881,8 @@ RULES: list[dict] = [
                "build_revenue_attribution_audit", "classify_verdict", "build_revenue_attribution"]),
     _m("src.module", "services/source_attribution_service.py", CLS_MIXED, _SRC, ["contact_created_at_ref"]),
     _r("src", "services/source_attribution_service.py", CLS_MIXED, _SRC,
-       symbol=["_finalize_channels", "_source_contact_row", "_unavailable_revenue_by_source",
-               "build_revenue_by_source", "build_source_platform_detail", "classify_contact_row"]),
+       symbol=["_finalize_channels", "_unavailable_revenue_by_source",
+               "build_revenue_by_source", "classify_contact_row"]),
     _r("chan", "services/dashboard_channels_service.py", CLS_MIXED, _CHAN,
        symbol=["_accumulate", "_build_channels_and_platforms", "_build_decision_cards",
                "_build_kpis", "_build_period_change", "_build_quality_matrix", "_build_trend",
@@ -1180,7 +1184,7 @@ RULES: list[dict] = [
        symbol=["fetch_lead_quality", "fetch_campaign_lead_detail", "fetch_campaign_pollution_report",
                "fetch_lead_date_grain_health", "fetch_missing_event_date_leads"]),
     _r("revrepo.source", "db/revenue_repository.py", CLS_LEGACY, _SRC,
-       symbol=["fetch_source_leads", "fetch_source_leads_daily", "fetch_source_contact_details"]),
+       symbol=["fetch_source_leads", "fetch_source_leads_daily"]),
     _r("revrepo.series", "db/revenue_repository.py", CLS_LEGACY, _REV, symbol="fetch_lead_daily_series"),
     _r("revrepo.sql_details", "db/revenue_repository.py", CLS_LEGACY, _DEALS, symbol="fetch_sql_lead_details"),
 
@@ -1202,7 +1206,6 @@ RULES: list[dict] = [
        symbol=["api_search_term_evidence", "api_search_term_evidence_export",
                "api_search_term_evidence_flagged", "api_search_term_evidence_term"]),
     _r("api.revenue", "api/server.py", CLS_MIXED, _RAS, symbol="get_revenue_attribution"),
-    _r("api.source", "api/server.py", CLS_MIXED, _SRC, symbol="get_revenue_by_source"),
     # PR-ADS-162H: "api.module" bound a module-level `sqls` field reference in
     # api/server.py to the report pipeline. The consumer is deleted and the rule
     # matched no occurrence; a module-level one written there now is unknown.
@@ -1311,9 +1314,6 @@ RULES: list[dict] = [
     _r("ui.deals_tab", "static/app.js", CLS_LEGACY, _DEALS,
        symbol=["renderDashboardDeals", "renderDealKpiRow", "renderDealSourcePipeline",
                "renderDealCampaignPipeline", "renderDealSqlNoDeal", "renderDealTruthFooter"]),
-    _r("ui.source", "static/app.js", CLS_MIXED, _SRC,
-       symbol=["sourceGaSqlsChip", "renderSourceGroupSection", "renderSourceChannelRows",
-               "renderSourcePlatformRow", "renderSourceDrilldown"]),
     _r("ui.mart", "static/app.js", CLS_LEGACY, _MART,
        symbol=["renderMartSummaryStrip", "getBusinessVerdictBadge"]),
     _r("ui.roas", "static/app.js", CLS_MIXED, _RAS,

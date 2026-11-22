@@ -320,7 +320,8 @@ def test_revenue_and_dashboard_keep_business_window_selector():
     assert "data-business-window-select" in INDEX_HTML
     rev_block = APP_JS[APP_JS.find("const REVENUE_PAGES"):
                        APP_JS.find("const REVENUE_PAGES") + 200]
-    for rp in ("roas-campaigns", "roas-countries", "deals", "revenue-by-source", "dashboard"):
+    # PR-ADS-168B: "revenue-by-source" is deleted (redirects to Channels).
+    for rp in ("roas-campaigns", "roas-countries", "deals", "dashboard"):
         assert rp in rev_block
     ev_block = APP_JS[APP_JS.find("const EVIDENCE_PAGES"):
                       APP_JS.find("const EVIDENCE_PAGES") + 300]

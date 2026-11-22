@@ -1,6 +1,13 @@
 """PR-ADS-164A — the Deals and Revenue by Source pages say what they count, and
 never read "unavailable" as "none".
 
+PR-ADS-168B deleted the Revenue by Source page, its drawer route and the mart
+`source` view. The cases about that page's UI and drawer are deleted with it
+(test_08, test_13, test_14, test_16, test_17 and the drawer/source halves of
+the mixed UI cases). The `source` surface in the server cases is now
+``build_revenue_by_source`` itself — the reader the mart view passed through
+unchanged, which still feeds the Dashboard source breakdowns.
+
 Both pages read the SAME canonical won-deal population
 (``canonical_revenue_service.load_won_deals``, all-source scope). They looked
 different because of presentation: the Deals page called an all-source list
@@ -76,16 +83,6 @@ UNDATED = ledger_row("d9", deal_name="Undated deal", deal_close_date=None)
 DEAL_NAMES = ("Acme renewal", "Beta expansion", "Gamma pilot", "Old deal",
               "Undated deal")
 
-#: The source platform each fixture deal lands on (the page's own taxonomy).
-GOOGLE_PLATFORM = ("google_ads", "paid_search", "google_ads")
-ORGANIC_PLATFORM = ("organic", "organic_search_direct", "organic_search")
-EMPTY_PLATFORM = ("offline", "offline_sources", "offline")
-
-CONTACT = {"contact_id": "c1", "acquisition_group": "google_ads",
-           "status_category": "qualified", "source_primary_raw": "PAID_SEARCH",
-           "source_detail_raw": None, "contact_created_at": "2026-10-05",
-           "company": "Acme Ltd"}
-
 #: state -> (ledger rows, patch_canonical_ledger keyword arguments)
 STATES = {
     # A current ledger with deals in the window.
@@ -113,7 +110,7 @@ BLOCKED = {
 }
 
 
-def _patch(monkeypatch, state, *, leads=True, contacts_readable=True):
+def _patch(monkeypatch, state, *, leads=True):
     """One coherent durable dataset (PR-ADS-125's), with the ledger in ``state``."""
     import db.revenue_repository as repo
 
@@ -130,10 +127,6 @@ def _patch(monkeypatch, state, *, leads=True, contacts_readable=True):
     if not leads:
         monkeypatch.setattr(repo, "fetch_source_leads",
                             lambda s, e: {"available": True, "rows": []})
-    monkeypatch.setattr(
-        repo, "fetch_source_contact_details",
-        lambda s, e: ({"available": True, "rows": [dict(CONTACT)]}
-                      if contacts_readable else {"available": False, "rows": []}))
 
 
 def _mart(view):
@@ -141,16 +134,19 @@ def _mart(view):
     return build_revenue_decision_mart(view=view, window=WINDOW, now=NOW)
 
 
-def _drawer(platform=GOOGLE_PLATFORM):
-    from services.source_attribution_service import build_source_platform_detail
-    return build_source_platform_detail(WINDOW, *platform, now=NOW)
+def _source():
+    """The per-source groups and their verdict, exactly as the deleted mart
+    `source` view passed them through (PR-ADS-168B)."""
+    from services.source_attribution_service import build_revenue_by_source
+    src = build_revenue_by_source(WINDOW, now=NOW)
+    return {"rows": src.get("groups") or [],
+            "closed_won_population": src.get("closed_won_population")}
 
 
-def _payloads(monkeypatch, state, *, platform=GOOGLE_PLATFORM, **kw):
-    """What the three endpoints really send for ``state``."""
+def _payloads(monkeypatch, state, **kw):
+    """What the Deals endpoint and the source reader really send for ``state``."""
     _patch(monkeypatch, state, **kw)
-    return {"deal": _mart("deal"), "source": _mart("source"),
-            "drawer": _drawer(platform)}
+    return {"deal": _mart("deal"), "source": _source()}
 
 
 def _verdict(payload):
@@ -181,10 +177,6 @@ def test_01_a_current_ledger_with_deals_publishes_the_count_beside_the_rows(
     assert _verdict(p["source"]) == published_two
     assert [r["deal_name"] for r in p["deal"]["rows"]] == ["Beta expansion",
                                                           "Acme renewal"]
-    # The drawer's verdict is for ITS platform's deals — a subset, exact.
-    assert _verdict(p["drawer"]) == {
-        "value": 1, "status": "published", "reason": None}
-    assert [d["deal_name"] for d in p["drawer"]["deals"]] == ["Acme renewal"]
 
 
 def test_02_both_pages_count_the_same_population(monkeypatch):
@@ -208,8 +200,7 @@ def test_03_a_current_ledger_with_no_deal_in_the_window_is_a_published_zero(
     zero = {"value": 0, "status": "published", "reason": None}
     assert _verdict(p["deal"]) == zero
     assert _verdict(p["source"]) == zero
-    assert _verdict(p["drawer"]) == zero
-    assert p["deal"]["rows"] == [] and p["drawer"]["deals"] == []
+    assert p["deal"]["rows"] == []
     assert all(g["closed_won_deals"] == 0 for g in p["source"]["rows"])
 
 
@@ -219,17 +210,14 @@ def test_04_a_population_that_was_not_released_says_so_and_carries_no_count(
     status, reason, _ = BLOCKED[state]
     p = _payloads(monkeypatch, state)
     verdict = {"value": None, "status": status, "reason": reason}
-    for surface in ("deal", "source", "drawer"):
+    for surface in ("deal", "source"):
         assert _verdict(p[surface]) == verdict, surface
     # The lists are empty in EXACTLY the same way as test_03's — the verdict
     # is the only thing that tells the two apart.
     assert p["deal"]["rows"] == [] and p["source"]["rows"] == []
-    assert p["drawer"]["deals"] == [] and p["drawer"]["contacts"] == []
     # Withheld means absent: no deal count, revenue or customer figure.
     assert list(_numbers({k: p["deal"][k] for k in
                           ("rows", "ledger_summary", "closed_won_population")})) == []
-    assert list(_numbers({k: p["drawer"][k] for k in
-                          ("deals", "summary", "closed_won_population")})) == []
 
 
 @pytest.mark.parametrize("state", sorted(STATES))
@@ -278,18 +266,6 @@ def test_07_views_that_list_no_deals_carry_no_population_verdict(monkeypatch):
         assert mart["closed_won_population"] is None, view
 
 
-def test_08_unreadable_contact_evidence_publishes_no_deal_count_in_the_drawer(
-        monkeypatch):
-    """The ledger is readable but the drilldown shows no rows: it must not
-    publish a count beside them."""
-    _patch(monkeypatch, "deals", contacts_readable=False)
-    drawer = _drawer()
-    assert drawer["source_health"]["status"] == "database_unavailable"
-    assert "closed_won_population" in drawer
-    assert drawer["closed_won_population"] is None
-    assert drawer["deals"] == [] and drawer["summary"]["deals"] is None
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # UI — the whole real app.js, through the real loaders
 # ═════════════════════════════════════════════════════════════════════════════
@@ -306,20 +282,18 @@ assert _ASYNC_HARNESS != _VM_HARNESS, "the 161B harness tail changed"
 _PROBE = """
 const P = %(payloads)s;
 _currentUser = %(user)s;
-fetchRevenuePerformance = async (view) => (view === "deal" ? P.deal : P.source);
+fetchRevenuePerformance = async (view) => P.deal;
 (async () => {
   await loadDeals();
-  await loadRevenueBySource();
-  return { deals: __els["revenue-deals-table-body"].innerHTML,
-           source: __els["revenue-by-source-body"].innerHTML,
-           drawer: renderSourceDrilldown(P.drawer) };
+  return { deals: __els["revenue-deals-table-body"].innerHTML };
 })()
 """
 
 
 def _ui(payloads, tmp_path, *, js=None, user=None):
-    """Render the Deals page, Revenue by Source and the source drawer from
-    ``payloads`` in the real app.js (or a mutation of it). Returns their HTML."""
+    """Render the Deals page from ``payloads`` in the real app.js (or a
+    mutation of it). Returns its HTML. (Revenue by Source and its drawer were
+    rendered here too until PR-ADS-168B deleted them.)"""
     node = shutil.which("node")
     assert node, "node is required: CI runs `node --check static/app.js`"
     (tmp_path / "harness.js").write_text(_ASYNC_HARNESS, encoding="utf-8")
@@ -407,23 +381,6 @@ def test_12_the_deals_page_never_reads_a_withheld_ledger_as_no_deals(
     assert "This does not mean that no deals closed." in _text(html)
 
 
-@pytest.mark.parametrize("state", sorted(BLOCKED))
-def test_13_revenue_by_source_never_reads_a_withheld_ledger_as_no_activity(
-        monkeypatch, tmp_path, state):
-    status, _, words = BLOCKED[state]
-    html = _ui(_payloads(monkeypatch, state), tmp_path)["source"]
-    _assert_says_only_why(html, status.capitalize(), words)
-
-
-@pytest.mark.parametrize("state", sorted(BLOCKED))
-def test_14_the_source_drawer_never_reads_a_withheld_ledger_as_no_clients(
-        monkeypatch, tmp_path, state):
-    status, _, words = BLOCKED[state]
-    html = _ui(_payloads(monkeypatch, state), tmp_path)["drawer"]
-    _assert_says_only_why(html, status.capitalize(), words)
-    assert "Closed-won deals behind this source:" in _text(html)
-
-
 def test_15_withheld_revenue_reads_withheld_with_its_reason_never_a_dash(
         monkeypatch, tmp_path):
     payloads = _payloads(monkeypatch, "unpriced")
@@ -448,49 +405,11 @@ def test_15_withheld_revenue_reads_withheld_with_its_reason_never_a_dash(
     assert "cte_family=revenue_proof" in admin
 
 
-def test_16_revenue_by_source_shows_a_published_zero_as_zero(monkeypatch,
-                                                              tmp_path):
-    """No deal closed in the window, but leads were created in it: the groups
-    still render, with 0 closed-won deals — not a blank, not 'unavailable'."""
-    html = _ui(_payloads(monkeypatch, "empty"), tmp_path)["source"]
-    text = _text(html)
-    assert "Google Ads" in text and "Organic" in text
-    assert "0 closed-won deals" in text
-    assert "No attributed source activity" not in text
-    # With no leads either, the page says the one thing the verdict proves.
-    html = _ui(_payloads(monkeypatch, "empty", leads=False), tmp_path)["source"]
-    assert "No closed-won deals closed in this period." in _text(html)
-    assert "No attributed source activity" not in _text(html)
-
-
-def test_17_the_source_drawer_lists_a_platforms_deals_and_a_real_zero(
-        monkeypatch, tmp_path):
-    html = _ui(_payloads(monkeypatch, "deals"), tmp_path)["drawer"]
-    text = _text(html)
-    assert "Acme renewal" in text and "$9.0k" in text
-    assert "Beta expansion" not in text              # another platform's deal
-    assert "Acme Ltd" in text                        # the contact behind it
-    # A platform with no deal and no contact, under a PUBLISHED zero.
-    monkeypatch.undo()
-    payloads = _payloads(monkeypatch, "deals", platform=EMPTY_PLATFORM)
-    assert _verdict(payloads["drawer"]) == {
-        "value": 0, "status": "published", "reason": None}
-    text = _text(_ui(payloads, tmp_path)["drawer"])
-    assert "No attributed closed-won client detail found for this source" in text
-    # A platform with a contact but no deal names the empty half precisely.
-    monkeypatch.undo()
-    payloads = _payloads(monkeypatch, "empty")
-    assert payloads["drawer"]["contacts"] and not payloads["drawer"]["deals"]
-    text = _text(_ui(payloads, tmp_path)["drawer"])
-    assert "Acme Ltd" in text
-    assert "No closed-won deals closed in this period for this source." in text
-
-
 def _mutated(payloads, **verdict):
     """A REAL payload set whose verdict alone is replaced (``None`` removes
     it) — the rows, summaries and every other key stay as the server sent."""
     out = json.loads(json.dumps(payloads, default=str))
-    for surface in ("deal", "source", "drawer"):
+    for surface in ("deal", "source"):
         if verdict.get("drop"):
             out[surface].pop("closed_won_population", None)
         else:
@@ -518,8 +437,7 @@ def test_18_an_unrecognised_or_missing_verdict_fails_closed_on_every_surface(
     so only the verdict stands between the page and "there are none"."""
     out = _ui(_mutated(_payloads(monkeypatch, "empty", leads=False), **verdict),
               tmp_path)
-    for surface in ("deals", "source", "drawer"):
-        _assert_says_only_why(out[surface], "Unavailable", words)
+    _assert_says_only_why(out["deals"], "Unavailable", words)
 
 
 def test_19_rows_sent_beside_a_withheld_verdict_are_not_rendered(monkeypatch,
@@ -527,11 +445,9 @@ def test_19_rows_sent_beside_a_withheld_verdict_are_not_rendered(monkeypatch,
     """The second wall: the UI holds even if a server sent the rows anyway."""
     leaked = _mutated(_payloads(monkeypatch, "deals"), value=None,
                       status="unavailable", reason="canonical_ledger_stale")
-    assert leaked["deal"]["rows"] and leaked["source"]["rows"]
-    assert leaked["drawer"]["deals"]
+    assert leaked["deal"]["rows"]
     out = _ui(leaked, tmp_path)
-    for surface in ("deals", "source", "drawer"):
-        _assert_says_only_why(out[surface], "Unavailable", STALE_WORDS)
+    _assert_says_only_why(out["deals"], "Unavailable", STALE_WORDS)
 
 
 def test_20_the_guard_is_load_bearing_without_it_stale_reads_as_none(
@@ -549,14 +465,9 @@ def test_20_the_guard_is_load_bearing_without_it_stale_reads_as_none(
     payloads = _payloads(monkeypatch, "stale")
     out = _ui(payloads, tmp_path, js=bypassed)
     assert "No closed-won deals closed in this period" in _text(out["deals"])
-    assert "No closed-won deals closed in this period" in _text(out["source"])
-    # The drawer's second wall (an unrecognised source_health.status is not
-    # "ready") still refuses to say "none" — but it no longer says why.
-    assert STALE_WORDS not in _text(out["drawer"])
     # …and with the guard in place the same payloads say why.
     out = _ui(payloads, tmp_path)
-    for surface in ("deals", "source", "drawer"):
-        _assert_says_only_why(out[surface], "Unavailable", STALE_WORDS)
+    _assert_says_only_why(out["deals"], "Unavailable", STALE_WORDS)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

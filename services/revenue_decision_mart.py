@@ -20,8 +20,9 @@ Doctrine (unchanged, never loosened):
 Controlled grains (no naive mega-table that double-counts spend):
   1. Campaign-day spend grain   -> campaign view rows
   2. Country-day spend grain    -> country view rows
-  3. Lead/deal event-date grain -> source + deal view rows
-  4. This rollup service chooses the view: campaign | country | source | deal.
+  3. Deal event-date grain      -> deal view rows
+  4. This rollup service chooses the view: campaign | country | deal.
+     (PR-ADS-168B deleted the `source` view with the Revenue by Source page.)
 
 Single source contract every view shares (computed ONCE per window):
   - business window (resolver: analysis.business_windows.resolve_window)
@@ -33,7 +34,7 @@ Single source contract every view shares (computed ONCE per window):
 
 The per-view ``rows`` change with the grain, but ``window``, ``spend_truth`` and
 ``summary`` are the SAME canonical truth regardless of the requested view. That
-is the whole point of the mart: one brain, one truth, four renderings.
+is the whole point of the mart: one brain, one truth, three renderings.
 """
 
 from __future__ import annotations
@@ -55,12 +56,12 @@ from services.revenue_attribution_service import (
     build_revenue_attribution,
     build_revenue_deals,
 )
-from services.source_attribution_service import build_revenue_by_source
 
 logger = logging.getLogger(__name__)
 
-# The only views the canonical contract serves.
-VALID_VIEWS = ("campaign", "country", "source", "deal")
+# The only views the canonical contract serves. PR-ADS-168B: the `source`
+# view served only the deleted Revenue by Source page; a request for it is a 400.
+VALID_VIEWS = ("campaign", "country", "deal")
 
 # Reporting timezone used to render the business window. Falls back to this when
 # the account time zone cannot be read from the durable spend tables.
@@ -569,15 +570,6 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             ),
         })
 
-    if view == "source":
-        diags.append({
-            "code": "source_spend_scope",
-            "message": (
-                "Only the Google Ads source carries spend and period revenue / ad "
-                "spend (a non-cohort operational ratio); every other source group "
-                "is revenue-only (no ratio, never $0)."
-            ),
-        })
     return diags
 
 
@@ -744,25 +736,18 @@ def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> d
       - data_health: view-specific availability the canonical spend_truth cannot
         carry. For the deal view this surfaces deal_ledger_status so a durable
         ledger OUTAGE is never silently rendered as a truthful empty window.
-      - closed_won_population (PR-ADS-164A): for the deal and source views, the
+      - closed_won_population (PR-ADS-164A): for the deal view, the
         view builder's OWN canonical ``{value, status, reason}`` for the won-deal
         population its rows list or partition. ``rows == []`` means "none" only
         beside ``status: published, value: 0``; passed through, never derived
         here. None for the campaign and country views.
     """
     payload = {"rows": [], "ledger_summary": None, "data_health": {},
-               "source_spend_truth": None, "closed_won_population": None}
+               "closed_won_population": None}
     if view == "campaign":
         payload["rows"] = core.get("campaigns") or []
     elif view == "country":
         payload["rows"] = core.get("countries") or []
-    elif view == "source":
-        source = build_revenue_by_source(window, now=now)
-        payload["rows"] = source.get("groups") or []
-        payload["closed_won_population"] = source.get("closed_won_population")
-        # PR-ADS-140: carry the Google Ads spend-truth proof block so the page can
-        # prove its Google Ads spend reconciles with the canonical top-line.
-        payload["source_spend_truth"] = source.get("source_spend_truth")
     elif view == "deal":
         deals = build_revenue_deals(window, now=now)
         payload["rows"] = deals.get("deals") or []
@@ -783,14 +768,14 @@ def build_revenue_decision_mart(
     """Build the canonical Revenue Decision Mart contract for a view + window.
 
     Args:
-        view: One of VALID_VIEWS (campaign | country | source | deal).
+        view: One of VALID_VIEWS (campaign | country | deal).
         window: A business-window key (analysis.business_windows.WINDOW_KEYS).
         now: Optional reference time for deterministic resolution/testing.
 
     Returns:
         The canonical contract: window, spend_truth, summary, rows, diagnostics.
         ``window``, ``spend_truth`` and ``summary`` are IDENTICAL across the
-        campaign, source and deal views; only ``rows`` changes with the
+        campaign and deal views; only ``rows`` changes with the
         requested grain. PR-ADS-167A: the country view (``SETTLED_DAY_VIEWS``)
         is the same contract over the settled-day window — an open window ends
         at yesterday, declared in ``window.through_reason`` /
@@ -890,15 +875,13 @@ def build_revenue_decision_mart(
         "sql_reconciliation": sql_reconciliation,
         "readiness": readiness,
         "rows": payload["rows"],
-        # Deal / source views (PR-ADS-164A): the canonical verdict for the
+        # Deal view (PR-ADS-164A): the canonical verdict for the
         # won-deal population behind `rows`. An empty `rows` is "there are
         # none" only when this says published with value 0.
         "closed_won_population": payload["closed_won_population"],
         # Deal view: the ledger's own summary (consistent with its rows) and the
         # ledger availability signal. None / empty for the other views.
         "ledger_summary": payload["ledger_summary"],
-        # Source view (PR-ADS-140): canonical Google Ads spend-truth proof block.
-        "source_spend_truth": payload.get("source_spend_truth"),
         "data_health": payload["data_health"],
         "diagnostics": diagnostics,
         "source_truth": "revenue_decision_mart",
@@ -1047,13 +1030,6 @@ def _difference_reasons(page_key: str, spend_truth: dict, *, status: str) -> lis
     if page_key == "roas_by_country" and not geo_gate.country_geo_ready(
             spend_truth["country_spend_status"]):
         reasons.append("different_geo_reconciliation")
-    if page_key == "revenue_by_source":
-        # PR-ADS-140: Revenue by Source now reads the SAME canonical campaign-daily
-        # spend as the mart (geo spend is diagnostic only), so a difference is
-        # NEVER a different-source-table mismatch. Any residual difference is an
-        # FX-coverage difference — the source USD spend is withheld until FX is safe.
-        if spend_truth["fx_status"] != "verified":
-            reasons.append("different_fx_coverage")
     if spend_truth["campaign_spend_status"] != "verified":
         reasons.append("different_campaign_mapping")
     if spend_truth["fx_status"] != "verified" and "different_fx_coverage" not in reasons:
@@ -1089,7 +1065,9 @@ def build_revenue_performance_audit(
 
     # Current per-page truth, each at its own grain.
     campaigns = core.get("campaigns") or []
-    source = build_revenue_by_source(window, now=now)
+    # PR-ADS-168B: Revenue by Source is deleted, so it is no longer a page
+    # compared here (Channels publishes its outcomes through the reader
+    # contract, audited by audit_customer_revenue_reader_cutover).
     deals = build_revenue_deals(window, now=now)
 
     def _sum_spend(rows):
@@ -1115,11 +1093,6 @@ def build_revenue_performance_audit(
     country_page_spend = _sum_spend(country_core.get("countries") or [])
     country_spend_truth = _spend_truth_block(country_core)
     country_mart_spend = _summary_block(country_core, country_spend_truth).get("spend_usd")
-    google_group = next(
-        (g for g in (source.get("groups") or []) if g.get("group") == "google_ads"),
-        {},
-    )
-    source_google_spend = _round2(google_group.get("spend"))
     deals_revenue = _round2((deals.get("summary") or {}).get("won_revenue"))
 
     tolerance = 0.02  # mirrors SPEND_VARIANCE_TOLERANCE for reconciliation
@@ -1127,7 +1100,6 @@ def build_revenue_performance_audit(
         ("roas_by_campaign", "Campaign Revenue & Spend", "spend", campaign_page_spend, mart_spend),
         ("roas_by_country", "Country Revenue & Spend", "spend", country_page_spend,
          country_mart_spend),
-        ("revenue_by_source", "Revenue by Source", "spend", source_google_spend, mart_spend),
         ("deals", "Deals", "revenue", deals_revenue, mart_revenue),
     ]
 

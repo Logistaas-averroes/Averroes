@@ -1115,7 +1115,8 @@ def test_17_the_endpoint_is_gone_from_the_running_app(monkeypatch):
     assert client.post(ENDPOINT, headers=auth, json={}).status_code in (404, 405)
     # The sibling report routes other pages read are untouched.
     paths = {r.path for r in server.app.routes}
-    assert {"/api/revenue-attribution", "/api/revenue-by-source",
+    # PR-ADS-168B deleted /api/revenue-by-source with its page.
+    assert {"/api/revenue-attribution",
             "/api/revenue-deals", "/api/dashboard/overview"} <= paths
 
 
@@ -1159,7 +1160,7 @@ def test_19_every_sidebar_page_is_still_routable():
     sales = sidebar.split(">Sales Results</li>")[1].split(
         'class="sidebar__section-label"')[0]
     assert re.findall(r'data-page="([a-z0-9-]+)"', sales) == [
-        "leads", "deals", "revenue-by-source", "roas-campaigns", "roas-countries"]
+        "leads", "deals", "roas-campaigns", "roas-countries"]  # PR-ADS-168B
     # The loader switch lost exactly one case: every page it loaded before
     # this slice, bar Unit Economics, is still loaded by it.
     switch = JS.split("function loadPage(")[1].split("\n}\n")[0]
@@ -1168,7 +1169,7 @@ def test_19_every_sidebar_page_is_still_routable():
         "dashboard", "campaigns", "search-terms", "geo", "keywords", "leads",
         "deals", "gclid-attribution", "scheduler", "health", "backfill",
         "roas-campaigns", "roas-countries", "revenue-health",
-        "revenue-by-source", "channels", "system"}
+        "channels", "system"}  # PR-ADS-168B: revenue-by-source deleted
     assert loaded <= pages
 
 

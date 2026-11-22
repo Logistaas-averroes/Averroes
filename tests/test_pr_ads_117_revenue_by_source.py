@@ -309,7 +309,8 @@ def test_backfill_read_only_to_external():
 
 
 def test_endpoints_registered():
-    assert '"/api/revenue-by-source"' in SERVER
+    # PR-ADS-168B: /api/revenue-by-source is deleted (see test_pr_ads_168b_*);
+    # the backfill and health endpoints remain.
     assert '"/api/source-attribution-backfill/run"' in SERVER
     assert '"/api/source-attribution-backfill/status"' in SERVER
     assert '"/api/source-attribution-health"' in SERVER
@@ -332,42 +333,8 @@ def test_durable_tables_exist():
 
 
 # ════════════════════════ frontend page ════════════════════════
-
-
-def test_page_registered_and_revenue_page():
-    assert '"revenue-by-source"' in JS[JS.find("const PAGES"):JS.find("const PAGES") + 700]
-    assert '"revenue-by-source"' in JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 160]
-    assert 'id="page-revenue-by-source"' in HTML
-    assert 'data-page="revenue-by-source"' in HTML
-    assert 'id="revenue-by-source-range"' in HTML  # date-range chip (PR-116 contract)
-
-
-def test_page_sections_and_period_ratio_only_for_google():
-    # PR-ADS-133: the page renders a group → channel → platform hierarchy. Each
-    # group section has Spend + ratio/Status columns; only Google Ads shows the
-    # ratio, every other source is revenue-only (never a fabricated ratio).
-    # PR-ADS-161E: the ratio is labelled period revenue / ad spend, never ROAS.
-    fn_idx = JS.find("function renderSourceGroupSection")
-    body = JS[fn_idx:JS.find("\n}\n", fn_idx) + 3]
-    assert ">Spend<" in body and ">${PERIOD_RATIO_LABEL} / Status<" in body
-    assert ">ROAS / Status<" not in body
-    assert ">Channel / Platform<" in body
-    st_idx = JS.find("function sourceStatusLabel")
-    status = JS[st_idx:JS.find("\n}\n", st_idx) + 3]
-    assert "Revenue-only — no connected spend source" in status
-    # Health summary surfaces the four counts.
-    health = JS[JS.find("function renderRevenueBySourceHealth"):JS.find("function renderRevenueBySourceHealth") + 700]
-    for label in ("Contacts classified", "Deals attributed", "Ambiguous deals", "Unclassified deals"):
-        assert label in health
-
-
-def test_loader_has_window_guard():
-    idx = JS.find("async function loadRevenueBySource")
-    body = JS[idx:idx + 1400]
-    assert "++_revReqSeq.bySource" in body
-    assert "_revResponseIsCurrent" in body
-    assert 'setWindowRangeLoading("revenue-by-source-range")' in body
-    assert 'renderWindowRange("revenue-by-source-range"' in body
+# PR-ADS-168B deleted the Revenue by Source page; its three page tests
+# (registration, section/ratio renderers, loader window guard) went with it.
 
 
 # ════════════════ retryable failures + chunk retryability (corrections) ═══════

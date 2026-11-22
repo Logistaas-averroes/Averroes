@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "revenue-health", "revenue-by-source", "channels", "system"];
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "revenue-health", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -35,6 +35,11 @@ const RETIRED_PAGE_REDIRECTS = {
   // The old page is deleted, not hidden — the redirect carries its INTENT
   // (land on the flagged terms), which is what an old bookmark actually wanted.
   waste: { page: "search-terms", tab: "flagged" },
+  // PR-ADS-168B: Revenue by Source is deleted; Channels carries closed-won
+  // deals, customers and revenue per channel (PR-ADS-168A). The key is NOT in
+  // PAGES — this entry is the only place it survives, so an old bookmark
+  // lands on Channels instead of the Dashboard fallback.
+  "revenue-by-source": { page: "channels" },
 };
 
 // PR-ADS-110/113: Revenue & Attribution pages. These use business-revenue
@@ -47,7 +52,7 @@ const RETIRED_PAGE_REDIRECTS = {
 // PR-ADS-153C: Leads is a CRM/business page — business windows, clean chrome.
 // PR-ADS-162A: Channels has its own acquisition-window selector — clean chrome.
 // PR-ADS-162C: System is a plain status page — clean chrome.
-const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads", "channels", "system"];
+const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -289,14 +294,14 @@ const PAGE_EXPLANATIONS = {
 const PAGE_HELP_CONTENT = {
   dashboard: {
     what: "Executive overview of Google Ads spend, HubSpot closed-won revenue, pipeline conversion, source mix, and computed action signals for one business window.",
-    source: "Canonical Revenue Decision Mart (Google Ads spend truth + HubSpot closed-won revenue truth), Revenue by Source, and the closed-won deal ledger.",
-    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaign Revenue & Spend, Revenue by Source) to drill down.",
+    source: "Canonical Revenue Decision Mart (Google Ads spend truth + HubSpot closed-won revenue truth), the source-group breakdown, and the closed-won deal ledger.",
+    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaign Revenue & Spend, Channels) to drill down.",
     doNotAssume: "'Unavailable' means the truth layer withheld a metric (FX, coverage, or lead-date safety) — it is never a $0. Period Revenue / Ad Spend (a non-cohort operational ratio) applies to Google Ads only; other sources are revenue-only.",
     checkNext: "Revenue Health for truth blockers, or Campaign Revenue & Spend for the campaigns behind a decision card."
   },
   campaigns: {
     what: "Campaign Evidence — genuine selected-window totals for spend, leads, SQLs, junk and CPQL, with a factual Outcome Status per campaign (SQL producer · Junk-heavy · Spend without SQL proof · Mapping review · No outcome evidence · Data unavailable). Outcome Status is a description of the window's evidence, not a scale/cut recommendation.",
-    source: "Canonical daily Google Ads API spend (native GBP + FX-safe USD — the same source as Revenue by Source) reconciled with deduplicated HubSpot lead outcomes on the HubSpot event date (contact_created_at). Lead labels are mapped to canonical Google Ads campaigns through the approved campaign-identity table; unmatched labels appear as Mapping Review rows.",
+    source: "Canonical daily Google Ads API spend (native GBP + FX-safe USD — the same source as the Revenue Decision Mart) reconciled with deduplicated HubSpot lead outcomes on the HubSpot event date (contact_created_at). Lead labels are mapped to canonical Google Ads campaigns through the approved campaign-identity table; unmatched labels appear as Mapping Review rows.",
     howToUse: "Pick an Evidence Window (7d…All time; All time is genuine cumulative totals). Filter by status/outcome and sort. Click a row to open the drawer — its lead evidence aggregates across the campaign's approved aliases and reconciles exactly with the row.",
     doNotAssume: "Read-only — no Google Ads or HubSpot changes are made. Spend is canonical Google Ads truth, never a snapshot; overall CPQL uses mapped Google Ads SQLs only (unmatched / Not-Google-Ads SQLs are disclosed, never fold into it).",
     checkNext: "Campaign detail drawer for drill-down, or Campaign Revenue & Spend for revenue attribution."
@@ -1466,7 +1471,6 @@ function loadPage(page) {
     case "roas-campaigns":  loadRoasCampaigns();  break;
     case "roas-countries":  loadRoasCountries();  break;
     case "revenue-health":  loadRevenueHealth();  break;
-    case "revenue-by-source": loadRevenueBySource(); break;
     case "channels":        loadChannels();        break;
     case "system":          loadSystem();          break;
   }
@@ -2286,16 +2290,15 @@ function canonicalValueHtml(value, metric, formatter, opts) {
 }
 
 // ── PR-ADS-164A — a won-deal list is read, empty, or not published ───────────
-// The Deals page, Revenue by Source and the source drawer each list or
-// partition a closed-won population. The API sends that population's canonical
+// The Deals page lists a closed-won population (Revenue by Source and its
+// drawer did too until PR-ADS-168B deleted them). The API sends that population's canonical
 // verdict as `closed_won_population` = {value, status, reason}. The verdict
 // decides what an empty list means; an empty array alone never does:
 //   "rows"    published, and exactly that many deals arrived;
 //   "empty"   published with value 0 — the ledger WAS read and holds no deal;
 //   "blocked" everything else: withheld, unavailable, an unrecognised status,
 //             no verdict at all, or a published count the rows contradict.
-// `dealCount` is the number of deals the page received: its rows, or — for
-// Revenue by Source, whose groups partition the population — their sum.
+// `dealCount` is the number of deals the page received: its rows.
 function closedWonPopulation(data) {
   return (data && data.closed_won_population) || null;
 }
@@ -2309,13 +2312,6 @@ function closedWonPopulationState(verdict, dealCount) {
   if (!closedWonPopulationPublished(verdict)) return "blocked";
   if (dealCount !== verdict.value) return "blocked";
   return verdict.value === 0 ? "empty" : "rows";
-}
-
-// The won deals the Revenue by Source groups hold between them. A group whose
-// count is not a number adds nothing, so the sum then contradicts the verdict.
-function sourceGroupDealCount(groups) {
-  return (groups || []).reduce(
-    (n, g) => n + (g && typeof g.closed_won_deals === "number" ? g.closed_won_deals : 0), 0);
 }
 
 // What a blocked list says: the API's own word and reason. Where it gave no
@@ -3888,7 +3884,7 @@ function renderRevBreakdowns(d) {
       ${renderRevBreakdownPanel("Revenue by Campaign", "Top 5 by closed-won revenue",
         b.by_campaign, "campaign", "roas-campaigns", common)}
       ${renderRevBreakdownPanel("Revenue by Source", "Top 5 · Google Ads spend-connected only",
-        b.by_source, "source_group", "revenue-by-source", { ...common, spendConnected: true })}
+        b.by_source, "source_group", "channels", { ...common, spendConnected: true })}
       ${renderRevBreakdownPanel("Revenue by Country", "Top 5 by closed-won revenue",
         b.by_country, "country", "roas-countries", common)}
     </div>`;
@@ -8532,6 +8528,9 @@ async function loadRevenueHealth() {
   loadCampaignMapping();
   // Admin-only Revenue Recovery panel (PR-ADS-114) sits above the diagnostics.
   loadRevenueRecoveryStatus();
+  // Admin-only Source Attribution Backfill panel (PR-ADS-168B: moved here from
+  // the deleted Revenue by Source page).
+  renderSourceBackfillPanelInit();
 
   const body = document.getElementById("revenue-health-body");
   if (!body) return;
@@ -9168,398 +9167,6 @@ document.addEventListener("click", (e) => {
   if (!btn) return;
   runLeadReconciliationJob(btn.dataset.reconcileAction === "preview");
 });
-
-// ── Revenue by Acquisition Source (PR-ADS-117) ──────────────────────────────
-// Google Ads is the only group with connected spend, so the only group that may
-// show ROAS. Every other group is revenue-only (ROAS unavailable, never $0/0x).
-
-// ── PR-ADS-133: Revenue by Source — group → channel → platform taxonomy ──────
-// Each top-level group renders a section with its channels; each channel lists
-// its platform rows, and every platform row expands into a drawer proving the
-// clients/deals behind it. Only Google Ads is spend-connected, so only Google
-// Ads shows ROAS — every other row is revenue-only with an honest status label
-// (never a fabricated $0 / 0.00x). Missing values render "Unavailable".
-
-// SQL / Customer conversion rate off the lead base; Unavailable when no leads.
-function fmtSourceRate(numer, denom) {
-  if (!denom || denom <= 0 || numer === null || numer === undefined) return "Unavailable";
-  return (100 * numer / denom).toFixed(0) + "%";
-}
-
-// Group-level period ratio / status cell: Google shows Period Revenue / Ad
-// Spend; others show why not.
-function sourceStatusLabel(group) {
-  if (group.has_spend === true) {
-    if (group.period_revenue_per_ad_spend !== null && group.period_revenue_per_ad_spend !== undefined) {
-      return `${PERIOD_RATIO_LABEL} ${fmtPeriodRatio(group.period_revenue_per_ad_spend)} · ${PERIOD_RATIO_DISCLOSURE}`;
-    }
-    // PR-ADS-140: when canonical Google Ads spend or the ratio is withheld, show
-    // the exact honest reason (FX withheld / coverage incomplete / source
-    // unavailable) — never a bare "Unavailable" and never "no connected spend
-    // source". PR-ADS-161E: a withheld period ratio names its reason.
-    const why = canonicalReasonLabel(group.period_ratio_reason);
-    return (group.spend_status_label || "Unavailable") + (why ? ` (${why})` : "");
-  }
-  if (group.group === "offline") return "Imported CRM records — no reliable source attribution";
-  if (group.group === "unclassified") return "Needs review — source missing or unsafe";
-  return "Revenue-only — no connected spend source";
-}
-
-// PR-ADS-140: compact proof chip inside the Google Ads section — the Revenue by
-// Source Google Ads spend is the canonical campaign spend, NOT country/geo spend.
-function renderSourceSpendProofChip(spendTruth) {
-  const st = spendTruth || {};
-  const tip = st.geo_spend_note
-    || "Country geo spend is diagnostic and is not used as the Revenue by Source denominator.";
-  return `<span class="source-proof-chip" title="${escapeHtml(tip)}">Spend source: canonical campaign spend</span>`;
-}
-
-// Expand control for a platform row (opens the clients/deals drawer, lazy).
-function sourcePlatformExpandControl(idx, group, channel, platform, label) {
-  const aria = `Show clients / deals behind ${label || "this platform"}`;
-  return `<button type="button" class="source-expand-button" data-source-expand data-source-idx="${idx}"`
-    + ` data-source-group="${encodeURIComponent(group)}" data-source-channel="${encodeURIComponent(channel)}"`
-    + ` data-source-platform="${encodeURIComponent(platform)}" aria-expanded="false"`
-    + ` aria-label="${escapeHtml(aria)}" title="${escapeHtml(aria)}">▸</button>`;
-}
-
-function renderSourcePlatformRow(group, ch, pf, idx) {
-  // The period ratio shows ONLY for a spend-connected platform (the canonical
-  // Google Ads bucket), with its canonical status and reason when it is not
-  // published; every other bucket shows its honest status string, never a
-  // fabricated ratio. (group.has_spend gates the group; pf.spend gates the
-  // individual bucket — see PR-133 review.)
-  const hasSpend = pf.spend !== null && pf.spend !== undefined;
-  const statusCell = hasSpend ? rowMetricHtml(pf, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts()) : `<span class="source-status">${escapeHtml(pf.status || "")}</span>`;
-  const spendCell = hasSpend ? fmtMoney(pf.spend) : '<span class="detail-unavailable">Unavailable</span>';
-  return `
-    <tr class="source-platform-row">
-      <td class="source-platform-name">${sourcePlatformExpandControl(idx, group.group, ch.channel, pf.platform, pf.label)}${escapeHtml(pf.label)}</td>
-      <td>${fmtCount(pf.leads)}</td>
-      <td>${fmtCount(pf.sqls)}</td>
-      <td>${fmtSourceRate(pf.sqls, pf.leads)}</td>
-      <td>${rowMetricHtml(pf, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(pf, "customers", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(pf, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
-      <td>${spendCell}</td>
-      <td>${statusCell}</td>
-    </tr>
-    <tr class="source-drilldown-row" data-source-drilldown-idx="${idx}" hidden>
-      <td colspan="9"><div class="source-drilldown-panel"></div></td>
-    </tr>`;
-}
-
-function renderSourceChannelRows(group, ch, gi, ci) {
-  // Only the spend-connected (canonical Paid Search) channel carries spend and
-  // the period ratio; gate on ch.spend so a non-canonical channel in the Google
-  // group never shows it.
-  const hasSpend = ch.spend !== null && ch.spend !== undefined;
-  const spendCell = hasSpend ? fmtMoney(ch.spend) : '<span class="detail-unavailable">Unavailable</span>';
-  const statusCell = hasSpend ? rowMetricHtml(ch, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts()) : "—";
-  const channelHead = `
-    <tr class="source-channel-row">
-      <td class="source-channel-name">${escapeHtml(ch.label)}</td>
-      <td>${fmtCount(ch.leads)}</td>
-      <td>${fmtCount(ch.sqls)}</td>
-      <td>${fmtSourceRate(ch.sqls, ch.leads)}</td>
-      <td>${rowMetricHtml(ch, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(ch, "customers", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(ch, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
-      <td>${spendCell}</td>
-      <td>${statusCell}</td>
-    </tr>`;
-  const platformRows = (ch.platforms || [])
-    .map((pf, pi) => renderSourcePlatformRow(group, ch, pf, `${gi}-${ci}-${pi}`))
-    .join("");
-  return channelHead + platformRows;
-}
-
-// PR-ADS-152 §1: the Google Ads group's SQL count is the canonical
-// google_ads_source_sqls scope (not the classification-derived legacy count),
-// with the campaign-attributable subset disclosed. A mismatch is withheld and
-// rendered "Reconciliation required", never a contradictory normal number.
-function sourceGaSqlsChip(group) {
-  if (group.has_spend !== true) return "";
-  const val = group.sql_reconciliation_status === "mismatch"
-    ? "Reconciliation required"
-    : dashValue(group.google_ads_source_sqls, fmtCount);
-  const camp = (group.campaign_attributable_sqls === null || group.campaign_attributable_sqls === undefined)
-    ? ""
-    : `<small class="source-sqls-scope">${escapeHtml(fmtCount(group.campaign_attributable_sqls))} campaign-attributable</small>`;
-  return `<div><span>Google Ads-source SQLs</span><strong>${escapeHtml(val)}</strong>${camp}</div>`;
-}
-
-function renderSourceGroupSection(group, gi, spendTruth) {
-  const channels = group.channels || [];
-  const headerRow = `
-    <tr>
-      <th>Channel / Platform</th>
-      <th>Leads</th>
-      <th>SQLs</th>
-      <th>SQL Rate</th>
-      <th>Won Deals</th>
-      <th title="Distinct proven HubSpot companies — not additive across rows">Customers</th>
-      <th>Won Revenue</th>
-      <th>Spend</th>
-      <th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL} / Status</th>
-    </tr>`;
-  const body = channels.length
-    ? channels.map((ch, ci) => renderSourceChannelRows(group, ch, gi, ci)).join("")
-    : `<tr><td colspan="9" class="source-drilldown-empty">No attributed activity in this window.</td></tr>`;
-  // Group KPI strip — Google shows Spend and the period ratio; others show the
-  // revenue-only reason.
-  const isGoogle = group.has_spend === true;
-  // PR-ADS-140: the Google Ads spend chip is the CANONICAL campaign spend (the
-  // same USD number shown at the top), with the native GBP evidence as a subline —
-  // never the old geo/country-derived figure. Unavailable (never $0) when withheld.
-  const st = spendTruth || {};
-  const nativeSub = (isGoogle && st.native_spend !== null && st.native_spend !== undefined)
-    ? `<small class="source-spend-native">${escapeHtml(fmtCompactCurrency(st.native_spend, st.native_currency))} native</small>`
-    : "";
-  const googleSpendText = group.spend === null || group.spend === undefined
-    ? "Unavailable" : fmtMoney(group.spend);
-  const spendChip = isGoogle
-    ? `<div><span>Spend</span><strong>${googleSpendText}</strong>${nativeSub}</div>`
-    : `<div><span>Spend</span><strong>Unavailable</strong></div>`;
-  const proofChip = isGoogle ? renderSourceSpendProofChip(st) : "";
-  return `
-    <div class="panel revenue-source-section">
-      <div class="panel__header source-group-header">
-        <span class="source-group-title">${escapeHtml(group.label)}</span>
-        <span class="source-group-status">${escapeHtml(sourceStatusLabel(group))}</span>
-        ${proofChip}
-      </div>
-      <div class="revenue-summary-strip revenue-summary-strip--four source-group-kpis">
-        <div><span>Leads</span><strong>${fmtCount(group.leads)}</strong></div>
-        ${sourceGaSqlsChip(group)}
-        <div><span>Customers</span><strong>${rowMetricHtml(group, "customers", fmtCount, businessBlockerOpts())}</strong><small>${rowMetricHtml(group, "closed_won_deals", fmtCount, businessBlockerOpts())} closed-won deals</small></div>
-        <div><span>Won Revenue</span><strong>${rowMetricHtml(group, "won_revenue", fmtMoney, businessBlockerOpts())}</strong></div>
-        ${spendChip}
-      </div>
-      <div class="panel__body panel__body--flush">
-        <div class="revenue-table-shell">
-          <div class="revenue-table-scroll">
-            <table class="data-table roas-table revenue-decision-table source-taxonomy-table">
-              ${headerRow}
-              <tbody>${body}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-// ── Source platform drawer (clients / deals behind a platform) ───────────────
-let sourceDrilldownCache = {};
-
-function sourceDrilldownKey(group, channel, platform) {
-  return `${getRoasBusinessWindow()}:${group}:${channel}:${platform}`;
-}
-
-function renderSourceDrilldownRow(d) {
-  const amount = d.amount == null ? drilldownValue(null) : fmtMoney(d.amount);
-  return `
-    <tr>
-      <td>${drilldownValue(d.deal_name || d.company)}</td>
-      <td>${drilldownValue(d.company_id)}</td>
-      <td>${drilldownValue(d.main_contact)}</td>
-      <td>${drilldownValue(d.contact_id)}</td>
-      <td>${drilldownValue(d.lifecycle_stage)}</td>
-      <!-- PR-ADS-153C: legacy operational classification, not canonical funnel
-           truth. Revenue by Source is migrated in a later PR. -->
-      <td title="Legacy operational classification (status_category) — not canonical funnel truth">${drilldownValue(d.status_category)}</td>
-      <td>${drilldownValue(d.deal)}</td>
-      <td>${drilldownValue(d.deal_id)}</td>
-      <td>${amount}</td>
-      <td>${drilldownValue(d.close_date)}</td>
-      <td>${drilldownValue(d.source)}</td>
-      <td>${drilldownValue(d.source_drilldown_1)}</td>
-      <td>${drilldownValue(d.source_drilldown_2)}</td>
-      <td>${drilldownValue(d.campaign_source_label)}</td>
-      <td>${drilldownValue(d.attribution_status)}</td>
-    </tr>`;
-}
-
-// One contact (lead / SQL) proof row. Same safe formatter; unavailable for any
-// field not durably stored (contact name, company id, lifecycle).
-function renderSourceContactRow(c) {
-  return `
-    <tr>
-      <td>${drilldownValue(c.company)}</td>
-      <td>${drilldownValue(c.company_id)}</td>
-      <td>${drilldownValue(c.main_contact)}</td>
-      <td>${drilldownValue(c.contact_id)}</td>
-      <td>${drilldownValue(c.lifecycle_stage)}</td>
-      <td>${drilldownValue(c.status_category)}</td>
-      <td>${c.is_sql ? "Yes" : "No"}</td>
-      <td>${drilldownValue(c.created_date)}</td>
-      <td>${drilldownValue(c.source)}</td>
-      <td>${drilldownValue(c.source_drilldown_1)}</td>
-      <td>${drilldownValue(c.source_drilldown_2)}</td>
-      <td>${drilldownValue(c.campaign_source_label)}</td>
-    </tr>`;
-}
-
-function renderSourceDrilldown(data) {
-  const status = data && data.source_health && data.source_health.status;
-  if (status === "database_unavailable") {
-    return `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
-  }
-  const contacts = (data && data.contacts) || [];
-  const deals = (data && data.deals) || (data && data.rows) || [];
-  // PR-ADS-164A: the canonical verdict for this platform's won deals decides
-  // what an empty list means. Withheld / unavailable shows the word and the
-  // reason, and nothing else.
-  const verdict = closedWonPopulation(data);
-  const dealState = closedWonPopulationState(verdict, deals.length);
-  if (dealState === "blocked") {
-    return `<div class="source-drilldown-empty">Closed-won deals behind this source: ${closedWonBlockedHtml(verdict)}</div>`;
-  }
-  // The contact half is "none" only when the server says its read succeeded.
-  if (status !== "ready") {
-    return `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
-  }
-  if (!contacts.length && dealState === "empty") {
-    return `<div class="source-drilldown-empty">No attributed closed-won client detail found for this source in this window.</div>`;
-  }
-  // Section 1 — Leads / SQLs proof (windowed by contact_created_at).
-  const contactHeader = `
-    <tr>
-      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
-      <th>Lifecycle</th><th>SQL / Customer Status</th><th>SQL</th><th>Created</th>
-      <th>Source</th><th>Source Drilldown 1</th><th>Source Drilldown 2</th>
-      <th>Campaign / Source</th>
-    </tr>`;
-  const contactsSection = contacts.length
-    ? `
-    <div class="source-drilldown-title">Leads / SQLs Behind This Source</div>
-    <div class="table-scroll source-drilldown-scroll">
-      <table class="data-table revenue-decision-table source-drilldown-table">
-        ${contactHeader}
-        <tbody>${contacts.map(renderSourceContactRow).join("")}</tbody>
-      </table>
-    </div>`
-    : `<div class="source-drilldown-title">Leads / SQLs Behind This Source</div>
-       <div class="source-drilldown-empty">No leads/SQLs found for this source in this window.</div>`;
-  // Section 2 — Closed-Won Deals proof (windowed by deal_close_date).
-  const dealHeader = `
-    <tr>
-      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
-      <th>Lifecycle</th><th>SQL / Customer Status</th><th>Deal</th><th>Deal ID</th>
-      <th>Amount</th><th>Close Date</th><th>Source</th><th>Source Drilldown 1</th>
-      <th>Source Drilldown 2</th><th>Campaign / Source</th><th>Attribution</th>
-    </tr>`;
-  const dealsSection = deals.length
-    ? `
-    <div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
-    <div class="table-scroll source-drilldown-scroll">
-      <table class="data-table revenue-decision-table source-drilldown-table">
-        ${dealHeader}
-        <tbody>${deals.map(renderSourceDrilldownRow).join("")}</tbody>
-      </table>
-    </div>`
-    : `<div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
-       <div class="source-drilldown-empty">No closed-won deals closed in this period for this source.</div>`;
-  return `${contactsSection}${dealsSection}`;
-}
-
-async function loadSourceDrilldown(group, channel, platform, drawerRow) {
-  const container = drawerRow.querySelector(".source-drilldown-panel");
-  if (!container) return;
-  const key = sourceDrilldownKey(group, channel, platform);
-  if (sourceDrilldownCache[key]) {
-    container.innerHTML = renderSourceDrilldown(sourceDrilldownCache[key]);
-    return;
-  }
-  container.innerHTML = `<p class="source-drilldown-muted">Loading source client details…</p>`;
-  try {
-    const window_ = getRoasBusinessWindow();
-    const res = await fetch(
-      `/api/revenue-performance/source-platform-detail?window=${encodeURIComponent(window_)}`
-      + `&source_group=${encodeURIComponent(group)}&source_channel=${encodeURIComponent(channel)}`
-      + `&source_platform=${encodeURIComponent(platform)}`,
-      { credentials: "same-origin" }
-    );
-    if (!res.ok) {
-      container.innerHTML = `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
-      return;
-    }
-    const data = await res.json();
-    sourceDrilldownCache[key] = data;
-    container.innerHTML = renderSourceDrilldown(data);
-  } catch (err) {
-    console.error("[loadSourceDrilldown]", err);
-    container.innerHTML = `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
-  }
-}
-
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-source-expand]");
-  if (!btn) return;
-  const idx = btn.getAttribute("data-source-idx");
-  const group = decodeURIComponent(btn.getAttribute("data-source-group") || "");
-  const channel = decodeURIComponent(btn.getAttribute("data-source-channel") || "");
-  const platform = decodeURIComponent(btn.getAttribute("data-source-platform") || "");
-  const drawer = document.querySelector(`.source-drilldown-row[data-source-drilldown-idx="${idx}"]`);
-  if (!drawer) return;
-  if (drawer.hasAttribute("hidden")) {
-    drawer.removeAttribute("hidden");
-    btn.setAttribute("aria-expanded", "true");
-    btn.textContent = "▾";
-    if (!drawer.dataset.loaded) {
-      drawer.dataset.loaded = "1";
-      loadSourceDrilldown(group, channel, platform, drawer);
-    }
-  } else {
-    drawer.setAttribute("hidden", "");
-    btn.setAttribute("aria-expanded", "false");
-    btn.textContent = "▸";
-  }
-});
-
-function renderRevenueBySourceHealth(summary) {
-  const s = summary || {};
-  return `
-    <div class="revenue-summary-strip revenue-summary-strip--four">
-      <div><span>Contacts classified</span><strong>${fmtCount(s.contacts_classified)}</strong></div>
-      <div><span>Deals attributed</span><strong>${fmtCount(s.deals_attributed)}</strong></div>
-      <div><span>Ambiguous deals</span><strong>${fmtCount(s.ambiguous_deals)}</strong></div>
-      <div><span>Unclassified deals</span><strong>${fmtCount(s.unclassified_deals)}</strong></div>
-    </div>
-  `;
-}
-
-function renderRevenueBySourcePage(data) {
-  const body = document.getElementById("revenue-by-source-body");
-  if (!body) return;
-  // PR-ADS-126: rows ARE the per-source groups from the canonical mart. PR-ADS-133
-  // enriches each group with a channel → platform breakdown; only the Google Ads
-  // group carries spend and the period ratio (the mart sets has_spend /
-  // period_revenue_per_ad_spend), so the frontend
-  // never decides which source has spend. Empty groups are dropped to keep the
-  // page a clean attribution view, not a diagnostics wall.
-  const groups = (data && data.rows) || [];
-  // PR-ADS-164A: the verdict, not an empty page, says "none".
-  const verdict = closedWonPopulation(data);
-  if (closedWonPopulationState(verdict, sourceGroupDealCount(groups)) === "blocked") {
-    body.innerHTML = renderClosedWonBlocked(verdict);
-    return;
-  }
-  // PR-ADS-140: the canonical Google Ads spend-truth proof block (native GBP + USD
-  // reporting + FX/coverage status). Drives the Google Ads spend chip subline and
-  // the "canonical campaign spend" proof chip so the page proves its number.
-  const spendTruth = (data && data.source_spend_truth) || {};
-  const active = groups.filter((g) => g && ((g.channels && g.channels.length) || g.leads || g.closed_won_deals));
-  const sections = active.length
-    ? active.map((g, gi) => renderSourceGroupSection(g, gi, spendTruth)).join("")
-    : `<div class="revenue-empty-inline">No closed-won deals closed in this period.</div>`;
-  body.innerHTML = `
-    ${renderMartSpendTruth(data)}
-    ${renderMartDiagnostics(data)}
-    ${sections}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads provides spend, so only Google Ads shows Period Revenue / Ad Spend — ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}. Every other channel/platform is revenue-only; no ratio is ever fabricated. Expand a platform to prove the clients/deals behind it.</p>
-  `;
-}
 
 // ── Channels: the acquisition-cohort funnel for every channel (PR-ADS-162A) ──
 // One table, one publication verdict. When the cohort is not published the
@@ -10476,35 +10083,10 @@ async function loadSystem() {
   }
 }
 
-async function loadRevenueBySource() {
-  const window_ = getRoasBusinessWindow();
-  const token = ++_revReqSeq.bySource;
-  // PR-ADS-164A: a drawer answer cached before this reload belongs to an
-  // earlier read of the ledger; it must not open beside the new counts.
-  sourceDrilldownCache = {};
-  setWindowRangeLoading("revenue-by-source-range");
-  renderSourceBackfillPanelInit();
-  const body = document.getElementById("revenue-by-source-body");
-  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue by source…</p>';
-  try {
-    // PR-ADS-126: PRIMARY truth is the canonical mart source view.
-    const data = await fetchRevenuePerformance("source", window_);
-    if (token !== _revReqSeq.bySource) return;  // stale response superseded
-    if (!data) {
-      if (body) body.innerHTML = renderMartUnavailable();
-      return;
-    }
-    if (!_revResponseIsCurrent("bySource", token, data)) return;
-    renderWindowRange("revenue-by-source-range", data.window || null);
-    renderRevenueBySourcePage(data);
-  } catch (err) {
-    console.error("[loadRevenueBySource]", err);
-    if (token !== _revReqSeq.bySource) return;
-    if (body) body.innerHTML = renderMartUnavailable();
-  }
-}
-
 // ── Source Attribution Backfill panel (admin-only) ──────────────────────────
+// PR-ADS-168B: moved from the deleted Revenue by Source page to Revenue Health
+// (loadRevenueHealth renders it into #source-backfill-panel). The job and its
+// endpoints are unchanged.
 
 let sourceBackfillJobId = null;
 let sourceBackfillPollTimer = null;
@@ -10566,7 +10148,7 @@ async function fetchSourceBackfillStatus() {
 }
 
 async function pollSourceBackfillOnce() {
-  if (_currentPage !== "revenue-by-source") { stopSourceBackfillPolling(); return; }
+  if (_currentPage !== "revenue-health") { stopSourceBackfillPolling(); return; }
   try {
     const status = await fetchSourceBackfillStatus();
     if (status) {
@@ -10576,7 +10158,8 @@ async function pollSourceBackfillOnce() {
         sourceBackfillPollTimer = setTimeout(pollSourceBackfillOnce, 2500);
         return;
       }
-      loadRevenueBySource();
+      // Job finished: refresh Revenue Health (it re-reads this panel's status).
+      loadRevenueHealth();
     }
   } catch (err) {
     console.error("[pollSourceBackfill]", err);
@@ -17065,14 +16648,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Wire up Revenue by Source controls (business windows — PR-ADS-117)
-  const bySourceRefresh = document.getElementById("revenue-by-source-refresh-btn");
-  const bySourceWindow  = document.getElementById("revenue-by-source-window");
-  if (bySourceRefresh) bySourceRefresh.addEventListener("click", loadRevenueBySource);
-  if (bySourceWindow) {
-    bySourceWindow.value = getRoasBusinessWindow();
-    bySourceWindow.addEventListener("change", handleBusinessWindowSelectChange);
-  }
 
 
 
@@ -17337,7 +16912,6 @@ function handleBusinessWindowSelectChange(e) {
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
-    case "revenue-by-source": loadRevenueBySource(); break;
     default:                loadRoasCampaigns();
   }
 }
@@ -17377,7 +16951,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {
