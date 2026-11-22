@@ -5490,6 +5490,7 @@ function renderDashboardCountries() {
       <h2 class="dash-tab-intro__title">Countries &amp; Markets</h2>
       <p class="dash-tab-intro__sub">Where Google Ads spend, SQLs, customers and closed-won revenue are actually showing up. Spend is native GBP; revenue is HubSpot closed-won USD.</p>
     </div>
+    ${ownerLabelMismatchNotice(d.owner_labelled_geo)}
     ${renderCtryKpiRow(d)}
     <section class="dash-panel dash-chart-panel dash-anim ctry-map-panel" aria-label="Geo performance map">
       ${renderCtryGeoMap(d)}
@@ -5559,6 +5560,17 @@ function ctrySpendWithheldText(d) {
   return why ? `Country spend withheld — ${why}` : "Country spend withheld";
 }
 
+/** PR-ADS-170A-F1: the spend card is the listed markets' spend. When Google
+ *  Ads geo spend lies outside them (a country that is not a listed market) the
+ *  card says how much; that spend is on no row of this page. "" when none,
+ *  or when the server did not compute it. */
+function ctryOutsideMarketsText(k) {
+  const o = (k || {}).spend_outside_listed_markets;
+  if (!o || !(o.native > 0)) return "";
+  const names = Array.isArray(o.countries) && o.countries.length ? ` (${o.countries.join(", ")})` : "";
+  return ` · not included: ${escapeHtml(fmtCompactCurrency(o.native, o.currency || "GBP"))} in countries outside the listed markets${escapeHtml(names)}`;
+}
+
 function renderCtryKpiRow(d) {
   const k = d.kpis || {};
   const pc = d.period_change || {};
@@ -5575,9 +5587,9 @@ function renderCtryKpiRow(d) {
   const cards = [
     {
       key: "spend", label: "Verified Geo Spend",
-      value: nativeVal, sub: usdSub,
+      value: nativeVal, sub: usdSub + ctryOutsideMarketsText(k),
       delta: dashDeltaChip("verified_spend_usd", pc),
-      source: "Google Ads · native GBP · country-attributed",
+      source: "Google Ads · native GBP · country-attributed · listed markets only",
       ok: native.amount !== null && native.amount !== undefined,
     },
     {
@@ -5761,7 +5773,7 @@ function wireCtryBubbleHover(root, d) {
     tooltip.textContent = "";
     const title = document.createElement("div");
     title.className = "dash-chart-tooltip__title";
-    title.textContent = `${r.country_name || "—"} · ${r.region || ""}`;
+    title.textContent = `${r.country_name || "—"}${ownerLabelledCountryText(r.spend_country_provenance)} · ${r.region || ""}`;
     tooltip.appendChild(title);
     const usd = (r.spend_usd !== null && r.spend_usd !== undefined) ? fmtMoney(r.spend_usd) : "Unavailable";
     const ratio = (r.period_ratio_available && r.period_revenue_per_ad_spend !== null && r.period_revenue_per_ad_spend !== undefined) ? fmtPeriodRatio(r.period_revenue_per_ad_spend) : "Unavailable";
@@ -5809,7 +5821,7 @@ function renderCtryLeaderboard(d) {
   const body = real.map((r, i) => `
     <tr class="ctry-row" data-ctry-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.country_name || "country")} detail">
       <td class="ctry-td ctry-td--name">
-        <span class="ctry-dot ${(CTRY_STATUS_META[r.status] || {}).dot || "ctry-dot--muted"}"></span>${escapeHtml(r.country_name || "—")}
+        <span class="ctry-dot ${(CTRY_STATUS_META[r.status] || {}).dot || "ctry-dot--muted"}"></span>${escapeHtml(r.country_name || "—")}${spendOwnerNote(r)}
       </td>
       <td class="ctry-td--region">${escapeHtml(r.region || "—")}</td>
       <td class="ctry-num">${ctrySpendCell(r)}</td>
@@ -5971,7 +5983,7 @@ function wireCtryDrawers(root, d) {
     }
     drawer.innerHTML = `
       <div class="ctry-drawer__head">
-        <strong>${escapeHtml(r.country_name || "Country")}</strong>
+        <strong>${escapeHtml(r.country_name || "Country")}</strong>${spendOwnerNote(r)}
         <span class="ctry-drawer__region">${escapeHtml(r.region || "")}</span>
         <span class="ctry-status" style="--ctry-accent:${ctryStatusColor(r.status)}">${escapeHtml(r.status || "")}</span>
         <button type="button" class="ctry-drawer__close" aria-label="Close">×</button>
@@ -11036,6 +11048,77 @@ function geoFmtSpend(v) {
   return fmtDollar(v);
 }
 
+// PR-ADS-170A: Google Ads reports a few locations with no country at all. The
+// owner labelled them (config/geo_owner_labels.yaml); the server marks every
+// row whose country rests on that label. The same words on all three country
+// pages — the row never passes an owner's label off as Google's.
+const OWNER_LABELLED_COUNTRY_NOTE = "Country set by owner — Google Ads reports this location without a country";
+
+/** The small note beside an owner-labelled country name, or "". `provenance`
+ *  is the row's `country_provenance` (Countries) or `spend_country_provenance`
+ *  (Country Revenue & Spend, Dashboard Countries). */
+function ownerLabelledCountryNote(provenance) {
+  if (provenance !== "owner_labelled") return "";
+  return ` <span class="owner-label-note" title="${escapeHtml(OWNER_LABELLED_COUNTRY_NOTE)}">set by owner</span>`;
+}
+
+/** The same note for a Country Revenue & Spend / Dashboard Countries row,
+ *  whose geo spend the server marks with `spend_country_provenance`. */
+function spendOwnerNote(row) {
+  return ownerLabelledCountryNote((row || {}).spend_country_provenance);
+}
+
+/** The owner marker as plain text, for a map hover or a tooltip that is not
+ *  HTML. `provenance` as for ownerLabelledCountryNote. */
+function ownerLabelledCountryText(provenance) {
+  return provenance === "owner_labelled" ? " (country set by owner)" : "";
+}
+
+/** PR-ADS-170A-F1: what to say when Google Ads now reports a country for a
+ *  location the owner labelled differently. The stored Google code is the one
+ *  in use; the owner's label is not applied. One sentence per location, "" when
+ *  there is none. `block` is the payload's `owner_labelled_geo`. */
+function ownerLabelMismatchText(block) {
+  const list = Array.isArray((block || {}).mismatches) ? block.mismatches : [];
+  if (!list.length) return "";
+  const parts = list.map((m) => {
+    const codes = Array.isArray(m.stored_codes) ? m.stored_codes.join(", ") : "";
+    const many = Array.isArray(m.stored_codes) && m.stored_codes.length > 1;
+    return `location ${m.criterion_id}: the owner set ${m.owner_code}, Google Ads reports ${codes}`
+      + (many ? " (two different countries, so its spend is under no country)" : ` — ${codes} is used`);
+  });
+  return `Owner country label not applied — Google Ads now reports a country for ${list.length === 1 ? "a location" : "locations"} the owner labelled differently (${parts.join("; ")}). Google's code always wins. Review the entry in config/geo_owner_labels.yaml.`;
+}
+
+/** The same sentence as a notice block for the revenue country pages. */
+function ownerLabelMismatchNotice(block) {
+  const text = ownerLabelMismatchText(block);
+  return text ? `<p class="mapping-notice mapping-notice--warn owner-label-mismatch" role="status">${escapeHtml(text)}</p>` : "";
+}
+
+/** PR-ADS-170A-F1: a published $0 that stands only on the owner's labels says
+ *  so — whether the country's own carrier is owner-labelled or labelled spend
+ *  in the window would otherwise have no country. */
+function ownerZeroNote(row) {
+  const on = Array.isArray((row || {}).zero_rests_on_owner_labels) ? row.zero_rests_on_owner_labels : [];
+  if (!on.length) return "";
+  const title = `This $0 rests on the owner's country label for Google Ads location${on.length === 1 ? "" : "s"} ${on.join(", ")}. Google Ads reports ${on.length === 1 ? "that location" : "those locations"} without a country; without the label that spend could be this country's and the figure would read "Unavailable".`;
+  return ` <span class="owner-label-note" title="${escapeHtml(title)}">owner label</span>`;
+}
+
+/** The residual row's Spend cell on Country Revenue & Spend. The row's spend is
+ *  a sum of named parts (server: `spend_components`); the part whose country
+ *  is KNOWN but is not a listed market is stated, never left inside a number
+ *  labelled "Unknown". */
+function residualSpendCell(r) {
+  const c = (r || {}).spend_components || {};
+  const out = c.outside_listed_markets;
+  const names = Array.isArray(r.outside_listed_market_countries) ? r.outside_listed_market_countries : [];
+  if (!(out > 0)) return fmtMoney(r.spend);
+  const rest = (c.geo_unassigned || 0) + (c.country_unidentified || 0);
+  return `${fmtMoney(r.spend)}<br><small class="metric-reason">${escapeHtml(fmtMoney(out))} is spend in ${names.length ? escapeHtml(names.join(", ")) : "countries"} — known ${names.length === 1 ? "country" : "countries"}, not among the listed markets${rest > 0 ? `; ${escapeHtml(fmtMoney(rest))} has no country` : ""}</small>`;
+}
+
 const GEO_ROW_SPEND_REASONS = {
   spend_location_unresolved: "some spend in this window has no country",
   country_not_matched: "country not matched",
@@ -11058,7 +11141,7 @@ function geoSpendCell(row) {
         : "Country spend for this window is not published.";
     return `<span class="td--na" title="${escapeHtml(title)}">Unavailable${why ? ` — ${escapeHtml(why)}` : ""}</span>`;
   }
-  return geoFmtSpend(row.spend_usd);
+  return geoFmtSpend(row.spend_usd) + (row.spend_usd === 0 ? ownerZeroNote(row) : "");
 }
 
 const GEO_NA = '<span class="td--na">Unavailable</span>';
@@ -11169,6 +11252,15 @@ async function loadGeo() {
     noticeEl.hidden = false;
   }
 
+  // PR-ADS-170A-F1: Google Ads now reports a country for a location the owner
+  // labelled differently. Its own notice, whatever else is shown.
+  const ownerEl = document.getElementById("geo-owner-label-notice");
+  if (ownerEl) {
+    const mismatch = ownerLabelMismatchText(data.owner_labelled_geo);
+    ownerEl.textContent = mismatch;
+    ownerEl.hidden = !mismatch;
+  }
+
   // The rows are printed as served. Fail closed on the window verdict: if the
   // window is not published no row's spend is read, whatever the row says.
   const leadsAvailable = data.leads_status === "published";
@@ -11268,7 +11360,7 @@ function renderGeoMap(rows, metric) {
   const known = (v) => (v === null || v === undefined) ? "Unavailable" : v;
 
   const customdata = rows.map((r) => [
-    r.country,
+    r.country + ownerLabelledCountryText(r.country_provenance),
     geoFmtSpend(r.spend_usd),
     known(r.total_leads),
     known(r.confirmed_sqls),
@@ -11349,7 +11441,7 @@ function renderGeoTable(rows) {
       <tr data-country="${escapeHtml(r.country)}"
           data-campaign="${escapeHtml(r.top_campaign || "")}"
           data-keyword="${escapeHtml(r.top_keyword || "")}">
-        <td class="td--name">${escapeHtml(r.country)}</td>
+        <td class="td--name">${escapeHtml(r.country)}${ownerLabelledCountryNote(r.country_provenance)}</td>
         <td class="td--num">${geoSpendCell(r)}</td>
         <td class="td--num">${geoLeadCell(r.total_leads)}</td>
         <td class="td--num">${geoLeadCell(r.confirmed_sqls)}</td>
@@ -18421,6 +18513,7 @@ function renderRoasCountriesPage() {
 
   tableBody.innerHTML = `
     ${renderMartSpendTruth(data)}
+    ${ownerLabelMismatchNotice(st.owner_labelled_geo)}
     ${residualMode ? renderCountryResidualWarning(st) : ""}
     ${renderMartSummaryStrip(data)}
     ${renderMartDiagnostics(data)}
@@ -18570,7 +18663,7 @@ function renderRoasCountryTable(rows) {
       return `
     <tr class="revenue-residual-row">
       <td><span class="revenue-residual-name">Unknown / Unattributed country</span> <span class="revenue-residual-badge">Residual</span></td>
-      <td>${fmtMoney(r.spend)}</td>
+      <td>${residualSpendCell(r)}</td>
       <td>—</td>
       <td>—</td>
       <td>—</td>
@@ -18582,7 +18675,7 @@ function renderRoasCountryTable(rows) {
     }
     return `
     <tr>
-      <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}</td>
+      <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}${spendOwnerNote(r)}</td>
       <td>${fmtMoney(r.spend)}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>

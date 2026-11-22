@@ -1380,7 +1380,12 @@ def test_13_unreadable_leads_are_unknown_on_the_table_and_on_the_map(
 # Fourth review — spend with no country, and the minors
 # ══════════════════════════════════════════════════════════════════════════
 PK_TEXT = "Pakistan"
-UNNAMED = ("2192", None, None)     # production: a criterion no row ever names
+# A criterion no row ever names. Until PR-ADS-170A this fixture used production's
+# `2192`; the owner has since labelled 2192 Cuba (config/geo_owner_labels.yaml),
+# so it is no longer "a location nothing names". The rule under test is about
+# such a location, so the fixture uses an id the owner has NOT labelled. The
+# assertions are unchanged. 2192 itself: tests/test_pr_ads_170a_*.
+UNNAMED = ("2997", None, None)
 UNAVAILABLE_NO_COUNTRY = "Unavailable — some spend in this window has no country"
 
 
@@ -1524,8 +1529,10 @@ def test_14b_when_no_stored_row_names_the_location_the_country_is_not_zero(
 
 def test_15_a_location_nothing_names_blocks_a_zero_only_in_a_window_that_holds_it(
         live_db, tmp_path):
-    """Production, read on 2026-11-19: criterion `2192` has 17 rows, none with
+    """Production, read on 2026-11-19: criterion `2192` had 17 rows, none with
     a country code or name, the newest on 2026-11-06 — a standing, tiny state.
+    (PR-ADS-170A: the owner has since labelled `2192`; `UNNAMED` is an
+    unlabelled criterion in the same state.)
 
     In a window that holds some of it, a lead country with no spend row is
     unavailable (that spend may be its own) and every country WITH a row is

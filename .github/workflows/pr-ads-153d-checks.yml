@@ -120,6 +120,7 @@ jobs:
             tests/test_pr_ads_167a_countries_zero_rule_pg_integration.py \
             tests/test_pr_ads_167a_geo_sync_country_codes_pg_integration.py \
             tests/test_pr_ads_167a_settled_coverage_consumers_pg_integration.py \
+            tests/test_pr_ads_170a_owner_labelled_geo_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_169a_certification_memory.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
@@ -234,6 +235,11 @@ jobs:
                            "tests.test_pr_ads_167a_countries_zero_rule_pg_integration",
                            "tests.test_pr_ads_167a_geo_sync_country_codes_pg_integration",
                            "tests.test_pr_ads_167a_settled_coverage_consumers_pg_integration",
+                           # PR-ADS-170A. The owner's country labels for
+                           # the two criteria Google reports without one:
+                           # applied by the readers, never written, a stored
+                           # Google code wins, an unlisted id stays unresolved.
+                           "tests.test_pr_ads_170a_owner_labelled_geo_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

@@ -534,8 +534,44 @@ def _finalize_row(
     }
 
 
+def _residual_spend_components(*, outside_listed_markets, country_unidentified,
+                               geo_unassigned) -> dict:
+    """The parts of the residual row's ``spend``, in the row's own unit.
+
+    PR-ADS-170A-F1. ``spend`` on the residual row is their sum, and each part
+    is a different statement:
+
+    * ``outside_listed_markets`` — Google Ads spend whose country IS known
+      (Google named it, or the owner labelled the criterion) but is not one of
+      the listed markets (``country_identity.SUPPORTED_COUNTRIES``);
+    * ``country_unidentified`` — spend rows whose country text names no
+      country at all;
+    * ``geo_unassigned`` — the campaign-to-geo shortfall: spend Google's
+      geographic view assigns to no location.
+    """
+    return {"outside_listed_markets": outside_listed_markets,
+            "country_unidentified": country_unidentified,
+            "geo_unassigned": geo_unassigned}
+
+
+def _known_country_outside_markets(row: dict) -> str | None:
+    """The country NAME when a spend row carries a real country that is not a
+    listed market, else None.
+
+    Known means a country CODE on the canonical geo row (``geo_country_code``:
+    Google's own, or the owner's label) that the ISO table names. Country TEXT
+    is deliberately not resolved here — the complete free-text resolver is the
+    Countries page's alone (PR-ADS-165A) — so a legacy row that carries only a
+    name stays in ``country_unidentified``.
+    """
+    code = row.get("geo_country_code")
+    if not isinstance(code, str):
+        return None
+    return country_identity.iso_country_label(code)
+
+
 def _apply_geo_spend_residual(countries: list, residual_native, residual_usd,
-                              use_usd) -> list:
+                              use_usd, bucketed_native=0.0, bucketed_usd=0.0) -> list:
     """Attach the Google Ads geo SPEND residual to the one residual country row.
 
     PR-ADS-153F. There is exactly ONE residual bucket per country view, and it
@@ -555,13 +591,40 @@ def _apply_geo_spend_residual(countries: list, residual_native, residual_usd,
 
     USD is shown only when FX is complete; otherwise USD stays None (never
     native GBP relabelled as USD).
+
+    ``bucketed_native`` / ``bucketed_usd`` (PR-ADS-170A-F1) are the native and
+    USD amounts of the geo spend the bucketing already placed on the residual
+    row, so the row's ``spend_native`` / ``spend_usd`` are those of the whole
+    row. The shortfall alone stays readable as ``spend_geo_unassigned_*``.
     """
     spend = residual_usd if use_usd else residual_native
     existing = next((r for r in countries if r.get("is_residual")), None)
     if existing is not None:
-        existing["spend"] = spend
-        existing["spend_native"] = residual_native
-        existing["spend_usd"] = residual_usd
+        # PR-ADS-170A-F1: ADD the shortfall to what the bucketing already put
+        # on this row. It used to be written OVER it, which dropped the spend of
+        # every Google country outside the listed markets (and of an
+        # owner-labelled one) whenever a shortfall residual existed: the rows
+        # then summed to less than the campaign total. Unknown stays unknown —
+        # a missing part makes the sum None, never a partial.
+        prior = existing.get("spend")
+        prior = 0.0 if prior is None and "spend" not in existing else prior
+        components = dict(existing.get("spend_components")
+                          or _residual_spend_components(
+                              outside_listed_markets=0.0,
+                              country_unidentified=prior, geo_unassigned=0.0))
+        components["geo_unassigned"] = spend
+        existing["spend_components"] = components
+        existing["spend"] = (None if (prior is None or spend is None)
+                             else round(_safe_float(prior) + _safe_float(spend), 2))
+        # Native / USD of the whole row, and of the shortfall alone.
+        existing["spend_geo_unassigned_native"] = residual_native
+        existing["spend_geo_unassigned_usd"] = residual_usd
+        existing["spend_native"] = (
+            None if (residual_native is None or bucketed_native is None)
+            else round(_safe_float(residual_native) + _safe_float(bucketed_native), 6))
+        existing["spend_usd"] = (
+            None if (residual_usd is None or bucketed_usd is None)
+            else round(_safe_float(residual_usd) + _safe_float(bucketed_usd), 6))
         existing["spend_mapping"] = "matched"
         existing.setdefault("attribution_notes", []).append(
             "Includes Google Ads spend the geographic view does not assign to any "
@@ -587,6 +650,12 @@ def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd) -> dict
         "spend": spend,
         "spend_native": residual_native,
         "spend_usd": residual_usd,
+        "spend_geo_unassigned_native": residual_native,
+        "spend_geo_unassigned_usd": residual_usd,
+        "spend_components": _residual_spend_components(
+            outside_listed_markets=0.0, country_unidentified=0.0,
+            geo_unassigned=spend),
+        "outside_listed_market_countries": [],
         "leads": 0,
         "sqls": 0,
         # A spend-only residual holds no deals. Customers stay None: no
@@ -751,6 +820,34 @@ def _build_country_rows(
     return rows
 
 
+def stamp_owner_labelled_countries(rows: list, owner_labelled_geo: dict,
+                                   code_field: str = "country_code") -> list:
+    """Mark the country rows whose geo spend is theirs on the OWNER's word.
+
+    PR-ADS-170A. ``owner_labelled_geo`` is the geo read's own disclosure
+    (``repo.fetch_geo_daily_spend_by_country``): the window's criteria that
+    carry no Google country code and that the owner labelled. A real country
+    row with one of those codes gets ``spend_country_provenance:
+    "owner_labelled"`` and the criterion ids; every other row is returned
+    unchanged. The residual row is never marked — it is not a country.
+    """
+    by_code: dict = {}
+    for c in (owner_labelled_geo or {}).get("criteria") or []:
+        if c.get("country_code"):
+            by_code.setdefault(str(c["country_code"]).upper(), []).append(
+                str(c.get("criterion_id")))
+    if not by_code:
+        return rows
+    out = []
+    for r in rows or []:
+        code = str(r.get(code_field) or "").upper()
+        if code in by_code and not r.get("is_residual"):
+            r = {**r, "spend_country_provenance": "owner_labelled",
+                 "owner_labelled_criteria": sorted(by_code[code])}
+        out.append(r)
+    return out
+
+
 def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> dict:
     spend = round(sum(_spend_value(r) for r in spend_rows), 2)
     leads = len(contacts)
@@ -850,6 +947,16 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
     for row in spend_rows:
         _, b = bucket_for(row.get(group_field), row.get("country_code"))
         b["spend"] += _safe_float(row.get("spend"))
+        if by_country and getattr(b.get("country_identity"), "is_residual", False):
+            # PR-ADS-170A-F1: spend that lands in the residual because its
+            # country is KNOWN but is not one of the listed markets (a Google-
+            # named or owner-labelled country outside the registry) is its own
+            # component — it is not "spend with no country".
+            known = _known_country_outside_markets(row)
+            if known:
+                b["spend_outside_markets"] = (
+                    b.get("spend_outside_markets", 0.0) + _safe_float(row.get("spend")))
+                b.setdefault("outside_market_countries", set()).add(known)
 
     # lead rows: {campaign_name, country, status_category, has_gclid}
     # (empty when lead metrics are withheld for an unsafe date grain)
@@ -929,10 +1036,32 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
                 finalized["verdict"] = "unattributed"
                 finalized["decision"] = "unattributed"
                 finalized["top_campaign"] = None
-                finalized.setdefault("attribution_notes", []).append(
-                    "Revenue whose country could not be identified "
-                    f"({identity.reason}). Shown separately so totals reconcile; "
-                    "never spread across real countries.")
+                # PR-ADS-170A-F1: say what each part of this row is. The
+                # residual holds (a) deals / leads whose CRM country is not a
+                # listed market or could not be identified, and (b) Google Ads
+                # spend. Its spend has named components (see
+                # `_residual_spend_components`); the geo shortfall is added by
+                # `_apply_geo_spend_residual`, never written over the rest.
+                outside = round(_safe_float(bucket.get("spend_outside_markets")), 2)
+                names = sorted(bucket.get("outside_market_countries") or [])
+                total = finalized.get("spend")
+                finalized["spend_components"] = _residual_spend_components(
+                    outside_listed_markets=outside,
+                    country_unidentified=(None if total is None
+                                          else round(_safe_float(total) - outside, 2)),
+                    geo_unassigned=0.0)
+                finalized["outside_listed_market_countries"] = names
+                if bucket.get("closed_won_deals") or bucket.get("leads"):
+                    finalized.setdefault("attribution_notes", []).append(
+                        "Deals and leads whose country is not one of the listed "
+                        "markets, or could not be identified. Shown separately so "
+                        "totals reconcile; never spread across real countries.")
+                if outside:
+                    finalized.setdefault("attribution_notes", []).append(
+                        "Includes Google Ads spend whose country is known but is "
+                        "not one of the listed markets"
+                        + (f" ({', '.join(names)})" if names else "")
+                        + ". It is not spend without a country.")
             else:
                 finalized["top_campaign"] = _db_top_campaign(key, revenue_rows, spend_rows)
         rows.append(finalized)
@@ -1497,7 +1626,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             if not name:
                 continue  # unresolved criterion id → not country-named
             country_source_rows.append({
+                # PR-ADS-170A: an owner-labelled criterion arrives here with
+                # the label's code and ISO name (repo, the one identity rule)
+                # and is placed exactly as any Google-named country is.
                 "campaign_name": None, "country": name,
+                # Used only to tell a KNOWN country outside the listed markets
+                # from text that names none; never a bucketing key.
+                "geo_country_code": r.get("country_code"),
                 "spend": r.get("spend"), "spend_usd": r.get("spend_usd"),
                 "fx_complete": r.get("fx_complete"),
             })
@@ -1561,6 +1696,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     if country_spend_trusted and canonical_geo_country and use_usd:
         country_spend_rows = [
             {"campaign_name": r.get("campaign_name"), "country": r.get("country"),
+             "geo_country_code": r.get("geo_country_code"),
              "spend": r.get("spend_usd")}
             for r in country_source_rows
         ]
@@ -1656,8 +1792,22 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         _res_native = country_residual["residual_native"]
         country_residual_usd = (round(_res_native * fx_effective_rate, 2)
                                 if (use_usd and fx_effective_rate is not None) else None)
+        # PR-ADS-170A-F1: the geo spend the bucketing already put on the
+        # residual row (countries outside the listed markets), in native and
+        # USD, so the shortfall is added to it and not written over it.
+        _outside = [r for r in country_source_rows
+                    if not country_identity.resolve(name=r.get("country")).is_country]
+        _outside_usd = (None if any(r.get("spend_usd") is None for r in _outside)
+                        else sum(_safe_float(r.get("spend_usd")) for r in _outside))
         countries = _apply_geo_spend_residual(
-            countries, _res_native, country_residual_usd, use_usd)
+            countries, _res_native, country_residual_usd, use_usd,
+            bucketed_native=sum(_safe_float(r.get("spend")) for r in _outside),
+            bucketed_usd=_outside_usd)
+    # PR-ADS-170A: a country row whose geo spend is under it on the owner's
+    # word says so. Canonical geo rows only — the legacy table has no criteria.
+    owner_labelled_geo = ((geo_by_country.get("owner_labelled_geo") or {})
+                          if canonical_geo_country else {})
+    countries = stamp_owner_labelled_countries(countries, owner_labelled_geo)
     summary = _build_db_summary(
         campaign_spend_rows, lead_rows, revenue_rows,
         revenue_available=revenue_available,
@@ -1839,6 +1989,12 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "country_residual_reason_code": country_residual["reason"],
         "canonical_customer_id": canonical_customer_id,
         "canonical_currency": canonical_currency,
+        # PR-ADS-170A: the window's geo criteria whose country is the owner's
+        # label, and any labelled criterion Google's stored code overrode.
+        "owner_labelled_geo": {
+            "criteria": list(owner_labelled_geo.get("criteria") or []),
+            "mismatches": list(owner_labelled_geo.get("mismatches") or []),
+        },
         # PR-ADS-119 currency contract: native GBP truth + USD reporting via daily
         # FX. ROAS renders only when canonical coverage complete AND FX complete.
         "spend_native_total": spend_native_total,

@@ -1,0 +1,31 @@
+# Owner-labelled Google Ads geo criteria (PR-ADS-170A)
+#
+# Google Ads reports spend against some location criteria and returns NO
+# country for them from its own lookup. The system never infers one (not even
+# from Google's "2000 + ISO 3166-1 numeric" id convention). The owner may
+# label such a criterion here. ONLY the ids listed are labelled.
+#
+# Rules (enforced in analysis/geo_owner_labels.py and db/geo_identity_sql.py):
+#   * a label applies only while NO stored Google Ads row of the criterion
+#     carries a country code. A stored Google code always wins; if it differs
+#     from the label the mismatch is logged and published, never merged;
+#   * the label is applied when the data is READ. It is never written into
+#     google_ads_geo_daily_spend — the stored rows stay what Google sent;
+#   * an entry is ignored (with a logged warning) unless it has all of:
+#       code      an ISO 3166-1 alpha-2 code in analysis/iso_countries.py
+#       approved  the date the owner approved it (YYYY-MM-DD)
+#       by        who approved it
+#
+# To label another criterion: add an entry below with the owner's approval
+# date, and add a line to docs/09_REPO_STATE.md. Do not add an id the owner
+# has not approved.
+
+owner_labelled_geo_criteria:
+  "2192":
+    code: CU          # Cuba
+    approved: "2026-11-22"
+    by: owner
+  "2364":
+    code: IR          # Iran
+    approved: "2026-11-22"
+    by: owner

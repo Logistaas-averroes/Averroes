@@ -319,6 +319,29 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   `db/geo_identity_sql.py`, used by every reader and by the writer: one code
   resolves, none or two that disagree do not, and nothing is guessed (not
   even Google's 2000 + ISO-numeric convention). Never `MAX(country_code)`.
+
+  **Two criteria are owner-labelled** (PR-ADS-170A, owner decision
+  2026-11-22): Google reports `2192` and `2364` with no country, and
+  `config/geo_owner_labels.yaml` names them Cuba and Iran. READERS resolve a
+  criterion through `geo_identity_sql.criterion_identity`: a stored Google
+  code always wins; only a criterion with no stored code takes its label,
+  with provenance `owner_labelled` (the pages say "set by owner"); a stored
+  code that differs from the label is used and published as
+  `owner_label_mismatch`, never merged. The writer and the sync use
+  `resolved_code` (stored codes only): **the label is never written into
+  `google_ads_geo_daily_spend`**, so Google's later answer is stored and
+  wins. To label another criterion, add an entry (`code`, `approved`, `by`)
+  to that file and a line to `docs/09` — only with the owner's approval. A
+  malformed entry is ignored with a warning, and a key repeated anywhere in
+  the file means NO labels at all (`yaml.safe_load` would keep the last one
+  silently — never read that file with it). Never add a rule that derives a
+  code from the id.
+
+  On Country Revenue & Spend the residual row's `spend` is a SUM of named
+  parts (`spend_components`): countries outside the 96 listed markets, spend
+  whose country text names none, and the campaign-to-geo shortfall.
+  `_apply_geo_spend_residual` ADDS the shortfall; it used to write over the
+  row and drop the rest (PR-ADS-170A-F1). Never assign to that row's spend.
   The sync names criteria from storage first, asks Google only about the
   rest, never writes NULL over a stored code, and a failed lookup makes the
   run `partial` (`country_lookup_failed`) — the chunk stays `verified`
@@ -328,7 +351,8 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   can be its own: no unresolved spend, OR every unresolved criterion is
   code-less everywhere and the country's code is carried on record by exactly
   one criterion that carries nothing else (`fetch_geo_code_carriers`; one
-  country, one criterion). A country never seen in geo spend stays
+  country, one criterion). An owner-labelled criterion is a carrier of its
+  code and is not unresolved spend. A country never seen in geo spend stays
   "Unavailable — some spend in this window has no country" while there is
   any. A country with a row is complete. `fmtDollar` prints `$0` for 39
   cents: beside a rule that `$0` is measured, render "<$1".

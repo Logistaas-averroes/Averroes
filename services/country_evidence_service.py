@@ -79,7 +79,12 @@ display text in the browser:
   carries — over the whole table, not only the window — because the sync
   stores a row with no code when its country lookup fails that day, and the
   criterion id is Google's own id for the location. Exactly one code on
-  record resolves; none, or two that disagree, do not. Unresolved spend is
+  record resolves; none, or two that disagree, do not. A criterion with NO
+  code on record that the owner has labelled
+  (``config/geo_owner_labels.yaml``, PR-ADS-170A — production's ``2192`` Cuba
+  and ``2364`` Iran) is keyed by the label's code, and its row says
+  ``country_provenance: "owner_labelled"``; a stored Google code always wins
+  over a label. Unresolved spend is
   one "(unresolved location)" row and stays in the total. The code is not
   required to be in a supported-markets list: production spend falls in 162
   distinct codes;
@@ -99,7 +104,8 @@ display text in the browser:
   Google keys one country under one criterion. So (PR-ADS-167A) the zero stands
   when every unresolved criterion in the window is code-less everywhere AND
   the country's code is carried on record by exactly one criterion that
-  carries nothing else (``repo.fetch_geo_code_carriers``). A country never seen
+  carries nothing else (``repo.fetch_geo_code_carriers``; an owner-labelled
+  criterion is a carrier of its code, not unresolved spend). A country never seen
   in geo spend, or any spend-less country while a criterion in the window
   carries two codes, is ``unavailable`` / ``spend_location_unresolved`` while
   there is unresolved spend. A country WITH a spend row is unaffected.
@@ -162,6 +168,12 @@ R_LEADS_UNREADABLE = "lead_summary_unreadable"
 
 #: Columns the legacy `geo` snapshot carried and the canonical table does not.
 DROPPED_METRICS = ("clicks", "impressions", "conversions", "campaign_name")
+
+#: PR-ADS-170A: a country a row carries because the owner labelled the Google
+#: criterion (``config/geo_owner_labels.yaml``), not because Google named it.
+from analysis.geo_owner_labels import (  # noqa: E402
+    OWNER_LABEL_NOTE, PROVENANCE_OWNER_LABELLED as OWNER_LABELLED,
+)
 
 #: The label for geo spend Google Ads reports against no resolvable country.
 UNRESOLVED_COUNTRY_LABEL = "(unresolved location)"
@@ -309,6 +321,7 @@ def _new_row(key: str, label: str, code, resolved: bool) -> dict:
         "country_resolved": resolved,
         "_spend_parts": 0, "_spend_usd": 0.0, "_spend_published": True,
         "_lead_parts": [], "_names": set(), "_no_country": False,
+        "_owner_criteria": set(),
     }
 
 
@@ -322,27 +335,57 @@ def identify_spend_rows(spend_rows: list, identities: dict) -> tuple:
     the same Google id, not a guess.
 
     * exactly one code on record -> that code, and the name stored with it;
-    * no code on any row         -> unresolved;
+    * no code on any row         -> the owner's label when the criterion is
+      listed in ``config/geo_owner_labels.yaml`` (PR-ADS-170A), marked
+      ``identity_provenance == "owner_labelled"``; otherwise unresolved;
     * two different codes        -> unresolved. The stored data contradicts
-      itself and nothing here picks a side.
+      itself and nothing here picks a side — an owner label does not either.
+
+    The rule is ``db.geo_identity_sql.criterion_identity``; this function
+    applies it and decides nothing itself. Each returned row also carries
+    ``owner_label_mismatch`` (a stored Google code that differs from the
+    criterion's label: the stored code is used).
 
     Returns ``(rows, unresolved_criteria, conflicting_criteria)`` — the two
     lists name the criterion ids, never a country.
     """
+    from db.geo_identity_sql import criterion_identity  # noqa: PLC0415
+
     out, unresolved, conflicting = [], [], []
     for r in spend_rows:
         criterion = str(r.get("country_criterion_id") or "").strip()
         ident = identities.get(criterion) or {}
-        codes = [c for c in (ident.get("codes") or []) if c]
-        if criterion and len(codes) == 1:
-            out.append({**r, "country_code": codes[0],
-                        "country_name": ident.get("name")})
+        resolved = criterion_identity(criterion, ident.get("codes"),
+                                      ident.get("name"))
+        extra = {"identity_provenance": resolved["provenance"],
+                 "owner_label": resolved["owner_label"],
+                 "owner_label_mismatch": resolved["owner_label_mismatch"]}
+        if criterion and resolved["code"]:
+            out.append({**r, "country_code": resolved["code"],
+                        "country_name": resolved["name"], **extra})
             continue
-        if len(codes) > 1:
+        if len(resolved["stored_codes"]) > 1:
             conflicting.append(criterion)
         unresolved.append(criterion)
-        out.append({**r, "country_code": None, "country_name": None})
+        out.append({**r, "country_code": None, "country_name": None,
+                    **extra, "identity_provenance": None})
     return out, sorted(set(unresolved)), sorted(set(conflicting))
+
+
+def _owner_label_disclosure(spend_rows: list) -> dict:
+    """``{criteria, mismatches}`` for the identified spend rows (PR-ADS-170A)."""
+    criteria, mismatches = {}, {}
+    for r in spend_rows:
+        cid = str(r.get("country_criterion_id") or "").strip()
+        label = r.get("owner_label") or {}
+        if r.get("identity_provenance") == OWNER_LABELLED and label:
+            criteria[cid] = {"criterion_id": cid, "country_code": label.get("code"),
+                             "country": label.get("name"),
+                             "approved": label.get("approved"), "by": label.get("by")}
+        if r.get("owner_label_mismatch"):
+            mismatches[cid] = dict(r["owner_label_mismatch"])
+    return {"criteria": [criteria[k] for k in sorted(criteria)],
+            "mismatches": [mismatches[k] for k in sorted(mismatches)]}
 
 
 def _join(spend_rows: list, lead_rows: list) -> dict:
@@ -356,6 +399,11 @@ def _join(spend_rows: list, lead_rows: list) -> dict:
             key = f"code:{code}"
             row = rows.setdefault(key, _new_row(key, None, code, True))
             row["_names"].add(str(r.get("country_name") or "").strip())
+            if r.get("identity_provenance") == OWNER_LABELLED:
+                # PR-ADS-170A: this spend is under the country on the owner's
+                # word, not Google's. The row says so.
+                row["_owner_criteria"].add(
+                    str(r.get("country_criterion_id") or "").strip())
         else:
             # Spend whose criterion carries no single country code on any
             # stored row. Its own row: it is real spend and stays in the total.
@@ -458,8 +506,11 @@ def build_country_evidence(*, days: int | None, window_key: str,
                     missing_ranges, failed_chunks},
          spend_status: "published" | "unavailable",
          leads_status: "published" | "unavailable",
+         owner_labelled_geo: {criteria, mismatches, note},
          rows: [{country_key, country, country_code, country_resolved,
-                 spend_usd, spend_status, spend_reason, <lead figures>}],
+                 spend_usd, spend_status, spend_reason,
+                 country_provenance, owner_labelled_criteria,
+                 <lead figures>}],
          total_spend_usd, countries_active, unmatched_lead_countries,
          dropped_metrics}
 
@@ -479,6 +530,7 @@ def build_country_evidence(*, days: int | None, window_key: str,
     with contextlib.ExitStack() as geo_reads:
         spend_rows: list = []
         spend: dict = {}
+        owner_geo = {"criteria": [], "mismatches": []}
         unresolved_criteria: list = []
         conflicting_criteria: list = []
         if covered:
@@ -511,6 +563,7 @@ def build_country_evidence(*, days: int | None, window_key: str,
                 else:
                     spend_rows, unresolved_criteria, conflicting_criteria = (
                         identify_spend_rows(spend_rows, identities["identities"]))
+                    owner_geo = _owner_label_disclosure(spend_rows)
 
         joined = _join(spend_rows, list(lead_rows or []) if leads_available else [])
         # Spend in this window that belongs to no named country. While there is
@@ -540,7 +593,19 @@ def build_country_evidence(*, days: int | None, window_key: str,
         #       location, so it stays unavailable while there is loose spend.
         # The evidence read failing is "carried by nothing": fail closed.
         carried: set = set()
-        if covered and unresolved_spend_present and not conflicting_criteria:
+        # PR-ADS-170A: a zero that stands because the country's ONE carrier is
+        # an owner-labelled criterion stands on the owner's word; say so.
+        carried_by_owner: dict = {}
+        # PR-ADS-170A-F1: the same disclosure for the OTHER zero that rests on
+        # the owner's word. With owner-labelled spend in the window, a
+        # spend-less country's $0 stands only because the label took that
+        # spend out of "no country" — unless Google itself keys the country
+        # under a criterion of its own (``carried_by_google``), in which case
+        # the zero would stand without any label.
+        owner_in_window = sorted(c["criterion_id"] for c in owner_geo["criteria"])
+        carried_by_google: set = set()
+        if covered and (unresolved_spend_present or owner_in_window) \
+                and not conflicting_criteria:
             candidates = sorted({
                 row["country_code"] for row in joined.values()
                 if row["country_resolved"] and row["country_code"]
@@ -551,12 +616,18 @@ def build_country_evidence(*, days: int | None, window_key: str,
                     for code, holders in (found.get("carriers") or {}).items():
                         if len(holders) == 1 and holders[0].get("codes") == [code]:
                             carried.add(code)
+                            if holders[0].get("provenance") == OWNER_LABELLED:
+                                carried_by_owner[code] = holders[0].get("criterion_id")
+                            else:
+                                carried_by_google.add(code)
     withheld_zero: list = []
     rows = []
     for row in joined.values():
         parts, usd = row.pop("_spend_parts"), row.pop("_spend_usd")
         fx_ok = row.pop("_spend_published")
         no_country = row.pop("_no_country")
+        owner_criteria = set(row.pop("_owner_criteria"))
+        zero_rests_on: set = set()
         leads = _lead_figures(row.pop("_lead_parts"))
         if not leads_available:
             leads = {k: (None if k != "lead_country_spellings" else [])
@@ -579,12 +650,32 @@ def build_country_evidence(*, days: int | None, window_key: str,
             # be this country (its code is another criterion's): a measured
             # zero.
             spend_usd, status, reason = 0.0, "published", None
+            if row["country_code"] in carried_by_owner:
+                owner_criteria.add(carried_by_owner[row["country_code"]])
+                zero_rests_on.add(carried_by_owner[row["country_code"]])
+            if row["country_code"] not in carried_by_google:
+                # Not provably independent of the labels (the carrier read
+                # failing counts as not proven): disclose.
+                zero_rests_on.update(owner_in_window)
         elif no_country:
             spend_usd, status, reason = None, "unavailable", R_NO_COUNTRY_RECORDED
         else:
             spend_usd, status, reason = None, "unavailable", R_COUNTRY_NOT_MATCHED
         rows.append({**row, "spend_usd": spend_usd, "spend_status": status,
-                     "spend_reason": reason, **leads})
+                     "spend_reason": reason,
+                     # PR-ADS-170A: "owner_labelled" when this row's spend (or
+                     # the evidence its zero rests on) is under this country
+                     # because the owner labelled the Google criterion.
+                     "country_provenance": OWNER_LABELLED if owner_criteria else None,
+                     "owner_labelled_criteria": sorted(c for c in owner_criteria if c),
+                     # PR-ADS-170A-F1: the owner-labelled criteria a published
+                     # $0 depends on — the country's own owner-labelled carrier
+                     # and/or labelled spend in the window that would otherwise
+                     # be "no country" and withhold this zero. [] when the zero
+                     # would stand without any owner label, and for every row
+                     # that is not a zero.
+                     "zero_rests_on_owner_labels": sorted(c for c in zero_rests_on if c),
+                     **leads})
     rows.sort(key=lambda r: (r["spend_usd"] is None, -(r["spend_usd"] or 0.0),
                              -(r.get("total_leads") or 0), r["country"]))
 
@@ -622,6 +713,10 @@ def build_country_evidence(*, days: int | None, window_key: str,
             "blocks_zero": bool(covered and withheld_zero),
             "zero_withheld_countries": sorted(withheld_zero) if covered else [],
         },
+        # PR-ADS-170A: the window's criteria whose country is the owner's label
+        # (Google reports them without one), and any labelled criterion whose
+        # stored Google code differs from its label — the stored code is used.
+        "owner_labelled_geo": {**owner_geo, "note": OWNER_LABEL_NOTE},
         "spend_status": "published" if covered else "unavailable",
         "leads_status": "published" if leads_available else "unavailable",
         "leads_reason": None if leads_available else R_LEADS_UNREADABLE,

@@ -4311,6 +4311,17 @@ body.is-revenue-page #monitoring-banner {
   font-style: italic;
 }
 .revenue-residual-name { font-style: normal; color: #475569; }
+/* PR-ADS-170A: "set by owner" beside a country the owner labelled. */
+.owner-label-note {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted, #6b7280);
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
+  white-space: nowrap;
+}
+
 .revenue-residual-badge {
   display: inline-block;
   font-size: 11px;
@@ -5474,6 +5485,7 @@ body.is-revenue-page #monitoring-banner {
 }
 .mapping-notice--ok { background: color-mix(in srgb, var(--green-500, #22c55e) 10%, #fff); color: var(--green-600, #16a34a); border-color: color-mix(in srgb, var(--green-500, #22c55e) 30%, #fff); }
 .mapping-notice--error { background: color-mix(in srgb, var(--red-500, #ef4444) 10%, #fff); color: var(--red-600, #dc2626); border-color: color-mix(in srgb, var(--red-500, #ef4444) 30%, #fff); }
+.mapping-notice--warn { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
 .mapping-notice--info { background: var(--color-surface-alt, #f1f5f9); color: var(--color-text-muted, #64748b); }
 .campaign-aliases {
   font-size: 0.75rem;

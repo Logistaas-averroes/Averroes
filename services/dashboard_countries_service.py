@@ -242,6 +242,10 @@ def _geo_spend_by_country(geo_result: dict) -> dict:
     """
     by_key: dict = {}
     residual: dict | None = None
+    # PR-ADS-170A-F1: the part of ``residual`` whose country IS known (Google
+    # named it, or the owner labelled it) but is not a listed market.
+    outside: dict | None = None
+    outside_names: set = set()
     for r in (geo_result.get("rows") or []):
         entry = {
             "native": r.get("spend"),
@@ -254,7 +258,13 @@ def _geo_spend_by_country(geo_result: dict) -> dict:
             by_key[identity.key] = _merge_spend(by_key.get(identity.key), entry)
         else:
             residual = _merge_spend(residual, entry)
-    return {"by_key": by_key, "residual": residual}
+            code = r.get("country_code")
+            label = country_identity.iso_country_label(code) if isinstance(code, str) else None
+            if label:
+                outside = _merge_spend(outside, dict(entry))
+                outside_names.add(label)
+    return {"by_key": by_key, "residual": residual, "outside_markets": outside,
+            "outside_market_countries": sorted(outside_names)}
 
 
 # ── Closed-won deal proof (grouped by country; residual preserved) ────────────
@@ -609,8 +619,13 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
     native = spend_truth.get("country_residual_native")
     usd = spend_truth.get("country_residual_usd")
     if native is None and mart_residual_row is not None:
-        native = mart_residual_row.get("spend_native")
-        usd = mart_residual_row.get("spend_usd")
+        # The shortfall alone (PR-ADS-170A-F1: the mart row's `spend_native` is
+        # now the whole residual row, which also holds countries outside the
+        # listed markets).
+        native = mart_residual_row.get("spend_geo_unassigned_native",
+                                       mart_residual_row.get("spend_native"))
+        usd = mart_residual_row.get("spend_geo_unassigned_usd",
+                                    mart_residual_row.get("spend_usd"))
 
     reason_bits = []
     if spend_truth.get("country_residual_reason"):
@@ -634,7 +649,7 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
 
 def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
                 country_roas_unblockable: bool, geo_available: bool,
-                revenue_connected: bool) -> dict:
+                revenue_connected: bool, geo_maps: dict | None = None) -> dict:
     """Hero KPIs derived from the real country rows (so they reconcile with the
     leaderboard / map) plus the canonical spend truth. The residual is surfaced
     separately, never in the ratio numerator.
@@ -675,7 +690,28 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
                  else _round2(sum((r.get("won_revenue_usd") or 0.0) for r in country_rows)))
 
     geo_ratio = _period_ratio(total_won, verified_usd) if country_roas_unblockable else None
+    # PR-ADS-170A-F1: the spend card is the LISTED MARKETS' spend — the market
+    # rows — not all Google Ads geo spend. Geo spend whose country is known but
+    # is not a listed market (Cuba, by the owner's label; any Google country
+    # outside the registry) is on no row of this page, so the payload states
+    # the scope and how much lies outside it. None when the geo read failed.
+    outside = (geo_maps or {}).get("outside_markets") if geo_available else None
+    no_country = None
+    if geo_available and geo_maps is not None:
+        whole = geo_maps.get("residual") or {}
+        no_country = _round2((whole.get("native") or 0.0)
+                             - ((outside or {}).get("native") or 0.0))
     return {
+        "verified_spend_scope": "listed_markets",
+        "spend_outside_listed_markets": (None if (not geo_available or geo_maps is None) else {
+            "native": _round2((outside or {}).get("native") or 0.0),
+            "usd": (_round2(outside.get("usd")) if (outside and outside.get("usd") is not None)
+                    else (0.0 if not outside else None)),
+            "currency": spend_truth.get("native_currency") or "GBP",
+            "countries": list((geo_maps or {}).get("outside_market_countries") or []),
+            # Geo spend Google reports with no resolvable country at all.
+            "no_country_native": no_country,
+        }),
         "countries_with_spend": countries_with_spend,
         "countries_with_closed_won_deals": countries_with_closed_won_deals,
         "verified_spend_native": {"amount": verified_native,
@@ -1101,6 +1137,14 @@ def _assemble(window: str, now: datetime | None) -> dict:
     country_rows = _build_country_rows(
         mart_real_rows, geo_maps, geo_available, deals_by_key, unknown_amount_keys,
         country_roas_unblockable, revenue_connected, native_currency)
+    # PR-ADS-170A: a market whose geo spend is under it because the owner
+    # labelled the Google criterion (Google reports it without a country) says
+    # so — from the SAME geo read that supplied its spend.
+    from services.revenue_attribution_service import (  # noqa: PLC0415
+        stamp_owner_labelled_countries,
+    )
+    owner_labelled_geo = (geo.get("owner_labelled_geo") or {}) if geo_available else {}
+    country_rows = stamp_owner_labelled_countries(country_rows, owner_labelled_geo)
 
     # PR-ADS-155-F1. The country-attributed revenue TOTAL gets its verdict from
     # its own population, via the canonical rule — not from geo readiness. Geo
@@ -1121,7 +1165,7 @@ def _assemble(window: str, now: datetime | None) -> dict:
     residual = _build_residual(summary, country_rows, spend_truth, mart_residual_row,
                                residual_amount_unknown, revenue_connected)
     kpis = _build_kpis(country_rows, residual, spend_truth, country_roas_unblockable,
-                       geo_available, revenue_connected)
+                       geo_available, revenue_connected, geo_maps=geo_maps)
     # PR-ADS-161E: the window's canonical verdicts — a country total is a
     # subset of the window, so when the window withholds it the card says why.
     # Only a NON-published verdict travels: a published one has nothing to add.
@@ -1148,6 +1192,10 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "spend_truth": spend_truth,
         "readiness": readiness,
         "country_rows": country_rows,
+        "owner_labelled_geo": {
+            "criteria": list(owner_labelled_geo.get("criteria") or []),
+            "mismatches": list(owner_labelled_geo.get("mismatches") or []),
+        },
         "residual": residual,
         "kpis": kpis,
         "country_roas_unblockable": country_roas_unblockable,
@@ -1219,6 +1267,13 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
     if not keep_native and isinstance(kpis.get("verified_spend_native"), dict):
         kpis["verified_spend_native"] = {**kpis["verified_spend_native"],
                                          "amount": None}
+    if isinstance(kpis.get("spend_outside_listed_markets"), dict):
+        # Withheld with the card it qualifies (PR-ADS-170A-F1).
+        _o = {**kpis["spend_outside_listed_markets"], "usd": None}
+        if not keep_native:
+            _o["native"] = None
+            _o["no_country_native"] = None
+        kpis["spend_outside_listed_markets"] = _o
     for k in ("countries_with_closed_won_deals", "residual_closed_won_deals",
               "residual_revenue_usd", "geo_period_revenue_per_ad_spend"):
         if k in kpis:
@@ -1476,6 +1531,11 @@ def build_dashboard_countries(window: str = "current_quarter",
         "kpis": kpis,
         "period_change": period_change,
         "countries": country_rows,
+        # PR-ADS-170A: the window's Google criteria whose country is the
+        # owner's label, and any labelled criterion a stored Google code
+        # overrode. A row it applies to carries `spend_country_provenance`.
+        "owner_labelled_geo": core.get("owner_labelled_geo")
+        or {"criteria": [], "mismatches": []},
         "residual": residual,
         "regional_mix": regional_mix,
         "decision_cards": decision_cards,

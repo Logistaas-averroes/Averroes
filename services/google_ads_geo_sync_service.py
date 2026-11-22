@@ -137,15 +137,26 @@ def _resolve_country_metadata(rows: list) -> dict:
     already stored for those days.) A criterion Google ANSWERED for without a
     country is not a failure: it is what Google says about that location.
 
+    PR-ADS-170A. The owner's labels (``config/geo_owner_labels.yaml``) are NOT
+    a source here. This step fills what is WRITTEN, and the table stays what
+    Google sent: an owner-labelled criterion is still asked of Google and is
+    still stored with no code while Google supplies none — so a code Google
+    supplies later is stored and wins. The readers apply the label
+    (``db.geo_identity_sql.criterion_identity``). The outcome only NAMES the
+    code-less criteria the owner has labelled (``owner_labelled``), so a run
+    report can tell them from the ones nothing names.
+
     Returns ``{criteria, from_storage, looked_up, lookup_failed, lookup_error,
-    storage_readable, unresolved}`` — ``unresolved`` names the criteria left
-    with no code.
+    storage_readable, unresolved, owner_labelled}`` — ``unresolved`` names the
+    criteria stored with no code; ``owner_labelled`` the ones among them the
+    readers will name from the owner's table.
     """
     ids = sorted({str(r.get("country_criterion_id")).strip() for r in rows
                   if str(r.get("country_criterion_id") or "").strip()})
     outcome = {"criteria": len(ids), "from_storage": 0, "looked_up": 0,
                "lookup_failed": False, "lookup_error": None,
-               "storage_readable": True, "unresolved": []}
+               "storage_readable": True, "unresolved": [],
+               "owner_labelled": []}
     if not ids:
         return outcome
     from db.geo_identity_sql import resolved_code  # noqa: PLC0415
@@ -183,6 +194,9 @@ def _resolve_country_metadata(rows: list) -> dict:
         if cid and not str(r["country_code"] or "").strip():
             unresolved.add(cid)
     outcome["unresolved"] = sorted(unresolved)
+    from analysis import geo_owner_labels  # noqa: PLC0415
+    labels = geo_owner_labels.owner_labels()
+    outcome["owner_labelled"] = sorted(c for c in unresolved if c in labels)
     return outcome
 
 
@@ -1358,7 +1372,8 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
             identity = _resolve_country_metadata(rows)
             chunk["country_identity"] = {
                 k: identity[k] for k in ("criteria", "from_storage", "looked_up",
-                                         "lookup_failed", "unresolved")}
+                                         "lookup_failed", "unresolved",
+                                         "owner_labelled")}
             lookup_error = None
             if identity["lookup_failed"]:
                 lookup_error = (
