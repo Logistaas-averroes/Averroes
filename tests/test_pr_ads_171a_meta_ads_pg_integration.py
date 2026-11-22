@@ -664,24 +664,43 @@ def test_13_an_account_suspended_mid_life_keeps_its_history(live_db, monkeypatch
         f"Logistaas ({OLD}): not in the configuration, and it is not declared "
         "retired; history through 2026-11-17 is kept; later periods are withheld")
 
-    # A declaration the ledger does not reach is not honoured either.
+    # Its true last spend day, the 18th, was never read (the ledger ends on
+    # the 17th). Declaring the truth withholds only ranges that touch the
+    # 18th; a range wholly after it rests on the declaration.
     monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD}:2026-11-18")
     early = _truth(*week, now=day3)
     assert early["state"] == "coverage_incomplete" and early["usd_spend"] is None
     assert ("declared to have last spent on 2026-11-18, but its verified coverage "
-            "ends 2026-11-17") in early["withheld_detail"]
-    assert overview._meta_spend_source(day3)["status"] == "account_unresolved"
+            "ends 2026-11-17; the days in between were never read") in (
+        early["withheld_detail"])
+    assert _truth(date(2026, 11, 12), date(2026, 11, 17), now=day3)["usd_spend"] == 142.34
+    graph.spend(CAMPAIGN_A, "2026-11-19", "4.00")
+    _run(NOW + timedelta(days=3))                    # the new account reads the 19th
+    beyond = _truth(date(2026, 11, 19), date(2026, 11, 19),
+                    now=NOW + timedelta(days=3, hours=4))
+    assert beyond["state"] == "verified" and beyond["account_ids"] == [NEW]
+    assert beyond["owner_declared_retired"] == [
+        {"account_id": OLD, "last_spend_day": "2026-11-18",
+         "relied_from": "2026-11-19"}]
+    unread = overview._meta_spend_source(day3)["accounts"][1]
+    assert unread["status"] == "history_kept"
+    assert unread["summary"] == (
+        f"Logistaas ({OLD}): declared retired by the owner (last spend day "
+        "2026-11-18); history through 2026-11-17 is kept; the days after "
+        "2026-11-17 up to 2026-11-18 were never read, and periods that include "
+        "them are withheld")
 
     # The owner declares its last spend day; the ledger bears it out.
     monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD}:2026-11-17")
     after = _truth(*week, now=day3)
     assert after["state"] == "verified" and after["usd_spend"] == 142.34
     assert after["owner_declared_retired"] == [
-        {"account_id": OLD, "last_spend_day": "2026-11-17"}]
+        {"account_id": OLD, "last_spend_day": "2026-11-17",
+         "relied_from": "2026-11-18"}]
     assert after["owner_declared_retired_disclosure"] == (
-        f"This total assumes ad account {OLD} spent nothing after 2026-11-17 — "
-        "the owner's declaration (META_AD_ACCOUNT_RETIRED), not a reading from "
-        "Meta.")
+        f"This total assumes ad account {OLD} spent nothing from 2026-11-18 on "
+        "(declared last spend day 2026-11-17) — the owner's declaration "
+        "(META_AD_ACCOUNT_RETIRED), not a reading from Meta.")
     old = after["accounts"][1]
     assert (old["configured"], old["required_through"], old["usd_spend"]) == (
         False, "2026-11-17", 142.34)
@@ -1075,11 +1094,20 @@ def test_27_with_nothing_configured_stored_accounts_are_still_required(
     line = overview._meta_spend_source(NOW)
     assert line["status"] == "account_unresolved"
     assert [a["status"] for a in line["accounts"]] == ["account_unresolved"] * 2
-    # Declared, and borne out: then Meta is simply not connected.
+    # Every account declared, and borne out: the zero for a later range rests
+    # on the declarations and SAYS so — never an unmarked "not connected".
     monkeypatch.setenv("META_AD_ACCOUNT_RETIRED",
                        f"{NEW}:2026-11-16,{OLD}:2026-11-17")
     gone = _truth(date(2026, 12, 1), date(2026, 12, 7), now=NOW + timedelta(days=30))
-    assert gone["state"] == "not_connected" and gone["usd_spend"] is None
+    assert gone["state"] == "verified_zero_spend" and gone["usd_spend"] == 0.0
+    assert gone["accounts"] == []
+    assert gone["owner_declared_retired"] == [
+        {"account_id": NEW, "last_spend_day": "2026-11-16",
+         "relied_from": "2026-11-17"},
+        {"account_id": OLD, "last_spend_day": "2026-11-17",
+         "relied_from": "2026-11-18"}]
+    assert gone["owner_declared_retired_disclosure"].startswith(
+        f"This total assumes ad account {NEW} spent nothing from 2026-11-17 on")
     line = overview._meta_spend_source(NOW)
     assert line["status"] == "not_connected"
     assert [a["summary"] for a in line["accounts"]] == [
@@ -1088,6 +1116,56 @@ def test_27_with_nothing_configured_stored_accounts_are_still_required(
         f"Logistaas ({OLD}): declared retired by the owner (last spend day "
         "2026-11-17); history through 2026-11-17 is kept"]
     assert _rows(live_db, OLD) == OLD_ROWS           # nothing is deleted
+
+
+def test_27a_a_declaration_for_an_account_that_is_still_read_is_not_honoured(
+        live_db, monkeypatch, caplog):
+    """Round 2, item 1. Both sets complete and syncing; the NEW account is
+    declared retired on a past day. It is still being read, so it stays
+    required: a range past its verified days is withheld, and the System
+    line says the declaration is ignored."""
+    import logging
+    caplog.set_level(logging.DEBUG)
+    graph = _pair()
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    pasted = "EAAGsecretPASTEDintoTHEwrongVARIABLE0x9f"
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{NEW}:2026-11-10")
+    out, errors = _run()
+    assert out["status"] == "success" and out["accounts_synced"] == 2
+    # The 17th: verified for Amman, not yet for Los Angeles.
+    truth = _truth(end=OLD_YESTERDAY)
+    assert truth["state"] == "coverage_incomplete" and truth["usd_spend"] is None
+    assert truth["owner_declared_retired"] == []
+    assert truth["retired_declaration_problems"][0]["reason"] == (
+        "retired_declaration_account_still_read")
+    assert _truth()["state"] == "verified" and _truth()["owner_declared_retired"] == []
+    line = overview._meta_spend_source(NOW)
+    assert line["status"] == "misconfigured"
+    assert line["reason"] == "retired_declaration_account_still_read"
+    assert line["reason_detail"] == (
+        f"META_AD_ACCOUNT_RETIRED names account {NEW}, which is configured and "
+        "still read; the declaration is ignored")
+    assert line["accounts"][0]["summary"].endswith(
+        "; it is declared retired but is still read, so the declaration is ignored")
+    assert line["retired_declaration_problems"] == [
+        {"account_id": NEW, "reason": "retired_declaration_account_still_read"}]
+
+    # Item 5: an unreadable entry reaches no log, no stored row and no page.
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{pasted},{OLD}:{pasted}")
+    out, errors = _run()
+    assert out["status"] == "partial"
+    assert _batches(live_db)[-1][3] == (
+        "meta_ads_misconfigured: META_AD_ACCOUNT_RETIRED: 2 entries are not "
+        "<account id>:<YYYY-MM-DD> (or declare one account with two days) and "
+        "are ignored — position 1, 2 in the list")
+    line = overview._meta_spend_source(NOW)
+    assert line["status"] == "misconfigured"
+    assert line["reason_detail"].startswith("META_AD_ACCOUNT_RETIRED: 2 entries")
+    assert line["retired_invalid_positions"] == [1, 2]
+    everything = _dump(live_db) + caplog.text + json.dumps(
+        [out, errors, line, _truth()], default=str)
+    assert pasted not in everything and "PASTED" not in everything
 
 
 def test_27b_a_clean_sync_never_reads_late_at_any_hour_of_the_day(

@@ -1766,18 +1766,18 @@ def _sync_meta_ads_spend(*, run_id, now, errors: list) -> dict:
             result["error"] = "; ".join(filter(None, [result.get("error"), text]))
         # A retirement declaration that cannot be read is ignored — never
         # guessed — and reported the same way.
-        bad_retired = cfg.get("retired_invalid") or []
+        # Named by position only — the text of an entry that failed to parse
+        # is never echoed (it may be a secret pasted into the wrong variable).
+        bad_retired = cfg.get("retired_invalid_positions") or []
         if bad_retired:
-            text = ("META_AD_ACCOUNT_RETIRED has an entry that is not "
-                    "<account id>:<YYYY-MM-DD> and is ignored: "
-                    + ", ".join(str(e)[:60] for e in bad_retired))
+            text = meta.retired_invalid_text(bad_retired)
             result["errors"].append(text)
             result["error"] = "; ".join(filter(None, [result.get("error"), text]))
         if (broken or bad_retired) and result["status"] == "success":
             result.update(status="partial", reason=meta.REASON_MISCONFIGURED,
                           last_source_date=None)
         result["misconfigured_sets"] = broken
-        result["retired_invalid"] = bad_retired
+        result["retired_invalid_positions"] = bad_retired
         meta.finish_batch(batch_id, result, result.get("last_source_date"))
         result["sync_batch_id"] = batch_id
         for text in result["errors"]:

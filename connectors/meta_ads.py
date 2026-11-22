@@ -201,8 +201,7 @@ def parse_account_ids(raw: str) -> tuple[list, list]:
         entry = part.strip()
         if not entry:
             continue
-        if entry.lower().startswith("act_"):
-            entry = entry[4:].strip()
+        entry = _strip_act(entry)
         if not _ACCOUNT_RE.match(entry):
             invalid.append(part.strip())
         elif entry not in ids:
@@ -245,38 +244,55 @@ def _credential_sets() -> list:
     return sets
 
 
+def _strip_act(value: str) -> str:
+    """An account id without a leading ``act_``, whatever its letter case."""
+    value = str(value or "").strip()
+    return value[4:].strip() if value[:4].lower() == "act_" else value
+
+
 def parse_retired(raw: str) -> tuple[list, list]:
-    """``(declarations, invalid)`` from ``META_AD_ACCOUNT_RETIRED``.
+    """``(declarations, invalid_positions)`` from ``META_AD_ACCOUNT_RETIRED``.
 
     A comma-separated list of ``<account id>:<YYYY-MM-DD>`` — the owner's
     declaration that the account spent nothing after that day (a day of the
-    account's own time zone). An entry that is not exactly that, or an id
-    declared twice with different days, is ``invalid`` and is never guessed.
+    account's own time zone). An entry that is not exactly that is invalid,
+    and so is EVERY entry of an id declared with two different days (``act_``
+    in any letter case is the same id): neither day is honoured, none is
+    guessed.
+
+    Invalid entries are reported by their 1-based POSITION in the list only.
+    Their text is never returned, logged or shown: a secret pasted into the
+    wrong variable must not be echoed.
     """
     from datetime import date as _date  # noqa: PLC0415
-    seen, invalid = {}, []
+    parsed, invalid = [], []           # parsed: (position, account, day)
+    position = 0
     for part in str(raw or "").split(","):
         entry = part.strip()
         if not entry:
             continue
+        position += 1
         account, sep, day = entry.partition(":")
-        account = account.strip()
-        if account.lower().startswith("act_"):
-            account = account[4:].strip()
-        day = day.strip()
+        account, day = _strip_act(account), day.strip()
         try:
             ok = bool(sep) and bool(_ACCOUNT_RE.match(account)) and (
                 _date.fromisoformat(day).isoformat() == day)
         except ValueError:
             ok = False
-        if not ok or seen.get(account, day) != day:
-            invalid.append(entry)
-            continue
-        seen[account] = day
-    for entry in invalid:                  # a contradicted id is not honoured
-        seen.pop(entry.partition(":")[0].strip().removeprefix("act_"), None)
-    return ([{"account_id": a, "last_spend_day": d} for a, d in seen.items()],
-            invalid)
+        if ok:
+            parsed.append((position, account, day))
+        else:
+            invalid.append(position)
+    days: dict = {}
+    for _, account, day in parsed:
+        days.setdefault(account, set()).add(day)
+    declarations = []
+    for position, account, day in parsed:
+        if len(days[account]) > 1:
+            invalid.append(position)   # one id, two days: neither is honoured
+        elif not any(d["account_id"] == account for d in declarations):
+            declarations.append({"account_id": account, "last_spend_day": day})
+    return declarations, sorted(invalid)
 
 
 def page_limit() -> int:
@@ -299,11 +315,16 @@ def config_status() -> dict:
     complete or not. An account in a broken set is still an account the owner
     configured: it does not sync, and it is never read as removed.
     ``unparsed_account_entries`` — True when some set's account list holds an
-    entry that is not an id, so the configured accounts are not fully known.
+    entry that is not an id, so the configured accounts are not fully known
+    (``unparsed_account_entry_count`` says how many).
 
     ``retired`` — the owner's declarations (``META_AD_ACCOUNT_RETIRED``):
-    ``[{account_id, last_spend_day}]``. ``retired_invalid`` — the entries that
-    could not be read; they are ignored, reported, and make the run partial.
+    ``[{account_id, last_spend_day}]``. ``retired_invalid_positions`` — the
+    1-based positions of the entries that could not be read; they are
+    ignored, reported, and make the run partial.
+
+    No raw text of an entry that failed to parse is ever returned: only how
+    many there are and where they sit in the list.
 
     ``configured`` — at least one complete set, an API version resolved, and
     no account listed in two sets. ``misconfigured`` — something is set and
@@ -331,11 +352,13 @@ def config_status() -> dict:
     for s in sets:
         listed += [a for a in s["listed_account_ids"] if a not in listed]
     retired, retired_invalid = parse_retired(_env("META_AD_ACCOUNT_RETIRED"))
+    unparsed = sum(len(s["invalid_entries"]) for s in sets)
     out = {"configured": False, "misconfigured": False, "reason": None,
            "sets": public, "account_ids": [], "misconfigured_sets": [],
            "listed_account_ids": listed,
-           "unparsed_account_entries": any(s["invalid_entries"] for s in sets),
-           "retired": retired, "retired_invalid": retired_invalid,
+           "unparsed_account_entries": unparsed > 0,
+           "unparsed_account_entry_count": unparsed,
+           "retired": retired, "retired_invalid_positions": retired_invalid,
            "duplicate_account_ids": duplicates,
            "has_access_token": any(e["has_access_token"] for e in public),
            "api_version": version, "api_version_source": version_source}
@@ -563,8 +586,8 @@ def fetch_account(account_id: str) -> dict:
     wanted = _require_account(account_id)
     body = _request(wanted, "", {"fields": ACCOUNT_FIELDS})
     account_id = str(body.get("account_id") or "").strip()
-    if not account_id and str(body.get("id") or "").startswith("act_"):
-        account_id = str(body["id"])[4:]
+    if not account_id and str(body.get("id") or "")[:4].lower() == "act_":
+        account_id = _strip_act(body["id"])
     if account_id != wanted:
         raise MetaAdsMalformedResponse(
             "the account Meta returned is not the account asked for")

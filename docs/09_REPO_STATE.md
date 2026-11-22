@@ -5730,3 +5730,34 @@ No assertion was loosened to make an implementation pass.
 passed, none skipped. Full suite with the one baseline deselect: **6207
 passed, 1 skipped, 1 deselected** (39m18s). Against `3cce252` the same two
 modules: 45 failed, 210 passed.
+
+### PR-ADS-171A — review round 2 (third commit): the retirement declaration
+
+Round 2's verdict was ship, with six points on `META_AD_ACCOUNT_RETIRED`
+closed first. One pure function now holds the rule
+(`meta_ads_spend_truth_service.declaration_verdict`).
+
+| # | Point | Regression (fails on `7be6b23`) |
+|---|---|---|
+| 1 | A declaration is honoured only for an account that is NOT being read (in no credential set, or `not_readable_since` set). A configured, readable, declared account stays required; the declaration is reported `retired_declaration_account_still_read` in the truth result and on the System line. | unit `test_82`; PG `test_27a` |
+| 2 | A declared day past the last verified day withholds only ranges that touch the unread days in between; ranges up to the last verified day publish as measured, ranges wholly after the declared day publish with the disclosure. The owner never has to declare a false day. | unit `test_83`, `test_84`; PG `test_13` |
+| 3 | `owner_declared_retired` entries carry `relied_from`, the first day the figure rests on the declaration; the disclosure string states it. | unit `test_63e3`; PG `test_13` |
+| 4 | Every account validly declared, none configured, range after all of them: `verified_zero_spend` WITH the marker and disclosure — not an unmarked `not_connected`. | unit `test_63h`; PG `test_27` |
+| 5 | The text of an entry that failed to parse is never echoed: `config_status`, the run error, the batch, the logs and the System line carry a count and 1-based positions only (`retired_invalid_positions`, `unparsed_account_entry_count`). The backfill script no longer echoes a bad `--account` value. | unit `test_85`, `test_63e6`, `test_63e7`; PG `test_27a` |
+| 6 | `act_` is stripped case-insensitively wherever an id is parsed, so `id:…,ACT_id:…` with two days is one id declared twice: neither is honoured. | unit `test_63e6` |
+
+Assertions reversed by these points, each pinning what the point changes:
+unit `test_63h` and PG `test_27` (`not_connected` → the marked zero, item 4);
+unit `test_63e3` and PG `test_13` (marker shape and disclosure text, item 3;
+and in PG `test_13` the System line for a declared day past the ledger, which
+is now "declared retired" with the unread days named, item 2); unit
+`test_63e6` / `test_63e7` (raw entries → positions, item 5).
+
+`docs/52` §6 carries the rule as a table and a note for PR-ADS-171B: any
+surface that shows a figure with `owner_declared_retired` non-empty must show
+the disclosure, and 171B must add an audit/AST guard for it.
+
+**Counts after this round.** Unit module 233 passed; PostgreSQL module 42
+passed, none skipped. Full suite with the one baseline deselect: **6227
+passed, 1 skipped, 1 deselected** (37m49s). Against `7be6b23` the same two
+modules: 28 failed, 247 passed.

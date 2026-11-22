@@ -88,7 +88,8 @@ def main(argv=None) -> int:
         accounts, invalid = parse_account_ids(",".join(args.accounts))
         if invalid:
             print(json.dumps({"status": "failed", "reason": "ad_account_id_invalid",
-                              "error": ", ".join(invalid)}, indent=2))
+                              "error": f"{len(invalid)} --account value(s) "
+                                       "are not an ad account id"}, indent=2))
             return 1
     result = meta.run_backfill(args.date_from, args.date_to, account_ids=accounts,
                                dry_run=args.dry_run, resume=args.resume,

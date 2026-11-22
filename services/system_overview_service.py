@@ -328,7 +328,7 @@ def _meta_account_line(account_id, row, state, role, now, *, declared=None,
            "complete_through": None, "history_through": history,
            "window_start": None, "window_end": None, "missing_ranges": [],
            "unresolved_failed_chunks": None, "usd_missing_days": None,
-           "declared_last_spend_day": declared,
+           "declared_last_spend_day": declared, "declaration_problem": None,
            "not_readable_since": _iso(state.get("not_readable_since")),
            "http_status": None, "error_code": None,
            "last_success_at": _iso(state.get("last_success_at")),
@@ -345,19 +345,26 @@ def _meta_account_line(account_id, row, state, role, now, *, declared=None,
                            "withheld"}
     if role == "unlisted":
         last_spend = row.get("last_spend_date")
-        borne_out = bool(declared and history and history >= declared
-                         and not (last_spend and last_spend > declared))
-        if borne_out:
+        if declared and not (last_spend and last_spend > declared):
+            unread = ""
+            if not history or history < declared:
+                unread = (f"; the days after {history or 'the start'} up to "
+                          f"{declared} were never read, and periods that "
+                          "include them are withheld")
             return {**out, "status": META_ACCOUNT_HISTORY_KEPT,
                     "summary": f"{name}: declared retired by the owner (last "
-                               f"spend day {declared}); {kept}"}
+                               f"spend day {declared}); {kept}{unread}"}
         why = ("it is not declared retired" if not declared else
-               f"its declared last spend day {declared} is not borne out by "
-               "what is stored")
+               f"its declared last spend day {declared} is contradicted by "
+               f"stored spend on {last_spend}")
         return {**out, "status": META_ACCOUNT_UNRESOLVED,
                 "reason": "account_not_configured_not_retired",
                 "summary": f"{name}: not in the configuration, and {why}; "
                            f"{kept}; later periods are withheld"}
+    # A declaration for an account that is configured and still answered for
+    # is not honoured: the account keeps being measured.
+    if declared and role == "syncing" and not state.get("not_readable_since"):
+        out["declaration_problem"] = "retired_declaration_account_still_read"
     failed = state.get("last_status") == "failed"
     if failed:
         out.update(reason=state.get("last_reason"),
@@ -453,9 +460,11 @@ def _meta_spend_source(now: datetime) -> dict:
            "complete_through": None, "missing_ranges": [],
            "unresolved_failed_chunks": None,
            "last_success_at": None, "age_hours": None,
-           "accounts": [], "misconfigured_sets": [], "retired_invalid": []}
+           "accounts": [], "misconfigured_sets": [],
+           "retired_invalid_positions": [], "retired_declaration_problems": []}
     cfg = meta.config_status()
-    out["retired_invalid"] = list(cfg.get("retired_invalid") or [])
+    out["retired_invalid_positions"] = list(
+        cfg.get("retired_invalid_positions") or [])
     if cfg.get("misconfigured"):
         detail = cfg.get("reason")
         if cfg.get("duplicate_account_ids"):
@@ -496,15 +505,27 @@ def _meta_spend_source(now: datetime) -> dict:
         out.update(last_success_at=oldest, age_hours=_age_hours(oldest, now))
 
     # A broken configuration is shown whatever the other accounts say.
-    if broken or out["retired_invalid"] or cfg.get("unparsed_account_entries"):
+    still_read = [line for line in lines if line.get("declaration_problem")]
+    for line in still_read:
+        line["summary"] += ("; it is declared retired but is still read, so "
+                            "the declaration is ignored")
+    out["retired_declaration_problems"] = [
+        {"account_id": line["account_id"], "reason": line["declaration_problem"]}
+        for line in still_read]
+    if (broken or out["retired_invalid_positions"] or still_read
+            or cfg.get("unparsed_account_entries")):
         if broken:
             reason, detail = broken[0]["reason"], (
                 f"credential set {broken[0]['set']}: {broken[0]['reason']}")
-        else:
+        elif out["retired_invalid_positions"]:
+            # Position only: the text of an unreadable entry is never shown.
             reason = "retired_declaration_invalid"
-            detail = ("META_AD_ACCOUNT_RETIRED has an entry that is not "
-                      "<account id>:<YYYY-MM-DD>: "
-                      + ", ".join(out["retired_invalid"]))
+            detail = meta.retired_invalid_text(out["retired_invalid_positions"])
+        else:
+            reason = still_read[0]["declaration_problem"]
+            detail = (f"META_AD_ACCOUNT_RETIRED names account "
+                      f"{still_read[0]['account_id']}, which is configured and "
+                      "still read; the declaration is ignored")
         return {**out, "status": SOURCE_MISCONFIGURED, "reason": reason,
                 "reason_detail": detail}
     if not live:

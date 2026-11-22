@@ -116,6 +116,16 @@ def reconciliation_tolerance_micros(currency_code: str | None) -> int:
     return 10_000
 
 
+def retired_invalid_text(positions: list) -> str:
+    """How an unreadable ``META_AD_ACCOUNT_RETIRED`` is reported: how many
+    entries, and where — never what they say."""
+    return (f"META_AD_ACCOUNT_RETIRED: {len(positions)} entr"
+            f"{'y is' if len(positions) == 1 else 'ies are'} not "
+            "<account id>:<YYYY-MM-DD> (or declare one account with two days) "
+            f"and {'is' if len(positions) == 1 else 'are'} ignored — position "
+            + ", ".join(str(int(p)) for p in positions) + " in the list")
+
+
 def last_due_sync(now: datetime | None = None) -> datetime:
     """The most recent daily sync that should have FINISHED by ``now`` (UTC).
 

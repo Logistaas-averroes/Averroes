@@ -1743,12 +1743,14 @@ def test_63e3_a_valid_declaration_publishes_and_says_so_at_the_top_level(
                     retired=declared)
     assert truth["state"] == "verified" and truth["usd_spend"] == 600.0
     # The marker a consumer cannot render the number without.
+    # ...with the first day the figure rests on it.
     assert truth["owner_declared_retired"] == [
-        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-12-20"}]
+        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-12-20",
+         "relied_from": "2026-12-21"}]
     assert truth["owner_declared_retired_disclosure"] == (
-        f"This total assumes ad account {OLD_ACCOUNT_ID} spent nothing after "
-        "2026-12-20 — the owner's declaration (META_AD_ACCOUNT_RETIRED), not a "
-        "reading from Meta.")
+        f"This total assumes ad account {OLD_ACCOUNT_ID} spent nothing from "
+        "2026-12-21 on (declared last spend day 2026-12-20) — the owner's "
+        "declaration (META_AD_ACCOUNT_RETIRED), not a reading from Meta.")
     old = truth["accounts"][1]
     assert (old["configured"], old["required_through"], old["state"],
             old["owner_declared_retired"]) == (False, "2026-12-20", "verified", True)
@@ -1760,13 +1762,15 @@ def test_63e3_a_valid_declaration_publishes_and_says_so_at_the_top_level(
                       retired=declared)
     assert january["account_ids"] == [ACCOUNT_ID] and january["usd_spend"] == 100.0
     assert january["owner_declared_retired"] == [
-        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-12-20"}]
+        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-12-20",
+         "relied_from": "2026-12-21"}]
     # A range inside its verified days does not rest on the declaration.
     inside = _truths(monkeypatch, accounts, start=date(2026, 12, 1),
                      end=date(2026, 12, 20), configured=[ACCOUNT_ID], now=now,
                      retired=declared)
     assert inside["state"] == "verified" and inside["owner_declared_retired"] == []
-    # Still configured AND declared: the declaration applies only past its day.
+    # Still configured, and Meta REFUSES it (`not_readable_since` is set): it
+    # is not being read, so the declaration is honoured past its day.
     both = _truths(monkeypatch, accounts, start=DECEMBER[0], end=DECEMBER[1],
                    now=now, states=states, retired=declared)
     assert both["state"] == "verified" and both["accounts"][1]["configured"] is True
@@ -1776,7 +1780,9 @@ def test_63e3_a_valid_declaration_publishes_and_says_so_at_the_top_level(
                       configured=[ACCOUNT_ID], now=now,
                       retired=f"{OLD_ACCOUNT_ID}:2026-12-19")
     assert earlier["state"] == "verified"
-    assert earlier["owner_declared_retired"][0]["last_spend_day"] == "2026-12-19"
+    assert earlier["owner_declared_retired"] == [
+        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-12-19",
+         "relied_from": "2026-12-21"}]              # the ledger reaches the 20th
 
 
 @pytest.mark.parametrize("declared, last_spend, reason, words", [
@@ -1827,18 +1833,27 @@ def test_63e5_a_declaration_that_cannot_be_read_or_names_no_account_is_ignored(
       {"account_id": "4730305973961806", "last_spend_day": "2027-01-31"}], []),
     ("944370805110952:2026-12-20,944370805110952:2026-12-20",
      [{"account_id": "944370805110952", "last_spend_day": "2026-12-20"}], []),
-    ("944370805110952", [], ["944370805110952"]),
-    ("944370805110952:2026-2-3", [], ["944370805110952:2026-2-3"]),
-    ("944370805110952:yesterday,x:2026-12-20", [],
-     ["944370805110952:yesterday", "x:2026-12-20"]),
-    # One id, two different days: neither is honoured.
-    ("944370805110952:2026-12-20,944370805110952:2026-12-21", [],
-     ["944370805110952:2026-12-21"]),
+    # Invalid entries are named by their 1-based position only.
+    ("944370805110952", [], [1]),
+    ("944370805110952:2026-2-3", [], [1]),
+    ("944370805110952:yesterday,x:2026-12-20", [], [1, 2]),
+    ("4730305973961806:2027-01-31, , oops,944370805110952:2026-12-20",
+     [{"account_id": "4730305973961806", "last_spend_day": "2027-01-31"},
+      {"account_id": "944370805110952", "last_spend_day": "2026-12-20"}], [2]),
+    # One id, two different days: NEITHER is honoured — both are invalid.
+    ("944370805110952:2026-12-20,944370805110952:2026-12-21", [], [1, 2]),
+    # `act_` in any letter case is the same id.
+    ("944370805110952:2026-12-20,ACT_944370805110952:2026-12-21", [], [1, 2]),
+    ("Act_944370805110952:2026-12-20,aCT_944370805110952:2026-12-20",
+     [{"account_id": "944370805110952", "last_spend_day": "2026-12-20"}], []),
     ("", [], []),
 ])
 def test_63e6_the_retirement_list_is_parsed_and_never_guessed(
         raw, declarations, invalid):
     assert connector.parse_retired(raw) == (declarations, invalid)
+    # ...and the account lists strip the prefix the same way.
+    assert connector.parse_account_ids("ACT_944370805110952, Act_1, aCt_944370805110952") == (
+        ["944370805110952", "1"], [])
 
 
 def test_63e7_an_unreadable_declaration_makes_the_run_partial(monkeypatch, store):
@@ -1846,12 +1861,15 @@ def test_63e7_an_unreadable_declaration_makes_the_run_partial(monkeypatch, store
     fakes.configure(monkeypatch, graph)
     monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD_ACCOUNT_ID}:Dec-20")
     status = connector.config_status()
-    assert status["retired"] == [] and status["retired_invalid"] == [
-        f"{OLD_ACCOUNT_ID}:Dec-20"]
+    assert status["retired"] == [] and status["retired_invalid_positions"] == [1]
+    assert "retired_invalid" not in status
     out, errors = _run()
     assert out["status"] == "partial" and out["reason"] == "meta_ads_misconfigured"
     assert [a["status"] for a in out["accounts"]] == ["success", "success"]
-    assert "META_AD_ACCOUNT_RETIRED" in errors[0] and "is ignored" in errors[0]
+    assert errors == [
+        "meta_ads_api/meta_campaign_spend: META_AD_ACCOUNT_RETIRED: 1 entry is "
+        "not <account id>:<YYYY-MM-DD> (or declare one account with two days) "
+        "and is ignored — position 1 in the list"]
     assert store.finished[0]["status"] == "partial"
     # A declared account that is still configured keeps syncing.
     monkeypatch.setenv("META_AD_ACCOUNT_RETIRED", f"{OLD_ACCOUNT_ID}:2026-11-17")
@@ -1949,8 +1967,19 @@ def test_63h_with_nothing_configured_stored_history_is_still_required(monkeypatc
         monkeypatch, accounts, start=date(2026, 12, 1), end=date(2026, 12, 7),
         configured=[], now=NOW + timedelta(days=30),
         retired=f"{ACCOUNT_ID}:2026-11-16,{OLD_ACCOUNT_ID}:2026-11-17")
-    assert declared["state"] == "not_connected" and declared["usd_spend"] is None
-    assert declared["owner_declared_retired"] == []      # no figure: no marker
+    # A zero that rests entirely on the declarations — and says so. It is
+    # never an unmarked "not connected".
+    assert declared["state"] == "verified_zero_spend"
+    assert declared["usd_spend"] == 0.0 and declared["accounts"] == []
+    assert declared["owner_declared_retired"] == [
+        {"account_id": ACCOUNT_ID, "last_spend_day": "2026-11-16",
+         "relied_from": "2026-11-17"},
+        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-11-17",
+         "relied_from": "2026-11-18"}]
+    assert "spent nothing from 2026-11-17 on" in declared[
+        "owner_declared_retired_disclosure"]
+    assert "spent nothing from 2026-11-18 on" in declared[
+        "owner_declared_retired_disclosure"]
 
 
 def test_63h2_all_time_discloses_each_accounts_first_verified_day(monkeypatch):
@@ -2342,3 +2371,162 @@ def test_81_the_smoke_test_checks_a_whole_month_before_a_backfill(
         assert token not in text + capsys.readouterr().out
     source = (ROOT / "scripts/meta_ads_smoke_test.py").read_text()
     assert "db." not in source and "start_sync_batch" not in source
+
+
+# ── review round 2 (PR-ADS-171A-R2): the retirement declaration ───────────
+
+def test_82_a_declaration_is_not_honoured_for_an_account_that_is_still_read(
+        monkeypatch):
+    """Both sets complete; the NEW account is current through 2026-12-18 and
+    is (wrongly) declared retired on 12-10. A range to the 19th must not
+    publish on the strength of that declaration."""
+    now = datetime(2026, 12, 20, 6, 0, tzinfo=timezone.utc)
+    accounts = [
+        _account(chunks=[_chunk("2026-10-20", "2026-12-18", now)], native=0.0, usd=0.0),
+        _account(chunks=[_chunk("2026-10-21", "2026-12-19", now)],
+                 native=75.0, usd=75.0, **OLD)]
+    truth = _truths(monkeypatch, accounts, start=date(2026, 12, 12),
+                    end=date(2026, 12, 19), now=now,
+                    retired=f"{ACCOUNT_ID}:2026-12-10")
+    assert truth["state"] == "coverage_incomplete" and truth["usd_spend"] is None
+    assert truth["owner_declared_retired"] == []
+    assert truth["retired_declaration_problems"] == [{
+        "account_id": ACCOUNT_ID,
+        "reason": "retired_declaration_account_still_read",
+        "detail": f"account {ACCOUNT_ID} is declared retired but is configured "
+                  "and still read; the declaration is ignored"}]
+    new = truth["accounts"][0]
+    assert (new["required_through"], new["owner_declared_retired"]) == (
+        "2026-12-19", False)
+    # Up to what it is verified for, it publishes as measured.
+    measured = _truths(monkeypatch, accounts, start=date(2026, 12, 12),
+                       end=date(2026, 12, 18), now=now,
+                       retired=f"{ACCOUNT_ID}:2026-12-10")
+    assert measured["state"] == "verified" and measured["owner_declared_retired"] == []
+    # Refused by Meta (`not_readable_since`), it is no longer being read.
+    refused = _truths(
+        monkeypatch, accounts, start=date(2026, 12, 12), end=date(2026, 12, 19),
+        now=now, retired=f"{ACCOUNT_ID}:2026-12-10",
+        states={ACCOUNT_ID: {"not_readable_since": now}})
+    assert refused["state"] == "verified"
+    assert refused["owner_declared_retired"][0]["relied_from"] == "2026-12-19"
+
+
+def test_83_a_declared_day_past_the_ledger_withholds_only_the_unread_days(
+        monkeypatch):
+    """The old account's last verified day is 12-20; its real last spend day,
+    the 23rd, was never read. Declaring the 23rd (the truth) withholds only
+    ranges that touch the 21st–23rd."""
+    accounts, states, now = _december()
+    kwargs = dict(configured=[ACCOUNT_ID], now=now,
+                  retired=f"{OLD_ACCOUNT_ID}:2026-12-23")
+
+    def ask(start, end):
+        return _truths(monkeypatch, accounts, start=start, end=end, **kwargs)
+    # Up to the last verified day: published as measured, no reliance.
+    measured = ask(date(2026, 12, 1), date(2026, 12, 20))
+    assert measured["state"] == "verified" and measured["usd_spend"] == 600.0
+    assert measured["owner_declared_retired"] == []
+    assert measured["retired_declaration_problems"] == []
+    # Touching the 21st–23rd: withheld, and the reason names the days.
+    for start, end in ((date(2026, 12, 1), date(2026, 12, 21)),
+                       (date(2026, 12, 23), date(2026, 12, 31)),
+                       (date(2026, 12, 22), date(2026, 12, 22)),
+                       (date(2026, 12, 1), date(2027, 1, 3))):
+        touching = ask(start, end)
+        assert touching["state"] == "coverage_incomplete", (start, end)
+        assert touching["usd_spend"] is None
+        assert touching["owner_declared_retired"] == []
+        assert ("declared to have last spent on 2026-12-23, but its verified "
+                "coverage ends 2026-12-20; the days in between were never "
+                "read") in touching["withheld_detail"]
+    # Wholly after the declared day: published, resting on the declaration
+    # from the 24th.
+    after = ask(date(2026, 12, 24), date(2027, 1, 3))
+    assert after["state"] == "verified" and after["usd_spend"] == 100.0
+    assert after["account_ids"] == [ACCOUNT_ID]
+    assert after["owner_declared_retired"] == [
+        {"account_id": OLD_ACCOUNT_ID, "last_spend_day": "2026-12-23",
+         "relied_from": "2026-12-24"}]
+    assert "spent nothing from 2026-12-24 on (declared last spend day 2026-12-23)" in (
+        after["owner_declared_retired_disclosure"])
+
+
+@pytest.mark.parametrize("day, covered, spent, read, start, end, expected", [
+    # (declared day, last verified day, last spend day, being read, range) →
+    #   (honoured, problem, required_end, relied_from)
+    ("12-20", "12-20", "12-19", True, "12-01", "12-31",
+     (False, "retired_declaration_account_still_read", "12-31", None)),
+    ("12-20", "12-20", "12-21", False, "12-01", "12-31",
+     (False, "retired_declaration_contradicted", "12-31", None)),
+    ("12-20", "12-20", "12-19", False, "12-01", "12-20", (False, None, "12-20", None)),
+    ("12-20", "12-20", "12-19", False, "12-01", "12-31", (True, None, "12-20", "12-21")),
+    ("12-18", "12-20", "12-18", False, "12-01", "12-31", (True, None, "12-20", "12-21")),
+    ("12-20", "12-20", "12-19", False, "12-25", "12-31", (True, None, None, "12-21")),
+    ("12-23", "12-20", "12-19", False, "12-01", "12-20", (False, None, "12-20", None)),
+    ("12-23", "12-20", "12-19", False, "12-01", "12-21",
+     (False, "retired_declaration_not_covered", "12-21", None)),
+    ("12-23", "12-20", "12-19", False, "12-23", "12-31",
+     (False, "retired_declaration_not_covered", "12-31", None)),
+    ("12-23", "12-20", "12-19", False, "12-24", "12-31", (True, None, None, "12-24")),
+    # All time reaches back before the declared day: it touches the gap.
+    ("12-23", "12-20", "12-19", False, None, "12-31",
+     (False, "retired_declaration_not_covered", "12-31", None)),
+    # Never verified at all.
+    ("12-23", None, None, False, "12-24", "12-31", (True, None, None, "12-24")),
+    ("12-23", None, None, False, "12-01", "12-31",
+     (False, "retired_declaration_not_covered", "12-31", None)),
+])
+def test_84_the_declaration_rule_is_one_pure_function(
+        day, covered, spent, read, start, end, expected):
+    def d(value):
+        return date.fromisoformat(f"2026-{value}") if value else None
+    verdict = truth_service.declaration_verdict(
+        day=d(day), covered_through=d(covered), last_spend=d(spent),
+        being_read=read, start_date=d(start), end_date=d(end))
+    assert (verdict["honoured"], verdict["problem"], verdict["required_end"],
+            verdict["relied_from"]) == (expected[0], expected[1], d(expected[2]),
+                                        d(expected[3]))
+
+
+def test_85_an_unreadable_entry_is_never_echoed_anywhere(monkeypatch, store, caplog):
+    """A secret pasted into the wrong variable: it must not come back out of
+    config_status, the run error, the batch, the logs or the System line."""
+    pasted = "EAAGsecretPASTEDintoTHEwrongVARIABLE0x9f"
+    graph = _pair()
+    fakes.configure(monkeypatch, graph)
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("META_AD_ACCOUNT_RETIRED",
+                       f"{OLD_ACCOUNT_ID}:2026-11-17,{pasted},{pasted}:2026-11-17")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID_3", f"{pasted}, act_{pasted}")
+    status = connector.config_status()
+    assert status["retired_invalid_positions"] == [2, 3]
+    assert status["unparsed_account_entries"] is True
+    assert status["unparsed_account_entry_count"] == 2
+    out, errors = _run()
+    assert out["status"] == "partial"
+    assert any("2 entries are not <account id>:<YYYY-MM-DD>" in e
+               and "position 2, 3 in the list" in e for e in errors)
+    from db import meta_ads_repository as repo
+    from services import system_overview_service as overview
+    monkeypatch.setattr(repo, "fetch_meta_accounts", lambda: {
+        "available": True, "accounts": []})
+    monkeypatch.setattr(repo, "fetch_meta_account_sync_states", lambda: {
+        "available": True, "states": {}})
+    line = overview._meta_spend_source(NOW)
+    assert line["status"] == "misconfigured"
+    truth = truth_service.build_meta_ads_spend_truth_for_days(
+        date(2026, 11, 10), date(2026, 11, 16))
+    assert truth["state"] == "source_unavailable"
+    everything = json.dumps([status, out, errors, line, truth, store.finished,
+                             store.synced, store.failures], default=str) + caplog.text
+    assert pasted not in everything and "PASTED" not in everything
+    # The backfill script does not echo a bad --account value either.
+    from scripts import backfill_meta_ads_spend as script
+    import io, contextlib
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        assert script.main(["--from", "2026-11-01", "--dry-run",
+                            "--account", pasted]) == 1
+    assert pasted not in printed.getvalue()
+    assert "1 --account value(s) are not an ad account id" in printed.getvalue()

@@ -242,22 +242,46 @@ META_AD_ACCOUNT_RETIRED=944370805110952:2026-12-20
 of that account's own time zone. It is the owner saying "this account spent
 nothing after that day". The platform cannot read that from Meta, so:
 
-* it is honoured **only when the ledger bears it out**: the account's verified
-  coverage reaches at least that day, and no stored spend is dated after it.
-  Otherwise it is not honoured and the reason names the day
-  (`retired_declaration_not_covered`, `retired_declaration_contradicted`);
-* an entry that is not `<id>:<YYYY-MM-DD>`, one id with two different days, or
-  an id that was never read is ignored — never guessed — and reported;
-* when honoured, the account is required through its last verified day and
-  contributes nothing after it;
+* it is honoured **only for an account that is not being read** — one that is
+  in no credential set, or one Meta has started refusing (its sync state has
+  `not_readable_since`). A declared account that is configured and still
+  answered for keeps being required like any other; the declaration is
+  ignored and reported (`retired_declaration_account_still_read`, in the truth
+  result and on the System line);
+* it is not honoured when the account has stored spend dated **after** the
+  declared day (`retired_declaration_contradicted`);
+* **declare the true last spend day, even if that day was never read.** With
+  the last verified day `L` and the declared day `D`:
+
+  | The range… | Result |
+  |---|---|
+  | ends on or before `L` | published as measured; nothing rests on the declaration |
+  | touches any day after `L` up to and including `D` | withheld (`retired_declaration_not_covered`) — those are days the account is said to have spent on, and they were never read |
+  | reaches past `L`, and `D` is on or before `L` | published; the account counts through `L` and the figure rests on the declaration from `L + 1` |
+  | starts after `D` (and after `L`) | published; the account has no day in it and the figure rests on the declaration from the day after the later of `L` and `D` |
+
+* an entry that is not `<id>:<YYYY-MM-DD>`, or one id given two different days
+  (`act_` in any letter case is the same id — then neither day is honoured),
+  is ignored, never guessed. It is reported **by its position in the list
+  only**: the text of an entry that failed to parse is never returned, logged
+  or shown, since it may be a secret pasted into the wrong variable. The same
+  holds for an account list entry that is not an id. An id that was never read
+  is ignored and named (`retired_declaration_unknown_account`);
 * **a total that rests on a declaration says so at the top level**:
-  `owner_declared_retired: [{account_id, last_spend_day}]` and
+  `owner_declared_retired: [{account_id, last_spend_day, relied_from}]` —
+  `relied_from` is the first day the figure rests on the declaration — and
   `owner_declared_retired_disclosure` ("This total assumes ad account … spent
-  nothing after … — the owner's declaration (META_AD_ACCOUNT_RETIRED), not a
-  reading from Meta."). Both are empty/None when the figure does not rest on
-  one. **A page that shows the figure must show the disclosure.**
-* an account that is both configured and declared keeps syncing for as long as
-  Meta answers; the declaration only matters past its last verified day.
+  nothing from … on (declared last spend day …) — the owner's declaration
+  (META_AD_ACCOUNT_RETIRED), not a reading from Meta."). Both are empty/None
+  when the figure does not rest on one;
+* when every account is validly declared and none is configured, a later range
+  is a zero that carries the declarations — never an unmarked
+  `not_connected`.
+
+**For PR-ADS-171B:** any surface that shows a figure whose
+`owner_declared_retired` is non-empty must show
+`owner_declared_retired_disclosure` beside it, and 171B must add an audit/AST
+guard that fails when a surface reads the figure without the disclosure.
 
 Backfill every account from the **same** first day. A period is published only
 when every account is covered for all of it; an account with no ads in a
@@ -505,16 +529,25 @@ META_AD_ACCOUNT_ID_2    = 944370805110952
    `account not readable since …; history through <day> is kept`, and the
    daily run is `partial`):
 
-   1. set `META_AD_ACCOUNT_RETIRED=944370805110952:<its last spend day>`. The
-      day must be on or before the "history through" day shown, and on or
-      after the last day it actually spent;
+   1. set `META_AD_ACCOUNT_RETIRED=944370805110952:<its TRUE last spend day>`.
+      Never adjust the day to fit what was read. If the true day is on or
+      before the "history through" day shown, every period is published. If
+      it is later — the account spent on days that were never read — then
+      periods up to the "history through" day are published as measured,
+      periods that include any day after it up to the declared day stay
+      withheld (that spend is unknown), and periods wholly after the declared
+      day are published with the disclosure;
    2. check the System page: the account reads `declared retired by the owner
-      (last spend day …); history through … is kept`;
+      (last spend day …); history through … is kept`, with the unread days
+      named if there are any;
    3. only then remove `META_ADS_ACCESS_TOKEN_2` and `META_AD_ACCOUNT_ID_2`
       (which ends the `partial` runs).
 
-   Its history stays stored. Totals for periods after that day are published
-   with the disclosure that they rest on this declaration.
+   While the account is still configured and Meta still answers for it, a
+   declaration is ignored and the System page says so: it has to stop being
+   read first. Its history stays stored. Totals for periods after it stopped
+   are published with the disclosure that they rest on this declaration, from
+   which day.
 
 ---
 

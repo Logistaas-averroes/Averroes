@@ -37,15 +37,17 @@ Which accounts are relevant, and for which days
   from the configuration means nothing.
 * The one exception is the owner's explicit declaration
   (``META_AD_ACCOUNT_RETIRED=<id>:<last spend day>``) that an account stopped
-  spending. It is honoured only when the ledger bears it out — verified
-  coverage reaching that day, and no stored spend after it. Then the account
-  is required only through its last verified day. A total that rests on a
-  declaration says so at the top level (``owner_declared_retired`` and
-  ``owner_declared_retired_disclosure``); a consumer must show it.
+  spending. It is honoured only for an account that is NOT being read (in no
+  credential set, or refused by Meta) and has no stored spend after the
+  declared day; see :func:`declaration_verdict`. A total that rests on a
+  declaration says so at the top level (``owner_declared_retired`` — with the
+  first day it rests on — and ``owner_declared_retired_disclosure``); a
+  consumer must show it.
 * For all time (``start`` None) each account counts from its own first
   verified day (``first_verified_days``).
-* ``not_connected`` only when no account is listed and none is stored (or
-  every stored one is validly declared retired before the range starts).
+* ``not_connected`` only when no account is listed and none is stored. When
+  every stored account is validly declared retired before the range, the
+  result is a zero that carries the declarations — never an unmarked one.
 
 Rules
 -----
@@ -64,7 +66,7 @@ Read-only: SELECTs on the local database. No call to Meta.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 STATE_VERIFIED = "verified"
 STATE_VERIFIED_ZERO = "verified_zero_spend"
@@ -202,9 +204,60 @@ DECLARATION_NOT_COVERED = "retired_declaration_not_covered"
 DECLARATION_CONTRADICTED = "retired_declaration_contradicted"
 #: A declaration names an account that was never read.
 DECLARATION_UNKNOWN_ACCOUNT = "retired_declaration_unknown_account"
+#: A declaration names an account that is configured and that Meta still
+#: answers for. It keeps being measured; the declaration is not honoured.
+DECLARATION_STILL_READ = "retired_declaration_account_still_read"
 
 DISCLOSURE = ("This total assumes {accounts} — the owner's declaration "
               "(META_AD_ACCOUNT_RETIRED), not a reading from Meta.")
+
+
+def declaration_verdict(*, day: date, covered_through: date | None,
+                        last_spend: date | None, being_read: bool,
+                        start_date: date | None, end_date: date) -> dict:
+    """Pure. What one retirement declaration means for one range.
+
+    ``{honoured, problem, required_end, relied_from}``:
+
+    * ``problem`` set, ``honoured`` False — the account stays required through
+      ``end_date`` like any other:
+        - the account is still being read (configured, and Meta answers);
+        - it has stored spend dated after the declared day;
+        - the range touches days between its last verified day and the
+          declared day — days it is said to have spent on that were never
+          read.
+    * ``honoured`` True — the range reaches past what is on record and rests
+      on the declaration from ``relied_from`` on. ``required_end`` is the last
+      day the account must still be verified for, or None when no day of the
+      range is the account's.
+    * neither — the range lies within the account's verified days: nothing
+      rests on the declaration.
+
+    A declared day LATER than the last verified day is allowed, so the owner
+    never has to declare a false day: ranges up to the last verified day are
+    published as measured, ranges touching the unread days in between are
+    withheld, and ranges wholly after the declared day rest on the
+    declaration.
+    """
+    out = {"honoured": False, "problem": None, "required_end": end_date,
+           "relied_from": None}
+    if being_read:
+        return {**out, "problem": DECLARATION_STILL_READ}
+    if last_spend is not None and last_spend > day:
+        return {**out, "problem": DECLARATION_CONTRADICTED}
+    if covered_through is not None and end_date <= covered_through:
+        return out                         # measured; nothing is relied on
+    settled_until = max(day, covered_through) if covered_through else day
+    relied_from = settled_until + timedelta(days=1)
+    if covered_through is not None and covered_through >= day:
+        after = start_date is not None and start_date > covered_through
+        return {**out, "honoured": True, "relied_from": relied_from,
+                "required_end": None if after else covered_through}
+    # The declared day is past the ledger: (covered_through, day] was never read.
+    if start_date is not None and start_date > day:
+        return {**out, "honoured": True, "relied_from": relied_from,
+                "required_end": None}
+    return {**out, "problem": DECLARATION_NOT_COVERED}
 
 
 def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
@@ -238,8 +291,9 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
         disclosure = None
         if relied:
             disclosure = DISCLOSURE.format(accounts="; ".join(
-                f"ad account {r['account_id']} spent nothing after "
-                f"{r['last_spend_day']}" for r in relied))
+                f"ad account {r['account_id']} spent nothing from "
+                f"{r['relied_from']} on (declared last spend day "
+                f"{r['last_spend_day']})" for r in relied))
         out = {**truth, **_frame(start_date, end_date, settled),
                "accounts": list(accounts),
                "account_ids": [a["account_id"] for a in accounts],
@@ -299,28 +353,47 @@ def build_meta_ads_spend_truth_for_days(start_date, end_date, *,
                     if row.get("covered_through") else None)
             spent = (date.fromisoformat(row["last_spend_date"])
                      if row.get("last_spend_date") else None)
-            if last is None or last < day:
+            # "Being read": configured, and Meta has not started refusing it.
+            being_read = (account_id in listed and not
+                          (states.get(account_id) or {}).get("not_readable_since"))
+            verdict = declaration_verdict(
+                day=day, covered_through=last, last_spend=spent,
+                being_read=being_read, start_date=start_date, end_date=end_date)
+            if verdict["problem"] == DECLARATION_STILL_READ:
                 problems.append({
-                    "account_id": account_id, "reason": DECLARATION_NOT_COVERED,
-                    "detail": f"account {account_id} is declared to have last "
-                              f"spent on {day.isoformat()}, but its verified "
-                              "coverage ends "
-                              + (last.isoformat() if last else "nowhere")})
-            elif spent is not None and spent > day:
+                    "account_id": account_id, "reason": DECLARATION_STILL_READ,
+                    "detail": f"account {account_id} is declared retired but "
+                              "is configured and still read; the declaration "
+                              "is ignored"})
+            elif verdict["problem"] == DECLARATION_CONTRADICTED:
                 problems.append({
                     "account_id": account_id, "reason": DECLARATION_CONTRADICTED,
                     "detail": f"account {account_id} is declared to have last "
                               f"spent on {day.isoformat()}, but has stored "
                               f"spend on {spent.isoformat()}"})
-            elif end_date > last:
-                # Honoured, and this range reaches past the ledger: the days
-                # after `last` rest on the declaration alone.
+            elif verdict["problem"] == DECLARATION_NOT_COVERED:
+                problems.append({
+                    "account_id": account_id, "reason": DECLARATION_NOT_COVERED,
+                    "detail": f"account {account_id} is declared to have last "
+                              f"spent on {day.isoformat()}, but its verified "
+                              "coverage ends "
+                              + (last.isoformat() if last else "nowhere")
+                              + "; the days in between were never read"})
+            elif verdict["honoured"]:
                 relied.append({"account_id": account_id,
-                               "last_spend_day": day.isoformat()})
-                if start_date is not None and start_date > last:
+                               "last_spend_day": day.isoformat(),
+                               "relied_from": verdict["relied_from"].isoformat()})
+                if verdict["required_end"] is None:
                     continue           # no day of this range is the account's
-                required_end = last
+                required_end = verdict["required_end"]
         relevant.append((account_id, row, required_end))
+    if not relevant and relied:
+        # Every account is validly declared retired before this range: the
+        # zero rests entirely on the declarations, and says so.
+        return finish(derive_meta_ads_spend_truth({
+            "connected": True, "available": True, "coverage_complete": True,
+            "native_total": 0.0, "usd_total": 0.0, "fx_status": "verified"}),
+            [], relied)
     if not relevant:
         return finish(derive_meta_ads_spend_truth({"connected": False}))
 
