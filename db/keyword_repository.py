@@ -185,6 +185,8 @@ def fetch_keyword_aggregates(start: date | None, end: date, *,
                 rows = _rows_as_dicts(cur)
                 cur.execute(totals_sql, params)
                 source = (_rows_as_dicts(cur) or [{}])[0]
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_keyword_aggregates failed: %s", exc)
         return {"available": False, "rows": [], "source": {}}
@@ -205,6 +207,10 @@ def fetch_keyword_aggregates(start: date | None, end: date, *,
         source["source_systems"] = list(source.get("source_systems") or [])
     return {"available": True, "rows": rows, "source": source}
 
+
+# PR-ADS-172A — a MemoryError is never an "unavailable" answer: each broad
+# handler below is preceded by one that lets it through. See the same note in
+# `db/search_term_repository.py`.
 
 #: PR-ADS-172A — rows a server-side cursor hands over per round trip. The
 #: result of a streamed read exists in this process one batch at a time.
@@ -276,6 +282,8 @@ def fetch_keyword_daily_costs(start: date | None, end: date, *,
                     cur.itersize = STREAM_BATCH_ROWS
                     cur.execute(folded_sql, (start, start, end) + scope_params)
                     daily_micros = fold_daily_cost_rows(cur)
+        except MemoryError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("fetch_keyword_daily_costs failed: %s", exc)
             return {"available": False, "rows": []}
@@ -297,6 +305,8 @@ def fetch_keyword_daily_costs(start: date | None, end: date, *,
             with conn.cursor() as cur:
                 cur.execute(sql, (start, start, end) + scope_params)
                 rows = _rows_as_dicts(cur)
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_keyword_daily_costs failed: %s", exc)
         return {"available": False, "rows": []}
@@ -348,6 +358,8 @@ def fetch_keyword_daily_for_criterion(
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
                 rows = _rows_as_dicts(cur)
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_keyword_daily_for_criterion failed: %s", exc)
         return {"available": False, "rows": []}
@@ -428,9 +440,13 @@ def fetch_keyword_legacy_audit() -> dict:
                 try:
                     cur.execute(legacy_sql)
                     summary.update((_rows_as_dicts(cur) or [{}])[0])
+                except MemoryError:
+                    raise
                 except Exception:  # noqa: BLE001 - legacy table may be absent
                     conn.rollback()
                     summary.setdefault("legacy_snapshot_rows", None)
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_keyword_legacy_audit failed: %s", exc)
         return {"available": False}

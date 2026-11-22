@@ -130,6 +130,8 @@ def _load_signal_thresholds() -> dict:
         th["small_sample_clicks"] = int(cfg["lead_quality"]["small_sample_warning_threshold"])
         th["quality_weak_max"] = int(cfg["ui"]["quality_score"]["medium_min"])
         th["quality_strong_min"] = int(cfg["ui"]["quality_score"]["strong_min"])
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.debug("thresholds.yaml load failed, using safe defaults: %s", exc)
     return th
@@ -245,6 +247,18 @@ def _build_population(start: date | None, end: date, *,
     # here by the loop below; both are the same amounts under the same keys.
     daily = kw_repo.fetch_keyword_daily_costs(start, end, customer_ids=customer_ids,
                                               folded=True)
+    if daily.get("available") is False:
+        # PR-ADS-172A — the per-date cost read FAILED. Without it every
+        # criterion would be published, in an available response, as
+        # FX-incomplete: a true withholding with a false reason. A population
+        # whose cost could not be read is unavailable, and says so.
+        logger.warning("[keyword-evidence] per-date cost read unavailable; the "
+                       "population is withheld rather than published as "
+                       "FX-incomplete")
+        return {"available": False, "units": [], "source": {},
+                "canonical": {"available": False}, "identity_available": False,
+                "currency_info": _monetary_summary([]),
+                "unavailable_reason": "keyword_daily_costs_unavailable"}
     daily_by_grain: dict = dict(daily.get("daily_micros") or {})
     for d in (daily.get("rows") or []):
         grain = _criterion_grain(d)
@@ -309,6 +323,8 @@ def _keyword_sql_attribution(pop: dict, start: date | None, end: date) -> dict:
         attr = attribute_keywords(contacts, criteria, available=available)
         attr["contacts"] = contacts
         return attr
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("[keyword-evidence] SQL attribution failed: %s", exc)
         return {"by_criterion": {}, "reconciliation": {}, "coverage": {},
@@ -718,6 +734,8 @@ def _selected_window_coverage(start, end, is_all_time: bool, now) -> dict:
     try:
         from services.keyword_sync_service import selected_window_coverage  # noqa: PLC0415
         return selected_window_coverage(start, end, is_all_time=bool(is_all_time), now=now)
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001
         return {
             "selected_window_coverage_status": "unknown",
@@ -900,6 +918,8 @@ def _canonical_keyword_reconciliation(window, sql_attr, now) -> dict:
         return _canon.page_reconciliation(
             _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_KEYWORD_ATTRIBUTABLE,
             now=now, consumer_count=kw_attributed, keyword_attributable=kw_attributed)
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001
         from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
         return _canon.page_reconciliation(
@@ -1025,6 +1045,8 @@ def _safe_base(window, now):
         return base
     except EvidenceWindowError:
         raise
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001
         return {"window": window, "reporting_currency": "USD"}
 
@@ -1128,6 +1150,8 @@ def _preview_account() -> tuple[str | None, list[str], str | None]:
         if not candidates:
             return None, [], PREVIEW_UNAVAILABLE_ACCOUNT
         return cid, candidates, None
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.info("campaign keyword preview: account unresolved: %s", exc)
         return None, [], PREVIEW_UNAVAILABLE_ACCOUNT
@@ -1204,6 +1228,8 @@ def keyword_preview_unavailable(reason: str, *, window=None, campaign_key=None,
     if window is not None:
         try:
             base = _safe_base(window, now) or {}
+        except MemoryError:
+            raise
         except Exception:  # noqa: BLE001
             base = {}
     return {
@@ -1277,6 +1303,8 @@ def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
                                         customer_id=customer_id)
     except EvidenceWindowError:
         raise
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.info("campaign keyword preview context failed (%s/%s): %s",
                     window, campaign_key, exc)
@@ -1311,6 +1339,8 @@ def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
             # account alone rather than over every account in the table.
             customer_ids=candidates, now=now)
     except EvidenceWindowError:
+        raise
+    except MemoryError:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.info("campaign keyword preview failed (%s/%s): %s",

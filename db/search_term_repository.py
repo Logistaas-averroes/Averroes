@@ -77,6 +77,25 @@ __all__ = [
     "fetch_legacy_currency_audit",
 ]
 
+#: PR-ADS-172A — the narrowed read is FOUR statements (evidenced terms, their
+#: other spellings, grouped rows, source totals) whose answers must agree: the
+#: grouped rows are limited to a term list the first two produced. Under READ
+#: COMMITTED each statement takes its own snapshot, so a term flagged between
+#: them would be missing from the list and silently absent from the result —
+#: something the one-population complete read cannot do. One snapshot, and
+#: PostgreSQL itself refuses a write in it.
+NARROWED_READ_TRANSACTION = (
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
+# PR-ADS-172A — a MemoryError is never an "unavailable" answer.
+#
+# Every reader here turns a failure into `{"available": False}` so a page can
+# withhold instead of breaking. Out of memory is not that kind of failure: the
+# process is no longer trustworthy, and under the certification's address-space
+# cap a swallowed MemoryError let an audit finish and report on sections it had
+# not built. Each broad handler below is therefore preceded by one that lets
+# MemoryError through.
+
 #: PR-ADS-172A — rows a server-side cursor hands over per round trip. The
 #: result of a streamed read exists in this process one batch at a time.
 STREAM_BATCH_ROWS = 2000
@@ -166,6 +185,8 @@ def fetch_search_term_aggregates(start: date | None, end: date, *,
             if conn is None:
                 return {"available": False, "rows": []}
             if flagged_candidates:
+                with conn.cursor() as cur:
+                    cur.execute(NARROWED_READ_TRANSACTION)
                 # PR-ADS-172A — every raw term that can belong to a FLAGGED unit.
                 #
                 # A unit of the evidence service is one NORMALIZED term × one
@@ -332,6 +353,8 @@ def fetch_search_term_aggregates(start: date | None, end: date, *,
                 # terms both statements above were limited to.
                 result["search_terms"] = search_terms
             return result
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_search_term_aggregates failed: %s", exc)
         return {"available": False, "rows": []}
@@ -441,6 +464,8 @@ def fetch_search_term_daily_costs(start: date | None, end: date, *,
                 row["currency_codes"] = sorted(row.get("currency_codes") or [])
                 row["source_systems"] = sorted(row.get("source_systems") or [])
             return {"available": True, "rows": rows}
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_search_term_daily_costs failed: %s", exc)
         return {"available": False, "rows": []}
@@ -547,6 +572,8 @@ def fetch_search_term_daily_for_campaign(
                 row["clicks"] = int(row["clicks"] or 0)
                 row["impressions"] = int(row["impressions"] or 0)
             return {"available": True, "rows": rows}
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_search_term_daily_for_campaign failed: %s", exc)
         return {"available": False, "rows": []}
@@ -647,6 +674,8 @@ def fetch_legacy_currency_audit() -> dict:
                 },
                 "rows": rows,
             }
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_legacy_currency_audit failed: %s", exc)
         return {"available": False, "summary": {}, "rows": []}
@@ -692,6 +721,8 @@ def fetch_waste_evidence_for_terms(search_terms: list) -> dict:
                     int(row["crm_junk_confirmed"])
                     if row.get("crm_junk_confirmed") is not None else None)
             return {"available": True, "rows": rows}
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_waste_evidence_for_terms failed: %s", exc)
         return {"available": False, "rows": []}
@@ -753,6 +784,8 @@ def fetch_latest_waste_classification(
                 int(row["crm_junk_confirmed"])
                 if row.get("crm_junk_confirmed") is not None else None)
             return {"available": True, "row": row}
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_latest_waste_classification failed: %s", exc)
         return {"available": False, "row": None}

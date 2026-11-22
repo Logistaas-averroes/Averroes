@@ -30,9 +30,16 @@ production.** Its row counts are the live tables' on 2026-11-22
 campaign daily spend 4,810). Its content is invented: 27 campaigns, 62,706
 distinct queries with a long tail over 180 source dates (102,990 term ×
 campaign units), 9,563 fact rows flagged, 9,596 `waste_terms` annotations.
-Production's term mix is not known from here, so production's absolute figures
-will differ; the one production number available — 287 MB resident when the
-backstop stopped the audit — is reproduced by this dataset at 294 MB.
+Production's absolute figures will differ. That this dataset, like production,
+stalls just under the cap (294 MB here, 287 MB there) validates nothing: any
+build that needs more than the cap stops just under it.
+
+**Production observation (read-only query, 2026-11-22).** `search_terms` held
+66,455 distinct terms and 101,852 term × campaign units — close to this
+dataset's 62,706 and 102,990 — but **zero** rows with `is_flagged_waste = TRUE`,
+and `waste_terms` was **empty**. This dataset flags 9,563 rows and carries 9,596
+annotations, so its "after" figures for the flagged section are for a flag
+state production does not have today. See §4.4.
 
 Peak resident growth of ONE call in a warm process (`VmHWM` after − `VmRSS`
 before), MB:
@@ -53,10 +60,16 @@ The whole audit, six windows in one process:
 | before, under the real 320 MB cap | 294 MB | 320 MB (the cap) | — |
 | after, under the real 320 MB cap | 175 MB | 208 MB | 19 s |
 
-Before, under the cap, the audit's own `except Exception` handlers swallowed
-the `MemoryError`s and it exited 0 reporting `certified: true`; the
-certification's guard band (PR-ADS-169A) is what refused that report. That is
-the production message.
+**What the pre-fix audit REPORTED under the cap is not reproducible, and that
+was a defect of its own.** Every reader and both section adapters caught
+`Exception` — which includes `MemoryError` — and answered "unavailable", and
+the gate passed any unavailable section that carried a reason. So the outcome
+depended on which allocation happened to fail: one run here exited 0 with
+`certified: true` (sections recorded as passed-unavailable); an independent
+run of the same code exited 1 with a false VIOLATION at 60d and
+passed-unavailable sections at 180d and all_time. A swallowed `MemoryError`
+could yield a false violation or a false pass. Only the certification's guard
+band (PR-ADS-169A) stood between that report and the verdict. Fixed in §4.5.
 
 **Top allocators before** (`tracemalloc`, flagged preview, `all_time`, 755 MB
 traced):
@@ -170,9 +183,65 @@ arithmetic that follows is untouched. Account scope is still applied in SQL by
 `_build_population` (search terms) no longer keeps the grouped rows and the
 cost rows referenced until it returns.
 
+### 4.4 What to expect in production — conditional on the flag state
+
+The flagged section's cost follows the number of flagged and annotated terms,
+not the table. With production's state on 2026-11-22 (nothing flagged, no
+annotation) the candidate list is empty: the narrowed read runs its first
+grouped statement, loads no unit, and the section is **available with zero
+rows and a total of 0** — a measurement that nothing is flagged, not an
+unavailable section and not a failed read. On the production-scale dataset
+with that flag state the section's resident growth is asserted ≤ 60 MB and the
+real audit holds with both sections available in all six windows
+(test_41, test_42). **This expectation holds only while that count stays near
+zero.** It grows as terms are flagged or annotated: at this dataset's 13,387
+candidate units the section costs ≈ 114 MB.
+
+### 4.5 A section that was not built is not a section that held
+
+"The audit holds in little memory" is also what an audit looks like when its
+sections were never built. So, in the same change:
+
+* **`MemoryError` is never converted.** Every broad `except Exception` in
+  `db/search_term_repository.py`, `db/keyword_repository.py`,
+  `services/search_term_evidence_service.py` and
+  `services/keyword_evidence_service.py` is preceded by `except MemoryError:
+  raise`, and so are the two in the audit's `_audit_window`. Out of memory
+  ends the audit; the capped runner records it as crashed.
+* **The gate reads WHY a section is unavailable.**
+  `audit_campaign_evidence_certification.classify_section_reason` classifies
+  every reason code a builder can emit:
+
+  | class | reasons | result |
+  | --- | --- | --- |
+  | declared withholding | `google_ads_customer_not_configured`, `search_term_truth_mismatch` | passed |
+  | failure | `keyword_evidence_unavailable`, `keyword_preview_failed`, `keyword_preview_context_failed`, `search_term_evidence_unavailable`, `flagged_preview_failed`, `flagged_preview_context_failed`, `campaign_identity_unresolved`, `window_not_resolved` | `unavailable_now` — exit 2 |
+  | violation | `keyword_scope_account_mismatch` | violation — exit 1 |
+  | anything else | — | `unavailable_now` — exit 2 |
+
+  `campaign_identity_unresolved` is a failure HERE because the audit probes
+  only a campaign whose identity the headline build resolved. A test fails if
+  a builder gains a reason code that is not in this table.
+* **The stored run proves it.** The audit's report carries each section's
+  `available` / `reason` per window on every path. `platform_certification_runs.
+  summary` used to drop the whole report; `summarize` now keeps
+  `audits[].drawer_sections = {window: {section: {available, reason}}}` for an
+  audit that builds sections, so the row alone shows both sections were built
+  in all six windows.
+* **One snapshot.** The narrowed read is four statements whose answers must
+  agree; it now opens with `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ,
+  READ ONLY`. Under READ COMMITTED a term flagged between the candidate
+  statement and the grouped statement would have been silently absent.
+* **A failed cost read is unavailable.** `_build_population` (both services)
+  ignored `available: False` from the per-date cost read and published every
+  unit, in an available response, as `fx_incomplete` — a right withholding
+  with a false reason. The population is now unavailable
+  (`search_term_evidence_unavailable` / `keyword_evidence_unavailable` on the
+  drawer sections). This applies to the pages too.
+
 ## 5. Proof
 
-`tests/test_pr_ads_172a_campaign_evidence_memory.py` (20 cases; in CI's
+`tests/test_pr_ads_172a_campaign_evidence_memory.py` (41 cases; in CI's
 PostgreSQL step and did-run list):
 
 * **Equivalence, real PostgreSQL.** On a fixture built from the cases where
@@ -188,9 +257,21 @@ PostgreSQL step and did-run list):
   `audit_platform_certification._run_capped` with the configured backstop and
   classified by `classify`, holds with resident peak ≤ 75% of a 293 MB budget
   and with both sections available in every window.
-* On `main` 17 of the 20 fail: "the flagged preview added 839 MB", "the keyword
-  preview added 123 MB", and "reached its memory backstop (320 MB of address
-  space): peak 320.0 MB is within 16 MB of it".
+* Of the first 20 cases, 17 fail on `main` — but only **three** for the memory
+  reason: test_21 ("the flagged preview added 839 MB"), test_22 ("the keyword
+  preview added 123 MB") and test_24 ("reached its memory backstop (320 MB of
+  address space): peak 320.0 MB is within 16 MB of it"). The other 14 fail
+  because the API they call does not exist there.
+* **§4.5.** A reader and a section re-raise `MemoryError`; every reason code is
+  classified and an unknown one fails closed; a failed section is
+  `unavailable_now`, a scope breach a violation, a declared withholding a
+  pass; on a real database a failed section read leaves the audit not
+  certified and out of memory ends it; the stored summary keeps the sections;
+  a row committed between the narrowed read's statements is not half-visible;
+  a failed cost read is unavailable. Nothing flagged — on the fixture and at
+  scale — is available, zero, and the audit holds. Against the first 172A
+  commit 20 of these 22 selected cases fail; the two that pass are the
+  nothing-flagged section cases, whose behaviour was already right.
 
 Every existing test passes unmodified.
 
@@ -213,6 +294,13 @@ Every existing test passes unmodified.
    narrowed to the one campaign.
 3. `build_campaign_evidence` (24–34 MB) is unchanged; most of it is the
    canonical contact reconciliation PR-ADS-169A already reduced.
-4. Production peaks are not measurable from here. The first production run
+4. `api/server.py`'s `_campaign_keyword_preview` / `_campaign_flagged_preview`
+   still catch `Exception`, so inside the web server a `MemoryError` raised by
+   a section becomes an unavailable section of that one response. Not changed
+   here: it is the server's choice for a request, not a certification.
+5. The narrowed read's snapshot covers the four statements of
+   `fetch_search_term_aggregates`. The per-date cost read that follows is a
+   second transaction, as it is on the complete path.
+6. Production peaks are not measurable from here. The first production run
    after deploy should show `campaign_evidence` `holds` with `peak_rss_mb` well
    under its budget in `platform_certification_runs.summary`.

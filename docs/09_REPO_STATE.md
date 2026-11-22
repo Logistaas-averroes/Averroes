@@ -5779,7 +5779,7 @@ not production figures. Peak resident growth of one call, `all_time`:
 `build_campaign_flagged_preview` 836 → 114 MB; `build_campaign_keyword_preview`
 118 → 39 MB; `build_campaign_evidence` 34 MB, unchanged. The six-window audit:
 902 MB uncapped before; under the real cap 294 MB resident at the 320 MB limit
-before (production's message, reproduced) and 175 MB resident / 208 MB of
+before and 175 MB resident / 208 MB of
 address space after, in 19 s instead of 52 s. No accumulation across windows
 was measured (six windows 175 MB, `all_time` alone 175 MB), so the audit loop
 is untouched. Full table: `docs/51_CAMPAIGN_EVIDENCE_DRAWER_MEMORY.md`.
@@ -5819,8 +5819,31 @@ No published number or payload shape changes: account scope is still applied in
 SQL before aggregation, a preview limit is still never the total, and every
 existing test passes unmodified.
 
-**Tests.** `tests/test_pr_ads_172a_campaign_evidence_memory.py` (20 cases; in
-CI's PostgreSQL step and did-run list). Pure: the folds equal the per-day rows;
+d. *Review round — a section that was not built is not a section that held.*
+   `MemoryError` is re-raised ahead of every broad handler in the two
+   repositories, the two services and the audit's `_audit_window` (it used to
+   become "unavailable", so under the cap the pre-fix audit could report a
+   false pass or a false violation depending on which allocation failed). The
+   audit classifies every section reason code
+   (`classify_section_reason`): a declared withholding passes, a failed build
+   or an unrecognised reason is `unavailable_now` (exit 2), a scope breach is
+   a violation. `summarize` keeps `audits[].drawer_sections` so the stored run
+   row proves both sections were built per window. The narrowed read is one
+   `REPEATABLE READ, READ ONLY` snapshot. A failed per-date cost read makes
+   the population unavailable instead of publishing `fx_incomplete` in an
+   available response (pages included).
+
+**Production observation (read-only, 2026-11-22).** 66,455 distinct terms,
+101,852 term × campaign units, zero flagged rows, `waste_terms` empty. The
+narrowed read therefore loads no unit in production today; the section is
+available with a true zero total and its memory should be near the floor —
+conditional on that count, and growing with it.
+
+**Tests.** `tests/test_pr_ads_172a_campaign_evidence_memory.py` (41 cases; in
+CI's PostgreSQL step and did-run list). Of the first 20, 17 fail on `main`,
+three of them for the memory reason (test_21, test_22, test_24) and 14 on the
+missing API; of the review round's 22 selected cases 20 fail on the first 172A
+commit. Pure: the folds equal the per-day rows;
 the builders ask for the narrow reads; an unknown population is refused; a CRM
 with exact queries gets the complete population. Real PostgreSQL, adversarial
 fixture: narrowed == complete as whole dictionaries for 6 windows × 5 campaign
@@ -5830,11 +5853,9 @@ an unexplained flag quarantines both; an unconfigured account is unavailable;
 an empty term list selects nothing. Production-scale synthetic data: flagged
 growth ≤ 170 MB, keyword ≤ 70 MB, narrowed == complete at scale, and the real
 audit through `_run_capped` + `classify` holds at ≤ 75% of a 293 MB budget with
-both sections available in every window. On `main` 17 of the 20 fail ("the
-flagged preview added 839 MB", "the keyword preview added 123 MB", "reached its
-memory backstop (320 MB of address space)"); the three that pass are the
-dataset's row counts, the preview total (already right) and the complete view
-declaring no narrowed population.
+both sections available in every window. The three of the first 20 that pass
+on `main` are the dataset's row counts, the preview total (already right) and
+the complete view declaring no narrowed population.
 
 **Known gaps.**
 

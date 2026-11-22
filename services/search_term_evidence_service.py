@@ -898,6 +898,19 @@ def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
             start, end, search_terms=narrowed_terms or [], folded=True)
     else:
         daily_costs = st_repo.fetch_search_term_daily_costs(start, end)
+    if daily_costs.get("available") is False:
+        # PR-ADS-172A — the per-date cost read FAILED. Carrying on would leave
+        # every unit without a day to convert and publish it, in an available
+        # response, as `fx_incomplete`: a true withholding with a false reason
+        # (no FX rate is missing — the cost was never read). A population whose
+        # cost could not be read is unavailable, and says so.
+        logger.warning("[search-term-evidence] per-date cost read unavailable; "
+                       "the population is withheld rather than published as "
+                       "FX-incomplete")
+        return {"available": False, "units": [], "source": {},
+                "identity_available": False, "canonical": {"available": False},
+                "aliases_by_id": {}, "currency_info": _monetary_summary([]),
+                "unavailable_reason": "search_term_daily_costs_unavailable"}
     for (term, campaign_name, campaign_id), days in (
             daily_costs.get("daily_micros") or {}).items():
         if not term:
@@ -1174,6 +1187,8 @@ def _search_term_sql_attribution(pop: dict, start, end) -> dict:
             leads_have_search_term=bool(contacts_res.get("leads_have_search_term")))
         attr["contacts"] = contacts
         return attr
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("[search-term-evidence] SQL attribution failed: %s", exc)
         return {"by_unit": {}, "reconciliation": {}, "coverage": {},
@@ -1535,6 +1550,8 @@ def _canonical_st_reconciliation(window, now) -> dict:
         from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
         return _canon.page_reconciliation(
             _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE, now=now)
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001
         return {}
 
@@ -1546,6 +1563,8 @@ def _safe_base(window: str, now: datetime | None = None) -> dict:
     try:
         _, _, base = _base(window, now)
         return base
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001 - unknown/unresolvable window
         return {"window": window if isinstance(window, str) else "30d",
                 "window_start": None, "window_end": None,
@@ -2155,6 +2174,8 @@ def _fetch_reviews_for_units(units: list) -> tuple[dict, bool]:
         fetched = review_repo.fetch_reviews_for_identities(
             [unit_identity(u) for u in units])
         return (fetched.get("rows") or {}), bool(fetched.get("available"))
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("[search-term-evidence] review state unavailable: %s", exc)
         return {}, False
@@ -2961,6 +2982,8 @@ def _flagged_preview_account() -> tuple[str | None, str | None]:
         cid = configured_customer_id()
         cid = str(cid).strip() if cid is not None else ""
         return (cid, None) if cid else (None, FLAGGED_PREVIEW_UNAVAILABLE_ACCOUNT)
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.info("campaign flagged preview: account unresolved: %s", exc)
         return None, FLAGGED_PREVIEW_UNAVAILABLE_ACCOUNT
@@ -3081,6 +3104,8 @@ def build_campaign_flagged_preview(window: str, campaign_key: str | None, *,
             # computed over the whole flagged population, not over the preview.
             population=POPULATION_FLAGGED_CANDIDATES, now=now)
     except EvidenceWindowError:
+        raise
+    except MemoryError:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.info("campaign flagged preview failed (%s/%s): %s",

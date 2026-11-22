@@ -897,3 +897,489 @@ def test_24_the_real_audit_holds_under_the_real_cap_at_production_scale(
         sections = report["per_window"][window]["sections"]
         assert sections == {"keyword": {"available": True, "reason": None},
                             "flagged": {"available": True, "reason": None}}, window
+    # …and the row the certification stores keeps that proof.
+    from services.platform_certification_service import summarize
+    stored = summarize({"audits": [{**outcome, "key": "campaign_evidence"}]})
+    assert stored["audits"][0]["drawer_sections"] == {
+        w: report["per_window"][w]["sections"] for w in WINDOWS}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4 · A section that was NOT BUILT is not a section that held (review round)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# "The audit holds in little memory" is also what an audit looks like when its
+# sections were never built. Before this round a failed read — and a swallowed
+# MemoryError — came back as `available: False` with a reason, and the gate
+# passed any unavailable section that carried one.
+
+import scripts.audit_campaign_evidence_certification as cert  # noqa: E402
+
+
+class _BrokenConn:
+    """A pooled connection whose every statement fails with ``exc``."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def cursor(self, *a, **k):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, *a, **k):
+        raise self.exc
+
+
+def _broken_get_conn(exc):
+    import contextlib
+
+    @contextlib.contextmanager
+    def _get_conn():
+        yield _BrokenConn(exc)
+    return _get_conn
+
+
+_READERS = [
+    (st_repo, lambda: st_repo.fetch_search_term_aggregates(None, TODAY)),
+    (st_repo, lambda: st_repo.fetch_search_term_aggregates(None, TODAY,
+                                                           flagged_candidates=True)),
+    (st_repo, lambda: st_repo.fetch_search_term_daily_costs(None, TODAY)),
+    (st_repo, lambda: st_repo.fetch_search_term_daily_costs(None, TODAY, search_terms=["x"],
+                                                            folded=True)),
+    (kw_repo, lambda: kw_repo.fetch_keyword_aggregates(None, TODAY, customer_ids=["1"])),
+    (kw_repo, lambda: kw_repo.fetch_keyword_daily_costs(None, TODAY)),
+    (kw_repo, lambda: kw_repo.fetch_keyword_daily_costs(None, TODAY, folded=True)),
+]
+
+
+@pytest.mark.parametrize("index", range(len(_READERS)))
+def test_30_a_reader_never_turns_out_of_memory_into_unavailable(monkeypatch, index):
+    module, read = _READERS[index]
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", ACCOUNT)
+    # An ordinary failure is still an unavailable answer, never a raise…
+    monkeypatch.setattr(module, "get_conn", _broken_get_conn(RuntimeError("cursor lost")))
+    assert read()["available"] is False
+    # …but out of memory is not an answer at all.
+    monkeypatch.setattr(module, "get_conn", _broken_get_conn(MemoryError()))
+    with pytest.raises(MemoryError):
+        read()
+
+
+def test_31_a_drawer_section_never_turns_out_of_memory_into_unavailable(monkeypatch):
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", ACCOUNT)
+
+    def _oom(*a, **k):
+        raise MemoryError()
+
+    monkeypatch.setattr(st_repo, "fetch_search_term_aggregates", _oom)
+    with pytest.raises(MemoryError):
+        st_svc.build_campaign_flagged_preview("30d", CAMP_A)
+    with pytest.raises(MemoryError):
+        st_svc.build_flagged_search_terms("30d")
+    monkeypatch.setattr(kw_repo, "fetch_keyword_aggregates", _oom)
+    with pytest.raises(MemoryError):
+        kw_svc.build_campaign_keyword_preview("30d", CAMP_A)
+    # The SQL-attribution helpers are "defensive" for the same reason, and are
+    # equally not allowed to absorb it.
+    import services.platform_sql_attribution_service as psa
+    monkeypatch.setattr(psa, "fetch_and_resolve_contacts", _oom)
+    with pytest.raises(MemoryError):
+        st_svc._search_term_sql_attribution({"units": []}, None, TODAY)
+    with pytest.raises(MemoryError):
+        kw_svc._keyword_sql_attribution({"units": []}, None, TODAY)
+
+
+def _emitted_reason_codes() -> set:
+    import api.server as server
+    codes = {getattr(kw_svc, n) for n in dir(kw_svc) if n.startswith("PREVIEW_UNAVAILABLE_")}
+    codes |= {getattr(st_svc, n) for n in dir(st_svc)
+              if n.startswith("FLAGGED_PREVIEW_UNAVAILABLE_")}
+    codes |= {st_svc.FLAGGED_PREVIEW_QUARANTINED, server.WINDOW_NOT_RESOLVED}
+    return codes
+
+
+def test_32_every_reason_a_section_can_emit_is_classified_and_unknown_fails_closed():
+    emitted = _emitted_reason_codes()
+    assert len(emitted) >= 11, emitted
+    tables = (cert.SECTION_REASONS_DECLARED, cert.SECTION_REASONS_FAILURE,
+              cert.SECTION_REASONS_VIOLATION)
+    classified = set().union(*tables)
+    assert emitted <= classified, f"unclassified reason codes: {emitted - classified}"
+    assert classified <= emitted, f"classified but never emitted: {classified - emitted}"
+    assert sum(len(t) for t in tables) == len(classified)      # one class each
+    # A read that failed is never a declared withholding.
+    for failed in (kw_svc.PREVIEW_UNAVAILABLE_SOURCE, kw_svc.PREVIEW_UNAVAILABLE_ERROR,
+                   kw_svc.PREVIEW_UNAVAILABLE_CONTEXT,
+                   st_svc.FLAGGED_PREVIEW_UNAVAILABLE_SOURCE,
+                   st_svc.FLAGGED_PREVIEW_UNAVAILABLE_ERROR,
+                   st_svc.FLAGGED_PREVIEW_UNAVAILABLE_CONTEXT):
+        assert cert.classify_section_reason(failed)[0] == cert.SECTION_REASON_FAILURE
+    assert cert.classify_section_reason(
+        kw_svc.PREVIEW_UNAVAILABLE_SCOPE)[0] == cert.SECTION_REASON_VIOLATION
+    for unknown in ("brand_new_reason", "", None, 7, "Keyword_Preview_Failed"):
+        assert cert.classify_section_reason(unknown)[0] == cert.SECTION_REASON_UNRECOGNISED
+
+
+def _audit_one_window(monkeypatch, *, keyword_reason=None, flagged_reason=None):
+    """`_audit_window` over a headline build that succeeded, with each drawer
+    section either available or unavailable for the given reason."""
+    import services.campaign_evidence_service as ce
+    monkeypatch.setattr(ce, "build_campaign_evidence", lambda window: {
+        "campaigns": [{"campaign_key": CAMP_A, "campaign_name": "uk - brand"}],
+        "summary": {}, "sql_reconciliation": {}})
+
+    def _section(real_unavailable, reason, window, key):
+        if reason is not None:
+            return real_unavailable(reason, window=window, campaign_key=key,
+                                    customer_id=ACCOUNT)
+        base = real_unavailable("x", window=window, campaign_key=key, customer_id=ACCOUNT)
+        return {**base, "available": True, "reason": None, "window": window,
+                "window_start": "2026-10-24", "window_end": "2026-11-22",
+                "all_time": False, "rows": [], "total_count": 0}
+
+    monkeypatch.setattr(kw_svc, "build_campaign_keyword_preview",
+                        lambda w, k: _section(kw_svc.keyword_preview_unavailable,
+                                              keyword_reason, w, k))
+    monkeypatch.setattr(st_svc, "build_campaign_flagged_preview",
+                        lambda w, k: _section(st_svc.flagged_preview_unavailable,
+                                              flagged_reason, w, k))
+    findings = cert.Findings()
+    result = cert._audit_window("30d", findings)
+    checks = {c["check"]: c["ok"] for c in findings.checks}
+    return findings, result, checks
+
+
+@pytest.mark.parametrize("section", ["keyword", "flagged"])
+def test_33_a_section_that_failed_to_build_is_not_a_passed_check(monkeypatch, section):
+    control, result, checks = _audit_one_window(monkeypatch)
+    assert checks["section[keyword/30d]"] is True and checks["section[flagged/30d]"] is True
+    assert not [u for u in control.unavailable if u.startswith("section[")]
+    assert result["sections"] == {"keyword": {"available": True, "reason": None},
+                                  "flagged": {"available": True, "reason": None}}
+
+    failures = sorted(r for r in cert.SECTION_REASONS_FAILURE
+                      if r != "window_not_resolved")
+    for reason in failures + ["a_reason_nobody_declared"]:
+        findings, result, checks = _audit_one_window(
+            monkeypatch, **{f"{section}_reason": reason})
+        label = f"section[{section}/30d]"
+        assert checks[label] is False, reason
+        assert any(u.startswith(label) for u in findings.unavailable), reason
+        assert findings.exit_code != cert.EXIT_CERTIFIED, reason
+        # …and the report says what the section was, for the stored run.
+        assert result["sections"][section] == {"available": False, "reason": reason}
+
+    # A declared withholding is still told apart from a failure, and passes.
+    declared = "google_ads_customer_not_configured"
+    findings, _result, checks = _audit_one_window(
+        monkeypatch, **{f"{section}_reason": declared})
+    assert checks[f"section[{section}/30d]"] is True
+    assert not [u for u in findings.unavailable if u.startswith("section[")]
+
+
+def test_34_a_scope_breach_reported_by_a_section_is_a_violation(monkeypatch):
+    findings, _result, checks = _audit_one_window(
+        monkeypatch, keyword_reason=kw_svc.PREVIEW_UNAVAILABLE_SCOPE)
+    assert checks["section[keyword/30d]"] is False
+    assert any(v.startswith("section[keyword/30d]") for v in findings.violations)
+    assert findings.exit_code == cert.EXIT_VIOLATION
+
+
+def test_35_out_of_memory_ends_the_audit_instead_of_becoming_a_check(monkeypatch):
+    import services.campaign_evidence_service as ce
+
+    def _oom(*a, **k):
+        raise MemoryError()
+
+    monkeypatch.setattr(ce, "build_campaign_evidence", _oom)
+    with pytest.raises(MemoryError):
+        cert._audit_window("30d", cert.Findings())
+    monkeypatch.setattr(ce, "build_campaign_evidence", lambda window: {
+        "campaigns": [{"campaign_key": CAMP_A, "campaign_name": "uk - brand"}],
+        "summary": {}, "sql_reconciliation": {}})
+    monkeypatch.setattr(kw_svc, "build_campaign_keyword_preview", _oom)
+    with pytest.raises(MemoryError):
+        cert._audit_window("30d", cert.Findings())
+
+
+def test_36_the_stored_run_keeps_what_each_drawer_section_was():
+    from services.platform_certification_service import summarize
+    per_window = {w: {"window": w, "available": True, "sections": {
+        "keyword": {"available": True, "reason": None},
+        "flagged": {"available": w != "all_time",
+                    "reason": None if w != "all_time" else "flagged_preview_failed"}}}
+        for w in WINDOWS}
+    per_window["7d"] = {"window": "7d", "available": False}      # built no section
+    summary = summarize({"verdict": "NOT CERTIFIED", "exit_code": 2, "audits": [
+        {"key": "campaign_evidence", "outcome": "unavailable", "exit_code": 2,
+         "report": {"per_window": per_window, "checks": ["large"] * 500}},
+        {"key": "closed_won_truth", "outcome": "holds", "exit_code": 0,
+         "report": {"totals": {}}},
+        {"key": "crashed_one", "outcome": "crashed", "exit_code": None, "report": None}]})
+    campaign, closed_won, crashed = summary["audits"]
+    assert "report" not in campaign
+    assert set(campaign["drawer_sections"]) == set(WINDOWS)
+    assert campaign["drawer_sections"]["7d"] == {}
+    assert campaign["drawer_sections"]["30d"] == {
+        "keyword": {"available": True, "reason": None},
+        "flagged": {"available": True, "reason": None}}
+    assert campaign["drawer_sections"]["all_time"]["flagged"] == {
+        "available": False, "reason": "flagged_preview_failed"}
+    # Only an audit that builds sections carries the key.
+    assert "drawer_sections" not in closed_won and "drawer_sections" not in crashed
+    json.dumps(summary)
+
+
+@_needs_pg
+@pytest.mark.parametrize("path", ["flagged", "keyword"])
+def test_37_the_audit_does_not_certify_a_window_whose_section_read_failed(
+        adversarial, monkeypatch, path):
+    """End to end on a real database: the headline builds, one section's read
+    fails. Before this round the audit recorded that section as PASSED."""
+    _exec("INSERT INTO keyword_daily_facts (source_date, customer_id, campaign_id,"
+          " campaign_name, ad_group_id, ad_group_name, criterion_id, keyword_text,"
+          " match_type, criterion_status, cost_micros, currency_code,"
+          " source_system, impressions, clicks, conversions) "
+          "VALUES (%s,%s,%s,%s,'ag1','AG','c1','freight software','EXACT',"
+          " 'ENABLED',1000000,'GBP','google_ads_api',100,10,1.0)",
+          (IN_7D, ACCOUNT, CAMP_A, NAMES[CAMP_A]))
+    label = f"section[{path}/30d]"
+    findings, per_window = cert.run(("30d",))
+    control = {c["check"]: c["ok"] for c in findings.checks}
+    assert control[label] is True
+    assert per_window["30d"]["sections"][path] == {"available": True, "reason": None}
+
+    module, name = {"flagged": (st_repo, "fetch_search_term_aggregates"),
+                    "keyword": (kw_repo, "fetch_keyword_aggregates")}[path]
+
+    def _statement_timeout(*a, **k):
+        raise RuntimeError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(module, name, _statement_timeout)
+    findings, per_window = cert.run(("30d",))
+    checks = {c["check"]: c["ok"] for c in findings.checks}
+    assert checks[label] is False
+    assert any(u.startswith(label) for u in findings.unavailable)
+    assert findings.exit_code != cert.EXIT_CERTIFIED
+    assert per_window["30d"]["sections"][path]["available"] is False
+    assert per_window["30d"]["sections"][path]["reason"] in cert.SECTION_REASONS_FAILURE
+
+    def _oom(*a, **k):
+        raise MemoryError()
+
+    monkeypatch.setattr(module, name, _oom)
+    with pytest.raises(MemoryError):
+        cert.run(("30d",))
+
+
+@_needs_pg
+def test_38_the_narrowed_read_is_one_snapshot(adversarial, monkeypatch):
+    """A row committed BETWEEN the candidate statement and the grouped
+    statement must not be half-visible. Under READ COMMITTED the grouped
+    statement saw it although the statements before it had not."""
+    key = ("Freight JOBS", CAMP_A)
+
+    def _rows_for(result):
+        return [r for r in result["rows"]
+                if (r["search_term"], r["campaign_id"]) == key][0]["row_count"]
+
+    before = st_repo.fetch_search_term_aggregates(None, TODAY, flagged_candidates=True)
+    assert _rows_for(before) == 1
+
+    real = st_repo.normalize_search_term
+    wrote = []
+
+    def _normalize_after_a_concurrent_commit(value):
+        if not wrote:
+            # Runs after the first statement's rows are fetched and before the
+            # next statement — on ANOTHER connection, committed at once.
+            other = adversarial.connect()
+            try:
+                other.autocommit = True
+                with other.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO search_terms (source_date, campaign_name,"
+                        " campaign_id, ad_group, keyword, match_type, search_term,"
+                        " customer_id, spend_usd, clicks, impressions, conversions,"
+                        " cost_micros, currency_code, source_system,"
+                        " is_flagged_waste, junk_category) VALUES "
+                        "(%s,%s,%s,'ag concurrent','kw','BROAD','Freight JOBS',%s,"
+                        " 9.0,1,1,0,9000000,'GBP','google_ads_api',TRUE,'job_seeker'),"
+                        "(%s,%s,%s,'ag concurrent','kw','BROAD','brand new flagged',%s,"
+                        " 9.0,1,1,0,9000000,'GBP','google_ads_api',TRUE,'job_seeker')",
+                        (IN_7D, NAMES[CAMP_A], CAMP_A, ACCOUNT,
+                         IN_7D, NAMES[CAMP_A], CAMP_A, ACCOUNT))
+            finally:
+                other.close()
+            wrote.append(True)
+        return real(value)
+
+    monkeypatch.setattr(st_repo, "normalize_search_term",
+                        _normalize_after_a_concurrent_commit)
+    during = st_repo.fetch_search_term_aggregates(None, TODAY, flagged_candidates=True)
+    assert wrote == [True]
+    # Every statement of the read saw the database as it was when it began.
+    assert _rows_for(during) == 1
+    assert during["search_terms"] == before["search_terms"]
+    assert during["source"] == before["source"]
+    assert sum(r["row_count"] for r in during["rows"]) == during["source"]["row_count"]
+    # The NEXT read sees the commit whole: the extra row AND the new term.
+    monkeypatch.setattr(st_repo, "normalize_search_term", real)
+    after = st_repo.fetch_search_term_aggregates(None, TODAY, flagged_candidates=True)
+    assert _rows_for(after) == 2 and "brand new flagged" in after["search_terms"]
+    assert st_repo.NARROWED_READ_TRANSACTION == (
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
+
+@_needs_pg
+def test_39_a_failed_cost_read_is_unavailable_not_published_as_fx_incomplete(
+        adversarial, monkeypatch):
+    """Without per-date cost a unit cannot be converted, and withholding its
+    USD is right. Saying an FX rate is missing — in an available response — is
+    not: nothing about FX was ever learned."""
+    now = datetime.now(tz=timezone.utc)
+    _exec("INSERT INTO keyword_daily_facts (source_date, customer_id, campaign_id,"
+          " campaign_name, ad_group_id, ad_group_name, criterion_id, keyword_text,"
+          " match_type, criterion_status, cost_micros, currency_code,"
+          " source_system, impressions, clicks, conversions) "
+          "VALUES (%s,%s,%s,%s,'ag1','AG','c1','freight software','EXACT',"
+          " 'ENABLED',1000000,'GBP','google_ads_api',100,10,1.0)",
+          (IN_7D, ACCOUNT, CAMP_A, NAMES[CAMP_A]))
+    healthy = st_svc.build_campaign_flagged_preview("30d", CAMP_A, now=now)
+    assert healthy["available"] is True
+    assert {r["currency_status"] for r in healthy["rows"]} == {"verified"}
+    assert kw_svc.build_campaign_keyword_preview("30d", CAMP_A, now=now)["available"] is True
+
+    failed = lambda *a, **k: {"available": False, "rows": []}  # noqa: E731
+    monkeypatch.setattr(st_repo, "fetch_search_term_daily_costs", failed)
+    monkeypatch.setattr(kw_repo, "fetch_keyword_daily_costs", failed)
+
+    for population in st_svc.POPULATIONS:
+        payload = st_svc.build_flagged_search_terms("30d", now=now, population=population)
+        assert payload["db_unavailable"] is True and payload["rows"] == [], population
+        assert payload["pagination"]["total_count"] is None
+    assert st_svc.build_search_term_evidence("30d", now=now)["db_unavailable"] is True
+    section = st_svc.build_campaign_flagged_preview("30d", CAMP_A, now=now)
+    assert (section["available"], section["reason"]) == (
+        False, st_svc.FLAGGED_PREVIEW_UNAVAILABLE_SOURCE)
+    assert section["total_count"] is None and section["rows"] == []
+
+    assert kw_svc.build_keyword_evidence("30d", now=now)["db_unavailable"] is True
+    section = kw_svc.build_campaign_keyword_preview("30d", CAMP_A, now=now)
+    assert (section["available"], section["reason"]) == (
+        False, kw_svc.PREVIEW_UNAVAILABLE_SOURCE)
+    assert section["total_count"] is None and section["rows"] == []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 5 · Nothing flagged at all — production's state on 2026-11-22
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A read-only production query on 2026-11-22 found 66,455 distinct terms,
+# 101,852 term × campaign units, ZERO rows with is_flagged_waste = TRUE and an
+# EMPTY waste_terms. So the narrowed read loads nothing there today. That must
+# be a measurement — available, zero rows, a true zero total — and must never
+# be confused with a read that failed.
+
+@_needs_pg
+def test_40_nothing_flagged_is_an_available_section_with_a_true_zero(adversarial):
+    _exec("UPDATE search_terms SET is_flagged_waste = FALSE, junk_category = NULL,"
+          " matched_pattern = NULL")
+    _exec("DELETE FROM waste_terms")
+    now = datetime.now(tz=timezone.utc)
+    narrowed = st_repo.fetch_search_term_aggregates(None, TODAY, flagged_candidates=True)
+    assert narrowed["available"] is True
+    assert narrowed["search_terms"] == [] and narrowed["rows"] == []
+    assert narrowed["source"]["row_count"] == 0
+    for window in WINDOWS:
+        complete, lean = _views(window, now, campaign=CAMP_A, page_size=500)
+        assert lean.pop("population_scope") == "flagged_candidates"
+        assert lean == complete
+        section = st_svc.build_campaign_flagged_preview(window, CAMP_A, now=now)
+        assert section["available"] is True and section["reason"] is None
+        assert section["rows"] == [] and section["total_count"] == 0
+        assert section["truncated"] is False
+        assert section["coverage_status"] == complete["truth_state"]["status"]
+    findings, per_window = cert.run(("30d",))
+    checks = {c["check"]: c["ok"] for c in findings.checks}
+    assert checks["section[flagged/30d]"] is True
+    assert per_window["30d"]["sections"]["flagged"] == {"available": True, "reason": None}
+
+
+#: Resident growth the flagged section may add when nothing is flagged, MB.
+UNFLAGGED_PREVIEW_GROWTH_LIMIT_MB = 60
+
+
+@pytest.fixture(scope="module")
+def unflagged_scale_db(scale_db):
+    """The production-scale dataset with production's flag state: no flagged
+    row and no annotation. A copy of the seeded database in the same cluster."""
+    name = "app_unflagged"
+    admin = scale_db.connect()
+    try:
+        admin.autocommit = True
+        with admin.cursor() as cur:
+            cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                        " WHERE datname = 'app' AND pid <> pg_backend_pid()")
+    finally:
+        admin.close()
+    import psycopg2
+    base = scale_db.url.rsplit("/", 1)[0]
+    maint = psycopg2.connect(base + "/postgres")
+    try:
+        maint.autocommit = True
+        with maint.cursor() as cur:
+            cur.execute(f"CREATE DATABASE {name} TEMPLATE app")
+    finally:
+        maint.close()
+    url = base + "/" + name
+    conn = psycopg2.connect(url)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("UPDATE search_terms SET is_flagged_waste = FALSE,"
+                        " junk_category = NULL, matched_pattern = NULL"
+                        " WHERE is_flagged_waste IS TRUE")
+            cur.execute("TRUNCATE waste_terms")
+            cur.execute("ANALYZE search_terms")
+            cur.execute("SELECT count(*), count(*) FILTER (WHERE is_flagged_waste)"
+                        " FROM search_terms")
+            assert cur.fetchone() == (228_043, 0)
+    finally:
+        conn.close()
+    return url
+
+
+@_needs_pg
+def test_41_at_scale_with_nothing_flagged_the_section_is_available_zero_and_small(
+        unflagged_scale_db):
+    m = _run_child(_MEASURE, unflagged_scale_db, "flagged", "all_time", SCALE_CAMPAIGN)
+    assert m["available"] is True and m["reason"] is None, m
+    assert m["rows"] == 0 and m["total_count"] == 0, m
+    growth = m["peak_mb"] - m["before_mb"]
+    assert growth <= UNFLAGGED_PREVIEW_GROWTH_LIMIT_MB, (
+        f"with nothing flagged the section added {growth:.0f} MB: {m}")
+
+
+@_needs_pg
+def test_42_at_scale_with_nothing_flagged_the_real_audit_holds_with_sections_built(
+        unflagged_scale_db, monkeypatch):
+    import scripts.audit_platform_certification as apc
+    from services.platform_certification_service import summarize
+    monkeypatch.setenv("DATABASE_URL", unflagged_scale_db)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", ACCOUNT)
+    module = "scripts.audit_campaign_evidence_certification"
+    rc, out, err, error, memory = apc._run_capped(module, 900, memory_mb=AUDIT_BUDGET_MB)
+    outcome = apc.classify(rc, out, err, error=error, memory=memory)
+    assert outcome["outcome"] == apc.HOLDS, (outcome.get("detail"), memory)
+    stored = summarize({"audits": [{**outcome, "key": "campaign_evidence"}]})
+    sections = stored["audits"][0]["drawer_sections"]
+    assert set(sections) == set(WINDOWS)
+    for window in WINDOWS:
+        assert sections[window] == {"keyword": {"available": True, "reason": None},
+                                    "flagged": {"available": True, "reason": None}}, window
