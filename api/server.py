@@ -1024,6 +1024,8 @@ def api_waste(
         payload = build_flagged_search_terms(
             window_key, page=1, page_size=_WASTE_ROW_LIMIT, sort="spend",
             high_spend_usd=high_spend)
+    except MemoryError:
+        raise                      # PR-ADS-173A — never an "empty" answer
     except Exception as exc:  # noqa: BLE001
         log.error("[api/waste] canonical flagged view failed: %s", exc, exc_info=True)
         return _empty()
@@ -3110,6 +3112,11 @@ def _search_term_evidence_call(window: str, builder, *args, fallback=None, **kwa
         return builder(*args, **kwargs)
     except (EvidenceWindowError, SearchTermQueryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MemoryError:
+        # PR-ADS-173A — out of memory is not "the database is unavailable".
+        # Answering with the db-unavailable shape would state a reason that is
+        # false; the request fails as what it is.
+        raise
     except Exception as exc:  # noqa: BLE001
         log.error("[api/search-term-evidence] error: %s", exc, exc_info=True)
         return (fallback or unavailable_terms_response)(window)
@@ -3377,7 +3384,15 @@ def api_search_term_evidence_export(
     """CSV export of the COMPLETE server-filtered Search Term Universe for the
     selected window (never a silently truncated page). 503 when the source is
     unavailable — an empty file is never presented as a complete export.
-    Requires auth. Read-only."""
+    Requires auth. Read-only.
+
+    PR-ADS-173A: the rows are serialized ONE AT A TIME into the response body
+    (each row dict exists only while it is written), the population is then
+    released, and the finished bytes are returned with their Content-Length.
+    The file is complete before a status is sent: a failure while ANY row is
+    serialized is a 503, never a 200 that ends early as a short, well-formed
+    "complete" CSV (which a streamed body could not avoid — its status and
+    headers are on the wire before the last row is written)."""
     import csv  # noqa: PLC0415
     import io  # noqa: PLC0415
 
@@ -3394,6 +3409,8 @@ def api_search_term_evidence_export(
             sql_state=sql_state)
     except (EvidenceWindowError, SearchTermQueryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.error("[api/search-term-evidence/export] error: %s", exc, exc_info=True)
         raise HTTPException(status_code=503,
@@ -3402,9 +3419,7 @@ def api_search_term_evidence_export(
         raise HTTPException(status_code=503,
                             detail="Search terms source unavailable.")
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow([
+    header = [
         "search_term", "review_state", "campaign", "mapping_status",
         "reported_spend_usd", "clicks", "impressions", "cpc_usd",
         "platform_conversions", "junk_categories", "matched_patterns",
@@ -3412,29 +3427,63 @@ def api_search_term_evidence_export(
         "attributed_sqls", "sql_attribution_status", "sql_attribution_source",
         "sql_attribution_coverage", "sql_ambiguity_reason",
         "first_seen", "last_seen", "window", "window_start", "window_end",
-    ])
-    for r in payload["rows"]:
-        writer.writerow([
-            r["search_term"], r["state"], r["campaign_name"],
-            r["mapping_status"],
-            "" if r["spend_usd"] is None else r["spend_usd"],
-            r["clicks"], r["impressions"],
-            "" if r["cpc_usd"] is None else r["cpc_usd"],
-            "" if r["conversions"] is None else r["conversions"],
-            "; ".join(r["junk_categories"]), "; ".join(r["matched_patterns"]),
-            "" if r.get("attributed_sqls") is None else r.get("attributed_sqls"),
-            r.get("sql_attribution_status") or "",
-            r.get("sql_attribution_source") or "",
-            "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
-            r.get("sql_ambiguity_reason") or "",
-            r["first_seen"] or "", r["last_seen"] or "",
-            payload["window"], payload["window_start"] or "",
-            payload["window_end"] or "",
-        ])
-    filename = f"search_terms_{payload['window']}_complete.csv"
+    ]
+    export_window = payload["window"]
+    window_start = payload["window_start"] or ""
+    window_end = payload["window_end"] or ""
+    try:
+        body = io.BytesIO()
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(header)
+        pending = 0
+        for r in payload["rows"]:
+            writer.writerow([
+                r["search_term"], r["state"], r["campaign_name"],
+                r["mapping_status"],
+                "" if r["spend_usd"] is None else r["spend_usd"],
+                r["clicks"], r["impressions"],
+                "" if r["cpc_usd"] is None else r["cpc_usd"],
+                "" if r["conversions"] is None else r["conversions"],
+                "; ".join(r["junk_categories"]), "; ".join(r["matched_patterns"]),
+                "" if r.get("attributed_sqls") is None else r.get("attributed_sqls"),
+                r.get("sql_attribution_status") or "",
+                r.get("sql_attribution_source") or "",
+                "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
+                r.get("sql_ambiguity_reason") or "",
+                r["first_seen"] or "", r["last_seen"] or "",
+                export_window, window_start, window_end,
+            ])
+            pending += 1
+            if pending >= _EXPORT_ROWS_PER_CHUNK:
+                body.write(buf.getvalue().encode("utf-8"))
+                buf.seek(0)
+                buf.truncate(0)
+                pending = 0
+        r = None
+        body.write(buf.getvalue().encode("utf-8"))
+        del buf, writer
+    except MemoryError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # The file is not complete, so there is no file: nothing has been sent.
+        log.error("[api/search-term-evidence/export] serialization failed: %s",
+                  exc, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="Search terms export could not be completed.") from exc
+    # The population is not needed to send the bytes.
+    del payload
+    content = body.getvalue()
+    del body
+    filename = f"search_terms_{export_window}_complete.csv"
+    # Response sets Content-Length from the complete body.
     return FastAPIResponse(
-        content=buf.getvalue(), media_type="text/csv",
+        content=content, media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+#: Rows serialized per encoded chunk of the Search Terms CSV body (PR-ADS-173A).
+_EXPORT_ROWS_PER_CHUNK = 1000
 
 
 # ---------------------------------------------------------------------------

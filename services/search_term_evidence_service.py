@@ -69,7 +69,9 @@ No writes. No Google Ads mutations, no negative keywords, no HubSpot writes.
 
 from __future__ import annotations
 
+import heapq
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -612,7 +614,237 @@ def _sum_opt(a, b):
     return a + b
 
 
-def _merge_group(unit: dict, g: dict) -> None:
+# ── PR-ADS-173A — the compact population unit ───────────────────────────────
+#
+# A population is one unit per normalized term × canonical campaign: ≈ 100,000
+# of them for the account at ``all_time``. Each used to be a dict of 25 keys
+# holding ten ``set`` objects, a per-date dict and a provenance dict — about
+# 2.4 KB — so the units alone were ≈ 250 MB of the web process (docs/54).
+#
+# ``_Unit`` holds the SAME fields under the SAME keys and is read and written
+# through the same ``unit["key"]`` / ``unit.get("key")`` protocol, so every
+# filter, sort, KPI, facet and row builder below is the code it was. What
+# changed is only how a unit is stored:
+#
+#   * fixed slots instead of a hash table per unit;
+#   * the set-valued fields are frozensets, and equal ones are ONE object
+#     shared by every unit of the population (most units carry the same
+#     ``{"GBP"}``, the same ``{"google_ads_api"}``, the same campaign label);
+#   * a unit with a single raw spelling stores that string, not a set of it;
+#   * the per-date native amounts are one flat tuple, not a dict;
+#   * ``_provenance`` is derived on read by ``_assess_currency_provenance``
+#     from the fields it has always been derived from, instead of stored.
+#
+# Nothing is rounded, dropped, summarised or approximated: a value read from a
+# ``_Unit`` equals the value the dict held. A set-valued field read from a
+# ``_Unit`` is immutable, so a stray in-place ``.add()`` fails loudly rather
+# than changing a set that other units share.
+
+_EMPTY_FROZENSET: frozenset = frozenset()
+
+#: Set-valued unit fields stored as (shared) frozensets.
+_UNIT_SET_KEYS = frozenset({
+    "currency_codes", "source_systems", "junk_categories", "matched_patterns",
+    "ad_groups", "keywords", "match_types", "source_labels", "campaign_ids",
+})
+
+#: Fields stored as they are, one slot each, under their own key.
+_UNIT_PLAIN_KEYS = (
+    "search_term", "search_term_normalized", "campaign_key", "campaign_name",
+    "mapping_status", "spend_usd", "spend_raw", "clicks", "impressions",
+    "conversions", "row_count", "cost_micros", "first_seen", "last_seen",
+    "any_flagged", "any_unreviewed",
+    "currency_codes", "source_systems", "junk_categories", "matched_patterns",
+    "ad_groups", "keywords", "match_types", "source_labels", "campaign_ids",
+    # Set by the passes that follow the merge; ABSENT until then, exactly as a
+    # dict key would be.
+    "fx_complete", "currency_status", "_waste_flag", "_waste_evidence",
+    "sql_attribution_coverage",
+)
+#: The per-unit SQL-attribution state. One state dict is the answer for very
+#: many units (every unit of a mapping status, when the CRM carries no query),
+#: so a unit REFERENCES its state instead of copying six values out of it.
+_UNIT_SQL_KEYS = ("attributed_sqls", "sql_attribution_status",
+                  "sql_attribution_source", "sql_candidate_count",
+                  "sql_ambiguity_reason", "sql_contact_keys")
+_UNIT_SQL_KEYS_SET = frozenset(_UNIT_SQL_KEYS)
+#: Keys whose storage differs from their value (see ``_Unit._special``).
+_UNIT_SPECIAL_KEYS = ("search_term_variants", "_daily_micros", "_provenance",
+                      *_UNIT_SQL_KEYS)
+
+
+class _Unit:
+    """One merged term × canonical-campaign unit, stored compactly and read as
+    the mapping it has always been (PR-ADS-173A)."""
+
+    __slots__ = _UNIT_PLAIN_KEYS + ("_variants", "_dm", "_sql")
+
+    def __init__(self, search_term, search_term_normalized, campaign_key,
+                 campaign_name, mapping_status):
+        self.search_term = search_term
+        self.search_term_normalized = search_term_normalized
+        self.campaign_key = campaign_key
+        self.campaign_name = campaign_name
+        self.mapping_status = mapping_status
+        self.spend_usd = None
+        self.spend_raw = None
+        self.clicks = 0
+        self.impressions = 0
+        self.conversions = None
+        self.row_count = 0
+        self.cost_micros = None
+        self.first_seen = None
+        self.last_seen = None
+        self.any_flagged = False
+        self.any_unreviewed = False
+        self.currency_codes = _EMPTY_FROZENSET
+        self.source_systems = _EMPTY_FROZENSET
+        self.junk_categories = _EMPTY_FROZENSET
+        self.matched_patterns = _EMPTY_FROZENSET
+        self.ad_groups = _EMPTY_FROZENSET
+        self.keywords = _EMPTY_FROZENSET
+        self.match_types = _EMPTY_FROZENSET
+        self.source_labels = _EMPTY_FROZENSET
+        self.campaign_ids = _EMPTY_FROZENSET
+        # None = no annotation attached — what an absent key reads as.
+        self._waste_flag = None
+        self._waste_evidence = None
+        self._variants = None      # None | one raw spelling | frozenset of them
+        self._dm = None            # None | (iso, micros, iso, micros, …)
+
+    # ── read ────────────────────────────────────────────────────────────────
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            return self._special(key)
+        except TypeError:
+            raise KeyError(key) from None
+
+    def get(self, key, default=None):
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            try:
+                return self._special(key)
+            except KeyError:
+                return default
+        except TypeError:
+            return default
+
+    def _special(self, key):
+        if key == "search_term_variants":
+            variants = self._variants
+            if variants is None:
+                return _EMPTY_FROZENSET
+            if type(variants) is frozenset:
+                return variants
+            return frozenset((variants,))
+        if key == "_daily_micros":
+            flat = self._dm
+            return dict(zip(flat[::2], flat[1::2])) if flat else {}
+        if key == "_provenance":
+            return _assess_currency_provenance(self)
+        if key in _UNIT_SQL_KEYS_SET:
+            try:
+                value = self._sql[key]
+            except AttributeError:
+                raise KeyError(key) from None
+            if key == "sql_contact_keys":
+                return list(value or [])
+            return value
+        raise KeyError(key)
+
+    def __contains__(self, key) -> bool:
+        try:
+            self[key]
+        except KeyError:
+            return False
+        return True
+
+    def keys(self):
+        """The keys that are SET — what a dict unit's ``keys()`` would list —
+        so ``{**unit, …}`` copies a unit as it always did."""
+        out = [k for k in _UNIT_PLAIN_KEYS if hasattr(self, k)
+               and not (k in ("_waste_flag", "_waste_evidence")
+                        and getattr(self, k) is None)]
+        out.extend(k for k in _UNIT_SPECIAL_KEYS if k in self)
+        return out
+
+    # ── write ───────────────────────────────────────────────────────────────
+    def __setitem__(self, key, value) -> None:
+        if key in _UNIT_SET_KEYS:
+            if type(value) is not frozenset:
+                value = frozenset(value)
+            setattr(self, key, value)
+        elif key == "search_term_variants":
+            variants = value if type(value) is frozenset else frozenset(value)
+            if not variants:
+                self._variants = None
+            elif len(variants) == 1:
+                (self._variants,) = variants
+            else:
+                self._variants = variants
+        elif key == "_daily_micros":
+            flat: list = []
+            for iso, micros in (value or {}).items():
+                flat.extend((iso, micros))
+            self._dm = tuple(flat) if flat else None
+        elif key in _UNIT_SQL_KEYS_SET:
+            # One field set on its own: this unit's private copy of its state.
+            state = dict(getattr(self, "_sql", None) or {})
+            state[key] = value
+            self._sql = state
+        elif key in _UNIT_PLAIN_KEYS_SET:
+            setattr(self, key, value)
+        else:
+            # A field this unit does not have. Storing it nowhere and carrying
+            # on would lose a value silently.
+            raise KeyError(f"search-term unit has no field {key!r}")
+
+    def set_sql_attribution(self, state: dict) -> None:
+        """Attach an attribution state by REFERENCE. ``state`` must carry all
+        six ``_UNIT_SQL_KEYS`` (the caller normalizes one that does not), so a
+        read of any of them is the read of a key that is present."""
+        self._sql = state
+
+    def add_daily_micros(self, iso: str, micros: int) -> None:
+        """``_daily_micros[iso] += micros`` on the flat per-date store."""
+        flat = self._dm
+        if flat is None:
+            self._dm = (iso, micros)
+            return
+        for i in range(0, len(flat), 2):
+            if flat[i] == iso:
+                self._dm = flat[:i + 1] + (flat[i + 1] + micros,) + flat[i + 2:]
+                return
+        self._dm = flat + (iso, micros)
+
+
+_UNIT_PLAIN_KEYS_SET = frozenset(_UNIT_PLAIN_KEYS)
+
+
+def _add_to_set_field(unit, key: str, values, intern=None) -> None:
+    """``unit[key] |= values`` for a dict unit (a mutable set, updated in
+    place as always) or a compact ``_Unit`` (a frozenset, replaced by the
+    union — shared through ``intern`` when one is given)."""
+    if not values:
+        return
+    current = unit.get(key)
+    if isinstance(current, set):
+        current.update(values)
+        return
+    if current is None:
+        if isinstance(unit, dict):
+            unit[key] = set(values)
+            return
+        current = _EMPTY_FROZENSET
+    merged = current.union(values)
+    if len(merged) != len(current):
+        unit[key] = intern(merged) if intern is not None else merged
+
+
+def _merge_group(unit, g: dict, intern=None) -> None:
     unit["spend_usd"] = _sum_opt(unit["spend_usd"], g.get("spend_usd"))
     unit["spend_raw"] = _sum_opt(unit.get("spend_raw"), g.get("spend_usd"))
     unit["clicks"] += int(g.get("clicks") or 0)
@@ -623,12 +855,8 @@ def _merge_group(unit: dict, g: dict) -> None:
     g_micros = g.get("cost_micros")
     if g_micros is not None:
         unit["cost_micros"] = (unit.get("cost_micros") or 0) + int(g_micros)
-    g_codes = g.get("currency_codes")
-    if g_codes:
-        unit.setdefault("currency_codes", set()).update(g_codes)
-    g_systems = g.get("source_systems")
-    if g_systems:
-        unit.setdefault("source_systems", set()).update(g_systems)
+    _add_to_set_field(unit, "currency_codes", g.get("currency_codes"), intern)
+    _add_to_set_field(unit, "source_systems", g.get("source_systems"), intern)
     fs, ls = g.get("first_seen"), g.get("last_seen")
     if fs is not None and (unit["first_seen"] is None or fs < unit["first_seen"]):
         unit["first_seen"] = fs
@@ -638,14 +866,15 @@ def _merge_group(unit: dict, g: dict) -> None:
     unit["any_unreviewed"] = unit["any_unreviewed"] or bool(g.get("any_unreviewed"))
     for k in ("junk_categories", "matched_patterns", "ad_groups", "keywords",
               "match_types"):
-        unit[k].update(g.get(k) or [])
+        _add_to_set_field(unit, k, g.get(k), intern)
     raw_term = g.get("search_term")
     if raw_term:
-        unit["search_term_variants"].add(raw_term)
+        _add_to_set_field(unit, "search_term_variants", (raw_term,))
     if g.get("campaign_name"):
-        unit["source_labels"].add(g["campaign_name"])
+        _add_to_set_field(unit, "source_labels", (g["campaign_name"],), intern)
     if g.get("campaign_id") is not None and str(g["campaign_id"]).strip():
-        unit["campaign_ids"].add(str(g["campaign_id"]).strip())
+        _add_to_set_field(unit, "campaign_ids",
+                          (str(g["campaign_id"]).strip(),), intern)
 
 
 def _unit_state(unit: dict) -> str:
@@ -732,9 +961,13 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
     # Query by every raw variant (that is what waste_terms stores), but key the
     # join on the NORMALIZED term so an annotation written against one casing
     # still reaches the unit that merged all casings.
-    terms = sorted({v for u in units
-                    for v in (u.get("search_term_variants") or set()) if v}
-                   | {u["search_term"] for u in units if u.get("search_term")})
+    term_set: set = set()
+    for u in units:
+        term_set.update(v for v in (u.get("search_term_variants") or ()) if v)
+        if u.get("search_term"):
+            term_set.add(u["search_term"])
+    terms = sorted(term_set)
+    del term_set
     if not terms:
         return {"available": True, "annotation_rows": 0, "attached": 0,
                 "legacy_unresolved": 0}
@@ -761,9 +994,17 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
     # Group units by term so we can detect same-name ambiguity within a term.
     # ``_unit_safe_labels`` for EVERY unit (mapped + unmatched) feeds the local
     # ambiguity denominator, but only mapped units are eligible for attachment.
+    #
+    # PR-ADS-173A: only terms an annotation row names can attach anything (the
+    # lookup below is keyed on the term), so only THEIR units are grouped —
+    # every unit of such a term, in every campaign, which is the whole
+    # ambiguity denominator. The outcome is the one grouping every term gave.
+    annotated_terms = {key[0] for key in ev_by_key}
     by_term: dict = {}
-    for u in units:
-        by_term.setdefault(u["search_term_normalized"], []).append(u)
+    if annotated_terms:
+        for u in units:
+            if u["search_term_normalized"] in annotated_terms:
+                by_term.setdefault(u["search_term_normalized"], []).append(u)
 
     for term, term_units in by_term.items():
         for u in term_units:
@@ -830,7 +1071,17 @@ POPULATION_FLAGGED_CANDIDATES = "flagged_candidates"
 POPULATIONS = (POPULATION_COMPLETE, POPULATION_FLAGGED_CANDIDATES)
 
 
-def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
+def _unavailable_population(reason: str | None = None) -> dict:
+    pop = {"available": False, "units": [], "source": {},
+           "identity_available": False, "canonical": {"available": False},
+           "aliases_by_id": {}, "currency_info": _monetary_summary([])}
+    if reason is not None:
+        pop["unavailable_reason"] = reason
+    return pop
+
+
+def _build_population(start, end, *, flagged_candidates: bool = False,
+                      normalized_terms=None) -> dict:
     """Fetch + merge the selected-window population at (search_term,
     canonical-campaign) grain. Returns {available, units, source, identity_available,
     canonical (spend result), aliases_by_id, currency_info}.
@@ -838,40 +1089,61 @@ def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
     ``flagged_candidates`` (PR-ADS-172A) narrows the read IN SQL to the terms
     that can belong to a flagged unit; the merge below is the same code either
     way, so a unit that is loaded is the unit the complete population holds.
+
+    PR-ADS-173A:
+
+    * ``normalized_terms`` narrows the read the same way to the units of the
+      given normalized terms (a term drawer), when the reader offers it.
+    * Every ``search_terms`` / ``waste_terms`` statement of the build — grouped
+      rows, source totals, per-date costs, annotations — runs on ONE
+      REPEATABLE READ, READ ONLY snapshot (``population_snapshot``).
+    * The grouped rows and the per-date costs are STREAMED into the units
+      (``sink=``) when the reader offers it, so neither result set is ever
+      held as a list of dicts; the units themselves are compact (``_Unit``).
+      A reader that only returns rows gets the same merge over those rows.
     """
+    import db.search_term_repository as st_repo  # noqa: PLC0415
+
+    with st_repo.population_snapshot():
+        return _build_population_in_snapshot(
+            start, end, flagged_candidates=flagged_candidates,
+            normalized_terms=normalized_terms)
+
+
+def _build_population_in_snapshot(start, end, *, flagged_candidates: bool,
+                                  normalized_terms) -> dict:
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
-    if flagged_candidates:
-        agg = st_repo.fetch_search_term_aggregates(start, end, flagged_candidates=True)
-    else:
-        agg = st_repo.fetch_search_term_aggregates(start, end)
-    if not agg.get("available"):
-        return {"available": False, "units": [], "source": {},
-                "identity_available": False, "canonical": {"available": False},
-                "aliases_by_id": {}, "currency_info": _monetary_summary([])}
+    # Canonical campaign identity, read once — and only once the grouped read
+    # has shown itself available (its first row, or its result), so an
+    # unavailable population still reads nothing else, as before.
+    context: dict = {}
 
-    canonical = revenue_repo.fetch_canonical_campaign_spend(start, end)
-    identity = revenue_repo.fetch_campaign_identity(canonical.get("customer_id"))
-    spend_by_id, norm_to_ids = _spend_index(canonical)
-    identity_by_label, aliases_by_id = _identity_label_index(identity)
+    def _identity():
+        if not context:
+            canonical = revenue_repo.fetch_canonical_campaign_spend(start, end)
+            identity = revenue_repo.fetch_campaign_identity(canonical.get("customer_id"))
+            spend_by_id, norm_to_ids = _spend_index(canonical)
+            identity_by_label, aliases_by_id = _identity_label_index(identity)
+            context.update(
+                canonical=canonical, identity=identity, spend_by_id=spend_by_id,
+                norm_to_ids=norm_to_ids, identity_by_label=identity_by_label,
+                aliases_by_id=aliases_by_id)
+        return context
 
-    units: dict = {}
-    # PR-ADS-172A: the grouped rows are consumed by this loop and nothing after
-    # it reads them, so this function lets go of them before the per-date costs
-    # are read instead of holding them beside the units for the rest of the
-    # build. (The repository's result is not mutated — only no longer held.)
-    group_rows = agg.get("rows") or []
-    source_totals = agg.get("source") or {}
-    narrowed_terms = agg.get("search_terms")
-    del agg
-    for g in group_rows:
-        term = g.get("search_term")
-        if not term:
-            continue
+    # (campaign_key → normalized term → unit). Equal frozensets, campaign keys
+    # and dates are stored once for the whole population.
+    units_by_campaign: dict = {}
+    unit_list: list = []          # in the order the units were first seen
+    shared: dict = {}
+    intern = lambda value: shared.setdefault(value, value)  # noqa: E731
+
+    def _unit_for(term, campaign_id, campaign_name, *, create: bool):
+        ctx = _identity()
         status, key, display = _resolve_campaign_identity(
-            g.get("campaign_id"), g.get("campaign_name"),
-            spend_by_id, norm_to_ids, identity_by_label)
+            campaign_id, campaign_name, ctx["spend_by_id"], ctx["norm_to_ids"],
+            ctx["identity_by_label"])
         # PR-ADS-153D: the merge key is the NORMALIZED term, so the aggregation
         # grain is exactly the durable identity grain. Grouping on the raw string
         # while identifying on the normalized one made "Freight JOBS" and
@@ -879,45 +1151,92 @@ def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
         # rows, the KPI counted one term, and the Action Queue kept one item
         # carrying only one variant's spend.
         norm_term = normalize_search_term(term)
-        ukey = (norm_term, key)
-        unit = units.get(ukey)
-        if unit is None:
-            unit = units[ukey] = {
-                # Display label; the full raw set rides along in
-                # search_term_variants and is resolved once merging is done.
-                "search_term": term,
-                "search_term_normalized": norm_term,
-                "search_term_variants": set(),
-                "campaign_key": key,
-                "campaign_name": display,
-                "mapping_status": status,
-                "spend_usd": None, "spend_raw": None,
-                "clicks": 0, "impressions": 0,
-                "conversions": None, "row_count": 0,
-                "cost_micros": None,
-                "currency_codes": set(), "source_systems": set(),
-                "first_seen": None, "last_seen": None,
-                "any_flagged": False, "any_unreviewed": False,
-                "junk_categories": set(), "matched_patterns": set(),
-                "ad_groups": set(), "keywords": set(), "match_types": set(),
-                "source_labels": set(), "campaign_ids": set(),
-                "_daily_micros": {},   # iso_date -> Σ cost_micros (per-date FX)
-            }
-        _merge_group(unit, g)
+        by_term = units_by_campaign.get(key)
+        if by_term is None:
+            if not create:
+                return None
+            by_term = units_by_campaign[intern(key)] = {}
+        unit = by_term.get(norm_term)
+        if unit is None and create:
+            if norm_term == term:
+                norm_term = term              # one string, not two equal ones
+            # Display label; the full raw set rides along in
+            # search_term_variants and is resolved once merging is done.
+            unit = by_term[norm_term] = _Unit(
+                term, norm_term, intern(key), display, status)
+            unit_list.append(unit)
+        return unit
 
-    # Attach per-SOURCE-DATE native cost to each unit so FX converts at each
-    # day's own rate (PR-ADS-144 §2) — routed through the SAME identity
-    # resolution so two same-named campaign ids never share a day's spend.
-    g = None
-    del group_rows
+    def _merge_group_row(g: dict) -> None:
+        term = g.get("search_term")
+        if not term:
+            return
+        unit = _unit_for(term, g.get("campaign_id"), g.get("campaign_name"),
+                         create=True)
+        if g.get("first_seen") is not None:
+            g["first_seen"] = intern(g["first_seen"])
+        if g.get("last_seen") is not None:
+            g["last_seen"] = intern(g["last_seen"])
+        if g.get("conversions") is not None:
+            # Few distinct values (most rows report 0.0): one float object each.
+            g["conversions"] = intern(g["conversions"])
+        _merge_group(unit, g, intern)
+
+    iso_of: dict = {}
+
+    def _merge_daily_cost(term, campaign_name, campaign_id, source_date, micros) -> None:
+        # Attach per-SOURCE-DATE native cost to each unit so FX converts at
+        # each day's own rate (PR-ADS-144 §2) — routed through the SAME identity
+        # resolution so two same-named campaign ids never share a day's spend,
+        # and the same normalized grain, so a day's cost for "Freight JOBS"
+        # lands on the same unit as "freight jobs".
+        if not term or micros is None:
+            return
+        unit = _unit_for(term, campaign_id, campaign_name, create=False)
+        if unit is None:
+            return
+        iso = iso_of.get(source_date)
+        if iso is None:
+            iso = iso_of[source_date] = (
+                source_date.isoformat() if hasattr(source_date, "isoformat")
+                else str(source_date))
+        unit.add_daily_micros(iso, int(micros))
+
+    read_groups = st_repo.fetch_search_term_aggregates
+    group_kwargs: dict = {}
     if flagged_candidates:
-        # The SAME exact term list the aggregates were narrowed to, and the
-        # per-date amounts folded per (term, campaign) by the repository rather
-        # than returned as one dict per (unit, day).
-        daily_costs = st_repo.fetch_search_term_daily_costs(
-            start, end, search_terms=narrowed_terms or [], folded=True)
-    else:
-        daily_costs = st_repo.fetch_search_term_daily_costs(start, end)
+        group_kwargs["flagged_candidates"] = True
+    if normalized_terms is not None and st_repo.reader_accepts(
+            read_groups, "normalized_terms"):
+        group_kwargs["normalized_terms"] = normalized_terms
+    if st_repo.reader_accepts(read_groups, "sink"):
+        group_kwargs["sink"] = _merge_group_row
+    agg = st_repo.fetch_search_term_aggregates(start, end, **group_kwargs)
+    if not agg.get("available"):
+        return _unavailable_population()
+
+    # A reader that returned its rows instead of streaming them: the same merge.
+    # The rows are consumed here and nothing after reads them (PR-ADS-172A).
+    for g in agg.get("rows") or []:
+        _merge_group_row(g)
+    g = None
+    source_totals = agg.get("source") or {}
+    narrowed_terms = agg.get("search_terms")
+    del agg
+    ctx = _identity()
+
+    read_costs = st_repo.fetch_search_term_daily_costs
+    cost_kwargs: dict = {}
+    if narrowed_terms is not None or flagged_candidates:
+        # The SAME exact term list the aggregates were narrowed to.
+        cost_kwargs["search_terms"] = narrowed_terms or []
+    if st_repo.reader_accepts(read_costs, "sink"):
+        cost_kwargs["sink"] = _merge_daily_cost
+    elif "search_terms" in cost_kwargs:
+        # The per-date amounts folded per (term, campaign) by the repository
+        # rather than returned as one dict per (unit, day).
+        cost_kwargs["folded"] = True
+    daily_costs = st_repo.fetch_search_term_daily_costs(start, end, **cost_kwargs)
     if daily_costs.get("available") is False:
         # PR-ADS-172A — the per-date cost read FAILED. Carrying on would leave
         # every unit without a day to convert and publish it, in an available
@@ -927,47 +1246,24 @@ def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
         logger.warning("[search-term-evidence] per-date cost read unavailable; "
                        "the population is withheld rather than published as "
                        "FX-incomplete")
-        return {"available": False, "units": [], "source": {},
-                "identity_available": False, "canonical": {"available": False},
-                "aliases_by_id": {}, "currency_info": _monetary_summary([]),
-                "unavailable_reason": "search_term_daily_costs_unavailable"}
+        return _unavailable_population("search_term_daily_costs_unavailable")
     for (term, campaign_name, campaign_id), days in (
             daily_costs.get("daily_micros") or {}).items():
-        if not term:
-            continue
-        _, key, _ = _resolve_campaign_identity(
-            campaign_id, campaign_name, spend_by_id, norm_to_ids, identity_by_label)
-        unit = units.get((normalize_search_term(term), key))
-        if unit is None:
-            continue
         for iso, micros in days.items():
-            unit["_daily_micros"][iso] = unit["_daily_micros"].get(iso, 0) + micros
+            _merge_daily_cost(term, campaign_name, campaign_id, iso, micros)
     for d in (daily_costs.get("rows") or []):
-        term = d.get("search_term")
-        if not term:
-            continue
-        _, key, _ = _resolve_campaign_identity(
-            d.get("campaign_id"), d.get("campaign_name"),
-            spend_by_id, norm_to_ids, identity_by_label)
-        # Same normalized grain as the population above, so a day's cost for
-        # "Freight JOBS" lands on the same unit as "freight jobs".
-        unit = units.get((normalize_search_term(term), key))
-        if unit is None:
-            continue
-        sd = d.get("source_date")
-        iso = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
-        micros = d.get("cost_micros")
-        if micros is not None:
-            unit["_daily_micros"][iso] = unit["_daily_micros"].get(iso, 0) + int(micros)
+        _merge_daily_cost(d.get("search_term"), d.get("campaign_name"),
+                          d.get("campaign_id"), d.get("source_date"),
+                          d.get("cost_micros"))
+    d = None
     del daily_costs
 
     # Assess provenance and perform INDEPENDENT per-unit FX conversion — an
     # unproven legacy unit never poisons a verified unit (PR-ADS-145 §2).
-    unit_list = list(units.values())
+    del units_by_campaign, shared
     for u in unit_list:
         u["search_term"] = _representative_term(
             u["search_term_variants"], u["search_term_normalized"])
-        u["_provenance"] = _assess_currency_provenance(u)
     try:
         _fx_convert_population(unit_list, start, end, strict=True)
     except FxRatesUnavailable as exc:
@@ -976,24 +1272,22 @@ def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
         logger.warning("[search-term-evidence] FX rate read unavailable (%s); the "
                        "population is withheld rather than published as "
                        "FX-incomplete", exc)
-        return {"available": False, "units": [], "source": {},
-                "identity_available": False, "canonical": {"available": False},
-                "aliases_by_id": {}, "currency_info": _monetary_summary([]),
-                "unavailable_reason": "fx_rates_unavailable"}
+        return _unavailable_population("fx_rates_unavailable")
 
     # Attach safely campaign-scoped waste_terms classification evidence so a
     # newly imported term that the monthly waste detection already confirmed shows as
     # Flagged waste rather than Needs review (PR-ADS-145 §4).
     annotation_join = _attach_waste_evidence(
-        unit_list, start, end, identity_by_label, aliases_by_id, norm_to_ids)
+        unit_list, start, end, ctx["identity_by_label"], ctx["aliases_by_id"],
+        ctx["norm_to_ids"])
 
     return {
         "available": True,
         "units": unit_list,
         "source": source_totals,
-        "identity_available": bool(identity.get("available")),
-        "canonical": canonical,
-        "aliases_by_id": aliases_by_id,
+        "identity_available": bool(ctx["identity"].get("available")),
+        "canonical": ctx["canonical"],
+        "aliases_by_id": ctx["aliases_by_id"],
         # Window-level three-state monetary picture (all units).
         "currency_info": _monetary_summary(unit_list),
         # PR-ADS-153D §24 — how the durable waste ANNOTATIONS joined the
@@ -1158,7 +1452,7 @@ def _null_last_desc(value):
     return (1, 0.0) if value is None else (0, -float(value))
 
 
-def _sort_units(units: list, sort: str) -> list:
+def _unit_sort_key(sort: str):
     def _cpc(u):
         if u["spend_usd"] is not None and u["clicks"] > 0:
             return float(u["spend_usd"]) / u["clicks"]
@@ -1182,7 +1476,26 @@ def _sort_units(units: list, sort: str) -> list:
         # Attributed SQLs: highest first; unavailable/null count always last.
         "attributed_sqls": lambda u: (_null_last_desc(u.get("attributed_sqls")), *base(u)),
     }
-    return sorted(units, key=keyers.get(sort or "spend", keyers["spend"]))
+    return keyers.get(sort or "spend", keyers["spend"])
+
+
+def _sort_units(units: list, sort: str) -> list:
+    return sorted(units, key=_unit_sort_key(sort))
+
+
+def _sorted_page(units: list, sort: str, offset: int, limit: int) -> list:
+    """``_sort_units(units, sort)[offset:offset + limit]`` without building a
+    sort key for every unit and keeping them all at once (PR-ADS-173A).
+
+    ``heapq.nsmallest(n, …, key=…)`` is defined as ``sorted(…, key=…)[:n]``,
+    ties included (it is stable), and holds only the ``n`` smallest keys. For a
+    page deep enough that most of the population precedes it, the plain sort
+    is used — the same result either way.
+    """
+    stop = offset + limit
+    if stop * 4 >= len(units):
+        return sorted(units, key=_unit_sort_key(sort))[offset:stop]
+    return heapq.nsmallest(stop, units, key=_unit_sort_key(sort))[offset:]
 
 
 # ── HubSpot SQL attribution (PR-ADS-146C §5) ─────────────────────────────────
@@ -1207,12 +1520,43 @@ def _search_term_sql_attribution(pop: dict, start, end) -> dict:
         contacts_res = fetch_and_resolve_contacts(start, end)
         available = bool(contacts_res.get("available"))
         contacts = contacts_res.get("contacts") or []
-        units_in = [{
+        if not any(c.get("search_term_norm") for c in contacts):
+            # PR-ADS-173A — no contact carries a query (the durable `leads`
+            # table persists none), so no contact can be matched to ANY unit:
+            # the reconciliation, coverage, completeness and audit blocks are
+            # the ones an empty unit list produces, and every unit's own state
+            # is decided by its mapping status alone. That is asked for per
+            # STATUS, from the attribution service's own rule, instead of
+            # copying ≈ 100,000 units into dicts to compute ≈ 100,000 equal
+            # answers. The moment one contact carries a query this branch is
+            # not taken and every unit is attributed individually, below.
+            from services.platform_sql_attribution_service import (  # noqa: PLC0415
+                unit_state_without_text_evidence,
+            )
+            attr = attribute_search_terms(
+                contacts, [], available=available,
+                leads_have_search_term=bool(contacts_res.get("leads_have_search_term")))
+            states: dict = {}
+
+            def _state_for(mapping_status):
+                state = states.get(mapping_status)
+                if state is None:
+                    state = states[mapping_status] = unit_state_without_text_evidence(
+                        mapping_status, available=available)
+                return state
+
+            attr["unit_state_by_mapping_status"] = _state_for
+            attr["contacts"] = contacts
+            return attr
+        # A generator: the attribution service reads each unit once to build
+        # its own working rows, so the units are not also copied into a list
+        # of dicts here first (PR-ADS-173A).
+        units_in = ({
             "unit_key": _st_unit_key(u),
             "campaign_id": (u.get("campaign_key") if u.get("mapping_status") == "mapped" else None),
             "search_term": u.get("search_term"),
             "mapping_status": u.get("mapping_status"),
-        } for u in (pop.get("units") or [])]
+        } for u in (pop.get("units") or []))
         attr = attribute_search_terms(
             contacts, units_in, available=available,
             leads_have_search_term=bool(contacts_res.get("leads_have_search_term")))
@@ -1230,12 +1574,27 @@ def _search_term_sql_attribution(pop: dict, start, end) -> dict:
 def _apply_search_term_sql(units: list, attr: dict) -> None:
     """Attach per-unit attribution to units so filter/sort/row see it."""
     by = attr.get("by_unit") or {}
+    # PR-ADS-173A: present when no contact carries a query — the state is then
+    # a function of the unit's mapping status (see _search_term_sql_attribution).
+    state_for_status = attr.get("unit_state_by_mapping_status")
     cov = (attr.get("coverage") or {}).get("coverage_pct")
     for u in units:
-        st = by.get(_st_unit_key(u)) or {
-            "attributed_sqls": None, "sql_attribution_status": "unavailable",
-            "sql_attribution_source": None, "sql_ambiguity_reason": None,
-            "sql_candidate_count": None, "sql_contact_keys": []}
+        if state_for_status is not None:
+            st = state_for_status(u.get("mapping_status"))
+        else:
+            st = by.get(_st_unit_key(u)) or {
+                "attributed_sqls": None, "sql_attribution_status": "unavailable",
+                "sql_attribution_source": None, "sql_ambiguity_reason": None,
+                "sql_candidate_count": None, "sql_contact_keys": []}
+        if type(u) is _Unit:
+            # The same six values, by reference to the state that carries them
+            # (PR-ADS-173A) — a state missing a key is completed with None
+            # first, which is what `st.get(key)` assigned below.
+            if not _UNIT_SQL_KEYS_SET <= st.keys():
+                st = {k: st.get(k) for k in _UNIT_SQL_KEYS}
+            u.set_sql_attribution(st)
+            u["sql_attribution_coverage"] = cov
+            continue
         u["attributed_sqls"] = st.get("attributed_sqls")
         u["sql_attribution_status"] = st.get("sql_attribution_status")
         u["sql_attribution_source"] = st.get("sql_attribution_source")
@@ -1507,7 +1866,6 @@ def build_search_term_evidence(window: str, *, page: int = 1,
     filtered = _filter_units(units, q=q, campaign=campaign, state=state,
                              junk_category=junk_category, min_spend=min_spend)
     filtered = _filter_units_sql(filtered, sql_state)
-    ordered = _sort_units(filtered, sort)
 
     # ── Complete-population KPIs (never page-scoped) ──
     # State counts use the PR-ADS-145 §4/§5 precedence (durable-true OR safe
@@ -1542,35 +1900,46 @@ def build_search_term_evidence(window: str, *, page: int = 1,
         "coverage": coverage,
     }
 
-    total = len(ordered)
+    # The page is sorted and sliced over the COMPLETE filtered population —
+    # only the page's rows are serialized.
+    total = len(filtered)
     offset = (page - 1) * page_size
-    page_rows = ordered[offset:offset + page_size]
     aliases_by_id = pop["aliases_by_id"]
+    rows = [_unit_row(u, aliases_by_id)
+            for u in _sorted_page(filtered, sort, offset, page_size)]
+    facets = _facets(units)
+    audit = _audit_block(base, pop, coverage_status=coverage["status"],
+                         state_counts=state_counts,
+                         population_count=len(filtered))
+    sql_block = _search_term_sql_block(sql_attr)
+    # PR-ADS-173A: everything the population contributes is computed above, so
+    # it is released BEFORE the canonical reconciliation below — an independent
+    # read with its own working set — instead of being held beside it.
+    u = None
+    del pop, units, filtered, sql_attr
 
     return {
         **base,
         "kpis": kpis,
-        "rows": [_unit_row(u, aliases_by_id) for u in page_rows],
+        "rows": rows,
         "pagination": {
             "total_count": total,
-            "returned_count": len(page_rows),
+            "returned_count": len(rows),
             "page": page,
             "page_size": page_size,
-            "has_more": offset + len(page_rows) < total,
+            "has_more": offset + len(rows) < total,
         },
-        "facets": _facets(units),
+        "facets": facets,
         "filters": {**_echo_filters(q, campaign, state, junk_category, min_spend, sort),
                     "sql_state": sql_state},
         "platform_date_field": "source_date",
         "sql_date_field": "contact_created_at",
-        "sql_attribution": _search_term_sql_block(sql_attr),
+        "sql_attribution": sql_block,
         # PR-ADS-152 §6: canonical SQL-scope reconciliation. Search Terms attribute
         # only exact persisted queries; the underlying SQL population is the
         # campaign-attributable subset, disclosed here with its explicit scope.
         "sql_reconciliation": _canonical_st_reconciliation(window, now),
-        "audit": _audit_block(base, pop, coverage_status=coverage["status"],
-                              state_counts=state_counts,
-                              population_count=len(filtered)),
+        "audit": audit,
     }
 
 
@@ -1827,6 +2196,37 @@ def _flagged_row(unit: dict, aliases_by_id: dict, review: dict | None,
     }
 
 
+#: The fields of a flagged row that the view's filters, sorts, KPIs, facets and
+#: identity invariant read (PR-ADS-173A). Everything else on a row is only ever
+#: SERIALIZED, so it is built for the rows of the returned page alone.
+_FLAGGED_INDEX_KEYS = (
+    "term_identity", "search_term", "campaign_key", "campaign_name",
+    "mapping_status", "review_state", "flag_reason", "flag_reason_label",
+    "spend_usd", "clicks", "last_seen", "attributed_sqls",
+    "sql_attribution_status", "action_needed", "priority_score",
+)
+
+
+class _FlaggedIndexRow(dict):
+    """The ``_FLAGGED_INDEX_KEYS`` of one full flagged row.
+
+    Each value is copied out of the row ``_flagged_row`` built — never
+    recomputed — so a filter, sort or KPI reads exactly what it read from the
+    full row. A read of ANY OTHER key raises instead of answering ``None``: if
+    a filter or KPI ever starts reading a field that is not carried here, it
+    fails loudly rather than silently treating every row as lacking it.
+    """
+
+    __slots__ = ()
+
+    def __missing__(self, key):
+        raise KeyError(f"flagged index row does not carry {key!r} — add it to "
+                       "_FLAGGED_INDEX_KEYS")
+
+    def get(self, key, default=None):  # noqa: ARG002 - strict on purpose
+        return self[key]
+
+
 def _flagged_truth_state(pop: dict, sql_attr: dict, *, available: bool) -> dict:
     """Truth state for the flagged view. Never collapses into zero.
 
@@ -1999,13 +2399,34 @@ def build_flagged_search_terms(
     # The flagged population: durable evidence only.
     flagged_units = [u for u in units if _unit_state(u) == STATE_FLAGGED]
 
+    # PR-ADS-173A: the audit block is the last reader of the units that are
+    # NOT flagged. It is computed here and those units are released before one
+    # full row is built per flagged unit, instead of being held beside them.
+    audit = _audit_block(base, pop, coverage_status="ok")
+    aliases_by_id = pop["aliases_by_id"]
+    annotation_join = pop.get("annotation_join") or {}
+    u = None
+    del pop, units
+
     # Durable local decisions, joined by canonical identity.
     reviews, review_available = _fetch_reviews_for_units(flagged_units)
 
-    rows_all = [_flagged_row(u, pop["aliases_by_id"],
-                             reviews.get(unit_identity(u)), high_spend_usd,
-                             review_available=review_available)
-                for u in flagged_units]
+    def _full_row(u) -> dict:
+        return _flagged_row(u, aliases_by_id, reviews.get(unit_identity(u)),
+                            high_spend_usd, review_available=review_available)
+
+    # PR-ADS-173A: one full row is built per flagged unit, as before, but only
+    # the fields the filters / sort / KPIs / facets read are KEPT for all of
+    # them (`_FlaggedIndexRow`). The full rows of the returned page are built
+    # again below, by the same call on the same unit.
+    rows_all: list = []
+    unit_by_identity: dict = {}
+    for u in flagged_units:
+        full = _full_row(u)
+        rows_all.append(_FlaggedIndexRow(
+            (k, full[k]) for k in _FLAGGED_INDEX_KEYS))
+        unit_by_identity[full["term_identity"]] = u
+    full = None
 
     # HARD INVARIANT (PR-ADS-153D §9). One row per durable identity, always.
     # If the aggregation grain ever drifts from the identity grain again, the
@@ -2030,15 +2451,16 @@ def build_flagged_search_terms(
     ordered = sorted(filtered, key=_flagged_sort_key(sort))
 
     # KPIs over the COMPLETE filtered population, never the returned page.
-    kpi_units = [u for u in flagged_units
-                 if unit_identity(u) in {r["term_identity"] for r in filtered}]
+    kpi_identities = {r["term_identity"] for r in filtered}
+    kpi_units = [u for u in flagged_units if unit_identity(u) in kpi_identities]
     mon = _monetary_summary(kpi_units)
     kpis = _flagged_kpis(filtered, mon, sql_attr,
                          review_available=review_available)
 
     total = len(ordered)
     offset = (page - 1) * page_size
-    page_rows = ordered[offset:offset + page_size]
+    page_rows = [_full_row(unit_by_identity[r["term_identity"]])
+                 for r in ordered[offset:offset + page_size]]
 
     return {
         **base,
@@ -2062,7 +2484,7 @@ def build_flagged_search_terms(
         "sql_date_field": "contact_created_at",
         "sql_attribution": _search_term_sql_block(sql_attr),
         "truth_state": truth_state,
-        "annotation_join": pop.get("annotation_join") or {},
+        "annotation_join": annotation_join,
         "review_state_available": review_available,
         "canonical_fact_source": {
             "table": "search_terms",
@@ -2089,7 +2511,7 @@ def build_flagged_search_terms(
             "google_ads_mutations": False,
             "negative_keywords_applied": False,
         },
-        "audit": _audit_block(base, pop, coverage_status="ok"),
+        "audit": audit,
     }
 
 
@@ -2327,12 +2749,57 @@ def _flagged_facets(rows: list) -> dict:
     }
 
 
+class _UnitRows(Sequence):
+    """The rows of an export: ``_unit_row`` of each unit, in order, serialized
+    WHEN READ (PR-ADS-173A).
+
+    An export is the complete filtered population — never a page — so its rows
+    used to be ≈ 100,000 full row dicts held at once to be written out one
+    after another. This is the same sequence (same length, same rows, same
+    order; indexable, sliceable, comparable to a list) that builds each row as
+    the consumer reaches it, so a CSV writer holds one row at a time.
+    """
+
+    __slots__ = ("_units", "_aliases_by_id")
+
+    def __init__(self, units: list, aliases_by_id: dict):
+        self._units = units
+        self._aliases_by_id = aliases_by_id
+
+    def __len__(self) -> int:
+        return len(self._units)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [_unit_row(u, self._aliases_by_id) for u in self._units[index]]
+        return _unit_row(self._units[index], self._aliases_by_id)
+
+    def __iter__(self):
+        aliases_by_id = self._aliases_by_id
+        for u in self._units:
+            yield _unit_row(u, aliases_by_id)
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, (list, _UnitRows)):
+            return len(self) == len(other) and all(
+                a == b for a, b in zip(self, other))
+        return NotImplemented
+
+    __hash__ = None
+
+    def __repr__(self) -> str:
+        return f"<{len(self)} search-term export rows>"
+
+
 def build_search_term_export(window: str, *, q=None, campaign=None, state=None,
                              junk_category=None, min_spend=None, sort="spend",
                              sql_state=None, now: datetime | None = None) -> dict[str, Any]:
     """COMPLETE server-filtered dataset for export (no pagination) — the export
     is the full filtered population at term×campaign grain, so it is never a
-    silently truncated page. Read-only."""
+    silently truncated page. Read-only.
+
+    PR-ADS-173A: ``rows`` is a ``_UnitRows`` sequence — every row, in order,
+    serialized as it is read — rather than a list holding them all."""
     _validate_filters(state, sort, TERM_SORTS)
     if sql_state and sql_state not in TERM_SQL_STATES:
         raise SearchTermQueryError(
@@ -2345,9 +2812,8 @@ def build_search_term_export(window: str, *, q=None, campaign=None, state=None,
     filtered = _filter_units(pop["units"], q=q, campaign=campaign, state=state,
                              junk_category=junk_category, min_spend=min_spend)
     filtered = _sort_units(_filter_units_sql(filtered, sql_state), sort)
-    aliases_by_id = pop["aliases_by_id"]
     return {**base, "db_unavailable": False, "complete": True,
-            "rows": [_unit_row(u, aliases_by_id) for u in filtered]}
+            "rows": _UnitRows(filtered, pop["aliases_by_id"])}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2369,18 +2835,44 @@ def build_search_term_drawer(window: str, term: str,
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
     start, end, base = _base(window, now)
-    pop = _build_population(start, end)
-    if not pop["available"]:
-        return {**base, "db_unavailable": True, "term": None}
-
     # Match on the normalized term so a drawer opened from any raw variant (or
     # an old bookmark carrying a different casing) resolves to the one unit.
     norm_term = normalize_search_term(term)
-    matches = [u for u in pop["units"]
-               if u["search_term_normalized"] == norm_term
-               and (campaign_key is None or u["campaign_key"] == campaign_key)]
+
+    # PR-ADS-173A — the drawer publishes ONE term. Everything below reads the
+    # units of that normalized term only: the matches, the units it compares
+    # labels with (units whose display term is this term — the same normalized
+    # term by construction), and the annotation join, which is decided among
+    # the units of one term. So only those units are loaded — every raw
+    # spelling, every campaign — instead of the account's whole window.
+    #
+    # The one reader that needs more is search-term SQL attribution once the
+    # CRM carries an exact user query: a contact is then attributed to a unit
+    # only when exactly ONE unit of the population matches it. In that case
+    # the complete population is built, as the flagged view does (172A).
+    pop = _build_population(start, end, normalized_terms={norm_term})
+    if not pop["available"]:
+        return {**base, "db_unavailable": True, "term": None}
+
+    def _matching(population):
+        return [u for u in population["units"]
+                if u["search_term_normalized"] == norm_term
+                and (campaign_key is None or u["campaign_key"] == campaign_key)]
+
+    matches = _matching(pop)
     if not matches:
         return {**base, "db_unavailable": False, "_not_found": True, "term": None}
+    sql_attr = _search_term_sql_attribution(pop, start, end)
+    if sql_attr.get("population_has_text"):
+        del sql_attr, matches
+        pop = _build_population(start, end)
+        if not pop["available"]:
+            return {**base, "db_unavailable": True, "term": None}
+        matches = _matching(pop)
+        if not matches:
+            return {**base, "db_unavailable": False, "_not_found": True,
+                    "term": None}
+        sql_attr = _search_term_sql_attribution(pop, start, end)
 
     aliases_by_id = pop["aliases_by_id"]
     if len(matches) == 1:
@@ -2496,7 +2988,6 @@ def build_search_term_drawer(window: str, term: str,
 
     # §8 — HubSpot SQL attribution for this term. Direct persisted query only; the
     # CRM stores a keyword, not the user query, so this is normally unavailable.
-    sql_attr = _search_term_sql_attribution(pop, start, end)
     _apply_search_term_sql(matches, sql_attr)
     sql_block = _search_term_drawer_sql_block(matches, sql_attr)
 
@@ -2596,46 +3087,97 @@ def _search_term_drawer_sql_block(matches: list, attr: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class _SlotRecord:
+    """A fixed-field record read and written like the dict it replaces
+    (PR-ADS-173A): ``record["field"]``, ``record.get("field")``. An unknown
+    field is a ``KeyError`` on read and on write, never a silent no-op."""
+
+    __slots__ = ()
+
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except (AttributeError, TypeError):
+            raise KeyError(key) from None
+
+    def get(self, key, default=None):
+        try:
+            return getattr(self, key)
+        except (AttributeError, TypeError):
+            return default
+
+    def __setitem__(self, key, value) -> None:
+        try:
+            setattr(self, key, value)
+        except (AttributeError, TypeError):
+            raise KeyError(key) from None
+
+
+class _TermUnit(_SlotRecord):
+    """One UNIQUE search term for pattern math — the per-term dict the Patterns
+    tab has always aggregated, as slots. ``campaign_keys`` / ``campaign_names``
+    are frozensets shared between terms that ran in the same campaigns. (The
+    dict also kept a ``campaign_rows`` list of the term's units; nothing read
+    it, and it pinned every unit of the population in memory for as long as
+    the terms lived, so it is not carried.)"""
+
+    __slots__ = ("search_term", "spend_usd", "clicks", "impressions",
+                 "conversions", "any_flagged", "any_unreviewed", "any_waste_flag",
+                 "has_unverified_spend", "last_seen", "campaign_keys",
+                 "campaign_names")
+
+    def __init__(self, search_term):
+        self.search_term = search_term
+        self.spend_usd = None
+        self.clicks = 0
+        self.impressions = 0
+        self.conversions = None
+        self.any_flagged = False
+        self.any_unreviewed = False
+        self.any_waste_flag = False
+        self.has_unverified_spend = False
+        self.last_seen = None
+        self.campaign_keys = _EMPTY_FROZENSET
+        self.campaign_names = _EMPTY_FROZENSET
+
+
 def _term_units_for_patterns(units: list, *, q=None, campaign=None, state=None,
                              min_spend=None) -> list:
     """Apply the shared filters then unify to UNIQUE search-term units (a term
     contributes once to pattern math, no matter how many campaigns it ran in)."""
-    filtered = _filter_units(units, q=q, campaign=campaign, state=state,
-                             min_spend=min_spend)
+    return _unify_term_units(_filter_units(units, q=q, campaign=campaign,
+                                           state=state, min_spend=min_spend))
+
+
+def _unify_term_units(filtered: list) -> list:
     by_term: dict = {}
+    shared: dict = {}
     for u in filtered:
         t = by_term.get(u["search_term"])
         if t is None:
-            t = by_term[u["search_term"]] = {
-                "search_term": u["search_term"],
-                "spend_usd": None, "clicks": 0, "impressions": 0,
-                "conversions": None,
-                "any_flagged": False, "any_unreviewed": False,
-                "any_waste_flag": False, "has_unverified_spend": False,
-                "last_seen": None,
-                "campaign_keys": set(), "campaign_names": set(),
-                "campaign_rows": [],
-            }
+            t = by_term[u["search_term"]] = _TermUnit(u["search_term"])
         # Only verified FX-complete USD contributes to pattern spend; an
         # unverified underlying unit flags the term's spend as partial rather
         # than counting a fabricated zero (PR-ADS-145 §6).
         if _unit_verified_usd(u):
-            t["spend_usd"] = _sum_opt(t["spend_usd"], u["spend_usd"])
+            t.spend_usd = _sum_opt(t.spend_usd, u["spend_usd"])
         else:
-            t["has_unverified_spend"] = True
-        t["clicks"] += u["clicks"]
-        t["impressions"] += u["impressions"]
-        t["conversions"] = _sum_opt(t["conversions"], u["conversions"])
-        t["any_flagged"] = t["any_flagged"] or u["any_flagged"]
-        t["any_waste_flag"] = t["any_waste_flag"] or bool(u.get("_waste_flag"))
-        t["any_unreviewed"] = t["any_unreviewed"] or u["any_unreviewed"]
+            t.has_unverified_spend = True
+        t.clicks += u["clicks"]
+        t.impressions += u["impressions"]
+        t.conversions = _sum_opt(t.conversions, u["conversions"])
+        t.any_flagged = t.any_flagged or u["any_flagged"]
+        t.any_waste_flag = t.any_waste_flag or bool(u.get("_waste_flag"))
+        t.any_unreviewed = t.any_unreviewed or u["any_unreviewed"]
         ls = u["last_seen"]
-        if ls is not None and (t["last_seen"] is None or ls > t["last_seen"]):
-            t["last_seen"] = ls
-        t["campaign_keys"].add(u["campaign_key"])
-        if u["campaign_name"]:
-            t["campaign_names"].add(u["campaign_name"])
-        t["campaign_rows"].append(u)
+        if ls is not None and (t.last_seen is None or ls > t.last_seen):
+            t.last_seen = ls
+        if u["campaign_key"] not in t.campaign_keys:
+            merged = t.campaign_keys | {u["campaign_key"]}
+            t.campaign_keys = shared.setdefault(merged, merged)
+        if u["campaign_name"] and u["campaign_name"] not in t.campaign_names:
+            merged = t.campaign_names | {u["campaign_name"]}
+            t.campaign_names = shared.setdefault(merged, merged)
     return list(by_term.values())
 
 
@@ -2672,49 +3214,78 @@ def _validate_pattern_params(n, sort, limit, min_terms):
     return n, limit, min_terms
 
 
+class _Pattern(_SlotRecord):
+    """One n-gram's aggregate over the unique terms that contain it. (The dict
+    this replaces also kept a ``_units`` list of those terms; nothing read
+    it.)"""
+
+    __slots__ = ("pattern", "n", "terms", "flagged_terms", "clean_terms",
+                 "needs_review_terms", "spend_usd", "clicks", "conversions",
+                 "verified_spend_terms", "unverified_spend_terms",
+                 "campaign_keys", "campaign_names")
+
+    def __init__(self, pattern, n):
+        self.pattern = pattern
+        self.n = n
+        self.terms = 0
+        self.flagged_terms = 0
+        self.clean_terms = 0
+        self.needs_review_terms = 0
+        self.spend_usd = None
+        self.clicks = 0
+        self.conversions = None
+        self.verified_spend_terms = 0
+        self.unverified_spend_terms = 0
+        self.campaign_keys = _EMPTY_FROZENSET
+        self.campaign_names = _EMPTY_FROZENSET
+
+
+def _term_grams(search_term: str, n: int) -> set:
+    return {phrase for phrase, _ in build_ngrams(tokenize_search_term(search_term), {n})}
+
+
 def _build_patterns(term_units: list, n: int) -> tuple[dict, dict]:
     """Aggregate patterns over unique term units. Returns (patterns, membership)
-    where membership maps search_term → set of patterns it joined."""
+    where membership maps search_term → the distinct patterns it joined (a
+    tuple of the patterns' own key strings, PR-ADS-173A)."""
     patterns: dict = {}
     membership: dict = {}
+    shared: dict = {}
     for t in term_units:
-        tokens = tokenize_search_term(t["search_term"])
-        grams = {phrase for phrase, _ in build_ngrams(tokens, {n})}
+        grams = _term_grams(t["search_term"], n)
         if not grams:
             continue
-        membership[t["search_term"]] = grams
         # Inherit the corrected term state: durable-true OR safe waste_terms
         # evidence → flagged (PR-ADS-145 §6).
         st = (STATE_FLAGGED if (t["any_flagged"] or t.get("any_waste_flag"))
               else STATE_NEEDS_REVIEW if t["any_unreviewed"] else STATE_CLEAN)
+        joined: list = []
         for phrase in grams:
             p = patterns.get(phrase)
             if p is None:
-                p = patterns[phrase] = {
-                    "pattern": phrase, "n": n, "terms": 0,
-                    "flagged_terms": 0, "clean_terms": 0, "needs_review_terms": 0,
-                    "spend_usd": None, "clicks": 0, "conversions": None,
-                    "verified_spend_terms": 0, "unverified_spend_terms": 0,
-                    "campaign_keys": set(), "campaign_names": set(),
-                    "_units": [],
-                }
-            p["terms"] += 1
-            p["flagged_terms"] += 1 if st == STATE_FLAGGED else 0
-            p["clean_terms"] += 1 if st == STATE_CLEAN else 0
-            p["needs_review_terms"] += 1 if st == STATE_NEEDS_REVIEW else 0
+                p = patterns[phrase] = _Pattern(phrase, n)
+            joined.append(p.pattern)
+            p.terms += 1
+            p.flagged_terms += 1 if st == STATE_FLAGGED else 0
+            p.clean_terms += 1 if st == STATE_CLEAN else 0
+            p.needs_review_terms += 1 if st == STATE_NEEDS_REVIEW else 0
             # Pattern spend aggregates only verified FX-complete term amounts;
             # a term with unverified underlying spend marks the pattern partial
             # (PR-ADS-145 §6) — never a fabricated zero.
             if t["spend_usd"] is not None:
-                p["spend_usd"] = _sum_opt(p["spend_usd"], t["spend_usd"])
-                p["verified_spend_terms"] += 1
+                p.spend_usd = _sum_opt(p.spend_usd, t["spend_usd"])
+                p.verified_spend_terms += 1
             if t.get("has_unverified_spend"):
-                p["unverified_spend_terms"] += 1
-            p["clicks"] += t["clicks"]
-            p["conversions"] = _sum_opt(p["conversions"], t["conversions"])
-            p["campaign_keys"].update(t["campaign_keys"])
-            p["campaign_names"].update(t["campaign_names"])
-            p["_units"].append(t)
+                p.unverified_spend_terms += 1
+            p.clicks += t["clicks"]
+            p.conversions = _sum_opt(p.conversions, t["conversions"])
+            if not p.campaign_keys.issuperset(t["campaign_keys"]):
+                merged = p.campaign_keys.union(t["campaign_keys"])
+                p.campaign_keys = shared.setdefault(merged, merged)
+            if not p.campaign_names.issuperset(t["campaign_names"]):
+                merged = p.campaign_names.union(t["campaign_names"])
+                p.campaign_names = shared.setdefault(merged, merged)
+        membership[t["search_term"]] = tuple(joined)
     return patterns, membership
 
 
@@ -2768,6 +3339,15 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
 
     term_units = _term_units_for_patterns(pop["units"], q=q, campaign=campaign,
                                           state=state, min_spend=min_spend)
+    # PR-ADS-173A: the facets and the audit block are the only other readers of
+    # the units. Both are computed here, and the units are then released before
+    # the patterns are aggregated instead of being held beside them.
+    facets = _facets(pop["units"])
+    audit = _audit_block(base, pop,
+                         coverage_status=_coverage_block(
+                             pop.get("currency_info") or _monetary_summary([]),
+                             pop["canonical"])["status"])
+    del pop
     patterns, membership = _build_patterns(term_units, n)
 
     rows = list(patterns.values())
@@ -2780,9 +3360,16 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
     # the surviving term set from the surviving pattern rows. ──
     surviving_patterns = {p["pattern"] for p in rows}
     surviving_terms = set()
+    overlapping_terms = 0
     for t, grams in membership.items():
-        if surviving_patterns & grams:
+        # A term's grams are distinct and each pattern is one row, so the
+        # number of surviving ROWS a term belongs to is the number of its grams
+        # that survived.
+        joined = sum(1 for g in grams if g in surviving_patterns)
+        if joined:
             surviving_terms.add(t)
+            if joined > 1:
+                overlapping_terms += 1
     contributing = [t for t in term_units
                     if t["search_term"] in surviving_terms]
     unique_spend = None
@@ -2791,10 +3378,6 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
     if unique_spend is None and not contributing:
         unique_spend = 0.0
     total_memberships = sum(p["terms"] for p in rows)
-    overlapping_terms = sum(
-        1 for t, grams in membership.items()
-        if t in surviving_terms
-        and sum(1 for p in rows if p["pattern"] in grams) > 1)
 
     # Whether the surviving pattern population has any unverified underlying
     # spend → the represented-spend KPI is a verified subtotal, not complete.
@@ -2850,12 +3433,9 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
                        "limit": limit, "has_more": len(rows) > len(returned)},
         "filters": _echo_pattern_filters(n, q, campaign, state, min_spend,
                                          min_terms, sort),
-        "facets": _facets(pop["units"]),
+        "facets": facets,
         "audit": {
-            **_audit_block(base, pop,
-                           coverage_status=_coverage_block(
-                               pop.get("currency_info") or _monetary_summary([]),
-                               pop["canonical"])["status"]),
+            **audit,
             "patterns_derivation": (
                 "derived from the same selected-window deduplicated "
                 "search_terms population as the Terms tab"),
@@ -2898,14 +3478,23 @@ def build_search_pattern_drawer(window: str, pattern: str, n: int, *,
     if not pop["available"]:
         return {**base, "db_unavailable": True, "pattern": None, "terms": []}
 
-    term_units = _term_units_for_patterns(pop["units"], q=q, campaign=campaign,
-                                          state=state, min_spend=min_spend)
-    members = []
-    for t in term_units:
-        tokens = tokenize_search_term(t["search_term"])
-        grams = {phrase for phrase, _ in build_ngrams(tokens, {n})}
-        if pattern in grams:
-            members.append(t)
+    # PR-ADS-173A: membership depends on the term's text alone, so it is
+    # decided per unit FIRST and only the member terms are unified — the same
+    # members, in the same order, as unifying every term of the window and then
+    # keeping the ones that contain the pattern.
+    is_member: dict = {}
+    member_units = []
+    for u in _filter_units(pop["units"], q=q, campaign=campaign, state=state,
+                           min_spend=min_spend):
+        term_text = u["search_term"]
+        hit = is_member.get(term_text)
+        if hit is None:
+            hit = is_member[term_text] = pattern in _term_grams(term_text, n)
+        if hit:
+            member_units.append(u)
+    del pop, is_member
+    members = _unify_term_units(member_units)
+    del member_units
     if not members:
         return {**base, "db_unavailable": False, "_not_found": True,
                 "pattern": None, "terms": []}

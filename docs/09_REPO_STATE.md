@@ -6040,3 +6040,104 @@ skipped. The 171A modules: 233 and 42 passed, unchanged in number.
 
 Counts after round 1: unit module 50 passed; PostgreSQL module 18 passed,
 none skipped; the 171A modules 233 and 42, unchanged.
+
+## PR-ADS-173A — the Search Terms pages no longer build the account's window as Python dicts
+
+**The exposure.** Production is one web process on a 512 MB instance (idle
+≈ 120 MB). `/api/search-term-evidence` (Terms), `/flagged`, `/patterns`,
+`/patterns/detail`, `/term`, `/export` and the `/api/waste` adapter each built
+every term × campaign unit of the selected window in Python on every request,
+with no cache and no limit — the item PR-ADS-172A listed first under "Not
+fixed". A signed-in user choosing "All time" and opening Search Terms could get
+the server killed.
+
+**Measured on a production-scale SYNTHETIC PostgreSQL dataset** (PR-ADS-172A's:
+the live `search_terms` row count, 228,043, with invented content — 62,706
+distinct queries, 102,990 term × campaign units, 9,563 flagged fact rows).
+These are not production figures. Peak resident growth of one request, MB,
+`all_time` (the dataset holds 180 dates, so `180d` is the same population):
+
+| route | before | after |
+| --- | --- | --- |
+| Terms | 673 | 75 |
+| Flagged page / `/api/waste` | 677 / 678 | 79 / 79 |
+| Patterns | 680 | 107 |
+| Pattern drawer | 679 | 78 |
+| Term drawer | 681 | 1.6 |
+| CSV export (20 MB file) | 673 | 117 |
+
+At `30d`: 144–159 before, 0.1–46 after. Full table, allocators and method:
+`docs/54_SEARCH_TERMS_PAGES_MEMORY.md`.
+
+**Cause.** 622 MB traced at the end of `_build_population`: ≈ 222 MB the ten
+`set` objects of each unit, 91 MB the 25-key unit dicts, 62 MB one dict per
+(term, campaign, day) cost row, 41 MB the per-unit per-date dicts, 19 MB a
+stored provenance dict per unit; the grouped rows were another ≈ 255 MB while
+being merged. Pages added more on top (49 MB of per-unit attribution state on
+Terms, 80 MB of per-term and per-pattern dicts on Patterns).
+
+**The fix.** Normalization and campaign identity are decided in Python and are
+NOT re-expressed in SQL; the units still exist, they are just no longer
+expensive.
+
+a. `fetch_search_term_aggregates(sink=)` and
+   `fetch_search_term_daily_costs(sink=)` stream their rows from server-side
+   cursors into the units. A reader offering only the row-list form (the
+   two-argument stand-ins existing tests install) is asked for rows and gets
+   the same merge (`reader_accepts`). The grouped statement is now ordered
+   (`search_term, campaign_name, campaign_id`, byte order), so a few details
+   that followed PostgreSQL's unordered output — the order of two same-named
+   campaigns in a facet, of two flagged rows with an equal sort key, of a term
+   drawer's campaign list — are deterministic. No value changes.
+b. `_Unit`: the same fields under the same keys, read through the same
+   `unit["key"]` / `.get()` protocol, stored in slots with shared frozensets, a
+   flat per-date tuple and a derived `_provenance`. The FX arithmetic is the
+   unchanged `_fx_convert_population`.
+c. Only the returned page is serialized: Terms selects it with a heap
+   (`_sorted_page`); the Flagged view keeps an index of the fields its filters /
+   sorts / KPIs / facets read (`_FlaggedIndexRow`, which raises on any other
+   key) and builds full rows for the page; Patterns uses slotted records and
+   releases the units first; the pattern drawer decides membership before
+   unifying; the term drawer loads the units of its one normalized term
+   (`normalized_terms=`), or the complete population if the CRM carries exact
+   queries; the CSV export writes one row dict at a time into a complete
+   body, releases the population and returns it with its Content-Length —
+   never a stream, so a failure on any row is a 503 and not a short
+   `…_complete.csv` under HTTP 200 (review fix F1).
+d. With no contact carrying a query, a unit's attribution state is asked for
+   per mapping status (`unit_state_without_text_evidence`, the rule
+   `_attribute` uses) instead of once per unit.
+e. `population_snapshot()`: every `search_terms` / `waste_terms` statement of a
+   build runs on one `REPEATABLE READ, READ ONLY` connection. Before, a sync
+   committing between the grouped rows and the per-date costs produced units
+   whose total and per-date amounts disagreed in a response that reconciled.
+f. `_search_term_evidence_call`, `/api/waste` and the export route let
+   `MemoryError` through instead of answering it as "database unavailable";
+   so does `fetch_reviews_for_identities`, which answered it as "review state
+   unavailable" (review fix). The other readers a build calls already did.
+
+**Proof.** `tests/test_pr_ads_173a_search_terms_pages_memory.py`, registered in
+CI's PostgreSQL step and did-run list: 364 requests on a real server publish
+payloads equal **as whole documents** to the ones captured from the parent
+commit `6c1cb04` (`tests/pr_ads_173a_scenarios.py`, `tests/fixtures/`); every
+route is bounded under 150 MB at `180d` and `all_time` on the scale dataset; a
+failed cost read and a failed FX read are unavailable on every route; a stream
+that breaks midway publishes nothing; out of memory is raised. Against the
+parent commit the measured cases fail at ≈ 675 MB and the snapshot case fails.
+Every existing test passes unmodified.
+
+**No refusal guard was added** — nothing measured needs one.
+
+**Not fixed.**
+
+1. If `leads` ever carries exact user queries, per-unit attribution adds
+   ≈ 80 MB (Terms ≈ 157 MB at `all_time`, simulated). Above target, unguarded;
+   bound `_attribute` before turning `LEADS_HAVE_SEARCH_TERM` on.
+2. Concurrent requests add up; nothing serialises population builds.
+3. A build holds two of the pool's ten connections at once, halving the
+   concurrency (≈ 5 builds) at which `getconn` raises and the read without a
+   connection reports unavailable.
+4. The snapshot covers `search_terms` and `waste_terms`, not canonical spend,
+   identity, FX rates, reviews or SQL contacts.
+5. The Flagged page still builds the complete population (`docs/51` §6.1).
+6. Production peaks are not measurable from here.

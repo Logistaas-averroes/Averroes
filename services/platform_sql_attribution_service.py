@@ -177,21 +177,13 @@ def _attribute(contacts: list, units: list, *, text_field: str, available: bool,
     row_sql_sum = 0
     for u in units:
         key = u["key"]
-        if not available:
-            by_unit[key] = _row_state(ST_UNAVAILABLE, None, source=None)
-            continue
-        if u.get("mapping_status") != "mapped":
-            by_unit[key] = _row_state(ST_MAPPING_REVIEW, None,
-                                      reason="Campaign identity unresolved (mapping review)")
+        if (not available or u.get("mapping_status") != "mapped"
+                or not population_has_text):
+            by_unit[key] = unit_state_without_text_evidence(
+                u.get("mapping_status"), available=available)
             continue
         tnorm = u.get("text_norm") or ""
         cid = u.get("campaign_id")
-        # No text evidence exists in the CRM population at all → unavailable (—),
-        # never a fabricated 0 (search-term case, PR-ADS-146C §5/§6).
-        if not population_has_text:
-            by_unit[key] = _row_state(ST_UNAVAILABLE, None,
-                                      reason="No exact query evidence in the CRM population")
-            continue
         group = by_ck.get((str(cid), tnorm), [])
         if len(group) > 1:
             by_unit[key] = _row_state(ST_AMBIGUOUS, None, candidate_count=len(group),
@@ -228,6 +220,25 @@ def _attribute(contacts: list, units: list, *, text_field: str, available: bool,
         "uniquely_attributed": uniquely_attributed,
         "ambiguous_contacts": ambiguous_contacts,
     }
+
+
+def unit_state_without_text_evidence(mapping_status, *, available: bool) -> dict:
+    """The attribution state of a unit that NO contact text can reach: the
+    source is unavailable, the unit's campaign is unresolved, or the CRM
+    population carries no text evidence at all. It depends on the unit's
+    ``mapping_status`` alone — never on its text — which is why a caller holding
+    a very large population may ask for it per status instead of per unit
+    (PR-ADS-173A). One definition, used by ``_attribute`` itself.
+    """
+    if not available:
+        return _row_state(ST_UNAVAILABLE, None, source=None)
+    if mapping_status != "mapped":
+        return _row_state(ST_MAPPING_REVIEW, None,
+                          reason="Campaign identity unresolved (mapping review)")
+    # No text evidence exists in the CRM population at all → unavailable (—),
+    # never a fabricated 0 (search-term case, PR-ADS-146C §5/§6).
+    return _row_state(ST_UNAVAILABLE, None,
+                      reason="No exact query evidence in the CRM population")
 
 
 def _row_state(status, count, *, source=None, contact_keys=None,
