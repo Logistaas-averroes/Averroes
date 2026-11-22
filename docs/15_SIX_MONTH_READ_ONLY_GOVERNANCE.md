@@ -94,6 +94,17 @@ For six months, the following are prohibited:
 - change assets
 - change ads
 
+### Meta Ads (Facebook / Instagram) — PR-ADS-171A
+
+The Meta connector (`connectors/meta_ads.py`) issues GET requests only and
+refuses any other method. Prohibited, as for Google Ads:
+
+- create, edit, pause, enable or delete campaigns, ad sets or ads
+- change budgets, bids, targeting, audiences or creatives
+- upload conversions or events (Conversions API / offline events)
+- start an asynchronous report run (it is a POST)
+- any call with a method other than GET
+
 ### HubSpot
 
 - create contacts
@@ -174,6 +185,7 @@ During the six-month read-only period:
 No API endpoint may:
 
 - call Google Ads write APIs
+- call Meta (Facebook / Instagram) write APIs
 - call HubSpot write APIs
 - create external mutations
 - trigger platform-side changes

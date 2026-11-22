@@ -7429,5 +7429,8 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .system-checks li, .system-fix-list li { margin-bottom: 6px; }
 .system-check--ok { color: var(--text-muted); }
 .system-check--bad, .system-source--warn { color: #b45309; font-weight: 600; }
+/* PR-ADS-171A: a source that was never set up. Not healthy, not a fault. */
+.system-source--neutral { color: var(--text-muted); }
+.system-source__detail { color: var(--text-muted); font-weight: 400; font-size: 0.85rem; margin-top: 2px; }
 /* PR-ADS-164A: the Deals footnote sat flush against the panel edge. */
 #page-deals .revenue-footnote { padding: var(--space-3) var(--space-4) var(--space-4); margin: 0; }

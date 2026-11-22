@@ -5260,3 +5260,511 @@ def move_absent_contacts(reconciliation_run_id, *,
     except Exception as exc:  # noqa: BLE001
         log.error("move_absent_contacts failed: %s", safe_db_error(exc))
         return {**result, "error": safe_db_error(exc)}
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-171A — Meta (Facebook/Instagram) Ads spend. Local tables only; nothing
+# is ever written to Meta.
+# ---------------------------------------------------------------------------
+
+class MetaAdsPersistenceError(RuntimeError):
+    """A Meta spend write did not commit. The caller records the chunk FAILED."""
+
+
+class MetaAccountIdentityChanged(MetaAdsPersistenceError):
+    """The API reports a currency or time zone other than the one on record,
+    for an account that has stored spend.
+
+    Every stored spend row is an amount in the stored currency on a day of the
+    stored zone. Overwriting either would relabel history, so the fetch is
+    refused and nothing is changed (``account_identity_changed``).
+    """
+
+
+class MetaRestatementImplausible(MetaAdsPersistenceError):
+    """A re-read would take a day with verified, non-zero spend to nothing.
+
+    Meta restates amounts; it does not un-spend a whole day. A response that
+    says so is far more likely a wrong answer (an account that has stopped
+    answering properly, a wrong window) than the truth, and replacing the
+    range with it would destroy stored history. Refused; nothing changes.
+    """
+
+
+#: A failed fetch's own words are stored for the operator; bounded.
+_META_ERROR_MESSAGE_MAX = 500
+
+
+def upsert_meta_ads_account(account: dict) -> dict:
+    """Store one ad account as Meta describes it. Raises on any failure.
+
+    A fetched NULL never blanks a stored value (COALESCE).
+
+    A fetched non-null currency or time zone that differs from the stored one:
+
+    * the account has stored campaign-day rows — refused:
+      :class:`MetaAccountIdentityChanged`, nothing changed. Those rows are
+      amounts in the old currency on days of the old zone;
+    * the account has NO stored campaign-day row — accepted: there is nothing
+      to relabel. On a zone change the account's coverage rows and account-day
+      rows (which can only say "no spend", on days of the OLD zone) are
+      deleted in the same transaction, so every day is read again in the new
+      zone before it is called covered. ``identity_changed`` in the result
+      names what changed.
+
+    Returns the row as stored after the write.
+    """
+    account_id = str((account or {}).get("account_id") or "").strip()
+    if not account_id:
+        raise MetaAdsPersistenceError("account_id is required")
+    currency = (str(account.get("currency_code") or "").strip().upper() or None)
+    zone = (str(account.get("time_zone_name") or "").strip() or None)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                raise MetaAdsPersistenceError("database unavailable")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT currency_code, time_zone_name FROM meta_ads_account "
+                    "WHERE account_id = %s FOR UPDATE", (account_id,))
+                stored = cur.fetchone()
+                changed = {}
+                if stored is not None:
+                    for label, old, new in (("currency", stored[0], currency),
+                                            ("time zone", stored[1], zone)):
+                        if old and new and str(old) != str(new):
+                            changed[label] = (str(old), str(new))
+                if changed:
+                    cur.execute(
+                        "SELECT EXISTS (SELECT 1 FROM meta_ads_campaign_daily_spend "
+                        "WHERE account_id = %s)", (account_id,))
+                    if cur.fetchone()[0]:
+                        label, (old, new) = next(iter(changed.items()))
+                        raise MetaAccountIdentityChanged(
+                            f"account_identity_changed: account {account_id} "
+                            f"{label} on record is {old}, the API reports {new}, "
+                            "and the account has stored spend")
+                    if "time zone" in changed:
+                        cur.execute("DELETE FROM meta_ads_spend_coverage "
+                                    "WHERE account_id = %s", (account_id,))
+                        cur.execute("DELETE FROM meta_ads_account_daily_spend "
+                                    "WHERE account_id = %s", (account_id,))
+                    log.warning(
+                        "upsert_meta_ads_account: account %s has no stored spend; "
+                        "accepting %s", account_id,
+                        ", ".join(f"{k} {o} -> {n}" for k, (o, n) in changed.items()))
+                cur.execute(
+                    """
+                    INSERT INTO meta_ads_account (
+                        account_id, account_name, currency_code, time_zone_name,
+                        timezone_offset_hours_utc, account_status,
+                        first_seen_at, fetched_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s,
+                              clock_timestamp(), clock_timestamp())
+                    ON CONFLICT (account_id) DO UPDATE SET
+                        account_name   = COALESCE(EXCLUDED.account_name,
+                                                  meta_ads_account.account_name),
+                        -- A differing non-null value reaches here only when
+                        -- the account has no stored spend (checked above).
+                        currency_code  = COALESCE(EXCLUDED.currency_code,
+                                                  meta_ads_account.currency_code),
+                        time_zone_name = COALESCE(EXCLUDED.time_zone_name,
+                                                  meta_ads_account.time_zone_name),
+                        timezone_offset_hours_utc = COALESCE(
+                            EXCLUDED.timezone_offset_hours_utc,
+                            meta_ads_account.timezone_offset_hours_utc),
+                        account_status = COALESCE(EXCLUDED.account_status,
+                                                  meta_ads_account.account_status),
+                        fetched_at     = clock_timestamp()
+                    RETURNING account_id, account_name, currency_code,
+                              time_zone_name, timezone_offset_hours_utc,
+                              account_status, first_seen_at, fetched_at
+                    """,
+                    (account_id, account.get("account_name"), currency, zone,
+                     account.get("timezone_offset_hours_utc"),
+                     account.get("account_status")))
+                row = cur.fetchone()
+        return {
+            "account_id": row[0], "account_name": row[1],
+            "currency_code": row[2], "time_zone_name": row[3],
+            "timezone_offset_hours_utc": (float(row[4]) if row[4] is not None
+                                          else None),
+            "account_status": row[5], "first_seen_at": row[6],
+            "fetched_at": row[7],
+            "identity_changed": {k: {"from": o, "to": n}
+                                 for k, (o, n) in changed.items()},
+        }
+    except MetaAdsPersistenceError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_meta_ads_account failed: %s", safe_db_error(exc))
+        raise MetaAdsPersistenceError(safe_db_error(exc)) from exc
+
+
+def _meta_day(value) -> date:
+    parsed = _to_date_or_none(value)
+    if parsed is None:
+        raise MetaAdsPersistenceError(f"not a date: {value!r}")
+    return parsed
+
+
+def replace_meta_campaign_spend_chunk(
+    account_id: str, chunk_start, chunk_end, rows: list, account_days: list, *,
+    currency_code: Optional[str] = None,
+    account_time_zone: Optional[str] = None,
+    pages_read: Optional[int] = None, http_status: Optional[int] = None,
+    source_query_version: Optional[str] = None,
+    sync_run_id: Optional[str] = None,
+    allow_zero_restatement: bool = False,
+) -> dict:
+    """Atomically REPLACE one account's Meta spend range and mark it verified.
+
+    One transaction: validate; read the range's per-day sums and the stored
+    campaign names; DELETE the range; INSERT the response; replace the
+    account-day rows; upsert the coverage row ``verified`` with
+    ``fetched_at = clock_timestamp()``. Any failure raises
+    :class:`MetaAdsPersistenceError` and leaves the range as it was.
+
+    Replace, not merge: Meta restates recent days, and a campaign-day absent
+    from a later response must stop counting. An empty ``rows`` is a verified
+    zero for a range that held no verified spend.
+
+    One restatement is refused: a day that a verified chunk already covers,
+    with stored spend above zero, whose campaign rows would now be absent or
+    sum to zero. That raises :class:`MetaRestatementImplausible` and changes
+    nothing. A changed amount, and a campaign-day that disappears while its
+    day still has spend, are ordinary restatements and pass.
+    ``allow_zero_restatement`` lifts the refusal; only the backfill script's
+    explicit flag sets it.
+
+    ``rows``: ``{account_id, campaign_id, campaign_name, spend_date,
+    cost_micros, spend_raw, currency_code, impressions, clicks}``. A row with
+    no name keeps the newest name stored for that campaign. ``account_days``:
+    ``{spend_date, cost_micros}``.
+
+    The caller passes only a response whose paging was exhausted and whose
+    days reconcile with the account-level rows; this writer does not decide
+    that. Counts returned are the database's own row counts.
+
+    ``days_restated`` counts the days a verified chunk already covered whose
+    campaign total differs after this write; ``max_restated_delta_micros`` is
+    the largest such change.
+    """
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        raise MetaAdsPersistenceError("account_id is required")
+    start, end = _meta_day(chunk_start), _meta_day(chunk_end)
+    if start > end:
+        raise MetaAdsPersistenceError(f"chunk_start {start} is after chunk_end {end}")
+
+    prepared, seen, new_sums = [], set(), {}
+    for r in rows or []:
+        if str(r.get("account_id") or "").strip() != account_id:
+            raise MetaAdsPersistenceError(
+                f"row account_id {r.get('account_id')!r} is not {account_id!r}")
+        campaign_id = str(r.get("campaign_id") or "").strip()
+        if not campaign_id:
+            raise MetaAdsPersistenceError("every row needs a campaign_id")
+        day = _meta_day(r.get("spend_date"))
+        if not (start <= day <= end):
+            raise MetaAdsPersistenceError(
+                f"row spend_date {day} is outside {start}..{end}")
+        micros = r.get("cost_micros")
+        if isinstance(micros, bool) or not isinstance(micros, int) or micros < 0:
+            raise MetaAdsPersistenceError(
+                f"row cost_micros {micros!r} is not a non-negative integer")
+        if (campaign_id, day) in seen:
+            raise MetaAdsPersistenceError(
+                f"duplicate row for campaign {campaign_id} on {day}")
+        seen.add((campaign_id, day))
+        new_sums[day] = new_sums.get(day, 0) + micros
+        name = (str(r.get("campaign_name")).strip()
+                if r.get("campaign_name") is not None else "") or None
+        prepared.append([campaign_id, name, day, micros, r.get("spend_raw"),
+                         r.get("currency_code") or currency_code,
+                         r.get("impressions"), r.get("clicks")])
+
+    day_rows, seen_days = [], set()
+    for r in account_days or []:
+        day = _meta_day(r.get("spend_date"))
+        if not (start <= day <= end) or day in seen_days:
+            raise MetaAdsPersistenceError(
+                f"account-day {day} is outside {start}..{end} or repeated")
+        micros = r.get("cost_micros")
+        if isinstance(micros, bool) or not isinstance(micros, int) or micros < 0:
+            raise MetaAdsPersistenceError(
+                f"account-day cost_micros {micros!r} is not a non-negative integer")
+        seen_days.add(day)
+        day_rows.append((day, micros))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                raise MetaAdsPersistenceError("database unavailable")
+            with conn.cursor() as cur:
+                # Read BEFORE the delete, in the same transaction.
+                cur.execute(
+                    "SELECT spend_date, SUM(cost_micros)::bigint "
+                    "FROM meta_ads_campaign_daily_spend "
+                    "WHERE account_id = %s AND spend_date BETWEEN %s AND %s "
+                    "GROUP BY spend_date", (account_id, start, end))
+                old_sums = {r[0]: int(r[1] or 0) for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT chunk_start, chunk_end FROM meta_ads_spend_coverage "
+                    "WHERE account_id = %s AND status = 'verified' "
+                    "AND chunk_end >= %s AND chunk_start <= %s",
+                    (account_id, start, end))
+                proven = [(r[0], r[1]) for r in cur.fetchall()]
+                restated, max_delta, zeroed = 0, 0, []
+                for day in sorted(set(old_sums) | set(new_sums)):
+                    if not any(cs <= day <= ce for cs, ce in proven):
+                        continue            # a first read is not a restatement
+                    delta = abs(new_sums.get(day, 0) - old_sums.get(day, 0))
+                    if delta:
+                        restated += 1
+                        max_delta = max(max_delta, delta)
+                    if old_sums.get(day, 0) > 0 and new_sums.get(day, 0) == 0:
+                        zeroed.append(day)
+                if zeroed and not allow_zero_restatement:
+                    raise MetaRestatementImplausible(
+                        f"{len(zeroed)} day(s) with verified spend would become "
+                        f"zero (first {zeroed[0].isoformat()}: "
+                        f"{old_sums[zeroed[0]]} micros stored); nothing was "
+                        "changed")
+
+                unnamed = sorted({p[0] for p in prepared if p[1] is None})
+                names_preserved = 0
+                if unnamed:
+                    cur.execute(
+                        "SELECT DISTINCT ON (campaign_id) campaign_id, campaign_name "
+                        "FROM meta_ads_campaign_daily_spend "
+                        "WHERE account_id = %s AND campaign_id = ANY(%s) "
+                        "AND NULLIF(BTRIM(campaign_name), '') IS NOT NULL "
+                        "ORDER BY campaign_id, spend_date DESC",
+                        (account_id, unnamed))
+                    known = {r[0]: r[1] for r in cur.fetchall()}
+                    for p in prepared:
+                        if p[1] is None and p[0] in known:
+                            p[1] = known[p[0]]
+                            names_preserved += 1
+
+                cur.execute(
+                    "DELETE FROM meta_ads_campaign_daily_spend "
+                    "WHERE account_id = %s AND spend_date BETWEEN %s AND %s",
+                    (account_id, start, end))
+                deleted = int(cur.rowcount or 0)
+                written = 0
+                if prepared:
+                    cols = list(zip(*prepared))
+                    cur.execute(
+                        """
+                        INSERT INTO meta_ads_campaign_daily_spend (
+                            account_id, campaign_id, campaign_name, spend_date,
+                            cost_micros, spend_raw, currency_code, impressions,
+                            clicks, sync_run_id, fetched_at)
+                        SELECT %s, t.campaign_id, t.campaign_name, t.spend_date,
+                               t.cost_micros, t.spend_raw, t.currency_code,
+                               t.impressions, t.clicks, %s, clock_timestamp()
+                        FROM unnest(%s::text[], %s::text[], %s::date[],
+                                    %s::bigint[], %s::text[], %s::text[],
+                                    %s::bigint[], %s::bigint[])
+                             AS t(campaign_id, campaign_name, spend_date,
+                                  cost_micros, spend_raw, currency_code,
+                                  impressions, clicks)
+                        """,
+                        (account_id, sync_run_id, *[list(c) for c in cols]))
+                    written = int(cur.rowcount or 0)
+                if written != len(prepared):
+                    raise MetaAdsPersistenceError(
+                        f"inserted {written} of {len(prepared)} campaign-day rows")
+
+                cur.execute(
+                    "DELETE FROM meta_ads_account_daily_spend "
+                    "WHERE account_id = %s AND spend_date BETWEEN %s AND %s",
+                    (account_id, start, end))
+                days_written = 0
+                if day_rows:
+                    cur.execute(
+                        """
+                        INSERT INTO meta_ads_account_daily_spend (
+                            account_id, spend_date, cost_micros, currency_code,
+                            sync_run_id, fetched_at)
+                        SELECT %s, t.spend_date, t.cost_micros, %s, %s,
+                               clock_timestamp()
+                        FROM unnest(%s::date[], %s::bigint[])
+                             AS t(spend_date, cost_micros)
+                        """,
+                        (account_id, currency_code, sync_run_id,
+                         [d for d, _ in day_rows], [m for _, m in day_rows]))
+                    days_written = int(cur.rowcount or 0)
+                if days_written != len(day_rows):
+                    raise MetaAdsPersistenceError(
+                        f"inserted {days_written} of {len(day_rows)} account-day rows")
+
+                total = sum(new_sums.values())
+                cur.execute(
+                    """
+                    INSERT INTO meta_ads_spend_coverage (
+                        account_id, chunk_start, chunk_end, status,
+                        rows_written, cost_micros_total, source_query_version,
+                        sync_run_id, account_time_zone, pages_read, http_status,
+                        error_code, error_message, days_restated,
+                        max_restated_delta_micros, fetched_at, updated_at)
+                    VALUES (%s, %s, %s, 'verified', %s, %s, %s, %s, %s, %s, %s,
+                            NULL, NULL, %s, %s,
+                            clock_timestamp(), clock_timestamp())
+                    ON CONFLICT (account_id, chunk_start, chunk_end) DO UPDATE SET
+                        status               = 'verified',
+                        rows_written         = EXCLUDED.rows_written,
+                        cost_micros_total    = EXCLUDED.cost_micros_total,
+                        source_query_version = EXCLUDED.source_query_version,
+                        sync_run_id          = EXCLUDED.sync_run_id,
+                        account_time_zone    = EXCLUDED.account_time_zone,
+                        pages_read           = EXCLUDED.pages_read,
+                        http_status          = EXCLUDED.http_status,
+                        error_code           = NULL,
+                        error_message        = NULL,
+                        days_restated        = EXCLUDED.days_restated,
+                        max_restated_delta_micros =
+                            EXCLUDED.max_restated_delta_micros,
+                        fetched_at           = clock_timestamp(),
+                        updated_at           = clock_timestamp()
+                    """,
+                    (account_id, start, end, written, total,
+                     source_query_version, sync_run_id, account_time_zone,
+                     pages_read, http_status, restated, max_delta))
+                if cur.rowcount != 1:
+                    raise MetaAdsPersistenceError("coverage row was not written")
+        return {"replaced": True, "deleted": deleted, "written": written,
+                "days_zeroed": len(zeroed),
+                "account_days_written": days_written,
+                "cost_micros_total": int(total),
+                "days_restated": restated,
+                "max_restated_delta_micros": int(max_delta),
+                "names_preserved": names_preserved}
+    except MetaAdsPersistenceError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("replace_meta_campaign_spend_chunk failed: %s", safe_db_error(exc))
+        raise MetaAdsPersistenceError(safe_db_error(exc)) from exc
+
+
+def record_meta_spend_coverage_failure(
+    account_id: str, chunk_start, chunk_end, *,
+    error_code: Optional[str] = None, error_message: Optional[str] = None,
+    http_status: Optional[int] = None, pages_read: Optional[int] = None,
+    account_time_zone: Optional[str] = None, sync_run_id: Optional[str] = None,
+) -> bool:
+    """Record a FAILED Meta spend fetch. Never raises. Writes no spend row.
+
+    A failure never replaces a ``verified`` row for the same range (the
+    ON CONFLICT guard), and it deletes nothing: the range keeps whatever the
+    last verified read stored. Returns True when the row was written.
+    """
+    if not account_id or not chunk_start or not chunk_end:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO meta_ads_spend_coverage (
+                        account_id, chunk_start, chunk_end, status,
+                        sync_run_id, account_time_zone, pages_read, http_status,
+                        error_code, error_message, fetched_at, updated_at)
+                    VALUES (%s, %s, %s, 'failed', %s, %s, %s, %s, %s, %s,
+                            clock_timestamp(), clock_timestamp())
+                    ON CONFLICT (account_id, chunk_start, chunk_end) DO UPDATE SET
+                        status            = 'failed',
+                        rows_written      = 0,
+                        cost_micros_total = 0,
+                        sync_run_id       = EXCLUDED.sync_run_id,
+                        account_time_zone = EXCLUDED.account_time_zone,
+                        pages_read        = EXCLUDED.pages_read,
+                        http_status       = EXCLUDED.http_status,
+                        error_code        = EXCLUDED.error_code,
+                        error_message     = EXCLUDED.error_message,
+                        days_restated     = NULL,
+                        max_restated_delta_micros = NULL,
+                        fetched_at        = clock_timestamp(),
+                        updated_at        = clock_timestamp()
+                    WHERE meta_ads_spend_coverage.status <> 'verified'
+                    """,
+                    (str(account_id), chunk_start, chunk_end, sync_run_id,
+                     account_time_zone, pages_read, http_status,
+                     (str(error_code)[:80] if error_code else None),
+                     (str(error_message)[:_META_ERROR_MESSAGE_MAX]
+                      if error_message else None)))
+                return cur.rowcount == 1
+    except Exception as exc:  # noqa: BLE001
+        log.error("record_meta_spend_coverage_failure failed: %s", safe_db_error(exc))
+        return False
+
+
+def record_meta_account_sync(
+    account_id: str, status: str, *, reason: Optional[str] = None,
+    error: Optional[str] = None, http_status: Optional[int] = None,
+    error_code: Optional[str] = None, readable: Optional[bool] = None,
+) -> bool:
+    """Record the outcome of one account's sync attempt. Never raises.
+
+    ``status``: ``success`` | ``partial`` | ``failed``. ``readable`` is what
+    ``meta_ads_spend_service.describe_failure`` reports: True when Meta
+    answered for this account on this attempt; False when Meta REFUSED the
+    read (a 4xx that is not throttling — suspended, closed, permission removed
+    — or a rejected token); None when the attempt says nothing either way (a
+    throttle, a network failure, a retired API version).
+
+    ``not_readable_since`` is set on the first refusal and kept until Meta
+    answers again. Writes only this table: no spend row, no coverage row.
+    """
+    if not account_id or status not in ("success", "partial", "failed"):
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO meta_ads_account_sync_state (
+                        account_id, last_attempt_at, last_status, last_reason,
+                        last_error, last_http_status, last_error_code,
+                        last_success_at, not_readable_since, updated_at)
+                    VALUES (%(id)s, clock_timestamp(), %(status)s, %(reason)s,
+                            %(error)s, %(http)s, %(code)s,
+                            CASE WHEN %(status)s IN ('success', 'partial')
+                                 THEN clock_timestamp() END,
+                            CASE WHEN %(readable)s IS FALSE
+                                 THEN clock_timestamp() END,
+                            clock_timestamp())
+                    ON CONFLICT (account_id) DO UPDATE SET
+                        last_attempt_at  = clock_timestamp(),
+                        last_status      = EXCLUDED.last_status,
+                        last_reason      = EXCLUDED.last_reason,
+                        last_error       = EXCLUDED.last_error,
+                        last_http_status = EXCLUDED.last_http_status,
+                        last_error_code  = EXCLUDED.last_error_code,
+                        last_success_at  = COALESCE(
+                            EXCLUDED.last_success_at,
+                            meta_ads_account_sync_state.last_success_at),
+                        not_readable_since = CASE
+                            WHEN %(readable)s IS TRUE THEN NULL
+                            WHEN %(readable)s IS FALSE THEN COALESCE(
+                                meta_ads_account_sync_state.not_readable_since,
+                                clock_timestamp())
+                            ELSE meta_ads_account_sync_state.not_readable_since END,
+                        updated_at       = clock_timestamp()
+                    """,
+                    {"id": str(account_id), "status": status,
+                     "reason": (str(reason)[:80] if reason else None),
+                     "error": (str(error)[:_META_ERROR_MESSAGE_MAX] if error else None),
+                     "http": http_status,
+                     "code": (str(error_code)[:40] if error_code is not None else None),
+                     "readable": readable})
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("record_meta_account_sync failed: %s", safe_db_error(exc))
+        return False

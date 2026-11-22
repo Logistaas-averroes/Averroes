@@ -95,6 +95,7 @@ _EAGER_DB_MODULES = (
     "db.deal_ledger_repository",
     "db.deal_company_association_repository",   # PR-ADS-161D2
     "db.hubspot_name_repository",                # PR-ADS-166A
+    "db.meta_ads_repository",                    # PR-ADS-171A
     "db.mailchimp_repository",
     "db.schema",
 )

@@ -390,6 +390,11 @@ def test_5b_the_scheduler_pairs_match_what_it_actually_stamps():
         "SOURCE_CLASSIFICATION_DATASET": dataset_keys.SOURCE_CLASSIFICATION_DATASET,
         "GCLID_SOURCE": dataset_keys.GCLID_SOURCE,
         "GCLID_MATCHES_DATASET": dataset_keys.GCLID_MATCHES_DATASET,
+        # PR-ADS-171A: the scheduler stamps the Meta Ads spend pair by these
+        # two names. The table only resolves names to values; the assertion
+        # below (declared == stamped) is unchanged.
+        "META_ADS_SOURCE": dataset_keys.META_ADS_SOURCE,
+        "META_ADS_SPEND_DATASET": dataset_keys.META_ADS_SPEND_DATASET,
     }
 
     def _value(node):

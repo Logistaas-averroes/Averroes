@@ -2465,6 +2465,115 @@ CREATE TABLE IF NOT EXISTS contact_source_classification_removed (
 );
 CREATE INDEX IF NOT EXISTS idx_csc_removed_contact
   ON contact_source_classification_removed(contact_id);
+
+-- ── PR-ADS-171A: Meta (Facebook/Instagram) Ads spend — read-only ───────────
+-- Five tables, written only by the Meta spend sync. Every one is keyed by
+-- account_id: there may be several ad accounts, each with its own currency
+-- and time zone. Nothing here is written
+-- back to Meta. Spend is stored in the ACCOUNT currency; a USD value is
+-- derived at read time from fx_rates (or 1 for a USD account).
+
+-- An ad account as Meta describes it. currency_code and time_zone_name are
+-- the account's identity for every spend row. While the account has stored
+-- spend rows the writer refuses a fetch that reports a different non-null
+-- value for either (`account_identity_changed`). A row here is never deleted:
+-- an account removed from the configuration keeps its row and its history.
+CREATE TABLE IF NOT EXISTS meta_ads_account (
+  account_id                 TEXT PRIMARY KEY,   -- digits, no `act_` prefix
+  account_name               TEXT,
+  currency_code              TEXT,
+  time_zone_name             TEXT,               -- IANA name from the API
+  timezone_offset_hours_utc  NUMERIC(5,2),
+  account_status             INTEGER,
+  first_seen_at              TIMESTAMPTZ DEFAULT NOW(),
+  fetched_at                 TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- One row per (account, campaign, account-local day). cost_micros is
+-- Decimal(spend) * 1,000,000 computed without floats; spend_raw keeps the
+-- string Meta returned. A range is REPLACED, never merged, so a campaign-day
+-- Meta stops reporting does not survive a re-read.
+CREATE TABLE IF NOT EXISTS meta_ads_campaign_daily_spend (
+  id             BIGSERIAL PRIMARY KEY,
+  account_id     TEXT NOT NULL,
+  campaign_id    TEXT NOT NULL,
+  campaign_name  TEXT,
+  spend_date     DATE NOT NULL,
+  cost_micros    BIGINT NOT NULL,
+  spend_raw      TEXT,
+  currency_code  TEXT,
+  impressions    BIGINT,
+  clicks         BIGINT,
+  sync_run_id    TEXT,
+  fetched_at     TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT ck_meta_campaign_spend_non_negative CHECK (cost_micros >= 0),
+  UNIQUE (account_id, campaign_id, spend_date)
+);
+CREATE INDEX IF NOT EXISTS idx_meta_campaign_daily_spend_date
+  ON meta_ads_campaign_daily_spend(spend_date);
+
+-- The account-level total per day, read by a separate query. A chunk is
+-- verified only when the campaign rows of each day sum to this row.
+CREATE TABLE IF NOT EXISTS meta_ads_account_daily_spend (
+  id             BIGSERIAL PRIMARY KEY,
+  account_id     TEXT NOT NULL,
+  spend_date     DATE NOT NULL,
+  cost_micros    BIGINT NOT NULL,
+  currency_code  TEXT,
+  sync_run_id    TEXT,
+  fetched_at     TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (account_id, spend_date)
+);
+
+-- The fetch ledger (the counterpart of google_ads_spend_coverage). A day is
+-- covered only inside a `verified` chunk; a verified chunk with no rows is a
+-- verified zero; a `failed` row never replaces a `verified` one. fetched_at is
+-- the instant the verified read was committed (clock_timestamp()), which the
+-- settle rule reads in account_time_zone.
+CREATE TABLE IF NOT EXISTS meta_ads_spend_coverage (
+  id                         BIGSERIAL PRIMARY KEY,
+  account_id                 TEXT NOT NULL,
+  chunk_start                DATE NOT NULL,
+  chunk_end                  DATE NOT NULL,
+  status                     TEXT NOT NULL,       -- verified | failed
+  rows_written               INTEGER NOT NULL DEFAULT 0,
+  cost_micros_total          BIGINT NOT NULL DEFAULT 0,
+  source_query_version       TEXT,
+  sync_run_id                TEXT,
+  account_time_zone          TEXT,
+  pages_read                 INTEGER,
+  http_status                INTEGER,
+  error_code                 TEXT,
+  error_message              TEXT,
+  days_restated              INTEGER,
+  max_restated_delta_micros  BIGINT,
+  fetched_at                 TIMESTAMPTZ DEFAULT NOW(),
+  updated_at                 TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT ck_meta_spend_coverage_status CHECK (status IN ('verified', 'failed')),
+  UNIQUE (account_id, chunk_start, chunk_end)
+);
+CREATE INDEX IF NOT EXISTS idx_meta_spend_coverage_range
+  ON meta_ads_spend_coverage(chunk_start, chunk_end);
+
+-- The outcome of the latest sync attempt per account — including an account
+-- that has never been read (no meta_ads_account row) or can no longer be.
+-- not_readable_since is the first attempt of the CURRENT run of refusals by
+-- Meta for this account; it clears on the next attempt Meta answers. This
+-- table states what happened; no spend figure is read from it.
+CREATE TABLE IF NOT EXISTS meta_ads_account_sync_state (
+  account_id          TEXT PRIMARY KEY,
+  last_attempt_at     TIMESTAMPTZ NOT NULL,
+  last_status         TEXT NOT NULL,              -- success | partial | failed
+  last_reason         TEXT,
+  last_error          TEXT,
+  last_http_status    INTEGER,
+  last_error_code     TEXT,
+  last_success_at     TIMESTAMPTZ,                -- last verified read
+  not_readable_since  TIMESTAMPTZ,
+  updated_at          TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT ck_meta_account_sync_status
+    CHECK (last_status IN ('success', 'partial', 'failed'))
+);
 """
 
 

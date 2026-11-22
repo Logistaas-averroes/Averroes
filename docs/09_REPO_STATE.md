@@ -5504,3 +5504,260 @@ five things to correct. All are in the second commit.
   marked as resting on the labels (not proven independent), which can over-
   disclose.
 - F1 tests: 9 more cases in the same module (29 in all).
+
+---
+
+## PR-ADS-171A — Meta Ads spend: a read-only connector, per account (November 2026)
+
+**What this adds.** Averroes reads daily campaign spend from Meta (Facebook /
+Instagram) Ads, stores it, and can say for any range of days whether that
+spend may be published and what it is. GET only; nothing is written to Meta.
+**No page shows Meta spend yet** — the Channels page is PR-ADS-171B. The
+System page gains one line. Doctrine: `docs/52_META_ADS_SPEND_CONNECTOR.md`.
+
+**Production facts (owner's Render shell, read-only, 2026-11-22).**
+
+- An unversioned Graph call: HTTP 400 `(#2635) You are calling a deprecated
+  version of the Ads API. Please upgrade to the latest version: v27.0.` The
+  configured version is `v27.0`; code 2635 is its own never-retried failure.
+- With `v27.0` and the token in the `Authorization: Bearer` header only, the
+  account node and Insights both answer 200.
+- Two ad accounts, in two Business portfolios, so two tokens:
+  `4730305973961806` "Logistaas Limited", GBP, America/Los_Angeles, status 1,
+  no delivery (`{'data': []}`) — the new account; and `944370805110952`
+  "Logistaas", USD, Asia/Amman, status 1, `last_30d` spend `'1909.34'`
+  (2026-10-23 to 2026-11-21) — the old account, to be suspended in about a
+  month, whose history must be kept. The owner intends to move the new account
+  to UK time.
+
+**So the connector is multi-account and multi-credential from the start.**
+
+| Piece | Where |
+|---|---|
+| Connector (GET only; credential sets; paging; retries; typed errors) | `connectors/meta_ads.py` |
+| Sync of one account's range; every account; backfill | `services/meta_ads_spend_service.py` |
+| Truth for a range of days, summed over accounts | `services/meta_ads_spend_truth_service.py` |
+| Reads | `db/meta_ads_repository.py` |
+| Writers (account, atomic range replace, failed ledger row, sync state) | `db/writers.py` (end of file) |
+| Five tables | `db/schema.py` (end of `_DDL`) |
+| Daily step, right after FX | `scheduler/incremental_sync.py::_sync_meta_ads_spend` |
+| System page line | `services/system_overview_service._meta_spend_source`; `static/app.js::systemSourceLine` |
+| Backfill; smoke test | `scripts/backfill_meta_ads_spend.py`; `scripts/meta_ads_smoke_test.py` |
+
+**Rules that hold (each has a test that fails without it — see below).**
+
+1. *The token.* Sent only in the `Authorization` header. `paging.next` (a URL
+   with the token in it) is never requested, stored or logged. No error text
+   carries the request URL or the text of a `requests` exception; Meta's own
+   `message` is included after secrets are scrubbed from it. An account is called
+   only with its own credential set's token.
+2. *Replace, not merge.* A re-read range is replaced in one transaction; a
+   campaign-day Meta stops reporting stops counting; a failure leaves the
+   range as it was.
+3. *Verified means reconciled.* A range is verified only when paging was
+   exhausted and each day's campaign rows add up to the account-level row
+   within one minor unit. Otherwise nothing is stored.
+4. *Unknown is not zero.* An empty verified response is a verified zero; a
+   range never fetched, or fetched and failed, is unknown.
+5. *Each account's own days.* The window ends on the account's own yesterday;
+   the settle rule runs in the account's own zone. At 06:00 UTC the Amman
+   account's yesterday has ended and the Los Angeles account's has not.
+6. *Each account's own currency.* USD converts at 1; GBP through the existing
+   daily GBP→USD rates; a currency the provider does not price is never
+   converted (`fx_currency_not_supported`).
+7. *One account never blocks or damages another.* The step is `success` only
+   when every account is verified and convertible, `failed` only when none is
+   verified, `partial` otherwise — recorded as `partial`, never folded.
+8. *An unreadable account keeps its history.* Stored rows and verified ledger
+   rows stay, and ranges past its last verified day are withheld — whether
+   it is still configured, sits in a broken credential set, or was dropped
+   from the configuration. The only exemption is the owner's explicit
+   declaration (`META_AD_ACCOUNT_RETIRED`), honoured only when the ledger
+   bears it out and disclosed on every total that rests on it. (Corrected in
+   review round 1, below: the first version treated "absent from the
+   configuration" as "stopped spending".)
+9. *Identity.* A different currency or zone for an account that has stored
+   spend is refused. With no stored spend it is accepted, and on a zone change
+   the account's ledger rows are dropped so its days are re-read in the new
+   zone.
+
+**Registration.** Dataset pair `(meta_ads_api, meta_campaign_spend)` in
+`services/dataset_keys.py`; `ACTIVE_SYNC_PAIRS`; freshness registry key
+`meta_ads_spend` (no page; not a core dataset); System Status source
+`meta_ads_api`. No new run type and no monitoring cadence
+(`RUN_TYPE_CADENCE` unchanged; the backfill writes no `sync_batches` row —
+review round 1, below). No
+new freshness status: while Meta is not configured the dataset reads
+`not_run`, which is neutral. `not_connected` exists only on the System page's
+Meta line, where it is rendered neutral. `connectors.meta_ads` is a forbidden
+import for reader-contract modules (reader-cutover audit, check 16). CI: the
+new PostgreSQL module is in the PG step and its did-run list.
+
+**Tests changed outside this PR's own files, and why.**
+
+- `tests/test_pr_ads_154_incremental_sync_hotfix.py::test_5b` — its
+  name→value table gained the two Meta key names, because the scheduler now
+  stamps that pair by those names. The assertion (declared == stamped) is
+  unchanged.
+- `tests/test_pr_ads_162c_system_page.py::test_21` — the System page has a
+  fourth source; the expected list gained it, and the case stubs it like the
+  other three. `::test_40` — on its empty database with no Meta credentials
+  the fourth source is `not_connected`; that is asserted on its own, and the
+  assertion over the original three sources is unchanged.
+- `tests/test_daily_incremental_sync.py::test_datasets_keys_present` — the
+  run report has one more dataset key, `meta_ads_api/meta_campaign_spend`.
+- `tests/conftest.py` — `db.meta_ads_repository` binds `get_conn` by value, so
+  it joined the eager-import list (the PR-ADS-157 guard `test_66` requires it).
+
+**Each guard, shown failing.** Twelve one-line changes to the implementation,
+each run against the two new test modules and then reverted:
+
+| Change made to the code | Tests that then fail (first few) |
+|---|---|
+| reconciliation gate removed | unit `test_39[…reconciliation_mismatch]`, `test_40`, `test_56`; PG `test_12` |
+| token also sent as `access_token` in the query | 65 unit cases — the fake refuses every request |
+| merge-only writer (no DELETE of the range; upsert) | PG `test_04`, `test_07`, `test_08`, `test_10` |
+| window on the UTC day instead of the account's | unit `test_33`, `test_33b`, `test_35`, `test_38` … (41 cases) |
+| settle rule in one fixed zone for every account | unit `test_60`–`test_63` (10 cases) |
+| every account called with set 1's token | unit `test_33`, `test_47a`, `test_47e`, `test_47f`, `test_47j` … (17 cases) |
+| `str(exc)` of the transport error in the message | unit `test_23`, `test_39[…retries_exhausted]`, `test_47j` |
+| a failed fetch may overwrite a verified ledger row | PG `test_12`, `test_15` |
+| paging stops at a short page instead of at no-`next` | unit `test_13`, `test_14`, `test_16`, `test_17`, `test_39[…page_overrun]` |
+| identity change accepted with stored spend | PG `test_15` |
+| a removed account ignored by the truth read | unit `test_63e`, `test_63f`, `test_63h`; PG `test_13`, `test_27` |
+| a configured unreadable account does not withhold later days | unit `test_63b`, `test_63e`; PG `test_01`, `test_02`, `test_12`, `test_13` |
+
+**Counts (build environment, PostgreSQL available, Python 3.11).**
+`tests/test_pr_ads_171a_meta_ads_connector.py`: 187 passed.
+`tests/test_pr_ads_171a_meta_ads_pg_integration.py`: 36 passed, none skipped.
+Full suite with the one baseline deselect: **6175 passed, 1 skipped,
+1 deselected** (37m38s). `compileall`, `node --check static/app.js` and
+`git diff --check` clean. A first full run found two contracts this PR had to
+meet — the conftest eager-import list and the System page's empty-database
+case — both listed above; the run reported here is after them.
+
+**Owner steps** (in full, with the smoke test's expected output:
+`docs/52_META_ADS_SPEND_CONNECTOR.md` §10).
+
+1. Deploy. The two credential sets are already in Render
+   (`META_ADS_ACCESS_TOKEN` + `META_AD_ACCOUNT_ID=4730305973961806`;
+   `META_ADS_ACCESS_TOKEN_2` + `META_AD_ACCOUNT_ID_2=944370805110952`).
+2. `python -m scripts.meta_ads_smoke_test` — per account: name, currency, time
+   zone, status, active campaigns, last-30-day spend, and yesterday's campaign
+   sum against the account total. Exit 0 and `=== 2 of 2 account(s) OK ===`.
+3. `python -m scripts.backfill_meta_ads_spend --from <first day> --dry-run`,
+   then without `--dry-run`. Both accounts, from the same first day.
+4. System page: "Meta Ads spend — Complete through <date>", one line per
+   account on its own date.
+5. Move the new account to UK time **before** its first ad, then backfill it
+   again (`--account 4730305973961806`).
+6. Keep the old account configured for as long as Meta answers for it. Only
+   when Meta refuses it for good: set
+   `META_AD_ACCOUNT_RETIRED=944370805110952:<last spend day>`, check the
+   System page, and only then remove `META_ADS_ACCESS_TOKEN_2` and
+   `META_AD_ACCOUNT_ID_2` (`docs/52` §10 step 7). Before any backfill, run
+   `python -m scripts.meta_ads_smoke_test --month YYYY-MM` for a month with an
+   archived campaign.
+
+**VERIFY — facts about the live API not checkable from the build
+environment** (`docs/52` §9, in full): daily rows from `time_range` +
+`time_increment=1` at both levels; the campaign-level fields; whether
+`level=campaign` includes archived and deleted campaigns; that each day's
+campaign rows add up to the account row within one minor unit; that a row
+always carries `spend`; `limit=500`; `paging.cursors.after` beside
+`paging.next`; the `effective_status` filter (smoke test only); the throttle
+codes and usage headers; what a suspended account returns; whether an
+account's zone can be changed in place; `account_status` meanings;
+`appsecret_proof`; how far back Insights serves daily data. Confirmed and
+removed from the list: the API version, and the Bearer header on the account
+node and on Insights.
+
+**Decisions to review** (`docs/52` §11). The owner's retirement declaration
+is the one value not taken from Meta. Any account not verified for a day
+withholds the total for that day. A zone change on an account with no spend
+drops that account's ledger rows.
+
+**Not in this PR.** The Channels page (171B). Meta campaign, ad set or ad
+breakdowns beyond campaign-day spend. Any outcome joined to Meta spend. An
+admin status route (the System page line carries the same facts).
+
+### PR-ADS-171A — review round 1 (independent review; second commit)
+
+Two blockers and four majors, each a surface that could state a number the
+evidence does not support. Each fix has a regression test that fails against
+the first commit (`3cce252`).
+
+| # | Defect | Fix | Regression (fails on `3cce252`) |
+|---|---|---|---|
+| 1 | **A broken credential set read as "removed".** With `META_ADS_ACCESS_TOKEN_2` lost and `META_AD_ACCOUNT_ID_2` still set, the old account dropped out of the configured list, was treated as retired, and a range past its last verified day published `verified` without its spend. | Configured = every id LISTED in any set, complete or broken (`config_status.listed_account_ids`); all are required through the last day asked for. An account list with an entry that is not an id → `source_unavailable`. | unit `test_63f2`; PG `test_13b` |
+| 2 | **"Absent from the configuration" published as "stopped spending".** | Rule deleted. A stored account that is not configured is required like any other. The only exemption is `META_AD_ACCOUNT_RETIRED=<id>:<last spend day>`, honoured only when verified coverage reaches that day and no stored spend is dated after it. A total that rests on it carries top-level `owner_declared_retired` and `owner_declared_retired_disclosure`. | unit `test_63e2`–`test_63e7`, `test_63f`, `test_63h`; PG `test_13`, `test_27` |
+| 3 | **Configured but never read was `not_connected`.** | Any listed account is relevant: `coverage_incomplete`. | unit `test_63g`; PG `test_17` |
+| 4 | **An empty 200 at both levels deleted stored spend** (nothing reconciles with nothing). | A re-read that would take a day with verified, non-zero spend to zero is refused inside the replace transaction (`meta_restatement_implausible`); rows and ledger untouched. Amount changes and a campaign-day going while its day keeps spend still pass. Override only by the backfill's `--accept-zero-restatement`. | unit `test_78`, `test_56`; PG `test_10`, `test_10b` |
+| 5 | **The System line read "late" about 22 hours a day for the Los Angeles account after a clean sync** (judged at page-view time). | Each account is judged against the last day its most recent DUE sync could settle in its own zone (`last_due_sync`, three hours' grace). `misconfigured` is shown whatever other accounts say. `usd_unavailable` instead of "Complete through" while spend has no US-dollar value. | unit `test_79`, `test_80`; PG `test_27b`, `test_27c`, `test_26`, `test_03` |
+| 6 | **A backfill overwrote the daily feed's freshness** (a failed daily run, then `backfill --account A`, read fresh; a partial backfill could move the proven-through date). | The Meta backfill writes no `sync_batches` row — as the Google Ads spend and geo backfills never did. Only the daily step moves `sync_state`. | unit `test_56`; PG `test_28`, `test_28b` (through `/api/datasets/freshness`) |
+
+Also: `error.code` / `error_subcode` are used only as integers (unit `test_76`,
+`test_77`); the "no error text contains a URL" claim is corrected to "the
+request URL" — Meta's own message is included after scrubbing; a test for the
+cursor that does not advance (unit `test_75`; the check already existed, so
+this one passes on `3cce252`); `first_verified_days` at the top level of the
+truth payload (unit `test_63h2`); `scripts/meta_ads_smoke_test.py --month
+YYYY-MM` compares campaign rows with the account total for a whole month, to
+be run for a month with an archived campaign BEFORE any backfill (unit
+`test_81`). No filter parameter for archived campaigns is sent: none could be
+verified.
+
+**Tests whose pinned behaviour this round reversed, and why.** Only where the
+review named the behaviour as the defect:
+
+- unit `test_63g` (last assertion) and PG `test_17`: asserted `not_connected`
+  for a configured account that was never read — item 3.
+- unit `test_63e` / `test_63h` and PG `test_13` / `test_27`: asserted that an
+  account dropped from the configuration keeps publishing later ranges —
+  item 2.
+- PG `test_10` (was "an empty response empties a range that held spend") —
+  item 4; it is now the regression for the refusal. PG `test_07` and `test_08`
+  build their own replacement rows and were adjusted so they no longer zero a
+  verified day (`test_08` passes the explicit flag for its last step).
+- unit `test_56` and PG `test_28`: asserted `sync_type='backfill'` batches —
+  item 6.
+- PG `test_03`: the "late" case moved from page-view time to after the missed
+  sync was due — item 5.
+
+No assertion was loosened to make an implementation pass.
+
+**Counts after this round.** Unit module 214 passed; PostgreSQL module 41
+passed, none skipped. Full suite with the one baseline deselect: **6207
+passed, 1 skipped, 1 deselected** (39m18s). Against `3cce252` the same two
+modules: 45 failed, 210 passed.
+
+### PR-ADS-171A — review round 2 (third commit): the retirement declaration
+
+Round 2's verdict was ship, with six points on `META_AD_ACCOUNT_RETIRED`
+closed first. One pure function now holds the rule
+(`meta_ads_spend_truth_service.declaration_verdict`).
+
+| # | Point | Regression (fails on `7be6b23`) |
+|---|---|---|
+| 1 | A declaration is honoured only for an account that is NOT being read (in no credential set, or `not_readable_since` set). A configured, readable, declared account stays required; the declaration is reported `retired_declaration_account_still_read` in the truth result and on the System line. | unit `test_82`; PG `test_27a` |
+| 2 | A declared day past the last verified day withholds only ranges that touch the unread days in between; ranges up to the last verified day publish as measured, ranges wholly after the declared day publish with the disclosure. The owner never has to declare a false day. | unit `test_83`, `test_84`; PG `test_13` |
+| 3 | `owner_declared_retired` entries carry `relied_from`, the first day the figure rests on the declaration; the disclosure string states it. | unit `test_63e3`; PG `test_13` |
+| 4 | Every account validly declared, none configured, range after all of them: `verified_zero_spend` WITH the marker and disclosure — not an unmarked `not_connected`. | unit `test_63h`; PG `test_27` |
+| 5 | The text of an entry that failed to parse is never echoed: `config_status`, the run error, the batch, the logs and the System line carry a count and 1-based positions only (`retired_invalid_positions`, `unparsed_account_entry_count`). The backfill script no longer echoes a bad `--account` value. | unit `test_85`, `test_63e6`, `test_63e7`; PG `test_27a` |
+| 6 | `act_` is stripped case-insensitively wherever an id is parsed, so `id:…,ACT_id:…` with two days is one id declared twice: neither is honoured. | unit `test_63e6` |
+
+Assertions reversed by these points, each pinning what the point changes:
+unit `test_63h` and PG `test_27` (`not_connected` → the marked zero, item 4);
+unit `test_63e3` and PG `test_13` (marker shape and disclosure text, item 3;
+and in PG `test_13` the System line for a declared day past the ledger, which
+is now "declared retired" with the unread days named, item 2); unit
+`test_63e6` / `test_63e7` (raw entries → positions, item 5).
+
+`docs/52` §6 carries the rule as a table and a note for PR-ADS-171B: any
+surface that shows a figure with `owner_declared_retired` non-empty must show
+the disclosure, and 171B must add an audit/AST guard for it.
+
+**Counts after this round.** Unit module 233 passed; PostgreSQL module 42
+passed, none skipped. Full suite with the one baseline deselect: **6227
+passed, 1 skipped, 1 deselected** (37m49s). Against `7be6b23` the same two
+modules: 28 failed, 247 passed.

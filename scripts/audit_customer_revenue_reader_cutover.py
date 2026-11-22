@@ -348,7 +348,9 @@ LEGACY_GATE = "revenue_integration_connected"
 FORBIDDEN_IMPORTS = ("db.writers", "writers", "connectors.hubspot_pull",
                      "hubspot_pull", "connectors.google_ads_direct",
                      "google_ads_direct", "connectors.google_ads_source",
-                     "connectors.hubspot_deals")
+                     "connectors.hubspot_deals",
+                     # PR-ADS-171A: a reader-contract module never calls Meta.
+                     "connectors.meta_ads", "meta_ads")
 #: Workbench families a View blockers link may name (docs/47).
 WORKBENCH_FAMILIES = ("customer_identity", "revenue_proof", "won_deal_membership")
 _PUBLICATION_STATUSES = ("published", "withheld", "unavailable", "not_published")

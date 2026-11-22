@@ -23,7 +23,8 @@ PR-ADS-154 (production hotfix):
   - The CLI's exit code agrees with the reported status.
 
 Doctrine:
-  - Read-only from external platforms (Google Ads, HubSpot, FX providers).
+  - Read-only from external platforms (Google Ads, Meta Ads, HubSpot, FX
+    providers).
   - Writes only to the local database.
   - Never modifies Google Ads campaigns, bids, budgets, keywords, or
     negative keywords.
@@ -60,6 +61,7 @@ from services.dataset_keys import (
     FX_DAILY_RATES_DATASET, FX_SOURCE,
     GCLID_MATCHES_DATASET, GCLID_SOURCE,
     KEYWORD_FACTS_DATASET, KEYWORD_FACTS_SOURCE,
+    META_ADS_SOURCE, META_ADS_SPEND_DATASET,
     SEARCH_TERMS_DATASET, SEARCH_TERMS_SOURCE,
     SOURCE_CLASSIFICATION_DATASET, SOURCE_CLASSIFICATION_SOURCE,
 )
@@ -212,6 +214,8 @@ LABEL_CANONICAL_SPEND = f"{CANONICAL_SPEND_SOURCE}/{CANONICAL_SPEND_DATASET}"
 LABEL_CANONICAL_GEO = f"{CANONICAL_GEO_SOURCE}/{CANONICAL_GEO_DATASET}"
 LABEL_GEO_RECONCILIATION = f"{CANONICAL_GEO_SOURCE}/geo_reconciliation"
 LABEL_FX = f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}"
+#: PR-ADS-171A — Meta (Facebook/Instagram) Ads campaign-daily spend.
+LABEL_META_ADS_SPEND = f"{META_ADS_SOURCE}/{META_ADS_SPEND_DATASET}"
 LABEL_DEAL_LEDGER = f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"
 LABEL_DEAL_COMPANY_ASSOCIATIONS = (
     f"{DEAL_COMPANY_ASSOCIATION_SOURCE}/{DEAL_COMPANY_ASSOCIATION_DATASET}")
@@ -250,6 +254,7 @@ ACTIVE_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
     (SOURCE_CLASSIFICATION_SOURCE, SOURCE_CLASSIFICATION_DATASET),
     (CANONICAL_SPEND_SOURCE, CANONICAL_SPEND_DATASET),
     (FX_SOURCE, FX_DAILY_RATES_DATASET),
+    (META_ADS_SOURCE, META_ADS_SPEND_DATASET),
     (CANONICAL_GEO_SOURCE, CANONICAL_GEO_DATASET),
 )
 
@@ -420,6 +425,11 @@ def run_daily_incremental_sync(
                                refreshed after the ledger (PR-ADS-161D2)
       - google_ads_api/canonical_spend — the ROAS denominator
       - fx/daily_rates      — required before any USD figure is safe
+      - meta_ads_api/meta_campaign_spend — Meta Ads campaign-daily spend
+                               (PR-ADS-171A): the last 28 complete days of
+                               each configured Meta ad account, replaced and
+                               reconciled per account; a clean skip when Meta
+                               is not configured
       - google_ads_api/canonical_geo — CANONICAL per-country spend (PR-ADS-153F),
                                run after canonical spend and FX and followed by
                                geo reconciliation; resumable and coverage-backed
@@ -618,6 +628,15 @@ def run_daily_incremental_sync(
     # published reference rates read-only; writes only the local fx_rates table.
     datasets[LABEL_FX] = _sync_fx_rates(
         run_id=run_id, date_to=today, errors=errors,
+    )
+
+    # ── meta_ads_api/meta_campaign_spend — PR-ADS-171A. Read-only (GET) Meta
+    # Ads spend for the last complete days of each META account's own zone.
+    # Isolated like every step: its failure is an error on the run and touches
+    # nothing Google Ads or HubSpot. Skipped, with no batch and no row written,
+    # when Meta is not configured.
+    datasets[LABEL_META_ADS_SPEND] = _sync_meta_ads_spend(
+        run_id=run_id, now=now, errors=errors,
     )
 
     # ── google_ads_api/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
@@ -1672,6 +1691,106 @@ def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
         if batch_id:
             db_writers.finish_sync_batch(batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
         return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_meta_ads_spend(*, run_id, now, errors: list) -> dict:
+    """Refresh Meta Ads campaign-daily spend (PR-ADS-171A). Read-only (GET).
+
+    Every configured ad account is synced on its own: its window is
+    ``[yesterday - 27, yesterday]`` in THAT account's zone (the zone Meta
+    reports for it; never the server's day and never the Google Ads zone),
+    and today is not fetched. Every decision about an account — paging,
+    reconciliation against the account-level total, the atomic replace, FX —
+    is ``services.meta_ads_spend_service``'s. One account failing does not
+    stop another, and a failure deletes nothing an account has stored.
+
+    One ``sync_batches`` row covers the step. Outcomes, never collapsed:
+      * ``skipped``  — Meta is not configured. No batch, no coverage row, no
+                       zero. Non-voting, like an unconfigured Mailchimp.
+      * ``success``  — every account is verified and convertible to USD.
+      * ``partial``  — some account failed, or is verified without USD rates,
+                       or a credential set is incomplete. What was verified is
+                       stored.
+      * ``failed``   — no account was verified; nothing was replaced.
+    Each account's own outcome is in ``accounts`` and in
+    ``meta_ads_account_sync_state``; each error names its account id.
+    """
+    from services import meta_ads_spend_service as meta  # noqa: PLC0415
+
+    batch_id = 0
+
+    def _note(text):
+        err = f"{LABEL_META_ADS_SPEND}: {text}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+
+    def _failed(reason, error, **extra):
+        _note(f"{reason}: {error}")
+        return {"status": "failed", "reason": reason, "error": str(error)[:500],
+                "external_writes_performed": False, **extra}
+
+    try:
+        cfg = meta.config_status()
+        if not cfg.get("configured"):
+            if cfg.get("misconfigured"):
+                detail = cfg.get("reason") or "configuration incomplete"
+                if cfg.get("duplicate_account_ids"):
+                    detail += ": " + ", ".join(cfg["duplicate_account_ids"])
+                return _failed(meta.REASON_MISCONFIGURED, detail)
+            return {"status": "skipped", "reason": meta.REASON_NOT_CONFIGURED,
+                    "note": "META_ADS_ACCESS_TOKEN and META_AD_ACCOUNT_ID are not set",
+                    "external_writes_performed": False}
+
+        run_id_str = str(run_id) if run_id else None
+        prepared = [meta.prepare_account(account_id, now)
+                    for account_id in cfg["account_ids"]]
+        date_from, date_to = meta.window_span(prepared)
+        batch_id = db_writers.start_sync_batch(
+            source=META_ADS_SOURCE, dataset=META_ADS_SPEND_DATASET,
+            sync_type="daily", date_from=date_from, date_to=date_to,
+            run_id=run_id,
+        )
+        if not batch_id:
+            return _failed(meta.REASON_BATCH,
+                           "the sync batch could not be opened, so the run has "
+                           "no durable record")
+
+        result = meta.sync_prepared(prepared, sync_run_id=run_id_str)
+        # A credential set with one of its two variables set is not called.
+        # The complete sets synced; the run cannot be called a success.
+        broken = cfg.get("misconfigured_sets") or []
+        for entry in broken:
+            text = (f"credential set {entry['set']} is misconfigured "
+                    f"({entry['reason']}) and was not synced")
+            result["errors"].append(text)
+            result["error"] = "; ".join(filter(None, [result.get("error"), text]))
+        # A retirement declaration that cannot be read is ignored — never
+        # guessed — and reported the same way.
+        # Named by position only — the text of an entry that failed to parse
+        # is never echoed (it may be a secret pasted into the wrong variable).
+        bad_retired = cfg.get("retired_invalid_positions") or []
+        if bad_retired:
+            text = meta.retired_invalid_text(bad_retired)
+            result["errors"].append(text)
+            result["error"] = "; ".join(filter(None, [result.get("error"), text]))
+        if (broken or bad_retired) and result["status"] == "success":
+            result.update(status="partial", reason=meta.REASON_MISCONFIGURED,
+                          last_source_date=None)
+        result["misconfigured_sets"] = broken
+        result["retired_invalid_positions"] = bad_retired
+        meta.finish_batch(batch_id, result, result.get("last_source_date"))
+        result["sync_batch_id"] = batch_id
+        for text in result["errors"]:
+            _note(text)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        # Named by class: an unexpected exception's text is not known to be
+        # free of request details.
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id, status="failed",
+                error_message=f"meta_sync_error: unexpected {type(exc).__name__}")
+        return _failed("meta_sync_error", f"unexpected {type(exc).__name__}")
 
 
 def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
