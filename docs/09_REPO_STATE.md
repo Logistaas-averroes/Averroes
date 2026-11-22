@@ -5833,13 +5833,22 @@ d. *Review round — a section that was not built is not a section that held.*
    the population unavailable instead of publishing `fx_incomplete` in an
    available response (pages included).
 
+e. *Second review round.* `google_ads_customer_not_configured` is a FAILURE
+   for the audit (exit 2): with the headline built and no account, no section
+   was read, and that run used to exit 0. A failed FX rate read makes the
+   population unavailable (`FxRatesUnavailable`); a rate missing for a day is
+   still `fx_incomplete`. The `MemoryError` guard extends to `fetch_fx_rates`,
+   `fetch_canonical_campaign_spend`, `fetch_campaign_identity`,
+   `fetch_sql_contacts` and `campaign_evidence_service`. A quarantined flagged
+   population still passes but is stored as `audits[].drawer_warnings`.
+
 **Production observation (read-only, 2026-11-22).** 66,455 distinct terms,
 101,852 term × campaign units, zero flagged rows, `waste_terms` empty. The
 narrowed read therefore loads no unit in production today; the section is
 available with a true zero total and its memory should be near the floor —
 conditional on that count, and growing with it.
 
-**Tests.** `tests/test_pr_ads_172a_campaign_evidence_memory.py` (41 cases; in
+**Tests.** `tests/test_pr_ads_172a_campaign_evidence_memory.py` (49 cases; in
 CI's PostgreSQL step and did-run list). Of the first 20, 17 fail on `main`,
 three of them for the memory reason (test_21, test_22, test_24) and 14 on the
 missing API; of the review round's 22 selected cases 20 fail on the first 172A

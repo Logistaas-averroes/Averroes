@@ -214,13 +214,22 @@ sections were never built. So, in the same change:
 
   | class | reasons | result |
   | --- | --- | --- |
-  | declared withholding | `google_ads_customer_not_configured`, `search_term_truth_mismatch` | passed |
-  | failure | `keyword_evidence_unavailable`, `keyword_preview_failed`, `keyword_preview_context_failed`, `search_term_evidence_unavailable`, `flagged_preview_failed`, `flagged_preview_context_failed`, `campaign_identity_unresolved`, `window_not_resolved` | `unavailable_now` — exit 2 |
+  | declared withholding | `search_term_truth_mismatch` | passed, and named as a warning |
+  | failure | `google_ads_customer_not_configured`, `keyword_evidence_unavailable`, `keyword_preview_failed`, `keyword_preview_context_failed`, `search_term_evidence_unavailable`, `flagged_preview_failed`, `flagged_preview_context_failed`, `campaign_identity_unresolved`, `window_not_resolved` | `unavailable_now` — exit 2 |
   | violation | `keyword_scope_account_mismatch` | violation — exit 1 |
   | anything else | — | `unavailable_now` — exit 2 |
 
   `campaign_identity_unresolved` is a failure HERE because the audit probes
-  only a campaign whose identity the headline build resolved. A test fails if
+  only a campaign whose identity the headline build resolved.
+  `google_ads_customer_not_configured` is a failure here for the same reason:
+  the section check is reached only after the headline resolved a campaign, and
+  with no account neither section reads anything — that run built no drawer
+  section and used to exit 0. (The builders also answer with this code when
+  account resolution RAISES; `tests/test_pr_ads_157` test_12 pins that, so it
+  was not given a code of its own. Either way it means "not built".)
+  A quarantined flagged population (`search_term_truth_mismatch`) still passes,
+  but the report lists it under `warnings` and the stored summary under
+  `audits[].drawer_warnings`, so it cannot sit silently under CERTIFIED. A test fails if
   a builder gains a reason code that is not in this table.
 * **The stored run proves it.** The audit's report carries each section's
   `available` / `reason` per window on every path. `platform_certification_runs.
@@ -238,10 +247,22 @@ sections were never built. So, in the same change:
   with a false reason. The population is now unavailable
   (`search_term_evidence_unavailable` / `keyword_evidence_unavailable` on the
   drawer sections). This applies to the pages too.
+* **A failed FX read is unavailable; a missing rate is still `fx_incomplete`.**
+  `_fx_rate_map` turned a failed `fetch_fx_rates` into the same empty map a
+  window with no rates gives. The population builds now ask for it strictly
+  (`FxRatesUnavailable`) and are unavailable when the rate READ failed. A rate
+  genuinely absent for some day is unchanged. The drawers' daily series keep
+  the lenient form.
+* The `MemoryError` guard also covers the readers these builders call:
+  `fetch_fx_rates`, `fetch_canonical_campaign_spend` and
+  `fetch_campaign_identity` in `db/revenue_repository.py` (those three only),
+  `fetch_sql_contacts`, and the five broad handlers of
+  `services/campaign_evidence_service.py` — one of which retried the read it
+  had just run out of memory on.
 
 ## 5. Proof
 
-`tests/test_pr_ads_172a_campaign_evidence_memory.py` (41 cases; in CI's
+`tests/test_pr_ads_172a_campaign_evidence_memory.py` (49 cases; in CI's
 PostgreSQL step and did-run list):
 
 * **Equivalence, real PostgreSQL.** On a fixture built from the cases where
@@ -301,6 +322,8 @@ Every existing test passes unmodified.
 5. The narrowed read's snapshot covers the four statements of
    `fetch_search_term_aggregates`. The per-date cost read that follows is a
    second transaction, as it is on the complete path.
-6. Production peaks are not measurable from here. The first production run
+6. `_convert_daily_series` (the term and keyword drawers' daily charts) still
+   shows a failed FX read as `fx_incomplete` per day.
+7. Production peaks are not measurable from here. The first production run
    after deploy should show `campaign_evidence` `holds` with `peak_rss_mb` well
    under its budget in `platform_certification_runs.summary`.

@@ -65,7 +65,12 @@ def summarize(report: dict) -> dict:
     for a in report.get("audits") or []:
         kept = _drawer_sections(a.get("report"))
         if kept is not None:
-            a = {**a, "drawer_sections": kept}
+            a = {**a, "drawer_sections": kept,
+                 # A section that passed on a DECLARED withholding (a
+                 # quarantined flagged population) is named here, so it cannot
+                 # sit silently under CERTIFIED. [] when there is none.
+                 "drawer_warnings": [str(w)[:300] for w in
+                                     ((a.get("report") or {}).get("warnings") or [])]}
         audits.append({k: a.get(k) for k in (
             "key", "module", "outcome", "exit_code", "seconds", "violations",
             "unavailable", "detail",
@@ -75,7 +80,8 @@ def summarize(report: dict) -> dict:
             "memory")
             # PR-ADS-172A: present only for an audit that builds drawer
             # sections (campaign_evidence) — see `_drawer_sections`.
-            + (("drawer_sections",) if "drawer_sections" in a else ())})
+            + (("drawer_sections", "drawer_warnings")
+               if "drawer_sections" in a else ())})
     return {"verdict": report.get("verdict"),
             "exit_code": report.get("exit_code"),
             "generated_at": report.get("generated_at"),

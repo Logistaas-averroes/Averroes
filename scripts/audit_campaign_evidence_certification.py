@@ -119,10 +119,6 @@ SECTION_KEYS = (
 #: The section correctly WITHHOLDS for a declared condition that is not a
 #: failed read. The window's other evidence is still certifiable.
 SECTION_REASONS_DECLARED = {
-    # No Google Ads account is configured: there is no scope to read within,
-    # and the builders refuse before any query.
-    "google_ads_customer_not_configured":
-        "no Google Ads account is configured — nothing was read",
     # The canonical flagged population quarantined itself (a flag with no
     # reason evidence). Publishing around it would be the defect.
     "search_term_truth_mismatch":
@@ -132,6 +128,15 @@ SECTION_REASONS_DECLARED = {
 #: The section could NOT BE BUILT although the window's headline build
 #: succeeded. That is not evidence of anything: exit 2, never a pass.
 SECTION_REASONS_FAILURE = {
+    # No Google Ads account could be resolved, so the section read NOTHING. It
+    # is a correct refusal by the builder and still not a pass here: this check
+    # is only reached after the headline build resolved a campaign for the
+    # window, and a run in which no section was ever built must not certify.
+    # (The builders also answer with this code when account resolution RAISES —
+    # tests/test_pr_ads_157 test_12 pins that — which is one more reason it can
+    # only mean "not built".)
+    "google_ads_customer_not_configured":
+        "no Google Ads account was resolved — the section read nothing",
     "keyword_evidence_unavailable": "the keyword evidence source could not be read",
     "keyword_preview_failed": "the keyword preview raised while building",
     "keyword_preview_context_failed": "the keyword section context could not be built",
@@ -190,6 +195,10 @@ class Findings:
         self.violations: list[str] = []
         self.unavailable: list[str] = []
         self.checks: list[dict] = []
+        #: PR-ADS-172A — checks that PASSED on a declared withholding. They do
+        #: not change the exit code, and they are never left unsaid: a
+        #: certified run with a quarantined section says so by name.
+        self.warnings: list[str] = []
 
     def record(self, name: str, ok: bool, detail: str = "") -> None:
         self.checks.append({"check": name, "ok": bool(ok), "detail": detail})
@@ -977,6 +986,7 @@ def _audit_window(window: str, f: Findings) -> dict:
                 detail = f"unavailable, reason={section['reason']} — {why}"
                 if kind == SECTION_REASON_DECLARED:
                     f.passed(label, detail)
+                    f.warnings.append(f"{label}: {detail}")
                 elif kind == SECTION_REASON_VIOLATION:
                     f.violation(label, detail)
                 else:
@@ -1081,6 +1091,7 @@ def main() -> int:
         "windows_audited": list(windows),
         "violations": findings.violations,
         "unavailable": findings.unavailable,
+        "warnings": findings.warnings,
         "checks": findings.checks,
         "per_window": per_window,
     }

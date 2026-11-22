@@ -47,6 +47,7 @@ from services.search_term_evidence_service import (  # noqa: PLC0415
     _assess_currency_provenance,
     _convert_daily_series,
     _coverage_block,
+    FxRatesUnavailable,
     _fx_convert_population,
     _identity_label_index,
     _iso,
@@ -284,7 +285,17 @@ def _build_population(start: date | None, end: date, *,
         unit["_conv_status"], unit["_conv_total"] = _conversion_evidence(g)
         units.append(unit)
 
-    _fx_convert_population(units, start, end)
+    try:
+        _fx_convert_population(units, start, end, strict=True)
+    except FxRatesUnavailable as exc:
+        # PR-ADS-172A — the rate READ failed: not "a rate is missing".
+        logger.warning("[keyword-evidence] FX rate read unavailable (%s); the "
+                       "population is withheld rather than published as "
+                       "FX-incomplete", exc)
+        return {"available": False, "units": [], "source": {},
+                "canonical": {"available": False}, "identity_available": False,
+                "currency_info": _monetary_summary([]),
+                "unavailable_reason": "fx_rates_unavailable"}
     # A unit is monetarily verified only when its currency is proven AND FX is
     # complete (same rule the monetary summary uses) — legacy/FX-incomplete units
     # never contribute to verified spend and surface a Currency-unavailable signal.

@@ -1074,12 +1074,159 @@ def test_33_a_section_that_failed_to_build_is_not_a_passed_check(monkeypatch, se
         # …and the report says what the section was, for the stored run.
         assert result["sections"][section] == {"available": False, "reason": reason}
 
-    # A declared withholding is still told apart from a failure, and passes.
-    declared = "google_ads_customer_not_configured"
+    # "No account configured" read nothing: with the headline built, not a pass.
+    assert "google_ads_customer_not_configured" in failures
+
+
+def test_33b_a_declared_withholding_passes_and_is_named_as_a_warning(monkeypatch):
+    """A quarantined flagged population is the section refusing correctly — a
+    pass, told apart from a failure, and never a silent one."""
+    assert cert.SECTION_REASONS_DECLARED.keys() == {st_svc.FLAGGED_PREVIEW_QUARANTINED}
     findings, _result, checks = _audit_one_window(
-        monkeypatch, **{f"{section}_reason": declared})
-    assert checks[f"section[{section}/30d]"] is True
+        monkeypatch, flagged_reason=st_svc.FLAGGED_PREVIEW_QUARANTINED)
+    assert checks["section[flagged/30d]"] is True
     assert not [u for u in findings.unavailable if u.startswith("section[")]
+    assert len(findings.warnings) == 1
+    assert findings.warnings[0].startswith(
+        "section[flagged/30d]: unavailable, reason=search_term_truth_mismatch")
+    clean, _result, _checks = _audit_one_window(monkeypatch)
+    assert clean.warnings == []
+
+    from services.platform_certification_service import summarize
+    sections = {"30d": {"sections": {
+        "keyword": {"available": True, "reason": None},
+        "flagged": {"available": False, "reason": "search_term_truth_mismatch"}}}}
+    stored = summarize({"verdict": "CERTIFIED", "exit_code": 0, "audits": [
+        {"key": "campaign_evidence", "outcome": "holds", "exit_code": 0,
+         "report": {"per_window": sections, "warnings": findings.warnings}},
+        {"key": "campaign_evidence", "outcome": "holds", "exit_code": 0,
+         "report": {"per_window": sections, "warnings": []}},
+        {"key": "closed_won_truth", "outcome": "holds", "exit_code": 0,
+         "report": {"totals": {}}}]})
+    warned, quiet, other = stored["audits"]
+    assert warned["drawer_warnings"] == findings.warnings
+    assert quiet["drawer_warnings"] == []
+    assert "drawer_warnings" not in other
+
+
+@_needs_pg
+def test_33c_with_no_account_configured_the_window_is_not_certified(
+        adversarial, monkeypatch):
+    """Canonical spend rows exist, so the headline builds and resolves a
+    campaign — and then neither section reads anything. That run built no
+    drawer section at all and used to exit as if it had."""
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    monkeypatch.setattr("analysis.search_term_scope.configured_customer_id",
+                        lambda: None)
+    findings = cert.Findings()
+    result = cert._audit_window("30d", findings)
+    assert result.get("probe_campaign_key")
+    assert result["sections"] == {
+        name: {"available": False, "reason": "google_ads_customer_not_configured"}
+        for name in ("keyword", "flagged")}
+    checks = {c["check"]: c["ok"] for c in findings.checks}
+    for name in ("keyword", "flagged"):
+        assert checks[f"section[{name}/30d]"] is False
+        assert any(u.startswith(f"section[{name}/30d]") for u in findings.unavailable)
+    assert findings.exit_code != cert.EXIT_CERTIFIED
+
+
+@pytest.mark.parametrize("reader", ["fetch_fx_rates", "fetch_canonical_campaign_spend",
+                                    "fetch_campaign_identity", "fetch_sql_contacts"])
+def test_33d_the_readers_these_builders_call_never_absorb_out_of_memory(
+        monkeypatch, reader):
+    import db.platform_sql_attribution_repository as sql_repo
+    import db.revenue_repository as rr
+    module = sql_repo if reader == "fetch_sql_contacts" else rr
+    call = {"fetch_fx_rates": lambda: rr.fetch_fx_rates(None, TODAY, "GBP", "USD"),
+            "fetch_canonical_campaign_spend":
+                lambda: rr.fetch_canonical_campaign_spend(None, TODAY),
+            "fetch_campaign_identity": lambda: rr.fetch_campaign_identity(None),
+            "fetch_sql_contacts": lambda: sql_repo.fetch_sql_contacts(None, TODAY)}[reader]
+    monkeypatch.setattr(module, "get_conn", _broken_get_conn(RuntimeError("cursor lost")))
+    assert call()["available"] is False
+    monkeypatch.setattr(module, "get_conn", _broken_get_conn(MemoryError()))
+    with pytest.raises(MemoryError):
+        call()
+
+
+def test_33e_the_headline_builder_never_absorbs_out_of_memory(monkeypatch):
+    import services.campaign_evidence_service as ce
+    import services.canonical_contact_outcome_service as canon
+    import services.marketing_outcome_cohort_service as cohort_svc
+    import db.revenue_repository as rr
+
+    def _oom(*a, **k):
+        raise MemoryError()
+
+    calls = []
+
+    def _oom_once(*a, **k):
+        # The handler this guards RETRIES the read; a second attempt that
+        # happened to fit would have hidden the first one running out.
+        calls.append(k)
+        if len(calls) == 1:
+            raise MemoryError()
+        return {"reconciliation_status": "reconciled"}
+
+    monkeypatch.setattr(canon, "page_reconciliation", _oom_once)
+    with pytest.raises(MemoryError):
+        ce._canonical_sql_reconciliation("30d", 0, None)
+    assert len(calls) == 1
+    monkeypatch.setattr(cohort_svc, "lifecycle_event_disclosure", _oom)
+    with pytest.raises(MemoryError):
+        ce._safe_lifecycle_disclosure(cohort_svc)
+    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", _oom)
+    with pytest.raises(MemoryError):
+        ce.build_campaign_evidence("30d")
+
+
+@_needs_pg
+def test_39b_a_failed_fx_read_is_unavailable_and_a_missing_rate_is_fx_incomplete(
+        adversarial, monkeypatch):
+    import db.revenue_repository as rr
+    now = datetime.now(tz=timezone.utc)
+    _exec("INSERT INTO keyword_daily_facts (source_date, customer_id, campaign_id,"
+          " campaign_name, ad_group_id, ad_group_name, criterion_id, keyword_text,"
+          " match_type, criterion_status, cost_micros, currency_code,"
+          " source_system, impressions, clicks, conversions) "
+          "VALUES (%s,%s,%s,%s,'ag1','AG','c1','freight software','EXACT',"
+          " 'ENABLED',1000000,'GBP','google_ads_api',100,10,1.0)",
+          (IN_7D, ACCOUNT, CAMP_A, NAMES[CAMP_A]))
+
+    # A rate genuinely MISSING for a day is a fact about the rate table: the
+    # section stays available and says fx_incomplete, exactly as before.
+    _exec("DELETE FROM fx_rates WHERE rate_date = %s", (IN_7D,))
+    section = st_svc.build_campaign_flagged_preview("7d", CAMP_A, now=now)
+    assert section["available"] is True
+    assert "fx_incomplete" in {r["currency_status"] for r in section["rows"]}
+    assert all(r["spend_usd"] is None for r in section["rows"]
+               if r["currency_status"] == "fx_incomplete")
+    kw_section = kw_svc.build_campaign_keyword_preview("7d", CAMP_A, now=now)
+    assert kw_section["available"] is True
+    assert kw_section["rows"][0]["spend_usd"] is None
+
+    # A rate read that FAILED is a fact about us: nothing is published as
+    # FX-incomplete on the strength of it.
+    monkeypatch.setattr(rr, "fetch_fx_rates",
+                        lambda *a, **k: {"available": False, "rates": {}})
+    for population in st_svc.POPULATIONS:
+        payload = st_svc.build_flagged_search_terms("30d", now=now, population=population)
+        assert payload["db_unavailable"] is True and payload["rows"] == []
+    section = st_svc.build_campaign_flagged_preview("30d", CAMP_A, now=now)
+    assert (section["available"], section["reason"], section["total_count"]) == (
+        False, st_svc.FLAGGED_PREVIEW_UNAVAILABLE_SOURCE, None)
+    assert kw_svc.build_keyword_evidence("30d", now=now)["db_unavailable"] is True
+    kw_section = kw_svc.build_campaign_keyword_preview("30d", CAMP_A, now=now)
+    assert (kw_section["available"], kw_section["reason"]) == (
+        False, kw_svc.PREVIEW_UNAVAILABLE_SOURCE)
+
+    findings = cert.Findings()
+    cert._audit_window("30d", findings)
+    checks = {c["check"]: c["ok"] for c in findings.checks}
+    assert checks["section[flagged/30d]"] is False
+    assert checks["section[keyword/30d]"] is False
+    assert findings.exit_code != cert.EXIT_CERTIFIED
 
 
 def test_34_a_scope_breach_reported_by_a_section_is_a_violation(monkeypatch):

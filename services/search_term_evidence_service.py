@@ -240,12 +240,31 @@ def _assess_currency_provenance(group: dict) -> dict:
     }
 
 
-def _fx_rate_map(start, end, native_currency, reporting_currency) -> dict:
-    """{iso_date: rate} for native→reporting over the window (empty if none)."""
+class FxRatesUnavailable(Exception):
+    """The FX rate READ failed (PR-ADS-172A).
+
+    Not the same statement as "a rate is missing for some day". A missing rate
+    is a fact about the rate table and is published as ``fx_incomplete``. A
+    failed read is a fact about us: nothing about FX was learned, so nothing
+    may be published as FX-incomplete on the strength of it.
+    """
+
+
+def _fx_rate_map(start, end, native_currency, reporting_currency, *,
+                 strict: bool = False) -> dict:
+    """{iso_date: rate} for native→reporting over the window (empty if none).
+
+    ``strict`` (PR-ADS-172A): a rate read that FAILED raises
+    ``FxRatesUnavailable`` instead of returning the same empty map a window
+    with no rates returns. The population builds pass it; a drawer's daily
+    series keeps the lenient form.
+    """
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
 
     result = revenue_repo.fetch_fx_rates(
         start, end, native_currency, reporting_currency)
+    if strict and result.get("available") is False:
+        raise FxRatesUnavailable(f"{native_currency}->{reporting_currency}")
     if not result.get("available"):
         return {}
     out = {}
@@ -361,7 +380,7 @@ MON_PARTIAL = "partial"
 MON_UNAVAILABLE = "unavailable"
 
 
-def _fx_convert_population(units: list, start, end) -> None:
+def _fx_convert_population(units: list, start, end, *, strict: bool = False) -> None:
     """Convert EACH unit's per-source-date native cost to USD at each day's own
     FX rate, INDEPENDENTLY per durable term × campaign unit (PR-ADS-145 §2).
 
@@ -379,7 +398,8 @@ def _fx_convert_population(units: list, start, end) -> None:
         if ccy == REPORTING_CURRENCY:
             return {}
         if ccy not in fx_cache:
-            fx_cache[ccy] = _fx_rate_map(start, end, ccy, REPORTING_CURRENCY)
+            fx_cache[ccy] = _fx_rate_map(start, end, ccy, REPORTING_CURRENCY,
+                                         strict=strict)
         return fx_cache[ccy]
 
     for u in units:
@@ -948,7 +968,18 @@ def _build_population(start, end, *, flagged_candidates: bool = False) -> dict:
         u["search_term"] = _representative_term(
             u["search_term_variants"], u["search_term_normalized"])
         u["_provenance"] = _assess_currency_provenance(u)
-    _fx_convert_population(unit_list, start, end)
+    try:
+        _fx_convert_population(unit_list, start, end, strict=True)
+    except FxRatesUnavailable as exc:
+        # PR-ADS-172A — the rate READ failed. Publishing these units as
+        # `fx_incomplete` would state that a rate is missing; none was read.
+        logger.warning("[search-term-evidence] FX rate read unavailable (%s); the "
+                       "population is withheld rather than published as "
+                       "FX-incomplete", exc)
+        return {"available": False, "units": [], "source": {},
+                "identity_available": False, "canonical": {"available": False},
+                "aliases_by_id": {}, "currency_info": _monetary_summary([]),
+                "unavailable_reason": "fx_rates_unavailable"}
 
     # Attach safely campaign-scoped waste_terms classification evidence so a
     # newly imported term that the monthly waste detection already confirmed shows as
