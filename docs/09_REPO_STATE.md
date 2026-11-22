@@ -5881,3 +5881,139 @@ the complete view declaring no narrowed population.
    `annotation_join` are account-wide by contract.
 3. Production's term mix is unknown from here; the first production run should
    show `campaign_evidence` `holds` with `peak_rss_mb` well under its budget.
+
+---
+
+## PR-ADS-171C — Meta ad sets: daily spend per ad set, and Meta-reported lead actions (November 2026)
+
+**What this adds.** Each Meta ad set has its own budget, targeting and
+countries, so the owner judges ad sets separately. Averroes now reads one row
+per ad account, ad set and day — spend, impressions, clicks and Meta's own
+lead-related action counts — and can say for any range of days whether that
+detail may be published. GET only; the existing `ads_read` token is
+sufficient; nothing is written to Meta. **No page and no API route shows it
+yet** (PR-ADS-171B / 171D). Doctrine: `docs/53_META_ADS_ADSET_DETAIL.md`.
+Depends on PR-ADS-171A (`docs/52`), whose rules are unchanged.
+
+**Production context (owner, 2026-11-22).** Account `944370805110952` (USD,
+Asia/Amman) has $5,927.77 stored since 2026-04-20 in two campaigns; account
+`4730305973961806` (GBP, America/Los_Angeles) is a verified zero. The ads use
+Meta native lead forms.
+
+| Piece | Where |
+|---|---|
+| The ad-set read (`level=adset`; `actions` → lead-related types; current names) | `connectors/meta_ads.py::iter_adset_daily`, `meta_reported_lead_actions` |
+| Sync of one range; the daily pass; reconciliation to campaign rows | `services/meta_ads_adset_service.py` |
+| The read function for the future page | `services/meta_ads_adset_truth_service.py::build_meta_adset_breakdown_for_days` |
+| Reads (ad-set ledger; campaign base; aggregated rows + read-time reconciliation) | `db/meta_ads_repository.py` |
+| The atomic range replace; the ad-set failure recorder | `db/writers.py::replace_meta_adset_chunk`, `record_meta_adset_coverage_failure` |
+| Tables `meta_ads_adset_daily_spend`, `meta_ads_adset_coverage` | `db/schema.py` |
+| The sibling daily step and its batch | `scheduler/incremental_sync.py::_sync_meta_ads_adsets` |
+| `--level adset`; `--adsets` | `scripts/backfill_meta_ads_spend.py`, `scripts/meta_ads_smoke_test.py` |
+
+**The rules that matter.**
+
+1. **The campaign level stays the published base.** An ad-set chunk is
+   `verified` only when every day of it is inside a verified campaign chunk
+   and, per day and campaign, the ad-set rows sum to the STORED campaign row
+   within one minor unit. A mismatch fails the chunk and stores nothing.
+2. **The ad-set level cannot demote campaign truth.** Its own two tables, its
+   own ledger, its own dataset key (`meta_ads_api/meta_adset_spend`) and
+   `sync_batches` row, written by a sibling step that starts after the
+   campaign batch is closed. No ad-set writer names a campaign table, the
+   campaign ledger or `meta_ads_account_sync_state`. A second ledger rather
+   than a `level` column on the existing one, so the guarantee is structural
+   rather than a filter every reader has to remember.
+3. **Run status.** Campaign verified + ad sets failed = the campaign dataset
+   `success`, the ad-set dataset `failed` (or `partial` when only some
+   accounts failed), and the run `partial` — never `success`, never `failed`.
+   No new run type; `RUN_TYPE_CADENCE` unchanged; no new freshness status.
+4. **The read function re-checks reconciliation in the database.** The
+   campaign level is re-read every morning; if the ad-set read then fails,
+   the ad-set rows describe yesterday's campaign figures while their ledger
+   row still says `verified`. `fetch_meta_adset_spend` compares the two
+   tables per day and campaign in one REPEATABLE READ snapshot and the read
+   function withholds on any difference.
+5. **One account short withholds every account.** Which accounts a range
+   needs, and through which day, is the campaign truth's decision
+   (`build_meta_ads_spend_truth_for_days`), called, not re-implemented.
+6. **Leads are Meta's own counts and are named so.** `meta_reported_leads` /
+   `meta_reported_lead_actions`; never contacts, CRM leads, MQLs or SQLs;
+   never in arithmetic with a HubSpot count.
+7. **The lead action types overlap and are never summed.** Each lead-related
+   `action_type` (name contains `lead`) is stored with its own count in
+   `meta_reported_lead_actions` (JSONB).
+8. **Unknown is not zero.** A row with no `actions` key stores SQL `NULL`; a
+   row whose `actions` holds no lead type stores `{}`. One row without
+   `actions` makes the range's lead figures unavailable. The same for a
+   missing `impressions` or `clicks`.
+9. **Names are labels.** `adset_id` and `campaign_id` are the identity.
+   Insights returns the CURRENT name on every row; a stored name is "what
+   Meta called it when this row was last fetched". Nothing joins on a name.
+
+**What Meta's documentation says about lead action types, and the decision.**
+The Insights reference describes `actions` only as "The total number of
+actions Accounts Center accounts took that are attributed to your ads" and
+lists no action types; the word "lead" does not occur on the page. The
+Breakdowns page says the entries "are hierarchical and include detailed
+actions not counted". The `AdsActionStats` reference page could not be
+retrieved from the build environment. So the documentation does not make the
+choice unambiguous: **no named native-lead column is stored**, the raw
+per-type counts are, and `meta_reported_leads` is `unavailable`
+(`meta_lead_action_type_unverified`) until
+`meta_ads.native_lead_action_type` names ONE type. The owner's
+`meta_ads_smoke_test --adsets` output is what will decide it.
+
+**Clicks** are Meta's `clicks` ("The number of clicks on your ads"), the
+figure the campaign rows already hold — not `inline_link_clicks`, which Meta
+reports on a fixed 1-day-click window.
+
+**Tests.** `tests/test_pr_ads_171c_meta_adsets.py` (47 cases) and
+`tests/test_pr_ads_171c_meta_adsets_pg_integration.py` (14 cases, in CI's
+PostgreSQL step and its did-run list). The fake Graph API
+(`tests/meta_ads_fakes.py`) gained ad sets: rows that roll up into their
+campaign's row, the current name on every row, `actions` only where a row
+has some.
+
+**Guards shown failing** (each mutation applied to the final tree, the two
+171C modules and the 171A PostgreSQL module run, then reverted):
+
+| Mutation | Fails |
+|---|---|
+| Reconciliation removed (`sync_adset_chunk` ignores the verdict) | unit `test_13`, `test_14`, `test_26`, `test_28`; PG `test_03` |
+| An ad-set failure marks the ACCOUNT failed in `meta_ads_account_sync_state` | unit `test_13`, `test_16`, `test_28`; PG `test_03`, `test_04`, `test_12` |
+| An ad-set failure recorded in the CAMPAIGN ledger | unit `test_28`; PG `test_03`, `test_04`, `test_12` |
+| A missing `actions` key read as "no leads" (`{}` instead of unknown) | unit `test_06`, `test_12`, `test_35`; PG `test_01`, `test_02` |
+| Overlapping lead types summed into `meta_reported_leads` | unit `test_07`, `test_08`; PG `test_02` |
+| `partial` collapsed to `failed` | unit `test_13`, `test_16`, `test_18`; PG `test_03`, `test_04`, `test_05`, `test_09` |
+| `partial` collapsed to `success` | unit `test_13`, `test_16`, `test_18`, `test_28`; PG `test_03`, `test_04`, `test_05`, `test_09` |
+| The read-time reconciliation check removed | PG `test_05` |
+| The "campaign base verified" check removed | unit `test_19`, `test_34`; PG `test_12` |
+| The ad-set coverage gate removed from the read function | PG `test_03`, `test_04`, `test_09`, `test_11` |
+| A failed row may replace a verified one (the shared recorder's guard) | PG `test_04`, `test_05`; 171A PG `test_10`, `test_10b`, `test_12`, `test_15` |
+
+**Existing tests changed** — three, each because a registry legitimately grew
+by the ad-set pair; no assertion was loosened:
+
+* `tests/test_pr_ads_171a_meta_ads_connector.py::test_51` — the datasets of
+  source `meta_ads_api` are now exactly `["meta_ads_spend", "meta_ads_adsets"]`
+  (was `["meta_ads_spend"]`).
+* `tests/test_daily_incremental_sync.py` — the daily run's dataset labels gain
+  `meta_ads_api/meta_adset_spend`.
+* `tests/test_pr_ads_154_incremental_sync_hotfix.py` — the name→value table
+  of the declared-equals-stamped check gains `META_ADS_ADSET_DATASET`.
+
+**Not verified against live Meta** — `docs/53` §9: the shape of a
+`level=adset` row; whether Meta omits `actions` for a row with no action;
+whether archived ad sets are included; rounding across many ad sets; which
+action type is the native-form lead count; that
+`use_unified_attribution_setting` is accepted with `ads_read`; whether
+`impressions`/`clicks` are always present; the default `action_report_time`.
+
+**Owner steps** (`docs/53` §10): deploy;
+`python -m scripts.meta_ads_smoke_test --adsets` and send back the output;
+then `python -m scripts.backfill_meta_ads_spend --from 2026-04-20 --level adset`
+(after the campaign-level backfill of the same range).
+
+**Counts.** Unit module 47 passed; PostgreSQL module 14 passed, none
+skipped. The 171A modules: 233 and 42 passed, unchanged in number.

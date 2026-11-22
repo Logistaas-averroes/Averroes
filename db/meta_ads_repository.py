@@ -1,4 +1,4 @@
-"""PR-ADS-171A — read-only queries over the Meta Ads spend tables.
+"""PR-ADS-171A / 171C — read-only queries over the Meta Ads spend tables.
 
 SELECTs only. Every function returns ``available: False`` when the database
 could not be read, which is a different answer from an empty result: a caller
@@ -247,18 +247,29 @@ def fetch_meta_spend_coverage(start: date | None, end: date,
     coverage functions read it unchanged, with ``fetched_at`` for the settle
     rule.
     """
+    return _fetch_coverage("meta_ads_spend_coverage", start, end, account_id)
+
+
+#: The two Meta fetch ledgers. A table name reaches SQL only from this tuple.
+_COVERAGE_TABLES = ("meta_ads_spend_coverage", "meta_ads_adset_coverage")
+
+
+def _fetch_coverage(table: str, start: date | None, end: date,
+                    account_id: str) -> dict:
+    if table not in _COVERAGE_TABLES:
+        return {"available": False, "chunks": []}
     try:
         with get_conn() as conn:
             if conn is None:
                 return {"available": False, "chunks": []}
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT chunk_start, chunk_end, status, rows_written,
                            cost_micros_total, account_id, fetched_at,
                            account_time_zone, error_code, error_message,
                            days_restated, max_restated_delta_micros
-                    FROM meta_ads_spend_coverage
+                    FROM {table}
                     WHERE account_id = %s
                       AND chunk_end >= COALESCE(%s::date, chunk_end)
                       AND chunk_start <= %s
@@ -275,7 +286,7 @@ def fetch_meta_spend_coverage(start: date | None, end: date,
                 } for r in cur.fetchall()]
         return {"available": True, "chunks": chunks}
     except Exception as exc:  # noqa: BLE001
-        logger.warning("fetch_meta_spend_coverage failed: %s", exc)
+        logger.warning("coverage read of %s failed: %s", table, exc)
         return {"available": False, "chunks": []}
 
 
@@ -304,3 +315,202 @@ def fetch_meta_spend_coverage_recency(account_id: str) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_meta_spend_coverage_recency failed: %s", exc)
         return {"available": False, **empty}
+
+
+# ── PR-ADS-171C — ad-set daily detail ─────────────────────────────────────
+#
+# Read-only, like everything above. The ad-set tables are a DETAIL of the
+# campaign rows: nothing here is a spend total of record, and every function
+# is keyed by ids. Names are labels.
+
+#: One snapshot for reads that must agree with each other (READ COMMITTED
+#: takes a fresh one per statement).
+_ONE_SNAPSHOT = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
+
+def fetch_meta_adset_coverage(start: date | None, end: date,
+                              account_id: str) -> dict:
+    """The AD-SET coverage chunks of one account that intersect
+    ``[start, end]``. Same shape as :func:`fetch_meta_spend_coverage`, read
+    from the ad-set ledger only."""
+    return _fetch_coverage("meta_ads_adset_coverage", start, end, account_id)
+
+
+def fetch_meta_campaign_day_totals(account_id: str, start: date,
+                                   end: date) -> dict:
+    """The stored campaign-level rows of one account, per day and campaign:
+    ``{available, rows: [{spend_date, campaign_id, cost_micros}], chunks}``.
+
+    ``chunks`` is the campaign ledger over the same range, read in the SAME
+    snapshot: the ad-set sync reconciles against these rows only where a
+    verified campaign chunk covers the day.
+    """
+    empty = {"available": False, "rows": [], "chunks": []}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return empty
+            with conn.cursor() as cur:
+                cur.execute(_ONE_SNAPSHOT)
+                cur.execute(
+                    "SELECT spend_date, campaign_id, SUM(cost_micros)::bigint "
+                    "FROM meta_ads_campaign_daily_spend "
+                    "WHERE account_id = %s AND spend_date BETWEEN %s AND %s "
+                    "GROUP BY spend_date, campaign_id "
+                    "ORDER BY spend_date, campaign_id",
+                    (str(account_id), start, end))
+                rows = [{"spend_date": _iso(r[0]), "campaign_id": r[1],
+                         "cost_micros": int(r[2] or 0)} for r in cur.fetchall()]
+                cur.execute(
+                    "SELECT chunk_start, chunk_end, status "
+                    "FROM meta_ads_spend_coverage "
+                    "WHERE account_id = %s AND chunk_end >= %s "
+                    "AND chunk_start <= %s ORDER BY chunk_start, chunk_end",
+                    (str(account_id), start, end))
+                chunks = [{"chunk_start": _iso(r[0]), "chunk_end": _iso(r[1]),
+                           "status": r[2]} for r in cur.fetchall()]
+        return {"available": True, "rows": rows, "chunks": chunks}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_meta_campaign_day_totals failed: %s", exc)
+        return empty
+
+
+def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
+                           tolerance_micros: int) -> dict:
+    """Per-ad-set figures of ONE account over ``[start, end]``, and whether
+    the stored ad-set rows still add up to the stored campaign rows.
+
+    ``rows`` — one per ``(campaign_id, adset_id)``:
+
+    * ``cost_micros`` / ``spend`` — the sum of the rows; ``spend_usd`` by each
+      row's own day's rate (1 for USD), None when any spend day is unpriced;
+    * ``impressions`` / ``clicks`` — the sum, or None when ANY row in the
+      range does not carry the figure (``*_missing_rows`` says how many): a
+      missing count is unknown, never zero;
+    * ``meta_reported_lead_action_counts`` — ``{action_type: count}`` summed per type over
+      the rows that carried ``actions``; ``rows_without_actions`` — how many
+      rows carried none (unknown, not zero). The types overlap and are never
+      added to each other;
+    * ``attribution_settings`` — the distinct settings Meta returned;
+    * ``adset_name`` / ``campaign_name`` — the newest stored label for the id
+      (over the whole table, not only the range). Labels, never keys.
+
+    ``mismatches`` — every ``(day, campaign_id)`` in the range whose ad-set
+    rows and campaign-level row differ by more than ``tolerance_micros``
+    (either side missing counts as zero), decided by the database in the same
+    snapshot as the rows. Not empty means the ad-set detail does not describe
+    the campaign spend on record, whatever the ledger says.
+    """
+    empty = {"available": False, "rows": [], "mismatches": []}
+    account_id = str(account_id)
+    scope = "account_id = %s AND spend_date BETWEEN %s AND %s"
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return empty
+            with conn.cursor() as cur:
+                cur.execute(_ONE_SNAPSHOT)
+                cur.execute(
+                    f"""
+                    SELECT s.campaign_id, s.adset_id,
+                           SUM(s.cost_micros)::bigint,
+                           SUM((s.cost_micros / 1000000.0) * {_RATE}),
+                           COUNT(DISTINCT s.spend_date) FILTER (WHERE {_UNPRICED}),
+                           SUM(s.impressions)::bigint,
+                           COUNT(*) FILTER (WHERE s.impressions IS NULL),
+                           SUM(s.clicks)::bigint,
+                           COUNT(*) FILTER (WHERE s.clicks IS NULL),
+                           COUNT(*) FILTER (WHERE s.meta_reported_lead_actions IS NULL),
+                           COUNT(*),
+                           ARRAY_AGG(DISTINCT s.attribution_setting)
+                             FILTER (WHERE s.attribution_setting IS NOT NULL),
+                           MIN(s.spend_date), MAX(s.spend_date),
+                           COUNT(DISTINCT s.currency_code),
+                           MIN(s.currency_code),
+                           COUNT(*) FILTER (WHERE s.currency_code IS NULL)
+                    FROM meta_ads_adset_daily_spend s {_FX_JOIN}
+                    WHERE s.account_id = %s AND s.spend_date BETWEEN %s AND %s
+                    GROUP BY s.campaign_id, s.adset_id
+                    ORDER BY s.campaign_id, s.adset_id
+                    """, (REPORTING_CURRENCY, account_id, start, end))
+                rows = []
+                for r in cur.fetchall():
+                    micros, total = int(r[2] or 0), int(r[10] or 0)
+                    priced = not int(r[4] or 0)
+                    no_impr, no_clicks = int(r[6] or 0), int(r[8] or 0)
+                    one_currency = int(r[14] or 0) == 1 and not int(r[16] or 0)
+                    rows.append({
+                        "account_id": account_id,
+                        "campaign_id": r[0], "adset_id": r[1],
+                        "cost_micros": micros, "spend": micros / 1_000_000,
+                        "spend_usd": (float(r[3] or 0.0) if priced else None),
+                        "fx_complete": priced,
+                        "impressions": (int(r[5] or 0) if not no_impr else None),
+                        "impressions_missing_rows": no_impr,
+                        "clicks": (int(r[7] or 0) if not no_clicks else None),
+                        "clicks_missing_rows": no_clicks,
+                        "rows_without_actions": int(r[9] or 0),
+                        "day_rows": total,
+                        "attribution_settings": sorted(r[11] or []),
+                        "first_day": _iso(r[12]), "last_day": _iso(r[13]),
+                        "currency_code": r[15] if one_currency else None,
+                        "meta_reported_lead_action_counts": {},
+                        "adset_name": None, "campaign_name": None,
+                    })
+                by_key = {(r["campaign_id"], r["adset_id"]): r for r in rows}
+
+                cur.execute(
+                    f"""
+                    SELECT s.campaign_id, s.adset_id, kv.key,
+                           SUM((kv.value)::bigint)::bigint
+                    FROM meta_ads_adset_daily_spend s,
+                         LATERAL jsonb_each_text(s.meta_reported_lead_actions) AS kv
+                    WHERE s.{scope} AND s.meta_reported_lead_actions IS NOT NULL
+                    GROUP BY s.campaign_id, s.adset_id, kv.key
+                    """, (account_id, start, end))
+                for campaign_id, adset_id, kind, count in cur.fetchall():
+                    by_key[(campaign_id, adset_id)]["meta_reported_lead_action_counts"][kind] = \
+                        int(count or 0)
+
+                # The newest label per id. Over the whole table: a label is
+                # what the thing is called now, not what it was called then.
+                for column in ("adset", "campaign"):
+                    cur.execute(
+                        f"SELECT DISTINCT ON ({column}_id) {column}_id, "
+                        f"{column}_name FROM meta_ads_adset_daily_spend "
+                        f"WHERE account_id = %s "
+                        f"AND NULLIF(BTRIM({column}_name), '') IS NOT NULL "
+                        f"ORDER BY {column}_id, fetched_at DESC, spend_date DESC",
+                        (account_id,))
+                    names = {r[0]: r[1] for r in cur.fetchall()}
+                    for row in rows:
+                        row[f"{column}_name"] = names.get(row[f"{column}_id"])
+
+                cur.execute(
+                    f"""
+                    SELECT COALESCE(a.spend_date, c.spend_date),
+                           COALESCE(a.campaign_id, c.campaign_id),
+                           COALESCE(a.micros, 0), COALESCE(c.micros, 0)
+                    FROM (SELECT spend_date, campaign_id,
+                                 SUM(cost_micros)::bigint AS micros
+                          FROM meta_ads_adset_daily_spend WHERE {scope}
+                          GROUP BY spend_date, campaign_id) a
+                    FULL JOIN (SELECT spend_date, campaign_id,
+                                      SUM(cost_micros)::bigint AS micros
+                               FROM meta_ads_campaign_daily_spend WHERE {scope}
+                               GROUP BY spend_date, campaign_id) c
+                      ON c.spend_date = a.spend_date
+                     AND c.campaign_id = a.campaign_id
+                    WHERE ABS(COALESCE(a.micros, 0) - COALESCE(c.micros, 0)) > %s
+                    ORDER BY 1, 2
+                    """, (account_id, start, end, account_id, start, end,
+                          int(tolerance_micros)))
+                mismatches = [{"spend_date": _iso(r[0]), "campaign_id": r[1],
+                               "adset_micros": int(r[2]),
+                               "campaign_micros": int(r[3])}
+                              for r in cur.fetchall()]
+        return {"available": True, "rows": rows, "mismatches": mismatches,
+                "account_id": account_id}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_meta_adset_spend failed: %s", exc)
+        return empty

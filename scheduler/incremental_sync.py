@@ -61,7 +61,7 @@ from services.dataset_keys import (
     FX_DAILY_RATES_DATASET, FX_SOURCE,
     GCLID_MATCHES_DATASET, GCLID_SOURCE,
     KEYWORD_FACTS_DATASET, KEYWORD_FACTS_SOURCE,
-    META_ADS_SOURCE, META_ADS_SPEND_DATASET,
+    META_ADS_ADSET_DATASET, META_ADS_SOURCE, META_ADS_SPEND_DATASET,
     SEARCH_TERMS_DATASET, SEARCH_TERMS_SOURCE,
     SOURCE_CLASSIFICATION_DATASET, SOURCE_CLASSIFICATION_SOURCE,
 )
@@ -216,6 +216,8 @@ LABEL_GEO_RECONCILIATION = f"{CANONICAL_GEO_SOURCE}/geo_reconciliation"
 LABEL_FX = f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}"
 #: PR-ADS-171A — Meta (Facebook/Instagram) Ads campaign-daily spend.
 LABEL_META_ADS_SPEND = f"{META_ADS_SOURCE}/{META_ADS_SPEND_DATASET}"
+#: PR-ADS-171C — the ad-set detail of that spend; a sibling step and batch.
+LABEL_META_ADS_ADSETS = f"{META_ADS_SOURCE}/{META_ADS_ADSET_DATASET}"
 LABEL_DEAL_LEDGER = f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"
 LABEL_DEAL_COMPANY_ASSOCIATIONS = (
     f"{DEAL_COMPANY_ASSOCIATION_SOURCE}/{DEAL_COMPANY_ASSOCIATION_DATASET}")
@@ -255,6 +257,7 @@ ACTIVE_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
     (CANONICAL_SPEND_SOURCE, CANONICAL_SPEND_DATASET),
     (FX_SOURCE, FX_DAILY_RATES_DATASET),
     (META_ADS_SOURCE, META_ADS_SPEND_DATASET),
+    (META_ADS_SOURCE, META_ADS_ADSET_DATASET),
     (CANONICAL_GEO_SOURCE, CANONICAL_GEO_DATASET),
 )
 
@@ -430,6 +433,10 @@ def run_daily_incremental_sync(
                                each configured Meta ad account, replaced and
                                reconciled per account; a clean skip when Meta
                                is not configured
+      - meta_ads_api/meta_adset_spend — the ad-set detail of that spend
+                               (PR-ADS-171C), for the same window, reconciled
+                               to the campaign rows; its failure never touches
+                               the campaign spend
       - google_ads_api/canonical_geo — CANONICAL per-country spend (PR-ADS-153F),
                                run after canonical spend and FX and followed by
                                geo reconciliation; resumable and coverage-backed
@@ -637,6 +644,18 @@ def run_daily_incremental_sync(
     # when Meta is not configured.
     datasets[LABEL_META_ADS_SPEND] = _sync_meta_ads_spend(
         run_id=run_id, now=now, errors=errors,
+    )
+
+    # ── meta_ads_api/meta_adset_spend — PR-ADS-171C. The ad-set detail of the
+    # window the step above just synced, per account, reconciled per day and
+    # campaign to the campaign rows it stored. A SIBLING step with its own
+    # batch and its own ledger: the campaign batch above is already closed
+    # with the campaign's own status and proven-through date, and nothing here
+    # can change either. Campaign verified + ad sets failed is one dataset
+    # `success` and one `failed` — a `partial` run, never a clean one.
+    datasets[LABEL_META_ADS_ADSETS] = _sync_meta_ads_adsets(
+        run_id=run_id, campaign_result=datasets[LABEL_META_ADS_SPEND],
+        errors=errors,
     )
 
     # ── google_ads_api/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
@@ -1786,6 +1805,78 @@ def _sync_meta_ads_spend(*, run_id, now, errors: list) -> dict:
     except Exception as exc:  # noqa: BLE001
         # Named by class: an unexpected exception's text is not known to be
         # free of request details.
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id, status="failed",
+                error_message=f"meta_sync_error: unexpected {type(exc).__name__}")
+        return _failed("meta_sync_error", f"unexpected {type(exc).__name__}")
+
+
+def _sync_meta_ads_adsets(*, run_id, campaign_result: dict, errors: list) -> dict:
+    """Refresh Meta Ads ad-set daily detail (PR-ADS-171C). Read-only (GET).
+
+    Runs right after :func:`_sync_meta_ads_spend`, over the SAME window each
+    account's campaign level was just synced for, and reconciles every day
+    and campaign to the campaign rows that step stored. Every decision about
+    an account is ``services.meta_ads_adset_service``'s.
+
+    This step writes ``meta_ads_adset_daily_spend``, ``meta_ads_adset_coverage``
+    and its OWN ``sync_batches`` row — nothing else. The campaign batch, the
+    campaign ledger and the account sync state are already final when it
+    starts, so a failed ad-set read cannot demote campaign-level truth.
+
+    Outcomes, never collapsed:
+      * ``skipped`` — Meta is not configured (the campaign step skipped).
+      * ``success`` — every account's ad sets were verified.
+      * ``partial`` — some account's were, some account's were not.
+      * ``failed``  — no account's ad sets were verified. With the campaign
+                      step a success, the RUN is then ``partial``.
+    """
+    from services import meta_ads_adset_service as adsets  # noqa: PLC0415
+    from services import meta_ads_spend_service as meta  # noqa: PLC0415
+
+    batch_id = 0
+
+    def _note(text):
+        err = f"{LABEL_META_ADS_ADSETS}: {text}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+
+    def _failed(reason, error):
+        _note(f"{reason}: {error}")
+        return {"status": "failed", "reason": reason, "error": str(error)[:500],
+                "external_writes_performed": False}
+
+    try:
+        campaign = campaign_result or {}
+        if campaign.get("status") == "skipped":
+            return {"status": "skipped", "reason": campaign.get("reason"),
+                    "note": campaign.get("note"),
+                    "external_writes_performed": False}
+        accounts = campaign.get("accounts") or []
+        if not accounts:
+            # The campaign step did not get as far as an account.
+            return _failed(adsets.REASON_BASE_UNVERIFIED,
+                           "campaign-level spend did not sync, so ad sets "
+                           "were not read")
+        date_from, date_to = adsets.window_span(accounts)
+        batch_id = db_writers.start_sync_batch(
+            source=META_ADS_SOURCE, dataset=META_ADS_ADSET_DATASET,
+            sync_type="daily", date_from=date_from, date_to=date_to,
+            run_id=run_id,
+        )
+        if not batch_id:
+            return _failed(meta.REASON_BATCH,
+                           "the sync batch could not be opened, so the run has "
+                           "no durable record")
+        result = adsets.sync_after_campaigns(
+            accounts, sync_run_id=str(run_id) if run_id else None)
+        meta.finish_batch(batch_id, result, result.get("last_source_date"))
+        result["sync_batch_id"] = batch_id
+        for text in result["errors"]:
+            _note(text)
+        return result
+    except Exception as exc:  # noqa: BLE001
         if batch_id:
             db_writers.finish_sync_batch(
                 batch_id=batch_id, status="failed",

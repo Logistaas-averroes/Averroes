@@ -549,8 +549,16 @@ def month_chunks(start: date, end: date) -> list:
 def run_backfill(date_from: date, date_to: date | None = None, *,
                  account_ids: list | None = None, dry_run: bool = False,
                  resume: bool = False, accept_zero_restatement: bool = False,
-                 now: datetime | None = None) -> dict:
+                 now: datetime | None = None, level: str = "campaign") -> dict:
     """Backfill ``[date_from, date_to]`` in monthly chunks, per account.
+
+    ``level`` is ``campaign`` (the default: PR-ADS-171A's campaign-daily
+    spend, unchanged) or ``adset`` (PR-ADS-171C: the ad-set detail of months
+    whose campaign level is ALREADY verified — a month whose campaign level is
+    not fails ``meta_adset_campaign_base_unverified`` and stores nothing).
+    The ad-set level reads the account from Meta without storing it, and
+    writes only the two ad-set tables: it cannot change the campaign rows,
+    the campaign ledger or an account's sync state.
 
     ``account_ids`` defaults to every configured account; an id that is not
     configured is refused. For each account ``date_to`` defaults to, and is
@@ -573,6 +581,11 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
     cfg = config_status()
     out = {"status": "failed", "reason": None, "error": None, "accounts": [],
            "dry_run": bool(dry_run), "external_writes_performed": False}
+    if level not in ("campaign", "adset"):
+        return {**out, "reason": REASON_MISCONFIGURED,
+                "error": "level must be campaign or adset"}
+    if level == "adset":
+        out["level"] = "adset"
     if not cfg["configured"]:
         reason = (REASON_MISCONFIGURED if cfg["misconfigured"]
                   else REASON_NOT_CONFIGURED)
@@ -586,7 +599,8 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
     for account_id in wanted:
         out["accounts"].append(_backfill_account(
             account_id, date_from, date_to, dry_run=dry_run, resume=resume,
-            accept_zero_restatement=accept_zero_restatement, now=now))
+            accept_zero_restatement=accept_zero_restatement, now=now,
+            level=level))
     statuses = [a["status"] for a in out["accounts"]]
     bad = [a for a in out["accounts"] if a["status"] != "success"]
     if not bad:
@@ -598,19 +612,21 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
 
 def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
                       dry_run: bool, resume: bool, accept_zero_restatement: bool,
-                      now: datetime | None) -> dict:
+                      now: datetime | None, level: str = "campaign") -> dict:
     from connectors import meta_ads  # noqa: PLC0415
     from db import meta_ads_repository as repo  # noqa: PLC0415
     import db.writers as db_writers  # noqa: PLC0415
 
     out = {"account_id": account_id, "status": "failed", "reason": None,
            "error": None, "chunks": []}
+    adsets = level == "adset"
     try:
-        account = (meta_ads.fetch_account(account_id) if dry_run
+        # The ad-set level reads the account and stores nothing about it.
+        account = (meta_ads.fetch_account(account_id) if dry_run or adsets
                    else refresh_account(account_id))
     except Exception as exc:  # noqa: BLE001
         failure = describe_failure(exc)
-        if not dry_run:
+        if not dry_run and not adsets:
             db_writers.record_meta_account_sync(
                 account_id, "failed", reason=failure["reason"],
                 error=failure["error"], http_status=failure["http_status"],
@@ -630,7 +646,8 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
 
     verified = set()
     if resume:
-        coverage = repo.fetch_meta_spend_coverage(date_from, end, account_id)
+        coverage = (repo.fetch_meta_adset_coverage if adsets
+                    else repo.fetch_meta_spend_coverage)(date_from, end, account_id)
         if not coverage.get("available"):
             return {**out, "reason": REASON_PERSISTENCE,
                     "error": "the coverage ledger could not be read"}
@@ -646,8 +663,14 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
         if dry_run:
             out["chunks"].append({**entry, "status": "planned"})
             continue
-        result = sync_chunk(account, start, stop,
-                            accept_zero_restatement=accept_zero_restatement)
+        if adsets:
+            from services import meta_ads_adset_service  # noqa: PLC0415
+            result = meta_ads_adset_service.sync_adset_chunk(
+                account, start, stop,
+                accept_zero_restatement=accept_zero_restatement)
+        else:
+            result = sync_chunk(account, start, stop,
+                                accept_zero_restatement=accept_zero_restatement)
         out["chunks"].append(result)
         statuses.append(result["status"])
         if result["status"] == "failed":

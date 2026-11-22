@@ -23,6 +23,17 @@ contains an ARCHIVED or DELETED campaign before the first backfill: if the
 campaign-level read leaves such a campaign out, that month shows a MISMATCH
 here (and would fail to backfill), and nothing has been written.
 
+    python -m scripts.meta_ads_smoke_test --adsets
+
+With ``--adsets`` (PR-ADS-171C) it reads, per account, YESTERDAY's ad-set
+rows and campaign rows and prints: the ad sets found; each campaign's ad-set
+sum beside its campaign total; how many rows carried no ``actions``,
+``impressions`` or ``clicks``; the attribution settings Meta returned; and
+every lead-related ``action_type`` with its count — so the output shows which
+action types this account really emits. The counts are printed one per type
+and never added together: the types overlap. It prints ids, never names, and
+never a token.
+
 Exit code: 0 every account was read and reconciles; 1 Meta refused a request
 for some account, or two totals differ, or a credential set is incomplete;
 2 Meta is not configured.
@@ -146,6 +157,78 @@ def _month(account_id: str, first, last) -> bool:
     return True
 
 
+def _adsets(account_id: str) -> bool:
+    """Yesterday's ad-set rows against the campaign rows, and the lead-related
+    action types Meta returned. Reads only; prints ids, never names."""
+    from connectors import meta_ads  # noqa: PLC0415
+    from services import meta_ads_adset_service as adsets  # noqa: PLC0415
+    from services import meta_ads_spend_service as meta  # noqa: PLC0415
+
+    print(f"--- Ad account {account_id} ---")
+    try:
+        account = meta_ads.fetch_account(account_id)
+        currency = account["currency_code"]
+        day = meta.account_local_yesterday(account["time_zone_name"])
+        if day is None:
+            print("FAILED           : the account time zone is not a known zone")
+            return False
+        iso = day.isoformat()
+        print(f"Yesterday        : {iso} ({account['time_zone_name']})")
+        stats: dict = {}
+        rows = [r for page in meta_ads.iter_adset_daily(account_id, iso, iso, stats)
+                for r in page]
+        campaigns = [r for page in meta_ads.iter_campaign_daily_spend(
+            account_id, iso, iso) for r in page]
+    except meta_ads.MetaAdsError as exc:
+        print(f"FAILED           : {exc.reason}: {exc}")
+        return False
+    verdict = adsets.reconcile_adsets_to_campaigns(
+        rows, campaigns, meta.reconciliation_tolerance_micros(currency))
+    print(f"Ad sets found    : {len({r['adset_id'] for r in rows})} in "
+          f"{len({r['campaign_id'] for r in rows})} campaign(s), "
+          f"{len(rows)} row(s), {stats.get('pages_read')} page(s)")
+    print(f"Ad-set sum       : {_amount(sum(r['cost_micros'] for r in rows))} {currency}")
+    print(f"Campaign total   : {_amount(sum(r['cost_micros'] for r in campaigns))} {currency}")
+    for campaign_id in sorted({r["campaign_id"] for r in rows}
+                              | {r["campaign_id"] for r in campaigns}):
+        print(f"  campaign {campaign_id}: ad sets "
+              f"{_amount(sum(r['cost_micros'] for r in rows if r['campaign_id'] == campaign_id))}"
+              f", campaign row "
+              f"{_amount(sum(r['cost_micros'] for r in campaigns if r['campaign_id'] == campaign_id))}"
+              f" {currency}")
+    print(f"Rows w/o actions : {sum(1 for r in rows if r['meta_reported_lead_actions'] is None)} "
+          f"of {len(rows)} (no `actions` key: unknown, not zero)")
+    print(f"Rows w/o clicks  : {sum(1 for r in rows if r['clicks'] is None)} of "
+          f"{len(rows)}; w/o impressions: "
+          f"{sum(1 for r in rows if r['impressions'] is None)}")
+    settings = sorted({r["attribution_setting"] for r in rows
+                       if r["attribution_setting"]})
+    print(f"Attribution      : {', '.join(settings) or 'not returned'}")
+    totals = adsets.lead_action_totals(rows)
+    print(f"Lead action types: {len(totals)} (Meta-reported; overlapping — "
+          "never add them together)")
+    for kind, count in totals.items():
+        print(f"  {kind} = {count}")
+    for row in sorted(rows, key=lambda r: (r["campaign_id"], r["adset_id"])):
+        leads = row["meta_reported_lead_actions"]
+        print(f"  ad set {row['adset_id']} (campaign {row['campaign_id']}): "
+              f"spend {_amount(row['cost_micros'])} {currency}; "
+              + ("actions absent" if leads is None else
+                 "; ".join(f"{k}={v}" for k, v in sorted(leads.items()))
+                 or "actions present, no lead type"))
+    if not verdict["reconciled"]:
+        for miss in verdict["mismatches"][:10]:
+            print(f"  MISMATCH {miss['spend_date']} campaign {miss['campaign_id']}: "
+                  f"ad sets {_amount(miss['adset_micros'])}, campaign row "
+                  f"{_amount(miss['campaign_micros'])} {currency}")
+        print("RESULT           : MISMATCH — the ad-set rows do not sum to the "
+              "campaign rows; do not backfill ad sets")
+        return False
+    print("RESULT           : OK — every campaign's ad-set rows sum to its "
+          "campaign row")
+    return True
+
+
 def main(argv=None) -> int:
     import argparse  # noqa: PLC0415
     from datetime import date  # noqa: PLC0415
@@ -155,7 +238,14 @@ def main(argv=None) -> int:
     parser.add_argument("--month", default=None, metavar="YYYY-MM",
                         help="compare campaign rows with the account total for "
                              "every day of this month, per account")
+    parser.add_argument("--adsets", action="store_true",
+                        help="yesterday's ad-set rows against the campaign "
+                             "rows, and the lead-related action types Meta "
+                             "returned, per account")
     args = parser.parse_args(argv)
+    if args.adsets and args.month:
+        print("USE ONE OF       : --adsets or --month")
+        return 2
     month = None
     if args.month:
         try:
@@ -180,7 +270,9 @@ def main(argv=None) -> int:
             why += f": {', '.join(cfg['duplicate_account_ids'])}"
         print(f"NOT CONFIGURED   : {why}")
         return 2
-    results = [(_month(account_id, *month) if month else _account(account_id))
+    results = [(_adsets(account_id) if args.adsets
+                else _month(account_id, *month) if month
+                else _account(account_id))
                for account_id in cfg["account_ids"]]
     good = sum(1 for ok in results if ok)
     print(f"=== {good} of {len(results)} account(s) OK"

@@ -1714,6 +1714,7 @@ function _datasetDisplayName(key) {
     "google_ads_api/canonical_geo": "Country spend data (daily)",
     "google_ads_api/geo":          "Geo data (legacy monthly snapshot)",
     "meta_ads_api/meta_campaign_spend": "Meta Ads spend data",
+    "meta_ads_api/meta_adset_spend": "Meta Ads ad-set data",
     "hubspot/contacts":     "Contacts data",
     "hubspot/deals":        "Deals data",
     "gclid/matches":        "Attribution data",
