@@ -17,14 +17,22 @@ a stored Google code always wins — is ``db.geo_identity_sql.criterion_identity
 
 Validation. An entry is kept only when:
 
-* its key is a Google criterion id (digits);
+* its key is a Google criterion id (ASCII digits);
 * ``code`` is an officially assigned ISO 3166-1 alpha-2 code
   (``analysis.iso_countries.ISO_COUNTRY_NAMES``);
-* ``approved`` is a calendar date and ``by`` is non-empty — a label nobody is
-  on record as approving is not an owner label.
+* ``approved`` is a calendar date that is not in the future and ``by`` is
+  non-empty — a label nobody is on record as approving, or one "approved"
+  on a day that has not happened, is not an owner label.
 
 Anything else is ignored with a logged warning. A missing or unreadable file
-means "no labels". Loading never raises: a config typo must not take a page
+means "no labels".
+
+A DUPLICATED KEY anywhere in the file means no labels at all (PR-ADS-170A-F1).
+YAML's default loader keeps the last of two equal keys and says nothing, so
+``"2192": CU`` followed by ``"2192": MX`` would label the criterion MX with
+no trace of the contradiction. The file is read with a loader that refuses a
+repeated key at any level (``"2192"`` and ``2192`` are the same key), and a
+file it refuses labels nothing: fail closed. Loading never raises: a config typo must not take a page
 down, and the fail-closed result of dropping a label is the pre-170A
 behaviour ("(unresolved location)").
 
@@ -35,7 +43,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from analysis.iso_countries import ISO_COUNTRY_NAMES
@@ -67,6 +75,38 @@ def _approved_date(value) -> str | None:
         return None
 
 
+def _today() -> date:
+    """Today, UTC — the day an ``approved`` date may not be after."""
+    return datetime.now(tz=timezone.utc).date()
+
+
+def _strict_loader():
+    """A YAML SafeLoader that refuses a mapping with a repeated key.
+
+    Keys are compared as text, so ``"2192"`` and ``2192`` are one key. PyYAML's
+    own loaders silently keep the last value.
+    """
+    import yaml  # noqa: PLC0415
+
+    class _NoDuplicateKeys(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader, node, deep=False):
+        seen = set()
+        for key_node, _value in node.value:
+            key = str(loader.construct_object(key_node, deep=True))
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"duplicate key {key!r}", key_node.start_mark)
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+    _NoDuplicateKeys.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        lambda loader, node: construct_mapping(loader, node, deep=True))
+    return _NoDuplicateKeys
+
+
 def validate_owner_labels(raw) -> tuple:
     """``(labels, rejected)`` from the raw config mapping.
 
@@ -82,12 +122,15 @@ def validate_owner_labels(raw) -> tuple:
         return labels, [(CONFIG_KEY, "not a mapping of criterion id to label")]
     for key, entry in raw.items():
         criterion = str(key if key is not None else "").strip()
-        if not criterion.isdigit():
+        if not (criterion.isascii() and criterion.isdigit()):
+            # ASCII digits only: "٢١٩٢" is a number to str.isdigit() and is
+            # not a Google criterion id.
             rejected.append((repr(key), "criterion id is not a number"))
             continue
         if criterion in seen:
             # "2192" and 2192 are one criterion; two entries are a contradiction
-            # nothing here settles. Neither is applied.
+            # nothing here settles. Neither is applied. (The file loader already
+            # refuses this; a caller passing its own mapping gets the same rule.)
             rejected.append((criterion, "listed twice"))
             labels.pop(criterion, None)
             continue
@@ -106,6 +149,9 @@ def validate_owner_labels(raw) -> tuple:
         if not approved:
             rejected.append((criterion, f"approved {entry.get('approved')!r} is not a date"))
             continue
+        if approved > _today().isoformat():
+            rejected.append((criterion, f"approved {approved} is in the future"))
+            continue
         by = entry.get("by")
         by = by.strip() if isinstance(by, str) else ""
         if not by:
@@ -121,7 +167,9 @@ def _load(path: str) -> dict:
     try:
         import yaml  # noqa: PLC0415
         with open(path, encoding="utf-8") as fh:
-            doc = yaml.safe_load(fh) or {}
+            # Not yaml.safe_load: it collapses a duplicated key to its last
+            # value. A repeated key raises here, and the file labels nothing.
+            doc = yaml.load(fh, Loader=_strict_loader()) or {}  # noqa: S506 — a SafeLoader subclass
         raw = doc.get(CONFIG_KEY) if isinstance(doc, dict) else None
         if not isinstance(doc, dict):
             log.warning("[geo-owner-labels] %s is not a mapping; no criterion is "

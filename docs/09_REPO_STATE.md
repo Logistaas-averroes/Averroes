@@ -5331,12 +5331,22 @@ spend was in a window a lead country never seen in Google Ads spend read
   an unlisted code-less criterion (`2368`, say) resolves to nothing.
 - `analysis/geo_owner_labels.py` loads and validates it. An entry is ignored,
   with a logged warning, unless its key is a criterion id, `code` is in
-  `analysis/iso_countries.ISO_COUNTRY_NAMES`, `approved` is a date and `by` is
-  non-empty; one criterion listed twice is ignored. A missing, empty or
-  unparseable file means no labels. Loading never raises.
-- `db/geo_identity_sql.criterion_identity` is the one rule, used by every
-  reader (`fetch_geo_daily_spend_by_country`, `fetch_geo_criterion_identities`,
-  `fetch_geo_code_carriers`, `country_evidence_service.identify_spend_rows`):
+  `analysis/iso_countries.ISO_COUNTRY_NAMES`, `approved` is a date that is not
+  in the future and `by` is non-empty. A missing, empty or unparseable file
+  means no labels. **A key repeated anywhere in the file means no labels at
+  all** (see F1 below): the file is read with a loader that refuses duplicate
+  keys, because YAML's default keeps the last one silently. Loading never
+  raises.
+- `db/geo_identity_sql.criterion_identity` is the one rule, used by the
+  readers that NAME a country (`fetch_geo_daily_spend_by_country`,
+  `fetch_geo_criterion_identities`, `fetch_geo_code_carriers`,
+  `country_evidence_service.identify_spend_rows`). One geo reader does not use
+  it and is not changed: `fetch_geo_reconciliation_breakdown` (the geo
+  reconciliation panel's `unmapped_geo_native` / `null_country_rows`) counts
+  rows whose STORED `country_code` is NULL, so it still reports the two
+  criteria's rows as unknown-country. That is a true statement about storage —
+  Google sent no country and the label is never written — but it is not what
+  the country pages show for them. The rule:
   stored codes are judged first, exactly as before (one resolves; two that
   disagree resolve to nothing); only a criterion with NO stored code takes its
   owner label, with `provenance: "owner_labelled"`.
@@ -5390,7 +5400,9 @@ two approved entries; nothing is inferred from an id; a stored code beats the
 label and the mismatch is logged and returned; malformed entries and
 unreadable files are ignored without raising; the production shape through
 the real handler and `loadGeo` (Cuba `$10`, Iran `$4`, both "set by owner",
-no "(unresolved location)", no notice, Pakistan `$0`, total conserved, stored
+no "(unresolved location)", no notice, Pakistan `$0`, the Countries total
+identical before and after — on that page the label only moves spend between
+rows; on the two revenue pages the country rows RISE, see F1 — stored
 rows still NULL); an unlisted code-less criterion still unresolved and still
 withholding; the owner-labelled criterion as the carrier of its code; Google
 later reporting `2192` as Mexico; a malformed config through the page; the
@@ -5400,13 +5412,23 @@ Dashboard Countries; the UI helper evaluated in node.
 
 **Known gaps.**
 
-1. On Country Revenue & Spend and Dashboard Countries, countries are grouped on
-   the 96-market registry (`country_identity.SUPPORTED_COUNTRIES`, unchanged).
-   Iran is in it and is a market row. Cuba is not: its spend is in the
-   "Unknown / Unattributed country" residual on Country Revenue & Spend and on
-   no market row on Dashboard Countries — as for every Google country outside
-   the registry, and as it was before the label. Only the Countries page shows
-   a Cuba row.
+1. Country Revenue & Spend and Dashboard Countries group on the 96-market
+   registry (`country_identity.SUPPORTED_COUNTRIES`, unchanged). Iran is in it
+   and is a market row on both. Cuba is not, and nor is any other Google
+   country outside the registry:
+   - **Country Revenue & Spend** — its spend is on the one residual row
+     ("Unknown / Unattributed country"), as a named component
+     (`spend_components.outside_listed_markets`, with the country names), and
+     the Spend cell says so. Since F1 the geo shortfall is ADDED to it; before
+     F1 a shortfall overwrote it and that spend was on no row.
+   - **Dashboard Countries** — it is on no row and is not in the residual
+     tile (which stays the campaign-to-geo shortfall). The "Verified Geo
+     Spend" card is the listed markets' spend only; the payload says so
+     (`kpis.verified_spend_scope: "listed_markets"`) and states the amount
+     outside them (`kpis.spend_outside_listed_markets`), and the card prints
+     it. The page is not restructured: there is still no row for such a
+     country there.
+   Only the Countries page shows a Cuba row.
 2. A market row is marked by its country code. If a code were carried by both
    an owner-labelled criterion and a Google-named one, the row's note would
    cover spend of both. Production has no such code.
@@ -5416,3 +5438,69 @@ Dashboard Countries; the UI helper evaluated in node.
    read-only figures recorded for this task; the first production read should
    show Cuba and Iran rows on the Countries page for a window holding their
    spend, and `owner_labelled_geo.mismatches` empty.
+
+### F1 — review corrections (same PR)
+
+An independent review of the first commit (`2a42a7d`) found no blocker and
+five things to correct. All are in the second commit.
+
+1. **Spend dropped on Country Revenue & Spend (pre-existing; exposed here).**
+   `_build_db_rows` puts the spend of a country outside the listed markets on
+   the residual row. `_apply_geo_spend_residual` then set that row's `spend`
+   to the campaign-to-geo shortfall — written OVER it, not added. With a
+   shortfall (`reconciled_with_residual`) the rows summed to less than the
+   campaign total: campaign £113, geo UK £100 + Iran £4 + Cuba £3 + Fiji £2 →
+   rows summed to £108. The first commit's text "never dropped / every pound on
+   exactly one row" was true only with no shortfall. Now the shortfall is
+   added; the row carries `spend_components: {outside_listed_markets,
+   country_unidentified, geo_unassigned}` (its `spend` is their sum),
+   `outside_listed_market_countries`, `spend_geo_unassigned_native/_usd` (the
+   shortfall alone) and `spend_native/_usd` of the whole row; an unknown part
+   makes the sum `None`. The row's notes no longer say "country could not be
+   identified" beside spend whose country is known: that component reads
+   "known but … not one of the listed markets". `spend_truth.
+   country_residual_native` is unchanged (the shortfall).
+   **So "identical totals before and after" holds for the Countries page
+   only.** On Country Revenue & Spend the rows' sum rises (to the campaign
+   total), and on Dashboard Countries the spend card rises by Iran's spend —
+   both because that spend was previously on no row.
+2. **A duplicated YAML key failed open.** `yaml.safe_load` keeps the last of
+   two equal keys: `"2192": CU` then `"2192": MX` labelled it MX. The file is
+   now read with a SafeLoader subclass that raises on a repeated key at any
+   level (`"2192"` and `2192` are one key); such a file labels nothing and
+   logs why. Also rejected, per entry: an `approved` date in the future, and a
+   key that is not ASCII digits.
+3. **A mismatch was only in the payload and one log line.** It is now a
+   visible notice on the Countries page (`#geo-owner-label-notice`), on
+   Country Revenue & Spend and on Dashboard Countries
+   (`ownerLabelMismatchNotice`), naming the location, the owner's code and the
+   Google code in use.
+4. **Provenance wherever the spend is shown.** The marker is also on the
+   Countries map hover, the Dashboard Countries bubble tooltip and the row
+   drawer. A published `$0` that stands only on the owner's labels says so in
+   both of its forms — the country's own carrier is owner-labelled, or
+   labelled spend in the window would otherwise have no country — through one
+   field, `zero_rests_on_owner_labels`, and one marker ("owner label"). A
+   country Google keys under a criterion of its own is not marked: its zero
+   would stand without any label. `country_provenance` stays the statement
+   "this row's COUNTRY was set by the owner" and is not put on a row such as
+   Pakistan.
+5. This section's wording (above) on duplicates, on which readers use the
+   rule, on totals, and known gap 1.
+
+**F1 known gaps.**
+
+- **No audit reports a mismatch.** The certification audits
+  (`scripts/audit_platform_certification.AUDITS`) cover the revenue/customer
+  reader contract, closed-won truth, deal-company associations, CRM truth
+  exceptions, marketing cohorts and Campaign Evidence. None reads geo spend or
+  country identity, and `audit_production_reality` is a legacy-table freshness
+  diagnostic. No audit was invented for this: a geo/country truth audit is
+  its own piece of work. Until one exists a mismatch is visible on the three
+  pages and in the log, and certification is silent about it.
+- The Dashboard Countries regional mix is a per-region aggregate with no
+  country names; it carries no per-country marker.
+- The zero marker needs the carrier read; if that read fails the zero is
+  marked as resting on the labels (not proven independent), which can over-
+  disclose.
+- F1 tests: 9 more cases in the same module (29 in all).

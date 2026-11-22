@@ -332,8 +332,16 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   `google_ads_geo_daily_spend`**, so Google's later answer is stored and
   wins. To label another criterion, add an entry (`code`, `approved`, `by`)
   to that file and a line to `docs/09` — only with the owner's approval. A
-  malformed entry is ignored with a warning. Never add a rule that derives a
+  malformed entry is ignored with a warning, and a key repeated anywhere in
+  the file means NO labels at all (`yaml.safe_load` would keep the last one
+  silently — never read that file with it). Never add a rule that derives a
   code from the id.
+
+  On Country Revenue & Spend the residual row's `spend` is a SUM of named
+  parts (`spend_components`): countries outside the 96 listed markets, spend
+  whose country text names none, and the campaign-to-geo shortfall.
+  `_apply_geo_spend_residual` ADDS the shortfall; it used to write over the
+  row and drop the rest (PR-ADS-170A-F1). Never assign to that row's spend.
   The sync names criteria from storage first, asks Google only about the
   rest, never writes NULL over a stored code, and a failed lookup makes the
   run `partial` (`country_lookup_failed`) — the chunk stays `verified`

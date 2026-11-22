@@ -596,7 +596,16 @@ def build_country_evidence(*, days: int | None, window_key: str,
         # PR-ADS-170A: a zero that stands because the country's ONE carrier is
         # an owner-labelled criterion stands on the owner's word; say so.
         carried_by_owner: dict = {}
-        if covered and unresolved_spend_present and not conflicting_criteria:
+        # PR-ADS-170A-F1: the same disclosure for the OTHER zero that rests on
+        # the owner's word. With owner-labelled spend in the window, a
+        # spend-less country's $0 stands only because the label took that
+        # spend out of "no country" — unless Google itself keys the country
+        # under a criterion of its own (``carried_by_google``), in which case
+        # the zero would stand without any label.
+        owner_in_window = sorted(c["criterion_id"] for c in owner_geo["criteria"])
+        carried_by_google: set = set()
+        if covered and (unresolved_spend_present or owner_in_window) \
+                and not conflicting_criteria:
             candidates = sorted({
                 row["country_code"] for row in joined.values()
                 if row["country_resolved"] and row["country_code"]
@@ -609,6 +618,8 @@ def build_country_evidence(*, days: int | None, window_key: str,
                             carried.add(code)
                             if holders[0].get("provenance") == OWNER_LABELLED:
                                 carried_by_owner[code] = holders[0].get("criterion_id")
+                            else:
+                                carried_by_google.add(code)
     withheld_zero: list = []
     rows = []
     for row in joined.values():
@@ -616,6 +627,7 @@ def build_country_evidence(*, days: int | None, window_key: str,
         fx_ok = row.pop("_spend_published")
         no_country = row.pop("_no_country")
         owner_criteria = set(row.pop("_owner_criteria"))
+        zero_rests_on: set = set()
         leads = _lead_figures(row.pop("_lead_parts"))
         if not leads_available:
             leads = {k: (None if k != "lead_country_spellings" else [])
@@ -640,6 +652,11 @@ def build_country_evidence(*, days: int | None, window_key: str,
             spend_usd, status, reason = 0.0, "published", None
             if row["country_code"] in carried_by_owner:
                 owner_criteria.add(carried_by_owner[row["country_code"]])
+                zero_rests_on.add(carried_by_owner[row["country_code"]])
+            if row["country_code"] not in carried_by_google:
+                # Not provably independent of the labels (the carrier read
+                # failing counts as not proven): disclose.
+                zero_rests_on.update(owner_in_window)
         elif no_country:
             spend_usd, status, reason = None, "unavailable", R_NO_COUNTRY_RECORDED
         else:
@@ -651,6 +668,13 @@ def build_country_evidence(*, days: int | None, window_key: str,
                      # because the owner labelled the Google criterion.
                      "country_provenance": OWNER_LABELLED if owner_criteria else None,
                      "owner_labelled_criteria": sorted(c for c in owner_criteria if c),
+                     # PR-ADS-170A-F1: the owner-labelled criteria a published
+                     # $0 depends on — the country's own owner-labelled carrier
+                     # and/or labelled spend in the window that would otherwise
+                     # be "no country" and withhold this zero. [] when the zero
+                     # would stand without any owner label, and for every row
+                     # that is not a zero.
+                     "zero_rests_on_owner_labels": sorted(c for c in zero_rests_on if c),
                      **leads})
     rows.sort(key=lambda r: (r["spend_usd"] is None, -(r["spend_usd"] or 0.0),
                              -(r.get("total_leads") or 0), r["country"]))

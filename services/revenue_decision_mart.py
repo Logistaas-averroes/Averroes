@@ -701,8 +701,12 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
     for r in rows or []:
         row = {**r, **{k: None for k in figures if k in r}, "metrics": None,
                "withheld_reason": reason}
+        # PR-ADS-170A-F1: the residual row's spend parts are withheld with it.
+        for k in ("spend_components", "spend_geo_unassigned_usd"):
+            if k in row:
+                row[k] = None
         if not fx_only:
-            for k in ("spend", "spend_native"):
+            for k in ("spend", "spend_native", "spend_geo_unassigned_native"):
                 if k in row:
                     row[k] = None
         elif "spend_native" in r:
