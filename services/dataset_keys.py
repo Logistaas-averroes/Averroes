@@ -75,6 +75,9 @@ VALID_SYNC_DATASETS: frozenset[str] = frozenset({
     "canonical_spend", "canonical_geo",
     # PR-ADS-171A — Meta Ads campaign-daily spend
     "meta_campaign_spend",
+    # PR-ADS-171C — Meta Ads ad-set daily detail (spend, delivery, Meta's own
+    # lead-related action counts). A detail of the campaign rows above.
+    "meta_adset_spend",
     # CRM
     "contacts", "deals", "matches", "contact_funnel", "lifecycle_events",
     "deal_ledger", "source_classification",
@@ -181,6 +184,10 @@ CANONICAL_GEO_SCOPE = "geo_daily_spend"
 # different platform and a different credential than `google_ads_api`.
 META_ADS_SOURCE = "meta_ads_api"
 META_ADS_SPEND_DATASET = "meta_campaign_spend"
+# PR-ADS-171C — the ad-set detail of that spend. Its own dataset key, batch
+# and ledger, so a failed ad-set read is recorded against the ad-set detail
+# and never against the campaign spend it is a detail of.
+META_ADS_ADSET_DATASET = "meta_adset_spend"
 
 # Daily reference FX rates (GBP→USD), required before any USD figure is safe.
 FX_SOURCE = "fx"
@@ -221,7 +228,7 @@ __all__ = [
     "KEYWORD_FACTS_SOURCE", "KEYWORD_FACTS_DATASET",
     "SEARCH_TERMS_SOURCE", "SEARCH_TERMS_DATASET",
     "LEGACY_KEYWORD_SNAPSHOT_SOURCE", "LEGACY_KEYWORD_SNAPSHOT_DATASET",
-    "META_ADS_SOURCE", "META_ADS_SPEND_DATASET",
+    "META_ADS_SOURCE", "META_ADS_SPEND_DATASET", "META_ADS_ADSET_DATASET",
     "FX_SOURCE", "FX_DAILY_RATES_DATASET",
     "DEAL_LEDGER_SOURCE", "DEAL_LEDGER_DATASET",
     "DEAL_COMPANY_ASSOCIATION_SOURCE", "DEAL_COMPANY_ASSOCIATION_DATASET",

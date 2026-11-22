@@ -157,6 +157,9 @@ class TestSummaryShape:
             # PR-ADS-171A: Meta Ads campaign-daily spend, right after FX.
             # Read-only (GET); `skipped` here, where Meta is not configured.
             "meta_ads_api/meta_campaign_spend",
+            # PR-ADS-171C: its ad-set detail, the step right after it.
+            # `skipped` here too.
+            "meta_ads_api/meta_adset_spend",
         }
         assert set(result["datasets"].keys()) == expected
 

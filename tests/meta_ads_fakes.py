@@ -18,6 +18,16 @@ FAILS the request (AssertionError) if any token it knows is anywhere but the
 ``Authorization`` header, if an account is called with another account's
 token, or if the URL requested is one it handed out as ``paging.next``.
 
+PR-ADS-171C — ad sets. An account also holds AD-SET rows (``adset``): each
+is one ad set on one day under one campaign, and rolls up into that
+campaign's row, so the three levels agree unless a test breaks one on
+purpose (``adset_hidden`` — an ad set ``level=adset`` leaves out;
+``roll_up=False`` — a campaign row that does not follow). As Meta does, the
+fake serves the name an ad set or campaign has NOW on every row, whatever the
+row's day (``rename_adset`` / ``rename_campaign``). A row carries ``actions``
+only if it was given some: ``NO_ACTIONS`` (the default) omits the key, and
+``[]`` or a list is served as it is.
+
 Identities are production-shaped: all-digit account ids, 18-digit campaign
 ids, decimal-string spend. The default account is the production one as Meta
 described it on 2026-11-22: currency GBP, time zone America/Los_Angeles, API
@@ -41,6 +51,21 @@ VERSION = "v27.0"
 CAMPAIGN_A = "120211234567890101"
 CAMPAIGN_B = "120211234567890102"
 CAMPAIGN_C = "120211234567890103"
+
+# PR-ADS-171C — ad sets (18-digit ids, like campaigns).
+ADSET_A1 = "120219876543210001"           # under CAMPAIGN_A
+ADSET_A2 = "120219876543210002"           # under CAMPAIGN_A
+ADSET_B1 = "120219876543210003"           # under CAMPAIGN_B
+ADSET_ARCHIVED = "120219876543210004"     # under CAMPAIGN_A, archived since
+#: A row given no ``actions``: the key is absent from the response.
+NO_ACTIONS = object()
+
+
+def actions(**counts) -> list:
+    """An Insights ``actions`` list. Keyword names use ``__`` for ``.``:
+    ``actions(lead=3, onsite_conversion__lead_grouped=3, link_click=40)``."""
+    return [{"action_type": name.replace("__", "."), "value": str(value)}
+            for name, value in counts.items()]
 
 
 class FakeResponse:
@@ -84,6 +109,63 @@ class FakeAccount:
         # Served for EVERY request on this account while set (a suspended or
         # closed account, a removed permission).
         self.refusal = None
+        # PR-ADS-171C. {(adset_id, "YYYY-MM-DD"): {campaign_id, spend,
+        # impressions, clicks, actions, attribution_setting}}
+        self.adset_rows: dict = {}
+        self.adset_hidden: set = set()    # held, not returned at level=adset
+        self.adset_names: dict = {}       # the name each ad set has NOW
+        self.campaign_names: dict = {}    # the name each campaign has NOW
+        self.adset_refusal = None         # served for level=adset only
+
+    def adset(self, adset_id, campaign_id, day, spend, *, name=None,
+              campaign_name=None, impressions=1000, clicks=25,
+              actions=NO_ACTIONS, attribution_setting="7d_click_1d_view",
+              roll_up=True):
+        """One ad set on one day. Rolls up into its campaign's row unless
+        ``roll_up`` is False."""
+        day = str(day)
+        self.adset_rows[(adset_id, day)] = {
+            "campaign_id": campaign_id, "spend": str(spend),
+            "impressions": None if impressions is None else str(impressions),
+            "clicks": None if clicks is None else str(clicks),
+            "actions": actions, "attribution_setting": attribution_setting}
+        if name is not None:
+            self.adset_names[adset_id] = name
+        self.adset_names.setdefault(adset_id, f"Ad set {adset_id[-2:]}")
+        if campaign_name is not None:
+            self.campaign_names[campaign_id] = campaign_name
+        self.campaign_names.setdefault(campaign_id, "Lead Gen — MENA")
+        if roll_up:
+            self.roll_up(campaign_id, day)
+        return self
+
+    def roll_up(self, campaign_id, day):
+        """Make the campaign row of ``day`` the sum of its ad-set rows."""
+        parts = [r for (_, d), r in self.adset_rows.items()
+                 if d == day and r["campaign_id"] == campaign_id]
+        if not parts:
+            self.rows.pop((campaign_id, day), None)
+            return self
+        total = sum((Decimal(r["spend"]) for r in parts), Decimal("0"))
+        self.spend(campaign_id, day, f"{total:.2f}",
+                   name=self.campaign_names.get(campaign_id, "Lead Gen — MENA"),
+                   impressions=sum(int(r["impressions"] or 0) for r in parts),
+                   clicks=sum(int(r["clicks"] or 0) for r in parts))
+        return self
+
+    def remove_adset(self, adset_id, day, roll_up=True):
+        row = self.adset_rows.pop((adset_id, str(day)), None)
+        if row and roll_up:
+            self.roll_up(row["campaign_id"], str(day))
+        return self
+
+    def rename_adset(self, adset_id, name):
+        self.adset_names[adset_id] = name
+        return self
+
+    def rename_campaign(self, campaign_id, name):
+        self.campaign_names[campaign_id] = name
+        return self
 
     def spend(self, campaign_id, day, spend, name="Lead Gen — MENA",
               impressions=1000, clicks=25):
@@ -228,6 +310,31 @@ class FakeGraph:
             data = [{"spend": str(total), "date_start": day, "date_stop": day,
                      "account_currency": currency}
                     for day, total in sorted(by_day.items())]
+        elif level == "adset":
+            # PR-ADS-171C. The ad set's and the campaign's CURRENT name on
+            # every row; `actions` only where the row has some.
+            assert str(params.get("use_unified_attribution_setting")) == "true"
+            if account.adset_refusal is not None:
+                return account.adset_refusal
+            data = []
+            for day, adset_id in sorted((d, a) for (a, d) in account.adset_rows
+                                        if since <= d <= until
+                                        and (a, d) not in account.adset_hidden):
+                row = account.adset_rows[(adset_id, day)]
+                full = {"adset_id": adset_id,
+                        "adset_name": account.adset_names.get(adset_id),
+                        "campaign_id": row["campaign_id"],
+                        "campaign_name": account.campaign_names.get(
+                            row["campaign_id"]),
+                        "spend": row["spend"], "impressions": row["impressions"],
+                        "clicks": row["clicks"],
+                        "attribution_setting": row["attribution_setting"],
+                        "account_currency": currency,
+                        "date_start": day, "date_stop": day}
+                if row["actions"] is not NO_ACTIONS:
+                    full["actions"] = row["actions"]
+                data.append({k: v for k, v in full.items()
+                             if k in fields and v is not None})
         else:
             assert level == "campaign", level
             keys = sorted(((day, cid) for (cid, day) in account.rows
@@ -236,7 +343,9 @@ class FakeGraph:
             data = []
             for day, cid in keys:
                 row = account.rows[(cid, day)]
-                full = {"campaign_id": cid, "campaign_name": row["name"],
+                full = {"campaign_id": cid,
+                        "campaign_name": account.campaign_names.get(
+                            cid, row["name"]),
                         "spend": row["spend"], "impressions": row["impressions"],
                         "clicks": row["clicks"], "account_currency": currency,
                         "date_start": day, "date_stop": day}

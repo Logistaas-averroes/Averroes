@@ -105,6 +105,11 @@ refuses any other method. Prohibited, as for Google Ads:
 - start an asynchronous report run (it is a POST)
 - any call with a method other than GET
 
+PR-ADS-171C reads ad-set rows through the same GET-only request primitive
+(`level=adset` on the Insights edge). It needs only `ads_read`; it does not
+use the Leads edge (`leads_retrieval`) and reads no lead's personal data —
+only Meta's aggregate action counts per ad set per day.
+
 ### HubSpot
 
 - create contacts

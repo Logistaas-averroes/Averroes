@@ -5,6 +5,7 @@
     python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --dry-run
     python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --resume
     python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --account 944370805110952
+    python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset
 
 Every configured ad account is backfilled, one after another (``--account``
 names one, and may be repeated). For each, the range is cut at calendar-month
@@ -24,6 +25,18 @@ no ads in a month is recorded as a verified zero in seconds.
                spend to zero is refused (``meta_restatement_implausible``) and
                changes nothing. Pass this ONLY after checking in Meta that the
                day really has no spend. The daily sync has no such switch.
+
+``--level adset``  (PR-ADS-171C) Backfill the AD-SET detail instead: one row
+               per ad set per day — spend, impressions, clicks and Meta's own
+               lead-related action counts — reconciled per day and campaign to
+               the campaign rows ALREADY stored. Run the campaign level (the
+               default) for the same range first: a month whose campaign level
+               is not verified fails ``meta_adset_campaign_base_unverified``
+               and stores nothing. It writes only the two ad-set tables and
+               cannot change the campaign rows, their ledger or an account's
+               sync state. ``--dry-run``, ``--resume``, ``--account`` and
+               ``--to`` mean the same. Without ``--level`` this command does
+               exactly what it did before.
 
 An account stops at its first failed month; the others still run.
 
@@ -61,6 +74,10 @@ def _parse(argv=None) -> argparse.Namespace:
                         default=None, metavar="ID",
                         help="one configured ad account id (repeatable; "
                              "default: every configured account)")
+    parser.add_argument("--level", choices=("campaign", "adset"),
+                        default="campaign",
+                        help="campaign (default) or adset: the ad-set detail "
+                             "of months whose campaign level is verified")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--accept-zero-restatement", action="store_true",
@@ -91,9 +108,11 @@ def main(argv=None) -> int:
                               "error": f"{len(invalid)} --account value(s) "
                                        "are not an ad account id"}, indent=2))
             return 1
+    extra = {"level": "adset"} if args.level == "adset" else {}
     result = meta.run_backfill(args.date_from, args.date_to, account_ids=accounts,
                                dry_run=args.dry_run, resume=args.resume,
-                               accept_zero_restatement=args.accept_zero_restatement)
+                               accept_zero_restatement=args.accept_zero_restatement,
+                               **extra)
     print(json.dumps(result, indent=2, default=str))
     status = result.get("status")
     if status == "success":

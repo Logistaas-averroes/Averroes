@@ -25,6 +25,7 @@ from services.dataset_keys import (
     CANONICAL_SPEND_SOURCE as _SPEND_SOURCE,
     META_ADS_SOURCE as _META_ADS_SOURCE,
     META_ADS_SPEND_DATASET as _META_ADS_SPEND_DATASET,
+    META_ADS_ADSET_DATASET as _META_ADS_ADSET_DATASET,
 )
 
 
@@ -261,6 +262,18 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "dataset": _META_ADS_SPEND_DATASET,
         "stale_threshold_days": 3,
         "depends_on": [],
+        "page": None,
+    },
+    # PR-ADS-171C: the ad-set detail of that spend. Its own pair, stamped by
+    # the sibling step, so its freshness is its own and the campaign spend's
+    # is never moved by it. No page reads it yet.
+    "meta_ads_adsets": {
+        "table": "meta_ads_adset_daily_spend",
+        "date_column": "spend_date",
+        "source": _META_ADS_SOURCE,
+        "dataset": _META_ADS_ADSET_DATASET,
+        "stale_threshold_days": 3,
+        "depends_on": ["meta_ads_spend"],
         "page": None,
     },
     # PR-ADS-153B: canonical CRM funnel spine. `source`/`dataset` MUST equal the

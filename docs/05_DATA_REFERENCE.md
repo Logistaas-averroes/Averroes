@@ -430,6 +430,19 @@ Token in the `Authorization: Bearer` header. Spend is a decimal string
 **Dataset key:** `(meta_ads_api, meta_campaign_spend)`, from
 `services/dataset_keys.py`; freshness registry key `meta_ads_spend`.
 
+**Ad-set detail (PR-ADS-171C, `docs/53_META_ADS_ADSET_DETAIL.md`).**
+
+| Table | Holds |
+|---|---|
+| `meta_ads_adset_daily_spend` | one row per account, ad set and account-local day: ids, labels, `cost_micros`, `impressions`, `clicks`, `meta_reported_lead_actions` (JSONB: Meta's own count per lead-related `action_type`; NULL = no `actions` on the row = unknown), `attribution_setting` |
+| `meta_ads_adset_coverage` | the ad-set fetch ledger (`verified` / `failed`), separate from the campaign ledger |
+
+Dataset key `(meta_ads_api, meta_adset_spend)`; freshness registry key
+`meta_ads_adsets`. Insights fields: `adset_id`, `adset_name`, `campaign_id`,
+`campaign_name`, `spend`, `impressions`, `clicks` (all clicks — not
+`inline_link_clicks`), `actions`, `attribution_setting`. `adset_id` and
+`campaign_id` are the identity; the names are labels and are never joined on.
+
 **Days are each account's own.** At the 06:00 UTC sync the Amman account's
 yesterday has ended; the Los Angeles account's has not (it ends at 08:00 UTC,
 07:00 in summer), so its last complete day is one date earlier.

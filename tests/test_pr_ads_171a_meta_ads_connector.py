@@ -1263,7 +1263,10 @@ def test_51_the_pair_is_registered_once_and_every_side_imports_it():
     assert (config["source"], config["dataset"]) == pair
     assert config["page"] is None and config["depends_on"] == []
     from services import system_status_service as status
-    assert status.SOURCE_DEFINITIONS["meta_ads_api"]["datasets"] == ["meta_ads_spend"]
+    # PR-ADS-171C registered the ad-set detail beside it, as a second dataset
+    # of the same source; the campaign spend's own entry is unchanged.
+    assert status.SOURCE_DEFINITIONS["meta_ads_api"]["datasets"] == [
+        "meta_ads_spend", "meta_ads_adsets"]
     assert status.PIPELINE_DEPENDENCIES["meta_ads_spend"]["page"] is None
     # Not a core dataset: an unconnected platform is not a critical failure.
     assert "meta_ads_spend" not in status.CORE_DATASETS

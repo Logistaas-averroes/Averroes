@@ -1,7 +1,9 @@
 """Meta (Facebook/Instagram) Marketing API connector — READ ONLY (PR-ADS-171A).
 
 Reads each configured ad account's description, its daily spend and (for the
-smoke test) how many of its campaigns are active. Nothing else.
+smoke test) how many of its campaigns are active. PR-ADS-171C adds the same
+spend per AD SET per day, with Meta's own lead-related action counts
+(``iter_adset_daily``; docs/53). Nothing else.
 
 Governance
 ----------
@@ -103,6 +105,26 @@ ACCOUNT_FIELDS = ("account_id,name,currency,timezone_name,"
 CAMPAIGN_FIELDS = ("campaign_id,campaign_name,spend,impressions,clicks,"
                    "account_currency,date_start,date_stop")
 ACCOUNT_DAY_FIELDS = "spend,account_currency,date_start,date_stop"
+#: PR-ADS-171C — one row per ad set per day. ``clicks`` is Meta's "number of
+#: clicks on your ads" (all clicks) — the same field the campaign rows store —
+#: not ``inline_link_clicks``, which Meta reports on a fixed 1-day-click
+#: window. ``actions`` carries Meta's own attributed action counts, one entry
+#: per ``action_type``; ``attribution_setting`` is the ad set's own setting.
+ADSET_FIELDS = ("adset_id,adset_name,campaign_id,campaign_name,spend,"
+                "impressions,clicks,actions,attribution_setting,"
+                "account_currency,date_start,date_stop")
+ADSET_SOURCE_QUERY_VERSION = "meta_insights_adset_daily_v1"
+#: Sent with the ad-set query so ``actions`` are counted under each ad set's
+#: own attribution setting (what Ads Manager shows), and the setting is
+#: returned beside them. Meta: "your ads results will be shown using unified
+#: attribution settings defined at ad set level".
+ADSET_PARAMS = {"use_unified_attribution_setting": "true"}
+#: An ``action_type`` is kept when its name contains this, in any letter case.
+#: A rule, not a list: Meta's reference does not enumerate the lead action
+#: types, so no list written here could be shown to be complete.
+LEAD_ACTION_MARKER = "lead"
+MAX_LEAD_ACTION_TYPES = 50
+MAX_ACTION_TYPE_LENGTH = 120
 
 _VERSION_RE = re.compile(r"^v\d{1,3}\.\d{1,2}$")
 _ACCOUNT_RE = re.compile(r"^\d{1,32}$")
@@ -685,7 +707,8 @@ def _pages(account_id: str, edge: str, params: dict,
 
 
 def _insight_pages(account_id: str, level: str, fields: str, start: str,
-                   end: str, stats: Optional[dict] = None) -> Iterator[list]:
+                   end: str, stats: Optional[dict] = None,
+                   extra: Optional[dict] = None) -> Iterator[list]:
     """Every page of one Insights query for one configured account."""
     account_id = _require_account(account_id)
     params = {
@@ -693,6 +716,7 @@ def _insight_pages(account_id: str, level: str, fields: str, start: str,
         "time_range": json.dumps({"since": str(start), "until": str(end)},
                                  separators=(",", ":")),
         "limit": page_limit(),
+        **(extra or {}),
     }
     return _pages(account_id, "insights", params, stats)
 
@@ -769,3 +793,114 @@ def fetch_account_daily_spend(account_id: str, start: str, end: str,
                                   or None),
             })
     return out
+
+
+# ── PR-ADS-171C — ad sets ─────────────────────────────────────────────────
+
+def is_lead_action_type(action_type) -> bool:
+    return LEAD_ACTION_MARKER in str(action_type or "").lower()
+
+
+def meta_reported_lead_actions(raw: dict) -> Optional[dict]:
+    """The lead-related entries of one Insights row's ``actions``.
+
+    * ``None`` — the row has NO ``actions`` key. Meta said nothing about
+      actions for that row: the counts are UNKNOWN, not zero.
+    * ``{}`` — ``actions`` is present and holds no lead-related type.
+    * ``{action_type: count}`` — every entry whose type contains "lead".
+
+    The types OVERLAP (Meta: the values in ``actions`` "are hierarchical and
+    include detailed actions"), so the counts are kept one per type and are
+    never added together here or anywhere else.
+
+    Raises :class:`MetaAdsMalformedResponse` for an ``actions`` that is not a
+    list of ``{action_type, value}``, a type given twice, or a count that is
+    not a non-negative whole number: an unreadable count is not a zero.
+    """
+    if "actions" not in raw:
+        return None
+    actions = raw["actions"]
+    if not isinstance(actions, list):
+        raise MetaAdsMalformedResponse("an Insights row's actions is not a list")
+    out, seen = {}, set()
+    for entry in actions:
+        kind = (str(entry.get("action_type") or "").strip()
+                if isinstance(entry, dict) else "")
+        if not kind or len(kind) > MAX_ACTION_TYPE_LENGTH:
+            raise MetaAdsMalformedResponse(
+                "an Insights action has no readable action_type")
+        if kind in seen:
+            raise MetaAdsMalformedResponse(
+                "an Insights row repeats an action_type")
+        seen.add(kind)
+        if not is_lead_action_type(kind):
+            continue
+        value = entry.get("value")
+        text = str(value).strip() if isinstance(value, (str, int)) \
+            and not isinstance(value, bool) else ""
+        if not re.fullmatch(r"\d{1,12}", text):
+            raise MetaAdsMalformedResponse(
+                "an Insights action count is not a whole number")
+        out[kind] = int(text)
+    if len(out) > MAX_LEAD_ACTION_TYPES:
+        raise MetaAdsMalformedResponse(
+            "an Insights row carries an implausible number of action types")
+    return out
+
+
+def iter_adset_daily(account_id: str, start: str, end: str,
+                     stats: Optional[dict] = None) -> Iterator[list]:
+    """Ad-set-day rows of one account for ``[start, end]`` (that account's
+    local days), a page at a time. Each row: ``{account_id, adset_id,
+    adset_name, campaign_id, campaign_name, spend_date, cost_micros,
+    spend_raw, currency_code, impressions, clicks, meta_reported_lead_actions,
+    attribution_setting}``.
+
+    ``adset_name`` / ``campaign_name`` are the names Meta holds NOW, on every
+    row whatever its day: labels, never identities. ``meta_reported_lead_actions`` is
+    :func:`meta_reported_lead_actions` (None = unknown). ``impressions`` / ``clicks`` are
+    None when the row does not carry them.
+
+    Raises on an ad-set-day that appears twice across the pages, a row with
+    no ad set id or no campaign id, a day outside the range, and any row that
+    cannot be read.
+    """
+    account_id = _require_account(account_id)
+    seen: set = set()
+    for data in _insight_pages(account_id, "adset", ADSET_FIELDS, start, end,
+                               stats, ADSET_PARAMS):
+        page = []
+        for raw in data:
+            adset_id = str(raw.get("adset_id") or "").strip()
+            campaign_id = str(raw.get("campaign_id") or "").strip()
+            if not adset_id or not campaign_id:
+                raise MetaAdsMalformedResponse(
+                    "an Insights row has no adset_id or no campaign_id")
+            day = _day(raw)
+            if not (str(start) <= day <= str(end)):
+                raise MetaAdsMalformedResponse(
+                    f"an Insights row is dated {day}, outside {start}..{end}")
+            if (adset_id, day) in seen:
+                raise MetaAdsMalformedResponse(
+                    f"ad set {adset_id} on {day} was returned twice")
+            seen.add((adset_id, day))
+            name, campaign_name = raw.get("adset_name"), raw.get("campaign_name")
+            setting = raw.get("attribution_setting")
+            page.append({
+                "account_id": account_id, "adset_id": adset_id,
+                "adset_name": (str(name).strip() or None) if name is not None else None,
+                "campaign_id": campaign_id,
+                "campaign_name": (str(campaign_name).strip() or None)
+                if campaign_name is not None else None,
+                "spend_date": day,
+                "cost_micros": spend_to_micros(raw.get("spend")),
+                "spend_raw": str(raw.get("spend")),
+                "currency_code": (str(raw.get("account_currency") or "").strip().upper()
+                                  or None),
+                "impressions": _count(raw.get("impressions")),
+                "clicks": _count(raw.get("clicks")),
+                "meta_reported_lead_actions": meta_reported_lead_actions(raw),
+                "attribution_setting": (str(setting).strip()[:80] or None)
+                if isinstance(setting, str) else None,
+            })
+        yield page

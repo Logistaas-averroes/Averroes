@@ -395,6 +395,8 @@ def test_5b_the_scheduler_pairs_match_what_it_actually_stamps():
         # below (declared == stamped) is unchanged.
         "META_ADS_SOURCE": dataset_keys.META_ADS_SOURCE,
         "META_ADS_SPEND_DATASET": dataset_keys.META_ADS_SPEND_DATASET,
+        # PR-ADS-171C: the ad-set detail's pair, stamped by its own step.
+        "META_ADS_ADSET_DATASET": dataset_keys.META_ADS_ADSET_DATASET,
     }
 
     def _value(node):

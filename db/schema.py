@@ -2574,6 +2574,80 @@ CREATE TABLE IF NOT EXISTS meta_ads_account_sync_state (
   CONSTRAINT ck_meta_account_sync_status
     CHECK (last_status IN ('success', 'partial', 'failed'))
 );
+
+-- ============================================================================
+-- PR-ADS-171C — Meta Ads AD-SET daily detail. Two tables, written only by the
+-- ad-set sync, and NEVER read or written by the campaign-level sync above:
+-- the campaign tables stay the published base, and nothing that happens to
+-- these two can change what the campaign ledger says.
+-- ============================================================================
+
+-- One row per (account, ad set, account-local day). The ids are the identity.
+-- adset_name / campaign_name are LABELS: the name Meta held when this row was
+-- last fetched (Insights returns the current name on every row, whatever its
+-- day), never a join key. A range is REPLACED, never merged.
+--
+-- meta_reported_lead_actions is Meta's OWN attributed action counts for the action types
+-- whose name contains "lead", one entry per action_type, under the ad set's
+-- attribution setting. NULL = the row carried no `actions` key (unknown, not
+-- zero); '{}' = `actions` was present and held no lead type. The types
+-- overlap, so they are never summed. They are not contacts and not CRM leads.
+CREATE TABLE IF NOT EXISTS meta_ads_adset_daily_spend (
+  id                   BIGSERIAL PRIMARY KEY,
+  account_id           TEXT NOT NULL,
+  adset_id             TEXT NOT NULL,
+  adset_name           TEXT,
+  campaign_id          TEXT NOT NULL,
+  campaign_name        TEXT,
+  spend_date           DATE NOT NULL,
+  cost_micros          BIGINT NOT NULL,
+  spend_raw            TEXT,
+  currency_code        TEXT,
+  impressions          BIGINT,
+  clicks               BIGINT,
+  meta_reported_lead_actions         JSONB,
+  attribution_setting  TEXT,
+  sync_run_id          TEXT,
+  fetched_at           TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT ck_meta_adset_spend_non_negative CHECK (cost_micros >= 0),
+  CONSTRAINT ck_meta_adset_lead_actions_object
+    CHECK (meta_reported_lead_actions IS NULL OR jsonb_typeof(meta_reported_lead_actions) = 'object'),
+  UNIQUE (account_id, adset_id, spend_date)
+);
+CREATE INDEX IF NOT EXISTS idx_meta_adset_daily_spend_date
+  ON meta_ads_adset_daily_spend(spend_date);
+CREATE INDEX IF NOT EXISTS idx_meta_adset_daily_spend_campaign
+  ON meta_ads_adset_daily_spend(account_id, campaign_id, spend_date);
+
+-- The ad-set fetch ledger. Same rules as meta_ads_spend_coverage, and its own
+-- table so that a failed or missing ad-set read is a statement about ad-set
+-- detail only. A chunk is `verified` only when, for every day and campaign,
+-- the ad-set rows summed to the stored, verified campaign-level row.
+CREATE TABLE IF NOT EXISTS meta_ads_adset_coverage (
+  id                         BIGSERIAL PRIMARY KEY,
+  account_id                 TEXT NOT NULL,
+  chunk_start                DATE NOT NULL,
+  chunk_end                  DATE NOT NULL,
+  status                     TEXT NOT NULL,       -- verified | failed
+  rows_written               INTEGER NOT NULL DEFAULT 0,
+  cost_micros_total          BIGINT NOT NULL DEFAULT 0,
+  source_query_version       TEXT,
+  sync_run_id                TEXT,
+  account_time_zone          TEXT,
+  pages_read                 INTEGER,
+  http_status                INTEGER,
+  error_code                 TEXT,
+  error_message              TEXT,
+  days_restated              INTEGER,
+  max_restated_delta_micros  BIGINT,
+  rows_without_actions       INTEGER,
+  fetched_at                 TIMESTAMPTZ DEFAULT NOW(),
+  updated_at                 TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT ck_meta_adset_coverage_status CHECK (status IN ('verified', 'failed')),
+  UNIQUE (account_id, chunk_start, chunk_end)
+);
+CREATE INDEX IF NOT EXISTS idx_meta_adset_coverage_range
+  ON meta_ads_adset_coverage(chunk_start, chunk_end);
 """
 
 

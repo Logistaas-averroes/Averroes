@@ -8,6 +8,12 @@ Meta.
 This PR adds the data and its truth function. **No page shows Meta spend yet**
 — the Channels page is PR-ADS-171B. The System page gains one line.
 
+**PR-ADS-171C** adds the ad-set detail of this spend — one row per ad set per
+day, with Meta's own lead-related action counts — in its own tables, ledger
+and sync step: `docs/53_META_ADS_ADSET_DETAIL.md`. Nothing in this document
+changes. The campaign level described here stays the published base; the
+ad-set level is reconciled to it and can never demote it.
+
 ---
 
 ## 1. What is read, and how
@@ -397,6 +403,10 @@ The tests' fake API is built from exactly these two accounts.
 
 ### VERIFY — not checkable from the build environment
 
+(The ad-set level has its own list — what remains unverified about
+`level=adset`, the `actions` field and the lead action types — in `docs/53`
+§9. The items below are unchanged by PR-ADS-171C and all still open.)
+
 Each is either guarded by a failure that says so, or affects only what is
 noted. The smoke test (§10) exercises 1–8.
 
@@ -513,6 +523,10 @@ META_AD_ACCOUNT_ID_2    = 944370805110952
    Re-run with `--resume` after an interruption. Exit 0 = every month of both
    accounts verified. (The backfill does not change the dataset's freshness;
    the next daily sync does.)
+4a. **Ad sets** (PR-ADS-171C), after the campaign backfill above:
+   `python -m scripts.meta_ads_smoke_test --adsets`, then
+   `python -m scripts.backfill_meta_ads_spend --from <day> --level adset`.
+   See `docs/53` §10 for the expected output and what to send back.
 5. **Check** the System page: the "Meta Ads spend" line should read
    `Complete through <date>` with one line per account, each on its own date.
    The 06:00 UTC sync keeps it current.

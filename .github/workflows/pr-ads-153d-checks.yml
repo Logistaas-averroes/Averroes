@@ -123,6 +123,7 @@ jobs:
             tests/test_pr_ads_170a_owner_labelled_geo_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
+            tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
             tests/test_pr_ads_169a_certification_memory.py \
             tests/test_pr_ads_172a_campaign_evidence_memory.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
@@ -255,6 +256,13 @@ jobs:
                            # the refused identity change, the USD identity and
                            # missing-rate reads, and the System page row.
                            "tests.test_pr_ads_171a_meta_ads_pg_integration",
+                           # PR-ADS-171C. Meta ad-set detail on a real schema:
+                           # a failed ad-set read that leaves every campaign
+                           # table byte-identical, the atomic range replace,
+                           # NULL vs '{}' lead actions, and the read function
+                           # withholding ad-set rows that no longer sum to the
+                           # campaign rows.
+                           "tests.test_pr_ads_171c_meta_adsets_pg_integration",
                            # PR-ADS-169A. The certification's run row on a
                            # real schema: written before the audits start,
                            # finalized in place, a dead run closed NOT

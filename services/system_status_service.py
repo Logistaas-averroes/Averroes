@@ -118,6 +118,14 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "blocks": [],
     },
+    # PR-ADS-171C: the ad-set detail of that spend. No page reads it yet.
+    "meta_ads_adsets": {
+        "label": "Meta Ads Ad Sets",
+        "source": "meta_ads_api",
+        "page": None,
+        "depends_on": ["meta_ads_spend"],
+        "blocks": [],
+    },
     "keywords": {
         "label": "Keywords (legacy snapshot)",
         "source": "google_ads_api",
@@ -227,7 +235,7 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     # PR-ADS-171A: the Meta Marketing API — its own platform and credential.
     "meta_ads_api": {
         "label": "Meta Ads API",
-        "datasets": ["meta_ads_spend"],
+        "datasets": ["meta_ads_spend", "meta_ads_adsets"],
     },
     "hubspot": {
         "label": "HubSpot CRM",
