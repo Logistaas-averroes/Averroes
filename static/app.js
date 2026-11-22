@@ -1697,6 +1697,7 @@ function _sourceDisplayName(source) {
   // Windsor remains only as a legacy/deprecated source label.
   const names = {
     google_ads_api: "Google Ads API",
+    meta_ads_api: "Meta Ads API",
     hubspot: "HubSpot",
     gclid: "GCLID Attribution",
     windsor: "Windsor legacy",
@@ -1712,6 +1713,7 @@ function _datasetDisplayName(key) {
     "google_ads_api/keywords":     "Keyword data (legacy snapshot)",
     "google_ads_api/canonical_geo": "Country spend data (daily)",
     "google_ads_api/geo":          "Geo data (legacy monthly snapshot)",
+    "meta_ads_api/meta_campaign_spend": "Meta Ads spend data",
     "hubspot/contacts":     "Contacts data",
     "hubspot/deals":        "Deals data",
     "gclid/matches":        "Attribution data",
@@ -10122,13 +10124,19 @@ function systemCertCard(cert) {
 }
 
 // One line per source. Only status "current" is healthy; every other status,
-// including one this code has never seen, is a warning.
+// including one this code has never seen, is a warning. The one exception is
+// keyed: Meta Ads with status "not_connected" (never set up) is neutral.
 function systemSourceLine(src) {
   const s = src || {};
   const label = escapeHtml(s.label || String(s.key || "source").replace(/_/g, " "));
   const hidden = " Won-deal, customer and revenue figures are hidden until it does.";
   let ok = false;
   let state = "Could not be read";
+  if (s.key === "meta_ads_spend" && s.status === "not_connected") {
+    const kept = (Array.isArray(s.accounts) ? s.accounts : []).filter((a) => a && a.summary).map((a) =>
+      `<div class="system-source__detail">${escapeHtml(String(a.summary))}</div>`).join("");
+    return `<tr><td><strong>${label}</strong></td><td>—</td><td class="system-source--neutral">Not connected${kept}</td></tr>`;
+  }
   if (s.key === "hubspot_contacts") {
     if (s.status === "current") { ok = true; state = "Up to date"; }
     else if (s.status === "late") state = `Late — ${systemLimit(s.limit_hours)}`;
@@ -10147,6 +10155,27 @@ function systemSourceLine(src) {
         r.start === r.end ? String(r.start) : `${r.start} to ${r.end}`);
       state = ranges.length ? `Late — no spend recorded for ${escapeHtml(ranges.join(", "))}`
         : "Late — a recent spend update failed";
+    }
+  } else if (s.key === "meta_ads_spend") {
+    if (s.status === "current" && s.complete_through) { ok = true; state = `Complete through ${escapeHtml(String(s.complete_through))}`; }
+    else if (s.status === "misconfigured") state = `Set up incorrectly — check the Meta settings${s.reason_detail ? ` (${escapeHtml(String(s.reason_detail))})` : ""}`;
+    else if (s.status === "token_rejected") state = "Meta rejected the access token — it must be renewed";
+    else if (s.status === "not_readable") state = "An ad account is not readable — its history is kept";
+    else if (s.reason === "meta_api_version_deprecated") {
+      state = `Meta no longer accepts the API version in use${s.reason_detail ? ` — ${escapeHtml(String(s.reason_detail))}` : ""}`;
+    }
+    else if (s.status === "not_proven") state = "Connected — no successful update yet";
+    else if (s.status === "late") {
+      const ranges = (Array.isArray(s.missing_ranges) ? s.missing_ranges : []).map((r) =>
+        r.start === r.end ? String(r.start) : `${r.start} to ${r.end}`);
+      state = ranges.length ? `Late — no spend recorded for ${escapeHtml(ranges.join(", "))}`
+        : "Late — a recent spend update failed";
+    }
+    // Each ad account in its own words (its own dates, in its own time zone).
+    const accounts = (Array.isArray(s.accounts) ? s.accounts : []).filter((a) => a && a.summary);
+    if (accounts.length > 1 || accounts.some((a) => a.status !== "current")) {
+      state += accounts.map((a) =>
+        `<div class="system-source__detail">${escapeHtml(String(a.summary))}</div>`).join("");
     }
   }
   const when = s.last_success_at ? `Last successful update ${systemAgo(s.age_hours)}` : "No successful update on record";

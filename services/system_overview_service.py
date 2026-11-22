@@ -17,6 +17,13 @@ One read for an operator who is not an engineer:
      (the function every revenue page's spend coverage is judged by), asked
      for the last :data:`SPEND_WINDOW_DAYS` complete account days.
 
+   * Meta Ads spend (PR-ADS-171A) — the same ``analyze_coverage`` over each
+     Meta ad account's coverage ledger, for the last :data:`SPEND_WINDOW_DAYS`
+     complete days of THAT account's zone; one line, every account listed.
+     Before that it says whether Meta is set up at all: ``not_connected`` (no
+     credentials — neutral, not a fault), ``misconfigured``,
+     ``token_rejected`` or ``not_readable``.
+
    Every source carries one ``status``; only ``current`` is healthy.
 3. **CRM data to fix** — the block the certification stored, passed through.
 4. **Removed contacts** — the latest check for contacts HubSpot no longer has
@@ -25,7 +32,7 @@ One read for an operator who is not an engineer:
    would remove and removed, the backlog, held contacts, search disagreements
    and pending strikes. Facts only; no verdict is derived from them here.
 
-Read-only: SELECTs on the local database. No HubSpot or Google Ads call.
+Read-only: SELECTs on the local database. No HubSpot, Google Ads or Meta call.
 """
 from __future__ import annotations
 
@@ -60,6 +67,18 @@ SOURCE_CURRENT = "current"          # the platform's own verdict says current
 SOURCE_LATE = "late"                # proven, but older than its limit
 SOURCE_NOT_PROVEN = "not_proven"    # readable, but currency is not proven
 SOURCE_UNAVAILABLE = "unavailable"  # the verdict could not be read
+# PR-ADS-171A — statuses only the Meta Ads row (key `meta_ads_spend`) carries.
+#: Meta is not set up: no credentials. Not a fault; nothing is claimed.
+SOURCE_NOT_CONNECTED = "not_connected"
+#: Meta is half set up (one credential, a bad account id, no API version).
+SOURCE_MISCONFIGURED = "misconfigured"
+#: Meta refused the access token on the latest sync.
+SOURCE_TOKEN_REJECTED = "token_rejected"
+#: Meta refuses to let an account be read (suspended, closed, permission
+#: removed). Its stored history is kept.
+SOURCE_NOT_READABLE = "not_readable"
+#: A per-account status only: stored, no longer configured, history kept.
+META_ACCOUNT_HISTORY_KEPT = "history_kept"
 
 
 def _utc(value):
@@ -275,9 +294,162 @@ def _spend_source(now: datetime) -> dict:
             "unresolved_failed_chunks": len(verdict.get("failed_chunks") or [])}
 
 
+def _meta_account_line(account_id, row, state, configured, now) -> dict:
+    """One Meta ad account, judged in its own zone. No call to Meta."""
+    from db import meta_ads_repository as repo  # noqa: PLC0415
+    from services import meta_ads_spend_service as meta  # noqa: PLC0415
+    from services.google_ads_spend_service import analyze_coverage  # noqa: PLC0415
+
+    row, state = row or {}, state or {}
+    history = row.get("covered_through")
+    out = {"account_id": account_id, "account_name": row.get("account_name"),
+           "currency": row.get("currency_code"),
+           "time_zone": row.get("time_zone_name"), "configured": bool(configured),
+           "status": SOURCE_UNAVAILABLE, "reason": None, "reason_detail": None,
+           "complete_through": None, "history_through": history,
+           "window_start": None, "window_end": None, "missing_ranges": [],
+           "unresolved_failed_chunks": None,
+           "not_readable_since": _iso(state.get("not_readable_since")),
+           "http_status": None, "error_code": None,
+           "last_success_at": _iso(state.get("last_success_at")),
+           "age_hours": _age_hours(state.get("last_success_at"), now)}
+    kept = (f"history through {history} is kept" if history
+            else "no history is stored")
+    name = f"{row.get('account_name') or 'Account'} ({account_id})"
+    if not configured:
+        return {**out, "status": META_ACCOUNT_HISTORY_KEPT,
+                "summary": f"{name}: no longer connected; {kept}"}
+    failed = state.get("last_status") == "failed"
+    if failed:
+        out.update(reason=state.get("last_reason"),
+                   reason_detail=state.get("last_error"),
+                   http_status=state.get("last_http_status"),
+                   error_code=state.get("last_error_code"))
+    since = str(out["not_readable_since"] or "")[:10] or "an unknown date"
+    codes = f"(HTTP {out['http_status']}, code {out['error_code']})"
+    if failed and out["reason"] == meta.REASON_TOKEN_REJECTED:
+        return {**out, "status": SOURCE_TOKEN_REJECTED,
+                "summary": f"{name}: Meta rejected the access token since "
+                           f"{since} {codes}; {kept}"}
+    if failed and out["reason"] == meta.REASON_NOT_READABLE:
+        return {**out, "status": SOURCE_NOT_READABLE,
+                "summary": f"{name}: account not readable since {since} "
+                           f"{codes}; {kept}"}
+    end = meta.account_local_yesterday(row.get("time_zone_name"), now)
+    if end is None:
+        # Never read, or its zone is not a zone: "the last complete days" has
+        # no meaning, so nothing is proven.
+        return {**out, "status": SOURCE_NOT_PROVEN,
+                "reason": out["reason"] or "no_account_on_record",
+                "summary": f"{name}: no successful update yet"
+                           + (f" — {out['reason_detail']}"
+                              if out["reason_detail"] else "")}
+    start = end - timedelta(days=SPEND_WINDOW_DAYS - 1)
+    out.update(window_start=start.isoformat(), window_end=end.isoformat())
+    coverage = repo.fetch_meta_spend_coverage(start, end, account_id)
+    if not coverage.get("available"):
+        return {**out, "summary": f"{name}: could not be read"}
+    verdict = analyze_coverage(start, end, coverage.get("chunks") or [])
+    zone = row.get("time_zone_name")
+    if verdict.get("complete") is True:
+        return {**out, "status": SOURCE_CURRENT, "reason": None,
+                "reason_detail": None, "complete_through": end.isoformat(),
+                "summary": f"{name}: complete through {end.isoformat()} ({zone})"}
+    ranges = list(verdict.get("missing_ranges") or [])
+    words = ", ".join(r["start"] if r["start"] == r["end"]
+                      else f"{r['start']} to {r['end']}" for r in ranges)
+    return {**out, "status": SOURCE_LATE, "missing_ranges": ranges,
+            "unresolved_failed_chunks": len(verdict.get("failed_chunks") or []),
+            "summary": f"{name}: late — "
+                       + (f"no spend recorded for {words} ({zone})" if words
+                          else "a recent spend update failed")
+                       + (f" — {out['reason_detail']}"
+                          if out["reason_detail"] else "")}
+
+
+def _meta_spend_source(now: datetime) -> dict:
+    """The Meta Ads spend line (PR-ADS-171A). No call to Meta.
+
+    One line for every ad account, with each account in ``accounts``. An
+    account is judged over the last :data:`SPEND_WINDOW_DAYS` complete days of
+    ITS OWN zone. The line is ``current`` only when every configured account
+    is; otherwise it carries the worst account's status. An account that is
+    stored but no longer configured is listed (its history is kept) and does
+    not affect the status.
+    """
+    from db import meta_ads_repository as repo  # noqa: PLC0415
+    from services import meta_ads_spend_service as meta  # noqa: PLC0415
+
+    out = {"key": "meta_ads_spend", "label": "Meta Ads spend",
+           "status": SOURCE_UNAVAILABLE, "reason": None, "reason_detail": None,
+           "window_start": None, "window_end": None,
+           "complete_through": None, "missing_ranges": [],
+           "unresolved_failed_chunks": None,
+           "last_success_at": None, "age_hours": None,
+           "accounts": [], "misconfigured_sets": []}
+    cfg = meta.config_status()
+    if cfg.get("misconfigured"):
+        detail = cfg.get("reason")
+        if cfg.get("duplicate_account_ids"):
+            detail = (f"{detail}: account "
+                      f"{', '.join(cfg['duplicate_account_ids'])} is listed in "
+                      "two credential sets")
+        return {**out, "status": SOURCE_MISCONFIGURED, "reason": cfg.get("reason"),
+                "reason_detail": detail,
+                "misconfigured_sets": cfg.get("misconfigured_sets") or []}
+    configured = list(cfg.get("account_ids") or [])
+    read = repo.fetch_meta_accounts()
+    states = repo.fetch_meta_account_sync_states()
+    if not read.get("available") or not states.get("available"):
+        return out if configured else {**out, "status": SOURCE_NOT_CONNECTED}
+    stored = {a["account_id"]: a for a in read.get("accounts") or []}
+    states = states.get("states") or {}
+    lines = [_meta_account_line(a, stored.get(a), states.get(a), True, now)
+             for a in configured]
+    lines += [_meta_account_line(a, row, states.get(a), False, now)
+              for a, row in stored.items() if a not in configured]
+    out["accounts"] = lines
+    if not configured:
+        return {**out, "status": SOURCE_NOT_CONNECTED}
+
+    live = [line for line in lines if line["configured"]]
+    statuses = [line["status"] for line in live]
+    for status in (SOURCE_UNAVAILABLE, SOURCE_TOKEN_REJECTED, SOURCE_NOT_READABLE,
+                   SOURCE_LATE, SOURCE_NOT_PROVEN):
+        if status in statuses:
+            break
+    else:
+        status = SOURCE_CURRENT
+    broken = cfg.get("misconfigured_sets") or []
+    out["misconfigured_sets"] = broken
+    worst = next((line for line in live if line["status"] == status), {})
+    successes = [line["last_success_at"] for line in live]
+    if successes and all(successes):
+        oldest = min(successes)
+        out.update(last_success_at=oldest, age_hours=_age_hours(oldest, now))
+    if status == SOURCE_CURRENT and broken:
+        # Every account that syncs is current, and a credential set is broken.
+        return {**out, "status": SOURCE_MISCONFIGURED,
+                "reason": broken[0]["reason"],
+                "reason_detail": f"credential set {broken[0]['set']}: "
+                                 f"{broken[0]['reason']}"}
+    if status == SOURCE_CURRENT:
+        ends = [line["complete_through"] for line in live]
+        starts = [line["window_start"] for line in live]
+        return {**out, "status": status, "complete_through": min(ends),
+                "window_start": min(starts), "window_end": min(ends)}
+    return {**out, "status": status, "reason": worst.get("reason"),
+            "reason_detail": worst.get("reason_detail"),
+            "missing_ranges": worst.get("missing_ranges") or [],
+            "unresolved_failed_chunks": worst.get("unresolved_failed_chunks"),
+            "window_start": worst.get("window_start"),
+            "window_end": worst.get("window_end")}
+
+
 _SOURCES = (("hubspot_contacts", "HubSpot contacts", _contacts_source),
             ("hubspot_deals", "HubSpot deals", _deals_source),
-            ("google_ads_spend", "Google Ads spend", _spend_source))
+            ("google_ads_spend", "Google Ads spend", _spend_source),
+            ("meta_ads_spend", "Meta Ads spend", _meta_spend_source))
 
 
 # ── removed contacts (PR-ADS-163C) ────────────────────────────────────────

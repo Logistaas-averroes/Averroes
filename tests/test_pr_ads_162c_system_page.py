@@ -403,11 +403,17 @@ def test_21_one_broken_source_does_not_take_the_page_down(monkeypatch):
     monkeypatch.setattr(so, "_deals_source", boom)
     monkeypatch.setattr(so, "_spend_source", lambda now: {
         "key": "google_ads_spend", "label": "Google Ads spend", "status": "late"})
+    # PR-ADS-171A: the page gained a fourth source, Meta Ads spend. It is
+    # stubbed like the others so this case stays about one broken source; its
+    # own states are tested in tests/test_pr_ads_171a_*.
+    monkeypatch.setattr(so, "_meta_spend_source", lambda now: {
+        "key": "meta_ads_spend", "label": "Meta Ads spend",
+        "status": "not_connected"})
     page = so.build_system_overview(NOW)
     assert page["certification"]["state"] == "certified"
     assert [(s["key"], s["status"]) for s in page["sources"]] == [
         ("hubspot_contacts", "current"), ("hubspot_deals", "unavailable"),
-        ("google_ads_spend", "late")]
+        ("google_ads_spend", "late"), ("meta_ads_spend", "not_connected")]
     assert page["external_calls_performed"] is False
 
 
@@ -744,6 +750,13 @@ def test_40_the_real_reads_on_a_live_database(monkeypatch):
         empty = so.build_system_overview()
         assert empty["certification"]["state"] == "not_checked"
         by_key = {s["key"]: s for s in empty["sources"]}
+        # PR-ADS-171A: the fourth source, Meta Ads, has no credentials in this
+        # environment. That is `not_connected` — neither proven nor late — and
+        # is asserted on its own; the three sources this case is about keep
+        # the assertion they had.
+        meta_line = by_key.pop("meta_ads_spend")
+        assert meta_line["status"] == "not_connected"
+        assert meta_line["complete_through"] is None
         assert {s["status"] for s in by_key.values()} <= {"not_proven", "late"}
         assert by_key["hubspot_deals"]["status"] == "not_proven"
         assert by_key["hubspot_deals"]["last_success_at"] is None

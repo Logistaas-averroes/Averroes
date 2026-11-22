@@ -154,6 +154,9 @@ class TestSummaryShape:
             # (after the associations).
             "hubspot/contact_names",
             "hubspot/company_names",
+            # PR-ADS-171A: Meta Ads campaign-daily spend, right after FX.
+            # Read-only (GET); `skipped` here, where Meta is not configured.
+            "meta_ads_api/meta_campaign_spend",
         }
         assert set(result["datasets"].keys()) == expected
 

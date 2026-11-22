@@ -23,6 +23,8 @@ from services.dataset_keys import (
     CANONICAL_GEO_SOURCE as _GEO_SYNC_SOURCE,
     CANONICAL_SPEND_DATASET as _SPEND_DATASET,
     CANONICAL_SPEND_SOURCE as _SPEND_SOURCE,
+    META_ADS_SOURCE as _META_ADS_SOURCE,
+    META_ADS_SPEND_DATASET as _META_ADS_SPEND_DATASET,
 )
 
 
@@ -247,6 +249,19 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "stale_threshold_days": 3,
         "depends_on": ["canonical_spend"],
         "page": "countries",
+    },
+    # PR-ADS-171A: Meta (Facebook/Instagram) Ads campaign-daily spend. Keys
+    # are imported from the registry the writer stamps from. No page reads it
+    # yet (the Channels page is PR-ADS-171B), so it names none. While Meta is
+    # not configured nothing stamps this pair and the dataset reads "not run".
+    "meta_ads_spend": {
+        "table": "meta_ads_campaign_daily_spend",
+        "date_column": "spend_date",
+        "source": _META_ADS_SOURCE,
+        "dataset": _META_ADS_SPEND_DATASET,
+        "stale_threshold_days": 3,
+        "depends_on": [],
+        "page": None,
     },
     # PR-ADS-153B: canonical CRM funnel spine. `source`/`dataset` MUST equal the
     # keys the ingestion service stamps on its sync batches

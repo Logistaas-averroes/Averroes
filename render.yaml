@@ -50,6 +50,26 @@ services:
         sync: false
       - key: WINDSOR_ACCOUNT_ID
         sync: false
+      # Meta (Facebook/Instagram) Ads read-only spend (PR-ADS-171A). GET only;
+      # nothing is ever written to Meta. Nothing set = not connected. A
+      # credential set is one token plus a comma-separated list of the ad
+      # accounts it reads (see .env.example).
+      - key: META_ADS_ACCESS_TOKEN
+        sync: false
+      - key: META_AD_ACCOUNT_ID
+        sync: false
+      # Credential set 2: another token and the ad account(s) IT reads (an
+      # account in another Business portfolio).
+      - key: META_ADS_ACCESS_TOKEN_2
+        sync: false
+      - key: META_AD_ACCOUNT_ID_2
+        sync: false
+      - key: META_API_VERSION
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_APP_SECRET_2
+        sync: false
       # Mailchimp read-only email-marketing evidence (PR-ADS-151). Pull-only —
       # GET requests exclusively; never written back to Mailchimp. MAILCHIMP_API_KEY
       # is the ONLY required variable — a valid -usXX key enables the connector and

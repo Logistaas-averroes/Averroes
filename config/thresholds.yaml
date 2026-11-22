@@ -80,6 +80,27 @@ sync:
       ads: 14
       hubspot_contacts: 14
       hubspot_deals: 30
+      # PR-ADS-171A — Meta restates recent spend; every run re-reads this many
+      # complete account days, ending yesterday in the Meta account's zone.
+      meta_ads: 28
+
+meta_ads:
+  # PR-ADS-171A — the read-only Meta (Facebook/Instagram) Ads spend connector.
+  # The Graph API version every Meta call is made against. v27.0 is the
+  # version Meta named on 2026-11-22 when production called a deprecated one,
+  # and the account and Insights reads then answered 200 on it. Meta retires
+  # versions: when it does, the sync fails with `meta_api_version_deprecated`
+  # and names the version to move to. META_API_VERSION (env) overrides this.
+  # A value that is not `vNN.N` leaves the connector `misconfigured`.
+  api_version: "v27.0"
+  # Campaign rows per Insights page.
+  page_limit: 500
+  # Currencies the FX provider (ECB reference rates) publishes. Spend in any
+  # other currency is stored and published in its own currency; its USD value
+  # is unavailable (`fx_currency_not_supported`), never estimated.
+  fx_provider_currencies: [AUD, BRL, CAD, CHF, CNY, CZK, DKK, EUR, GBP, HKD,
+                           HUF, IDR, ILS, INR, ISK, JPY, KRW, MXN, MYR, NOK,
+                           NZD, PHP, PLN, RON, SEK, SGD, THB, TRY, USD, ZAR]
 
 contact_reconciliation:
   # PR-ADS-163C — the daily check that removes contacts deleted or merged away

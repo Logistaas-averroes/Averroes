@@ -58,6 +58,8 @@ VALID_SYNC_SOURCES: frozenset[str] = frozenset({
     "fx",
     "gclid",
     "mailchimp",
+    # PR-ADS-171A — the Meta (Facebook/Instagram) Marketing API. Read-only.
+    "meta_ads_api",
     "analysis",
     "windsor",          # historical only — not written by any active path
 })
@@ -71,6 +73,8 @@ VALID_SYNC_DATASETS: frozenset[str] = frozenset({
     # Platform evidence
     "campaigns", "keywords", "keyword_facts", "search_terms", "geo",
     "canonical_spend", "canonical_geo",
+    # PR-ADS-171A — Meta Ads campaign-daily spend
+    "meta_campaign_spend",
     # CRM
     "contacts", "deals", "matches", "contact_funnel", "lifecycle_events",
     "deal_ledger", "source_classification",
@@ -172,6 +176,12 @@ LEGACY_KEYWORD_SNAPSHOT_DATASET = "keywords"
 # second geo dataset cannot quietly reuse the same state row.
 CANONICAL_GEO_SCOPE = "geo_daily_spend"
 
+# PR-ADS-171A — Meta (Facebook/Instagram) Ads campaign-daily spend, read from
+# the Marketing API Insights edge. Its own source key: these rows come from a
+# different platform and a different credential than `google_ads_api`.
+META_ADS_SOURCE = "meta_ads_api"
+META_ADS_SPEND_DATASET = "meta_campaign_spend"
+
 # Daily reference FX rates (GBP→USD), required before any USD figure is safe.
 FX_SOURCE = "fx"
 FX_DAILY_RATES_DATASET = "daily_rates"
@@ -211,6 +221,7 @@ __all__ = [
     "KEYWORD_FACTS_SOURCE", "KEYWORD_FACTS_DATASET",
     "SEARCH_TERMS_SOURCE", "SEARCH_TERMS_DATASET",
     "LEGACY_KEYWORD_SNAPSHOT_SOURCE", "LEGACY_KEYWORD_SNAPSHOT_DATASET",
+    "META_ADS_SOURCE", "META_ADS_SPEND_DATASET",
     "FX_SOURCE", "FX_DAILY_RATES_DATASET",
     "DEAL_LEDGER_SOURCE", "DEAL_LEDGER_DATASET",
     "DEAL_COMPANY_ASSOCIATION_SOURCE", "DEAL_COMPANY_ASSOCIATION_DATASET",

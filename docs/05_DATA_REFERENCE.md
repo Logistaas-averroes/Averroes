@@ -399,3 +399,37 @@ identified. Nothing is dropped, nothing is spread across real countries, and
 `Sum(known country rows) + eligible residual = the canonical scope total`.
 
 Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
+
+---
+
+## Meta Ads spend — confirmed from production (PR-ADS-171A)
+
+Read-only. Full doctrine: `docs/52_META_ADS_SPEND_CONNECTOR.md`.
+
+**Ad accounts** (owner's Render shell, 2026-11-22)
+
+| Account id | Name | Currency | Time zone | Credential set | Role |
+|---|---|---|---|---|---|
+| `944370805110952` | Logistaas | USD | Asia/Amman | 2 (`META_ADS_ACCESS_TOKEN_2`, `META_AD_ACCOUNT_ID_2`) | the old account, with the running ads and the history; in another Business portfolio; to be suspended |
+| `4730305973961806` | Logistaas Limited | GBP | America/Los_Angeles | 1 (`META_ADS_ACCESS_TOKEN`, `META_AD_ACCOUNT_ID`) | the new account; no delivery yet; the owner intends to move it to UK time |
+
+**API**: Graph API `v27.0` (`config/thresholds.yaml` → `meta_ads.api_version`).
+Token in the `Authorization: Bearer` header. Spend is a decimal string
+(`'1909.34'`) in the account's own currency; no delivery is `{'data': []}`.
+
+**Tables** (all keyed by `account_id`)
+
+| Table | Holds |
+|---|---|
+| `meta_ads_account` | name, currency, time zone, status |
+| `meta_ads_campaign_daily_spend` | spend per campaign per account-local day (`cost_micros`, `spend_raw`) |
+| `meta_ads_account_daily_spend` | the account-level total per day (the reconciliation total) |
+| `meta_ads_spend_coverage` | per-range fetch ledger (`verified` / `failed`) |
+| `meta_ads_account_sync_state` | the latest sync attempt per account; `not_readable_since` |
+
+**Dataset key:** `(meta_ads_api, meta_campaign_spend)`, from
+`services/dataset_keys.py`; freshness registry key `meta_ads_spend`.
+
+**Days are each account's own.** At the 06:00 UTC sync the Amman account's
+yesterday has ended; the Los Angeles account's has not (it ends at 08:00 UTC,
+07:00 in summer), so its last complete day is one date earlier.

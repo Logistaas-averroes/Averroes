@@ -170,9 +170,19 @@ high. Do not invoke it for copy edits, CSS, renames or mechanical work.
 
 ### Read-only governance — ACTIVE
 
-**No writes to Google Ads or HubSpot.** See
+**No writes to Google Ads, Meta Ads or HubSpot.** See
 `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`. HubSpot property history is read;
 nothing is written back. Offline conversion uploads (OCT) are not authorized.
+
+The Meta connector (`connectors/meta_ads.py`, PR-ADS-171A, `docs/52_*`) is GET
+only: `_request` refuses any other method, so no asynchronous report run. A
+token goes in the `Authorization` header only — Meta's `paging.next` is a URL
+with the token in it and is never requested, stored or logged, and no error
+text may include a URL or `str()` of a `requests` exception. There may be
+several ad accounts and several credential sets: everything is per account
+(its own currency, its own time zone, its own ledger), an account is called
+only with its own set's token, and a failed or unreadable account never
+deletes its stored history.
 
 ---
 
