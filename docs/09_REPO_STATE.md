@@ -6012,8 +6012,31 @@ action type is the native-form lead count; that
 
 **Owner steps** (`docs/53` §10): deploy;
 `python -m scripts.meta_ads_smoke_test --adsets` and send back the output;
-then `python -m scripts.backfill_meta_ads_spend --from 2026-04-20 --level adset`
-(after the campaign-level backfill of the same range).
+then `python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset`
+(the SAME `--from` as the campaign-level backfill, which ran from 2025-01-01).
 
 **Counts.** Unit module 47 passed; PostgreSQL module 14 passed, none
 skipped. The 171A modules: 233 and 42 passed, unchanged in number.
+
+**Review round 1.** An independent review found no blocker; fixed in place:
+* a configured lead type could publish a confident 0 on every ad set. A type
+  the sync never stores (no `lead` in it) is now refused
+  (`meta_lead_action_type_not_stored`, a fixed message in `config_problems`,
+  the string not echoed), and 0 is published only when that exact type
+  appears in that account's stored ad-set rows on some day, otherwise
+  `meta_lead_action_type_not_observed` — per account
+  (`db/meta_ads_repository.fetch_meta_adset_spend(observed_action_type=)`,
+  same snapshot). `test_08` had pinned the defect (0 for `{}` counts with no
+  evidence the type is ever emitted); its assertion is corrected. New:
+  unit `test_36`, PostgreSQL `test_15`–`test_17`, shown failing on c0a8077
+  except `test_16` (a type seen on day 1 is still 0 on day 2 — preserved).
+* `docs/53`: ad-set backfill uses the campaign backfill's `--from`
+  (2025-01-01), or all-time ad-set detail stays withheld (§10); the smoke test
+  does not exercise VERIFY 3 — the backfill fails loudly instead (§9); one
+  malformed `actions` entry fails the whole chunk, spend included (VERIFY 9);
+  the custom-conversion claim is marked unproven (§11); the System page's
+  "Meta Ads API" source card and worst-of verdict now reflect ad-set health
+  (§5).
+
+Counts after round 1: unit module 50 passed; PostgreSQL module 18 passed,
+none skipped; the 171A modules 233 and 42, unchanged.

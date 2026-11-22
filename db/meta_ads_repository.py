@@ -376,7 +376,8 @@ def fetch_meta_campaign_day_totals(account_id: str, start: date,
 
 
 def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
-                           tolerance_micros: int) -> dict:
+                           tolerance_micros: int,
+                           observed_action_type: str | None = None) -> dict:
     """Per-ad-set figures of ONE account over ``[start, end]``, and whether
     the stored ad-set rows still add up to the stored campaign rows.
 
@@ -400,8 +401,15 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
     (either side missing counts as zero), decided by the database in the same
     snapshot as the rows. Not empty means the ad-set detail does not describe
     the campaign spend on record, whatever the ledger says.
+
+    ``action_type_observed`` — with ``observed_action_type``: whether that
+    EXACT key (case and all) appears in any stored row of this account, on
+    any day, not only the range. Only a type the account has been seen to
+    emit can be read as "Meta reported none" on a day it is absent; None when
+    no type was asked about.
     """
-    empty = {"available": False, "rows": [], "mismatches": []}
+    empty = {"available": False, "rows": [], "mismatches": [],
+             "action_type_observed": None}
     account_id = str(account_id)
     scope = "account_id = %s AND spend_date BETWEEN %s AND %s"
     try:
@@ -509,8 +517,17 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
                                "adset_micros": int(r[2]),
                                "campaign_micros": int(r[3])}
                               for r in cur.fetchall()]
+
+                observed = None
+                if observed_action_type:
+                    cur.execute(
+                        "SELECT EXISTS (SELECT 1 FROM meta_ads_adset_daily_spend "
+                        "WHERE account_id = %s "
+                        "AND jsonb_exists(meta_reported_lead_actions, %s))",
+                        (account_id, str(observed_action_type)))
+                    observed = bool(cur.fetchone()[0])
         return {"available": True, "rows": rows, "mismatches": mismatches,
-                "account_id": account_id}
+                "account_id": account_id, "action_type_observed": observed}
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_meta_adset_spend failed: %s", exc)
         return empty

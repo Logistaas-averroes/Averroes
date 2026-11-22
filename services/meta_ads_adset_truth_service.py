@@ -62,6 +62,12 @@ REASON_SOURCE = "meta_adset_source_unavailable"
 REASON_MISMATCH = "meta_adset_reconciliation_mismatch"
 #: No action type has been confirmed as the native lead-form count.
 REASON_LEAD_TYPE_UNVERIFIED = "meta_lead_action_type_unverified"
+#: The configured type is not one the sync stores (only types containing
+#: "lead" are kept): its count would read as 0 on every ad set, forever.
+REASON_LEAD_TYPE_NOT_STORED = "meta_lead_action_type_not_stored"
+#: The account's stored rows have never carried the configured type (exact
+#: key, case and all): its absence is not evidence that Meta reported none.
+REASON_LEAD_TYPE_NOT_OBSERVED = "meta_lead_action_type_not_observed"
 #: Some day's row carried no ``actions`` at all: the count is unknown there.
 REASON_ACTIONS_MISSING = "meta_actions_missing_on_some_days"
 REASON_COUNT_MISSING = "meta_count_missing_on_some_days"
@@ -70,6 +76,19 @@ LEADS_DISCLOSURE = (
     "Meta-reported leads are Meta's own attributed counts under each ad "
     "set's attribution setting. They are not contacts or CRM leads and are "
     "not comparable with HubSpot counts.")
+
+#: Fixed text: the configured string itself is never echoed.
+LEAD_TYPE_NOT_STORED_DETAIL = (
+    "meta_ads.native_lead_action_type names an action type the ad-set sync "
+    "does not store (only types containing \"lead\" are kept); "
+    "Meta-reported leads are unavailable until it names one that is.")
+
+
+def lead_type_stored(lead_type: str | None) -> bool:
+    """Whether the ad-set sync stores ``lead_type`` at all
+    (``connectors.meta_ads.is_lead_action_type``). Pure."""
+    from connectors.meta_ads import is_lead_action_type  # noqa: PLC0415
+    return bool(lead_type) and is_lead_action_type(lead_type)
 
 
 def _metric(value, reason=None, **extra) -> dict:
@@ -81,7 +100,8 @@ def _metric(value, reason=None, **extra) -> dict:
             "reason": None if published else reason, **extra}
 
 
-def lead_metrics(row: dict, lead_type: str | None) -> dict:
+def lead_metrics(row: dict, lead_type: str | None, *,
+                 type_observed: bool | None = None) -> dict:
     """Pure. The two lead figures of one aggregated ad-set row.
 
     ``meta_reported_lead_actions`` — the per-type counts, published only when
@@ -90,22 +110,36 @@ def lead_metrics(row: dict, lead_type: str | None) -> dict:
 
     ``meta_reported_leads`` — the count of the ONE configured action type
     (``lead_type``), or unavailable: no type is configured
-    (``meta_lead_action_type_unverified``), or some day carried no
-    ``actions`` (``meta_actions_missing_on_some_days``). With ``actions``
-    present on every day and the type absent from all of them, Meta reported
-    none: 0.
+    (``meta_lead_action_type_unverified``), the type is one the sync never
+    stores (``meta_lead_action_type_not_stored``; it is not echoed), or some
+    day carried no ``actions`` (``meta_actions_missing_on_some_days``).
+
+    With ``actions`` present on every day and the type absent from all of
+    them, 0 is published ONLY when ``type_observed`` is True — the account's
+    stored rows carry that exact key on some day. Otherwise the absence may
+    just mean the name is wrong or this account never emits it:
+    ``meta_lead_action_type_not_observed`` (False) or
+    ``meta_adset_source_unavailable`` (None, not known).
     """
     missing = int(row.get("rows_without_actions") or 0)
     counts = dict(row.get("meta_reported_lead_action_counts") or {})
     raw = _metric(None if missing else counts, REASON_ACTIONS_MISSING,
                   rows_without_actions=missing, overlapping_types=True)
+    stored = lead_type_stored(lead_type)
     if not lead_type:
         leads = _metric(None, REASON_LEAD_TYPE_UNVERIFIED)
+    elif not stored:
+        leads = _metric(None, REASON_LEAD_TYPE_NOT_STORED)
     elif missing:
         leads = _metric(None, REASON_ACTIONS_MISSING)
+    elif lead_type in counts:
+        leads = _metric(int(counts[lead_type]))
+    elif type_observed is True:
+        leads = _metric(0)                  # a type this account does emit
     else:
-        leads = _metric(int(counts.get(lead_type, 0)))
-    leads["action_type"] = lead_type
+        leads = _metric(None, REASON_LEAD_TYPE_NOT_OBSERVED
+                        if type_observed is False else REASON_SOURCE)
+    leads["action_type"] = lead_type if stored else None
     return {"meta_reported_leads": leads, "meta_reported_lead_actions": raw}
 
 
@@ -152,8 +186,14 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
     base = campaign.build_meta_ads_spend_truth_for_days(
         start_date, end_date, settled=settled, now=now)
     lead_type = adsets.native_lead_action_type()
+    stored_type = lead_type_stored(lead_type)
     frame = {**_frame(start_date, end_date, settled, base),
-             "native_lead_action_type": lead_type}
+             # A refused type is reported by a fixed message, never echoed.
+             "native_lead_action_type": lead_type if stored_type else None,
+             "config_problems": [] if stored_type or not lead_type else [{
+                 "key": "meta_ads.native_lead_action_type",
+                 "reason": REASON_LEAD_TYPE_NOT_STORED,
+                 "detail": LEAD_TYPE_NOT_STORED_DETAIL}]}
 
     def withheld(status, reason, detail=None, accounts=()):
         return {**frame, "status": status, "reason": reason, "detail": detail,
@@ -177,7 +217,9 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                    "currency": entry.get("currency"),
                    "time_zone": entry.get("time_zone"),
                    "required_through": entry.get("required_through"),
-                   "adset_coverage": "verified", "reason": None, "detail": None}
+                   "adset_coverage": "verified", "reason": None, "detail": None,
+                   # Has this account's stored detail ever carried the type?
+                   "meta_reported_leads_type_observed": None}
         accounts.append(summary)
 
         def block(status, reason, detail, coverage):
@@ -227,7 +269,8 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
         currency = (entry.get("currency") or "").upper() or None
         read = repo.fetch_meta_adset_spend(
             first, required_end, account_id,
-            tolerance_micros=meta.reconciliation_tolerance_micros(currency))
+            tolerance_micros=meta.reconciliation_tolerance_micros(currency),
+            observed_action_type=lead_type if stored_type else None)
         if not read.get("available"):
             block(STATUS_UNAVAILABLE, REASON_SOURCE,
                   f"account {account_id}: the ad-set rows could not be read",
@@ -241,6 +284,8 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                   f"campaign row (first {miss['spend_date']} campaign "
                   f"{miss['campaign_id']})", "mismatch")
             continue
+        observed = read.get("action_type_observed") if stored_type else None
+        summary["meta_reported_leads_type_observed"] = observed
         fx_reason = (meta.REASON_FX_UNSUPPORTED
                      if (currency or "") not in priced else meta.REASON_FX_MISSING)
         for r in read["rows"]:
@@ -259,7 +304,7 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                     else None, fx_reason, currency=meta.REPORTING_CURRENCY),
                 "impressions": _metric(r.get("impressions"), REASON_COUNT_MISSING),
                 "clicks": _metric(r.get("clicks"), REASON_COUNT_MISSING),
-                **lead_metrics(r, lead_type),
+                **lead_metrics(r, lead_type, type_observed=observed),
                 "attribution_settings": r.get("attribution_settings") or [],
             })
 

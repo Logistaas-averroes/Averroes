@@ -728,3 +728,79 @@ def test_14_the_schema_holds_what_the_registry_names(live_db):
     assert any("(account_id, adset_id, spend_date)" in r[0] for r in unique)
     assert q(live_db, "SELECT COUNT(*) FROM information_schema.tables "
                       "WHERE table_name = 'meta_ads_adset_coverage'") == [(1,)]
+
+
+# ── review round 1: a configured type that is never carried is not a zero ──
+
+@pytest.mark.parametrize("configured", ["Lead", "offsite_conversion.custom.123"])
+def test_15_a_type_the_stored_rows_never_carry_never_publishes_zero(
+        live_db, monkeypatch, configured):
+    # The old account stores {"lead": …}. "Lead" (wrong case) and a custom
+    # conversion id (never stored: no "lead" in it) are both absent from
+    # every row — which says nothing about what Meta reported.
+    fakes.configure(monkeypatch, _pair())
+    _run()
+    monkeypatch.setattr(adsets, "native_lead_action_type", lambda: configured)
+    out = _detail()
+    assert out["status"] == "published" and out["rows"]
+    for row in out["rows"]:
+        assert row["meta_reported_leads"]["value"] is None, row["adset_id"]
+        assert row["meta_reported_leads"]["status"] == "unavailable"
+    a2 = _by_adset(out)[ADSET_A2]["meta_reported_leads"]
+    if configured == "Lead":
+        assert a2 == {"value": None, "status": "unavailable",
+                      "reason": "meta_lead_action_type_not_observed",
+                      "action_type": "Lead"}
+        assert out["config_problems"] == []
+        assert [a["meta_reported_leads_type_observed"] for a in out["accounts"]
+                if a["account_id"] == OLD] == [False]
+    else:
+        assert a2["reason"] == "meta_lead_action_type_not_stored"
+        assert [p["reason"] for p in out["config_problems"]] == [
+            "meta_lead_action_type_not_stored"]
+        # Refused, and never echoed: a fixed message only.
+        assert out["native_lead_action_type"] is None
+        assert configured not in json.dumps(out, default=str)
+
+
+def test_16_a_type_observed_on_one_day_is_a_zero_on_a_day_it_is_absent(
+        live_db, monkeypatch):
+    graph = FakeGraph()
+    old = graph.add_account(OLD)
+    old.adset(ADSET_A1, CAMPAIGN_A, "2026-11-15", "40.00",
+              actions=actions(lead=2, link_click=9))
+    old.adset(ADSET_A1, CAMPAIGN_A, "2026-11-16", "35.00",
+              actions=actions(link_click=7))
+    fakes.configure(monkeypatch, graph)
+    _run()
+    monkeypatch.setattr(adsets, "native_lead_action_type", lambda: "lead")
+    day2 = _detail(date(2026, 11, 16), date(2026, 11, 16))
+    assert day2["status"] == "published"
+    assert _by_adset(day2)[ADSET_A1]["meta_reported_leads"] == {
+        "value": 0, "status": "published", "reason": None, "action_type": "lead"}
+    assert _by_adset(_detail())[ADSET_A1]["meta_reported_leads"]["value"] == 2
+
+
+def test_17_an_account_that_never_emitted_the_type_is_withheld_alone(
+        live_db, monkeypatch):
+    # Two accounts in one range. The old one has emitted "lead"; the new one
+    # has `actions` on every row and never "lead". Its ad sets are not 0.
+    graph = _pair()
+    new_adset, new_campaign = "120219876543210099", "120211234567890199"
+    graph.default.adset(new_adset, new_campaign, "2026-11-15", "10.00",
+                        actions=actions(link_click=5))
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    _run()
+    monkeypatch.setattr(adsets, "native_lead_action_type", lambda: "lead")
+    out = _detail()
+    assert out["status"] == "published"
+    rows = _by_adset(out)
+    assert rows[new_adset]["account_id"] == NEW
+    assert rows[new_adset]["meta_reported_leads"] == {
+        "value": None, "status": "unavailable",
+        "reason": "meta_lead_action_type_not_observed", "action_type": "lead"}
+    assert rows[ADSET_A2]["meta_reported_leads"]["value"] == 1
+    observed = {a["account_id"]: a["meta_reported_leads_type_observed"]
+                for a in out["accounts"]}
+    assert observed == {NEW: False, OLD: True}

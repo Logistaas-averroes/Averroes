@@ -376,10 +376,22 @@ def test_08_no_lead_type_is_published_until_one_is_confirmed(monkeypatch):
     leads = adset_truth.lead_metrics(row, adsets.native_lead_action_type())[
         "meta_reported_leads"]
     assert leads["value"] == 4 and leads["status"] == "published"
-    # `actions` on every day, the type on none: Meta reported none. Zero.
+    # `actions` on every day, the type on none: Meta reported none — zero —
+    # ONLY for a type this account's stored rows have carried on some day.
+    # (Review round 1 corrected this assertion: it pinned 0 with no evidence
+    # that the type is one the account emits at all.)
     none = adset_truth.lead_metrics({"rows_without_actions": 0,
-                                     "meta_reported_lead_action_counts": {}}, "lead")
+                                     "meta_reported_lead_action_counts": {}}, "lead",
+                                    type_observed=True)
     assert none["meta_reported_leads"]["value"] == 0
+    for observed, reason in ((False, "meta_lead_action_type_not_observed"),
+                             (None, "meta_adset_source_unavailable")):
+        unseen = adset_truth.lead_metrics(
+            {"rows_without_actions": 0, "meta_reported_lead_action_counts": {}},
+            "lead", type_observed=observed)
+        assert unseen["meta_reported_leads"] == {
+            "value": None, "status": "unavailable", "reason": reason,
+            "action_type": "lead"}
     # A day without `actions`: unknown — never zero, never a partial count.
     partial = adset_truth.lead_metrics(
         {"rows_without_actions": 1, "meta_reported_lead_action_counts": {"lead": 4}}, "lead")
@@ -1077,3 +1089,31 @@ def test_35_the_smoke_test_prints_the_action_types_this_account_emits(
            "70.00 USD" in out
     assert "do not backfill ad sets" in out
     assert smoke.main(["--adsets", "--month", "2026-03"]) == 2
+
+
+@pytest.mark.parametrize("configured, reason", [
+    # Not a type the sync stores (it keeps only types containing "lead"): a
+    # custom conversion's action_type carries its id, not its name.
+    ("offsite_conversion.custom.123", "meta_lead_action_type_not_stored"),
+    # Stored-shaped, but not the exact key Meta emits for this account.
+    ("Lead", "meta_lead_action_type_not_observed"),
+    ("leads", "meta_lead_action_type_not_observed"),
+])
+def test_36_a_configured_type_the_account_never_carried_never_publishes_zero(
+        configured, reason):
+    # The account's stored rows carry {"lead": 4}. Whatever else is
+    # configured, its absence from those rows is not "Meta reported none".
+    # `type_observed` is what the repository answers for THAT exact key.
+    row = {"rows_without_actions": 0, "meta_reported_lead_action_counts": {"lead": 4}}
+    # The 171C call shape (no observation evidence): never a 0.
+    assert adset_truth.lead_metrics(row, configured)[
+        "meta_reported_leads"]["value"] is None
+    leads = adset_truth.lead_metrics(row, configured, type_observed=False)[
+        "meta_reported_leads"]
+    assert leads["value"] is None and leads["status"] == "unavailable"
+    assert leads["reason"] == reason
+    if reason == "meta_lead_action_type_not_stored":
+        assert leads["action_type"] is None         # the string is not echoed
+    # The exact key the account emits still publishes its count.
+    assert adset_truth.lead_metrics(row, "lead", type_observed=True)[
+        "meta_reported_leads"]["value"] == 4

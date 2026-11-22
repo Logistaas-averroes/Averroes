@@ -182,6 +182,20 @@ types are hierarchical. So:
   `config/thresholds.yaml` → `meta_ads.native_lead_action_type` is `null`.
   When it is set to ONE action type, the read function publishes that type's
   count and nothing else. It is never a list.
+* **A configured type is not thereby evidence** (review round 1). A type the
+  sync never stores — one without `lead` in it, e.g. a custom conversion's
+  `offsite_conversion.custom.<id>` — is refused: `meta_reported_leads` is
+  unavailable (`meta_lead_action_type_not_stored`), the string is not echoed,
+  and the read function's `config_problems` carries a fixed message. A type
+  that is stored-shaped but not the exact key (`Lead`, `leads`) would be
+  absent from every row and read as 0 on every ad set. So **0 is published
+  only when that exact key appears in that account's stored ad-set rows on
+  at least one day** (any day, not only the range — decided in the same
+  snapshot as the rows); otherwise unavailable,
+  `meta_lead_action_type_not_observed`. This is per account: in a range over
+  two accounts, the one that has never emitted the type is unavailable for
+  its rows while the other publishes, and any future total over both must be
+  unavailable too. `accounts[].meta_reported_leads_type_observed` says which.
 * **The open question for the owner** is in §10 step 2: the smoke test prints
   which lead-related action types the production account really emits.
 
@@ -249,7 +263,11 @@ No new run type (`RUN_TYPE_CADENCE` is unchanged — the step is part of
 where 171A's is: `services/dataset_keys.py`, `ACTIVE_SYNC_PAIRS`,
 `services/freshness_service.py` (`meta_ads_adsets`, depending on
 `meta_ads_spend`), `services/system_status_service.py`, and the dataset label
-in `static/app.js`. The System page's "Meta Ads spend" line is unchanged.
+in `static/app.js`. The System page's "Meta Ads spend" line itself is
+unchanged. Its "Meta Ads API" source card, and the worst-of verdict over the
+sources, now also reflect ad-set health: `meta_ads_adsets` is a dataset of
+that source (`services/system_status_service.py`, `SOURCE_DEFINITIONS`), so a
+failed or stale ad-set step shows there even while campaign spend is current.
 
 USD: the ad-set rows are amounts on the same days in the same currency as the
 campaign rows, so the rates the campaign step ensured are the rates they need.
@@ -287,7 +305,8 @@ Returns `status` (`published` | `withheld` | `unavailable`), `reason`,
 `detail`, `rows`, `accounts`, and metadata: `metric_family`
 (`meta_reported_adset_delivery`), `window_basis`
 (`meta_account_local_spend_date`), `names_are_labels`,
-`native_lead_action_type`, the lead disclosure, and the owner-retirement
+`native_lead_action_type` (None when refused), `config_problems`, the lead
+disclosure, and the owner-retirement
 disclosure of `docs/52` §6 passed through unchanged.
 
 One row per account, campaign and ad set. Each figure is
@@ -298,7 +317,7 @@ One row per account, campaign and ad set. Each figure is
 | `spend` | account currency (`currency`) | — |
 | `spend_usd` | each day at its own rate; the amount itself for a USD account | a spend day has no rate (`fx_rates_missing`) or the currency is not priced (`fx_currency_not_supported`) — the same rules as `docs/52` §7 |
 | `impressions`, `clicks` | the sum | any day's row does not carry the figure (`meta_count_missing_on_some_days`) |
-| `meta_reported_leads` | the count of the ONE configured action type | no type is configured (`meta_lead_action_type_unverified`); or a day carried no `actions` (`meta_actions_missing_on_some_days`) |
+| `meta_reported_leads` | the count of the ONE configured action type; 0 only when that exact type is in the account's stored rows on some day | no type is configured (`meta_lead_action_type_unverified`); the type is one the sync never stores (`meta_lead_action_type_not_stored`); the account has never carried it (`meta_lead_action_type_not_observed`); or a day carried no `actions` (`meta_actions_missing_on_some_days`) |
 | `meta_reported_lead_actions` | `{action_type: count}`, flagged `overlapping_types` | a day carried no `actions` |
 
 **Which accounts a range needs, through which day, and what a retirement
@@ -353,7 +372,10 @@ recorded and cannot be recovered from Insights.
 ## 9. What is not verified against the live API
 
 Each is either guarded by a failure that says so, or affects only what is
-noted. `meta_ads_smoke_test --adsets` (§10) exercises 1–7.
+noted. `meta_ads_smoke_test --adsets` (§10) exercises 1, 2 and 4–7. It reads
+yesterday only, so it does **not** exercise 3 (archived or deleted ad sets);
+the ad-set backfill does, and fails that month loudly with
+`meta_adset_reconciliation_mismatch` rather than storing a short detail.
 
 1. `level=adset` with `time_increment=1` returns `adset_id`, `adset_name`,
    `campaign_id`, `campaign_name`, `spend`, `impressions`, `clicks`,
@@ -378,7 +400,11 @@ noted. `meta_ads_smoke_test --adsets` (§10) exercises 1–7.
 8. The default `action_report_time`. It is not sent. It decides which day a
    conversion is counted on; Meta restates either way, and the 28-day re-read
    follows.
-9. That the value of an `actions` entry is always a whole number.
+9. That the value of an `actions` entry is always a whole number. One
+   malformed `actions` entry — a null entry, a fractional count on a lead
+   type, any type (lead or not) given twice on a row — fails the whole chunk
+   (`meta_malformed_response`), including that chunk's ad-set spend: loud,
+   not wrong.
 10. Timing: the campaign read and the ad-set read are two requests seconds
     apart. If Meta restates a recent day between them, that morning's ad-set
     chunk fails reconciliation, the run is `partial`, and the next run
@@ -445,11 +471,15 @@ noted. `meta_ads_smoke_test --adsets` (§10) exercises 1–7.
 
    It prints ids, never names, and never a token.
 3. **Backfill the ad sets**, after the campaign level is backfilled for the
-   same range (`docs/52` §10 step 4). Spend is stored from 2026-04-20:
+   same range (`docs/52` §10 step 4). **Use the SAME `--from` as the campaign
+   backfill** (the owner ran it with `--from 2025-01-01`). All-time ad-set
+   detail counts from each account's first verified CAMPAIGN day (§7), so a
+   later ad-set `--from` leaves all-time ad-set detail withheld
+   (`meta_adset_coverage_incomplete`) for good:
 
    ```
-   python -m scripts.backfill_meta_ads_spend --from 2026-04-20 --level adset --dry-run
-   python -m scripts.backfill_meta_ads_spend --from 2026-04-20 --level adset
+   python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset --dry-run
+   python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset
    ```
 
    Exit 0 = every month of both accounts verified at ad-set level. Re-run
@@ -471,10 +501,11 @@ noted. `meta_ads_smoke_test --adsets` (§10) exercises 1–7.
   under a name it may not deserve.
 * **A row with no `actions` key is unknown, and one such row withholds the
   range's lead figures** (VERIFY 2).
-* **Lead-related means "the action type contains `lead`".** A custom
-  conversion whose name contains "lead" would be kept too; it is stored under
-  its own type and is never published as `meta_reported_leads` unless it is
-  the one configured type.
+* **Lead-related means "the action type contains `lead`".** Whether a custom
+  conversion is ever kept is **unproven**: its `action_type` carries its id
+  (`offsite_conversion.custom.<id>`), not its name, so one named "Lead" is
+  most likely not stored. A configured type the rule would not keep is
+  refused (§4).
 * **The ad-set step is a sibling with its own batch**, so its failure is a
   `failed` or `partial` dataset in a `partial` run and never changes the
   campaign dataset's status or proven-through date.
