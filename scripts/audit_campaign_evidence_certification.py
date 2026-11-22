@@ -33,7 +33,9 @@ What it checks
   6  both previews are window-aligned with the requested Evidence Window
   7  both previews carry the complete §6 section contract on every path
   8  unavailable is never rendered as zero (no `available: False` with rows,
-     and no unavailable section reporting a numeric total)
+     and no unavailable section reporting a numeric total) — and (PR-ADS-172A)
+     a section unavailable because it FAILED TO BUILD, or for a reason this
+     gate does not recognise, is exit 2, never a pass
   9  the SQL reconciliation block is present and uses the
      `campaign_attributable_sqls` scope
  10  the publication rule holds: a non-reconciled scope withholds the
@@ -100,6 +102,83 @@ SECTION_KEYS = (
     "campaign_id", "identity_status", "coverage_status", "rows",
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PR-ADS-172A — why a drawer section is unavailable decides what it proves
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Until PR-ADS-172A an unavailable section passed this gate as long as it
+# carried SOME reason code and no rows. But the preview adapters turn every
+# failure — a failed statement, a timeout, a cursor error — into exactly that
+# shape. So a drawer that could not be built certified, and "the audit held in
+# little memory" was also what a drawer that built nothing looked like.
+#
+# Every reason a section builder can emit is therefore classified here, by
+# name. A reason that is not listed is not a pass: the gate does not certify a
+# state it has never been told about.
+
+#: The section correctly WITHHOLDS for a declared condition that is not a
+#: failed read. The window's other evidence is still certifiable.
+SECTION_REASONS_DECLARED = {
+    # The canonical flagged population quarantined itself (a flag with no
+    # reason evidence). Publishing around it would be the defect.
+    "search_term_truth_mismatch":
+        "the flagged population is quarantined by its own truth state",
+}
+
+#: The section could NOT BE BUILT although the window's headline build
+#: succeeded. That is not evidence of anything: exit 2, never a pass.
+SECTION_REASONS_FAILURE = {
+    # No Google Ads account could be resolved, so the section read NOTHING. It
+    # is a correct refusal by the builder and still not a pass here: this check
+    # is only reached after the headline build resolved a campaign for the
+    # window, and a run in which no section was ever built must not certify.
+    # (The builders also answer with this code when account resolution RAISES —
+    # tests/test_pr_ads_157 test_12 pins that — which is one more reason it can
+    # only mean "not built".)
+    "google_ads_customer_not_configured":
+        "no Google Ads account was resolved — the section read nothing",
+    "keyword_evidence_unavailable": "the keyword evidence source could not be read",
+    "keyword_preview_failed": "the keyword preview raised while building",
+    "keyword_preview_context_failed": "the keyword section context could not be built",
+    "search_term_evidence_unavailable": "the search-term evidence source could not be read",
+    "flagged_preview_failed": "the flagged preview raised while building",
+    "flagged_preview_context_failed": "the flagged section context could not be built",
+    # The audit probes only a campaign whose identity the headline build
+    # resolved, so a section that then calls it unresolved did not read it.
+    "campaign_identity_unresolved":
+        "the section did not resolve a campaign identity the page resolved",
+    # Reached only through the API helper, never through a builder the audit
+    # calls with a window; listed so it can never be mistaken for a pass.
+    "window_not_resolved": "no evidence window reached the section",
+}
+
+#: The section withheld because it caught a truth-contract breach.
+SECTION_REASONS_VIOLATION = {
+    "keyword_scope_account_mismatch":
+        "the keyword read returned rows of another Google Ads account",
+}
+
+SECTION_REASON_DECLARED = "declared"
+SECTION_REASON_FAILURE = "failure"
+SECTION_REASON_VIOLATION = "violation"
+SECTION_REASON_UNRECOGNISED = "unrecognised"
+
+
+def classify_section_reason(reason) -> tuple[str, str]:
+    """``(class, explanation)`` for an unavailable section's reason code.
+
+    Fails closed: a missing, empty or unknown reason is ``unrecognised``.
+    """
+    if isinstance(reason, str):
+        for table, kind in ((SECTION_REASONS_DECLARED, SECTION_REASON_DECLARED),
+                            (SECTION_REASONS_FAILURE, SECTION_REASON_FAILURE),
+                            (SECTION_REASONS_VIOLATION, SECTION_REASON_VIOLATION)):
+            if reason in table:
+                return kind, table[reason]
+    return SECTION_REASON_UNRECOGNISED, (
+        f"reason {reason!r} is not one this gate knows how to read")
+
+
 _API_SERVER = _ROOT / "api" / "server.py"
 _APP_JS = _ROOT / "static" / "app.js"
 
@@ -116,6 +195,10 @@ class Findings:
         self.violations: list[str] = []
         self.unavailable: list[str] = []
         self.checks: list[dict] = []
+        #: PR-ADS-172A — checks that PASSED on a declared withholding. They do
+        #: not change the exit code, and they are never left unsaid: a
+        #: certified run with a quarantined section says so by name.
+        self.warnings: list[str] = []
 
     def record(self, name: str, ok: bool, detail: str = "") -> None:
         self.checks.append({"check": name, "ok": bool(ok), "detail": detail})
@@ -767,6 +850,9 @@ def _audit_window(window: str, f: Findings) -> dict:
     try:
         from services.campaign_evidence_service import build_campaign_evidence
         payload = build_campaign_evidence(window)
+    except MemoryError:
+        # Out of memory is not "unavailable": let the capped runner see it.
+        raise
     except Exception as exc:  # noqa: BLE001
         f.unavailable_now(f"build[{window}]", f"campaign evidence build failed: {exc}")
         return {**out, "available": False}
@@ -848,13 +934,22 @@ def _audit_window(window: str, f: Findings) -> dict:
         from services.search_term_evidence_service import build_campaign_flagged_preview
         sections["keyword"] = build_campaign_keyword_preview(window, key)
         sections["flagged"] = build_campaign_flagged_preview(window, key)
+    except MemoryError:
+        # Out of memory is not a section state. It ends the audit, and the
+        # capped runner records it — it is never turned into a check result.
+        raise
     except Exception as exc:  # noqa: BLE001
         # The adapters promise never to raise. If one does, that is a defect in
         # the contract itself, not an outage.
         f.violation(f"drawer_sections[{window}]",
                     f"a preview adapter raised instead of returning an "
                     f"unavailable section: {exc}")
-        return {**out, "available": True, "publishable": publishable}
+        return {**out, "available": True, "publishable": publishable,
+                "sections": _section_evidence(sections)}
+
+    # PR-ADS-172A — what each section actually was goes into the report on
+    # EVERY path below, so a stored run proves the sections were really built.
+    out["sections"] = _section_evidence(sections)
 
     expected_provenance = {
         "keyword": ("keyword_daily_facts", "keyword_facts"),
@@ -884,7 +979,22 @@ def _audit_window(window: str, f: Findings) -> dict:
                             f"unavailable section published a total of "
                             f"{section['total_count']} — unavailable is not zero")
             else:
-                f.passed(label, f"unavailable, reason={section['reason']}")
+                # PR-ADS-172A — the contract above holds; now, WHY is it
+                # unavailable? The headline build for this window succeeded,
+                # so only a declared withholding is a pass.
+                kind, why = classify_section_reason(section["reason"])
+                detail = f"unavailable, reason={section['reason']} — {why}"
+                if kind == SECTION_REASON_DECLARED:
+                    f.passed(label, detail)
+                    f.warnings.append(f"{label}: {detail}")
+                elif kind == SECTION_REASON_VIOLATION:
+                    f.violation(label, detail)
+                else:
+                    # A failed build, or a reason this gate has never been
+                    # told about: nothing was proven. Exit 2, not a pass.
+                    f.unavailable_now(
+                        label, detail + "; the section was not built although "
+                        "the window's headline evidence was")
             continue
 
         # An available section must be window-aligned with what was requested.
@@ -914,9 +1024,15 @@ def _audit_window(window: str, f: Findings) -> dict:
         f.passed(f"annotation_role[{window}]",
                  "waste_terms is declared classification-annotation only")
 
-    return {**out, "available": True, "publishable": publishable,
-            "sections": {k: {"available": v.get("available"), "reason": v.get("reason")}
-                         for k, v in sections.items()}}
+    return {**out, "available": True, "publishable": publishable}
+
+
+def _section_evidence(sections: dict) -> dict:
+    """``{section: {available, reason}}`` — what was built, for the report."""
+    return {name: {"available": section.get("available"),
+                   "reason": section.get("reason")}
+            for name, section in (sections or {}).items()
+            if isinstance(section, dict)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -975,6 +1091,7 @@ def main() -> int:
         "windows_audited": list(windows),
         "violations": findings.violations,
         "unavailable": findings.unavailable,
+        "warnings": findings.warnings,
         "checks": findings.checks,
         "per_window": per_window,
     }

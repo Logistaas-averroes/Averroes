@@ -1260,6 +1260,9 @@ def fetch_canonical_campaign_spend(start: date | None, end: date,
                 "coverage_start": _as_date(meta[0]),
                 "coverage_end": _as_date(meta[1]),
             }
+    except MemoryError:
+        # PR-ADS-172A — out of memory is never an "unavailable" answer.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_canonical_campaign_spend failed: %s", exc)
         return {"available": False, "rows": []}
@@ -2313,6 +2316,9 @@ def fetch_fx_rates(start: date | None, end: date,
                         rates[d] = float(r.get("rate"))
                     provider = r.get("provider") or provider
             return {"available": True, "rates": rates, "provider": provider}
+    except MemoryError:
+        # PR-ADS-172A — out of memory is never an "unavailable" answer.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_fx_rates failed: %s", exc)
         return {"available": False, "rates": {}}
@@ -2354,6 +2360,9 @@ def fetch_campaign_identity(customer_id: str | None = None) -> dict:
                         "approved_by": r.get("approved_by"),
                     })
             return {"available": True, "mappings": mappings}
+    except MemoryError:
+        # PR-ADS-172A — out of memory is never an "unavailable" answer.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_campaign_identity failed: %s", exc)
         return {"available": False, "mappings": []}

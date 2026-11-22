@@ -105,6 +105,9 @@ def fetch_sql_contacts(start: date | None, end: date) -> dict:
             return {"available": True, "rows": rows, "table": "leads",
                     "date_field": "contact_created_at",
                     "leads_have_search_term": LEADS_HAVE_SEARCH_TERM}
+    except MemoryError:
+        # PR-ADS-172A — out of memory is never an "unavailable" answer.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_sql_contacts failed: %s", exc)
         return _unavailable("leads", {"date_field": "contact_created_at"})

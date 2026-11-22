@@ -5761,3 +5761,123 @@ the disclosure, and 171B must add an audit/AST guard for it.
 passed, none skipped. Full suite with the one baseline deselect: **6227
 passed, 1 skipped, 1 deselected** (37m49s). Against `7be6b23` the same two
 modules: 28 failed, 247 passed.
+
+## PR-ADS-172A — a campaign drawer section no longer builds the account's search terms
+
+**Production evidence.** The daily certification's sixth audit,
+`campaign_evidence`, was SIGKILLed on 2026-11-21 and on 2026-11-22 was crashed
+"reached its memory backstop (320 MB of address space)" at `peak_rss_mb` 287
+after 114 s; the other five held at 36–127 MB. NOT CERTIFIED both days. The cap
+(PR-ADS-169A) worked as designed and is unchanged: backstop 320 MB, safety
+margin 64 MB, the audit still in `AUDITS`.
+
+**Measured on a production-scale SYNTHETIC PostgreSQL dataset** (live row
+counts — `search_terms` 228,043, `keyword_daily_facts` 98,152, `leads` 27,823,
+contact funnel 21,866 — with invented content: 62,706 distinct queries, 102,990
+term × campaign units, 9,563 flagged fact rows, 9,596 annotations). These are
+not production figures. Peak resident growth of one call, `all_time`:
+`build_campaign_flagged_preview` 836 → 114 MB; `build_campaign_keyword_preview`
+118 → 39 MB; `build_campaign_evidence` 34 MB, unchanged. The six-window audit:
+902 MB uncapped before; under the real cap 294 MB resident at the 320 MB limit
+before and 175 MB resident / 208 MB of
+address space after, in 19 s instead of 52 s. No accumulation across windows
+was measured (six windows 175 MB, `all_time` alone 175 MB), so the audit loop
+is untouched. Full table: `docs/51_CAMPAIGN_EVIDENCE_DRAWER_MEMORY.md`.
+
+**Cause.** Each drawer section composes its page builder with a campaign
+filter, and the builder loaded the account. The flagged section built every
+term × campaign unit in the window — `fetch_search_term_aggregates` (+255 MB,
+102,990 dict rows), the units (+250 MB), `fetch_search_term_daily_costs`
+(+264 MB, 227,952 dict rows) — to publish ten flagged rows of one campaign. The
+keyword section read 98,152 (criterion, day) cost rows as dicts (+116 MB).
+
+**The fix.**
+
+a. `build_flagged_search_terms(population="flagged_candidates")`, passed by
+   `build_campaign_flagged_preview`; default `complete`, so the Flagged page is
+   unchanged. `fetch_search_term_aggregates(flagged_candidates=True)` asks the
+   database which raw terms carry durable evidence (`BOOL_OR(is_flagged_waste
+   IS TRUE) OR search_term IN (SELECT search_term FROM waste_terms)`), adds
+   every other spelling that normalizes to the same term (decided by
+   `normalize_search_term` over a server-side cursor, never re-written in SQL),
+   narrows both of its statements with `search_term = ANY(%s)` and returns the
+   list; `fetch_search_term_daily_costs(search_terms=, folded=True)` takes the
+   same list. A flagged unit, its metrics, `total_count`, the KPIs, the facets,
+   the annotation join and the truth state are computed by the same code over
+   units that are complete in every spelling and every campaign. If the CRM
+   ever carries exact user queries (`population_has_text`), attribution depends
+   on unflagged units too and the complete population is built instead. A
+   narrowed response declares `population_scope`.
+b. `fetch_keyword_daily_costs(folded=True)`: one `{iso_date: micros}` mapping
+   per criterion from a server-side cursor instead of one dict per (criterion,
+   day). `keyword_evidence_service._build_population` always asks for it, so
+   the Keyword Evidence page shrinks too (123 → 43 MB at `all_time`).
+c. `_build_population` (search terms) lets go of the grouped rows and the cost
+   rows as soon as they are merged.
+
+No published number or payload shape changes: account scope is still applied in
+SQL before aggregation, a preview limit is still never the total, and every
+existing test passes unmodified.
+
+d. *Review round — a section that was not built is not a section that held.*
+   `MemoryError` is re-raised ahead of every broad handler in the two
+   repositories, the two services and the audit's `_audit_window` (it used to
+   become "unavailable", so under the cap the pre-fix audit could report a
+   false pass or a false violation depending on which allocation failed). The
+   audit classifies every section reason code
+   (`classify_section_reason`): a declared withholding passes, a failed build
+   or an unrecognised reason is `unavailable_now` (exit 2), a scope breach is
+   a violation. `summarize` keeps `audits[].drawer_sections` so the stored run
+   row proves both sections were built per window. The narrowed read is one
+   `REPEATABLE READ, READ ONLY` snapshot. A failed per-date cost read makes
+   the population unavailable instead of publishing `fx_incomplete` in an
+   available response (pages included).
+
+e. *Second review round.* `google_ads_customer_not_configured` is a FAILURE
+   for the audit (exit 2): with the headline built and no account, no section
+   was read, and that run used to exit 0. A failed FX rate read makes the
+   population unavailable (`FxRatesUnavailable`); a rate missing for a day is
+   still `fx_incomplete`. The `MemoryError` guard extends to `fetch_fx_rates`,
+   `fetch_canonical_campaign_spend`, `fetch_campaign_identity`,
+   `fetch_sql_contacts` and `campaign_evidence_service`. A quarantined flagged
+   population still passes but is stored as `audits[].drawer_warnings`.
+
+**Production observation (read-only, 2026-11-22).** 66,455 distinct terms,
+101,852 term × campaign units, zero flagged rows, `waste_terms` empty. The
+narrowed read therefore loads no unit in production today; the section is
+available with a true zero total and its memory should be near the floor —
+conditional on that count, and growing with it.
+
+**Tests.** `tests/test_pr_ads_172a_campaign_evidence_memory.py` (49 cases; in
+CI's PostgreSQL step and did-run list). Of the first 20, 17 fail on `main`,
+three of them for the memory reason (test_21, test_22, test_24) and 14 on the
+missing API; of the review round's 22 selected cases 20 fail on the first 172A
+commit. Pure: the folds equal the per-day rows;
+the builders ask for the narrow reads; an unknown population is refused; a CRM
+with exact queries gets the complete population. Real PostgreSQL, adversarial
+fixture: narrowed == complete as whole dictionaries for 6 windows × 5 campaign
+filters × 3 sorts; the narrowed population omits what cannot be flagged and
+holds complete units; the preview total is the campaign's whole flagged count;
+an unexplained flag quarantines both; an unconfigured account is unavailable;
+an empty term list selects nothing. Production-scale synthetic data: flagged
+growth ≤ 170 MB, keyword ≤ 70 MB, narrowed == complete at scale, and the real
+audit through `_run_capped` + `classify` holds at ≤ 75% of a 293 MB budget with
+both sections available in every window. The three of the first 20 that pass
+on `main` are the dataset's row counts, the preview total (already right) and
+the complete view declaring no narrowed population.
+
+**Known gaps.**
+
+1. The Search Terms pages still build the complete population inside the web
+   server: `/api/search-term-evidence`, `/flagged` (the page), `/patterns`,
+   `/patterns/detail`, `/term`, `/export` and `/api/waste` — 702 MB of growth
+   at `all_time` on this dataset (839 before; only (c) applies), 170 MB at 30d.
+   On a 512 MB instance that is an OOM risk a user can trigger from the window
+   selector. Terms and Patterns publish every unit and need pagination or
+   aggregation in SQL; the Flagged page could take the narrowed population
+   once its audit block's "every source row" claim is restated.
+2. The flagged section's cost now follows the account's flagged and annotated
+   terms (13,387 candidate units ≈ 110 MB here), because `truth_state` and
+   `annotation_join` are account-wide by contract.
+3. Production's term mix is unknown from here; the first production run should
+   show `campaign_evidence` `holds` with `peak_rss_mb` well under its budget.

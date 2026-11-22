@@ -69,6 +69,8 @@ logger = logging.getLogger(__name__)
 # never silently drift from the Revenue-side contract).
 try:  # pragma: no cover - import guard
     from services.google_ads_spend_service import SPEND_VARIANCE_TOLERANCE
+except MemoryError:
+    raise
 except Exception:  # noqa: BLE001
     SPEND_VARIANCE_TOLERANCE = 0.02
 
@@ -115,6 +117,8 @@ def load_status_thresholds() -> dict[str, float]:
             cfg = yaml.safe_load(fh) or {}
         junk_pct = float(cfg["campaign_verdicts"]["fix"]["min_junk_pct"])
         small_sample = int(cfg["lead_quality"]["small_sample_warning_threshold"])
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.debug("thresholds.yaml load failed, using defaults: %s", exc)
     return {"junk_heavy_pct": junk_pct, "small_sample": small_sample}
@@ -492,6 +496,8 @@ def _canonical_sql_reconciliation(window, consumer_count, now) -> dict:
         return _canon.page_reconciliation(
             _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
             now=now, consumer_count=consumer_count)
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001
         from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
         return _canon.page_reconciliation(
@@ -875,6 +881,8 @@ def _safe_lifecycle_disclosure(cohort_svc) -> dict:
     """The event-time disclosure must never take the page down with it."""
     try:
         return cohort_svc.lifecycle_event_disclosure()
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.error("[campaigns] lifecycle disclosure failed: %s", exc)
         return cohort_svc.lifecycle_disclosure_skeleton(
@@ -925,6 +933,8 @@ def unavailable_response(window: str, now: datetime | None = None) -> dict[str, 
         window_key, is_all_time = resolved["key"], resolved["is_all_time"]
         window_start = start.isoformat() if start else None
         window_end = end.isoformat()
+    except MemoryError:
+        raise
     except Exception:  # noqa: BLE001 - unknown/unresolvable window
         window_key = window if isinstance(window, str) else "30d"
         window_start = window_end = None
