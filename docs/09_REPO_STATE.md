@@ -6064,7 +6064,7 @@ These are not production figures. Peak resident growth of one request, MB,
 | Patterns | 680 | 107 |
 | Pattern drawer | 679 | 78 |
 | Term drawer | 681 | 1.6 |
-| CSV export (20 MB file) | 673 | 95 |
+| CSV export (20 MB file) | 673 | 117 |
 
 At `30d`: 144–159 before, 0.1–46 after. Full table, allocators and method:
 `docs/54_SEARCH_TERMS_PAGES_MEMORY.md`.
@@ -6100,8 +6100,10 @@ c. Only the returned page is serialized: Terms selects it with a heap
    releases the units first; the pattern drawer decides membership before
    unifying; the term drawer loads the units of its one normalized term
    (`normalized_terms=`), or the complete population if the CRM carries exact
-   queries; the CSV export is a `StreamingResponse` over rows serialized as
-   they are sent.
+   queries; the CSV export writes one row dict at a time into a complete
+   body, releases the population and returns it with its Content-Length —
+   never a stream, so a failure on any row is a 503 and not a short
+   `…_complete.csv` under HTTP 200 (review fix F1).
 d. With no contact carrying a query, a unit's attribution state is asked for
    per mapping status (`unit_state_without_text_evidence`, the rule
    `_attribute` uses) instead of once per unit.
@@ -6110,7 +6112,9 @@ e. `population_snapshot()`: every `search_terms` / `waste_terms` statement of a
    committing between the grouped rows and the per-date costs produced units
    whose total and per-date amounts disagreed in a response that reconciled.
 f. `_search_term_evidence_call`, `/api/waste` and the export route let
-   `MemoryError` through instead of answering it as "database unavailable".
+   `MemoryError` through instead of answering it as "database unavailable";
+   so does `fetch_reviews_for_identities`, which answered it as "review state
+   unavailable" (review fix). The other readers a build calls already did.
 
 **Proof.** `tests/test_pr_ads_173a_search_terms_pages_memory.py`, registered in
 CI's PostgreSQL step and did-run list: 364 requests on a real server publish
@@ -6130,7 +6134,9 @@ Every existing test passes unmodified.
    ≈ 80 MB (Terms ≈ 157 MB at `all_time`, simulated). Above target, unguarded;
    bound `_attribute` before turning `LEADS_HAVE_SEARCH_TERM` on.
 2. Concurrent requests add up; nothing serialises population builds.
-3. A build holds two of the pool's ten connections at once.
+3. A build holds two of the pool's ten connections at once, halving the
+   concurrency (≈ 5 builds) at which `getconn` raises and the read without a
+   connection reports unavailable.
 4. The snapshot covers `search_terms` and `waste_terms`, not canonical spend,
    identity, FX rates, reviews or SQL contacts.
 5. The Flagged page still builds the complete population (`docs/51` §6.1).

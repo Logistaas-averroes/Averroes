@@ -673,19 +673,46 @@ def test_21_the_same_requests_are_answered(published):
     assert set(published) == set(golden["payloads"])
 
 
+def _same_document(golden_sha256: str, published_payload) -> bool:
+    """Whether a published payload is the golden one BYTE FOR BYTE once
+    serialized canonically — the digest the capture recorded. Python ``==``
+    would accept ``0`` for ``0.0`` or ``False``, and ``1.0`` for ``True``; the
+    JSON a client receives distinguishes all of them, so this does too."""
+    return matrix.digest(published_payload) == golden_sha256
+
+
+def test_23_the_comparison_tells_types_apart_that_python_equality_does_not():
+    """The equality in test_22 must fail on a payload whose numbers are equal
+    in Python but serialize differently (review of 173A, concern 2)."""
+    reference = {"rows": [{"clicks": 0, "spend_usd": 0.0, "fx_complete": False,
+                           "count": 1}]}
+    digest = matrix.digest(reference)
+    assert _same_document(digest, json.loads(json.dumps(reference)))
+    for changed in ({"clicks": 0.0}, {"spend_usd": 0}, {"fx_complete": 0},
+                    {"count": True}, {"count": 1.0}):
+        variant = {"rows": [{**reference["rows"][0], **changed}]}
+        assert variant == reference                  # what `==` would accept
+        assert not _same_document(digest, variant), changed
+
+
 @_needs_pg
 @pytest.mark.parametrize("family", FAMILIES)
 def test_22_every_payload_equals_the_one_the_parent_commit_published(published, family):
     """Whole-document equality, request by request: every number, row, total,
     facet, KPI, sort order and key. Nothing is normalized, rounded, sorted or
-    removed before comparing."""
-    _, golden = _golden()
+    removed before comparing, and the comparison is of the canonical
+    SERIALIZED bytes (the capture's sha256), so a value whose type changed —
+    ``0`` for ``0.0``, ``False`` for ``0`` — differs even where Python's ``==``
+    would call it equal."""
+    index, golden = _golden()
     names = [n for n in golden["payloads"] if _family(n) == family]
     assert names, family
     differing = {}
     for name in names:
-        if published[name] != golden["payloads"][name]:
-            differing[name] = _first_difference(golden["payloads"][name], published[name])
+        if not _same_document(index["scenarios"][name]["sha256"], published[name]):
+            differing[name] = (
+                _first_difference(golden["payloads"][name], published[name])
+                or "equal under ==, but the serialized bytes differ (a type changed)")
     assert not differing, (
         f"{len(differing)} of {len(names)} {family} payloads differ from the "
         f"parent commit's: " + "; ".join(f"{k} → {v}" for k, v in list(differing.items())[:5]))
@@ -701,7 +728,7 @@ def test_22_every_payload_equals_the_one_the_parent_commit_published(published, 
 # Peak resident growth one request may add to a warm process, MB. Measured on
 # this dataset (docs/54): before ≈ 673–683 for every route; after — Terms 75,
 # Flagged 79, /api/waste 79, Patterns 107, pattern drawer 78, term drawer 2,
-# CSV export 95.
+# CSV export 117–120 (the file is complete before it is sent; review fix F1).
 
 GROWTH_LIMIT_MB = {
     "terms": 115, "terms_filtered_page": 115, "flagged": 120, "waste": 120,
@@ -1291,10 +1318,11 @@ def test_49_the_term_drawer_loads_the_units_of_its_term_only(seeded, monkeypatch
 
 
 @_needs_pg
-def test_50_the_csv_is_streamed_and_is_the_file_it_always_was(seeded, monkeypatch):
-    """The export is sent as it is serialized. The bytes are the golden file's
-    (section 2); here: it IS a stream, in more than one chunk, and an
-    unavailable source is refused before the response starts."""
+def test_50_the_csv_is_complete_before_it_is_sent_and_is_the_file_it_always_was(
+        seeded, monkeypatch):
+    """The export is serialized in chunks of rows, but SENT only once complete:
+    a plain response carrying every byte and their Content-Length — the
+    golden file's bytes — and an unavailable source is refused with a 503."""
     import api.server as srv
     from fastapi import HTTPException
     from fastapi.responses import StreamingResponse
@@ -1304,24 +1332,144 @@ def test_50_the_csv_is_streamed_and_is_the_file_it_always_was(seeded, monkeypatc
                         lambda window, now: real_base(window, now or NOW))
     monkeypatch.setattr(srv, "_EXPORT_ROWS_PER_CHUNK", 10)
     response = _export("all_time")
-    assert isinstance(response, StreamingResponse)
+    assert not isinstance(response, StreamingResponse)
     assert response.headers["content-disposition"] == (
         'attachment; filename="search_terms_all_time_complete.csv"')
-
-    async def _chunks():
-        return [c async for c in response.body_iterator]
-
-    import asyncio
-    chunks = asyncio.run(_chunks())
-    assert len(chunks) > 5
+    assert int(response.headers["content-length"]) == len(response.body)
     _, golden = _golden()
-    assert "".join(chunks) == golden["payloads"]["export/all_time"]["csv"]
+    assert response.body.decode("utf-8") == golden["payloads"]["export/all_time"]["csv"]
 
     monkeypatch.setattr(st_repo, "fetch_search_term_aggregates",
                         lambda *a, **k: {"available": False, "rows": []})
     with pytest.raises(HTTPException) as refused:
         _export("all_time")
     assert refused.value.status_code == 503
+
+
+def test_51_a_row_that_fails_to_serialize_is_a_503_never_a_short_complete_file(
+        monkeypatch):
+    """Review of 173A, F1. A streamed body sends 200 and its headers before the
+    last row is written, so a failure on row 1,001 saved as a short,
+    well-formed ``…_complete.csv`` (header + 1,000 rows). The file must be
+    complete before anything is sent: the same failure is a 503."""
+    import api.server as srv
+    from fastapi import HTTPException
+
+    groups = [_group(f"bulk term {i:04d}") for i in range(1_200)]
+    _doubles(monkeypatch, groups, streamed=True)
+    real_unit_row = st_svc._unit_row
+    served = {"rows": 0}
+
+    def _fails_on_row_1001(unit, aliases_by_id):
+        served["rows"] += 1
+        if served["rows"] == 1_001:
+            raise RuntimeError("row 1,001 could not be serialized")
+        return real_unit_row(unit, aliases_by_id)
+
+    monkeypatch.setattr(st_svc, "_unit_row", _fails_on_row_1001)
+    try:
+        response = _export("all_time")
+    except HTTPException as refused:
+        assert refused.status_code == 503
+    else:
+        # What the parent of this fix returned: a response whose status is
+        # already 200. Drain it to show what a client would have saved.
+        import asyncio
+
+        async def _drain():
+            got = []
+            try:
+                async for chunk in response.body_iterator:
+                    got.append(chunk)
+            except RuntimeError:
+                pass
+            return "".join(c if isinstance(c, str) else c.decode() for c in got)
+
+        body = asyncio.run(_drain()) if hasattr(response, "body_iterator") else ""
+        pytest.fail(f"a failed export started as HTTP {response.status_code} "
+                    f"with {body.count(chr(13) + chr(10))} complete lines")
+    assert served["rows"] == 1_001                   # it got that far, then refused
+
+    # The population is genuinely larger than one chunk, and the export of it
+    # is whole when nothing fails.
+    monkeypatch.setattr(st_svc, "_unit_row", real_unit_row)
+    whole = _export("all_time")
+    assert int(whole.headers["content-length"]) == len(whole.body)
+    assert whole.body.decode("utf-8").count("\r\n") == 1 + 1_200
+
+
+class _MemoryErrorOnFloat:
+    """A column value whose conversion runs out of memory — inside the real
+    reader's own row normalisation, not a replaced function."""
+
+    def __float__(self):
+        raise MemoryError()
+
+    def __int__(self):
+        raise MemoryError()
+
+
+def test_52_out_of_memory_inside_a_real_reader_is_raised_not_unavailable(monkeypatch):
+    """Review of 173A, concern 1. Out of memory raised while a REAL reader
+    iterates its cursor or normalises a row must reach the caller as
+    MemoryError — never become ``available: False`` (or "review state
+    unavailable") with a reason that is false. Each reader is the production
+    function; only the connection under it is a stand-in."""
+    import db.search_term_review_repository as review_repo
+
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", ACCOUNT)
+    bad = list(_GROUP_RECORD)
+    bad[3] = _MemoryErrorOnFloat()                      # spend_usd → float()
+
+    # The grouped rows: in the cursor loop, and in `_normalize_group_row`,
+    # streamed and as a list.
+    monkeypatch.setattr(st_repo, "get_conn",
+                        _conn_yielding([_GROUP_RECORD], MemoryError()))
+    with pytest.raises(MemoryError):
+        st_repo.fetch_search_term_aggregates(None, matrix.D0, sink=lambda row: None)
+    monkeypatch.setattr(st_repo, "get_conn", _conn_yielding([tuple(bad)], None))
+    with pytest.raises(MemoryError):
+        st_repo.fetch_search_term_aggregates(None, matrix.D0, sink=lambda row: None)
+    # The per-date costs: in the cursor loop, and converting a row's micros.
+    monkeypatch.setattr(st_repo, "get_conn", _conn_yielding(
+        [("freight jobs", "uk - brand", "1", date(2026, 11, 1), 1_000_000)],
+        MemoryError()))
+    with pytest.raises(MemoryError):
+        st_repo.fetch_search_term_daily_costs(None, matrix.D0, sink=lambda *row: None)
+    monkeypatch.setattr(st_repo, "get_conn", _conn_yielding(
+        [("freight jobs", "uk - brand", "1", date(2026, 11, 1), _MemoryErrorOnFloat())],
+        None))
+    with pytest.raises(MemoryError):
+        st_repo.fetch_search_term_daily_costs(None, matrix.D0, sink=lambda *row: None)
+
+    # The Flagged page's durable review decisions.
+    class _ReviewCursorOOM(_FailsAfter):
+        def fetchall(self):
+            raise MemoryError()
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _review_conn():
+        yield _ReviewCursorOOM([], None)
+
+    monkeypatch.setattr(review_repo, "get_conn", _review_conn)
+    with pytest.raises(MemoryError):
+        review_repo.fetch_reviews_for_identities(["identity-1"])
+    _doubles(monkeypatch, _POPULATION_GROUPS, streamed=True)
+    with pytest.raises(MemoryError):
+        st_svc.build_flagged_search_terms("30d", now=NOW)
+
+    # Search-term SQL attribution: the real contact reader and the real
+    # attribution wrapper.
+    import db.platform_sql_attribution_repository as sql_repo
+
+    monkeypatch.undo()                     # the real readers again, everywhere
+    monkeypatch.setattr(sql_repo, "get_conn", _review_conn)
+    with pytest.raises(MemoryError):
+        sql_repo.fetch_sql_contacts(None, matrix.D0)
+    with pytest.raises(MemoryError):
+        st_svc._search_term_sql_attribution({"units": []}, None, matrix.D0)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

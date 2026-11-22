@@ -3386,15 +3386,17 @@ def api_search_term_evidence_export(
     unavailable — an empty file is never presented as a complete export.
     Requires auth. Read-only.
 
-    PR-ADS-173A: the file is STREAMED. The complete population is built and
-    sorted before the response starts (so an unavailable source is still a 503,
-    never a started-then-empty file); each row is then serialized and written
-    as it is sent, in the same order and the same CSV dialect, instead of every
-    row dict and the whole file being held in memory at once."""
+    PR-ADS-173A: the rows are serialized ONE AT A TIME into the response body
+    (each row dict exists only while it is written), the population is then
+    released, and the finished bytes are returned with their Content-Length.
+    The file is complete before a status is sent: a failure while ANY row is
+    serialized is a 503, never a 200 that ends early as a short, well-formed
+    "complete" CSV (which a streamed body could not avoid — its status and
+    headers are on the wire before the last row is written)."""
     import csv  # noqa: PLC0415
     import io  # noqa: PLC0415
 
-    from fastapi.responses import StreamingResponse  # noqa: PLC0415
+    from fastapi.responses import Response as FastAPIResponse  # noqa: PLC0415
 
     from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
     from services.search_term_evidence_service import (  # noqa: PLC0415
@@ -3426,8 +3428,11 @@ def api_search_term_evidence_export(
         "sql_attribution_coverage", "sql_ambiguity_reason",
         "first_seen", "last_seen", "window", "window_start", "window_end",
     ]
-
-    def _csv_chunks():
+    export_window = payload["window"]
+    window_start = payload["window_start"] or ""
+    window_end = payload["window_end"] or ""
+    try:
+        body = io.BytesIO()
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(header)
@@ -3447,24 +3452,37 @@ def api_search_term_evidence_export(
                 "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
                 r.get("sql_ambiguity_reason") or "",
                 r["first_seen"] or "", r["last_seen"] or "",
-                payload["window"], payload["window_start"] or "",
-                payload["window_end"] or "",
+                export_window, window_start, window_end,
             ])
             pending += 1
             if pending >= _EXPORT_ROWS_PER_CHUNK:
-                yield buf.getvalue()
+                body.write(buf.getvalue().encode("utf-8"))
                 buf.seek(0)
                 buf.truncate(0)
                 pending = 0
-        yield buf.getvalue()
-
-    filename = f"search_terms_{payload['window']}_complete.csv"
-    return StreamingResponse(
-        _csv_chunks(), media_type="text/csv",
+        r = None
+        body.write(buf.getvalue().encode("utf-8"))
+        del buf, writer
+    except MemoryError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # The file is not complete, so there is no file: nothing has been sent.
+        log.error("[api/search-term-evidence/export] serialization failed: %s",
+                  exc, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="Search terms export could not be completed.") from exc
+    # The population is not needed to send the bytes.
+    del payload
+    content = body.getvalue()
+    del body
+    filename = f"search_terms_{export_window}_complete.csv"
+    # Response sets Content-Length from the complete body.
+    return FastAPIResponse(
+        content=content, media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-#: Rows serialized per chunk of the streamed Search Terms CSV (PR-ADS-173A).
+#: Rows serialized per encoded chunk of the Search Terms CSV body (PR-ADS-173A).
 _EXPORT_ROWS_PER_CHUNK = 1000
 
 

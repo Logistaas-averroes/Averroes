@@ -46,10 +46,12 @@ before, each in a fresh interpreter), MB:
 | Patterns (n = 2) | 156 | 46 | 678 | 107 | 680 | 107 |
 | Pattern drawer | 147 | 19 | 681 | 77 | 679 | 78 |
 | Term drawer (a head query in 27 campaigns) | 147 | 0.1 | 680 | 0.5 | 681 | 1.6 |
-| CSV export (20 MB file, 102,990 rows) | 159 | 21 | 673 | 95 | 673 | 95 |
+| CSV export (20 MB file, 102,990 rows) | 159 | 31 | 673 | 120 | 673 | 117 |
 
-The largest request is now 107 MB (Patterns), against the 150 MB this change
-was asked to stay within. Wall time fell with it: Terms 12.2 → 7.8 s, Flagged
+The largest request is now 120 MB (the CSV export at `180d`), against the
+150 MB this change was asked to stay within. (The export figures are those of
+the review fix in §4.3: the file is assembled in full before it is sent, which
+costs ≈ 23 MB more than the streamed body it replaced, 95 MB.) Wall time fell with it: Terms 12.2 → 7.8 s, Flagged
 32.8 → 8.7 s, Patterns 16.0 → 8.9 s, the term drawer 11.3 → 0.5 s at
 `all_time`.
 
@@ -170,10 +172,20 @@ population — exactly as PR-ADS-172A established.
   `normalize_search_term` over a server-side cursor, as 172A does for flagged
   candidates). If the CRM carries exact user queries, attribution needs every
   unit and the complete population is built, as the flagged view does.
-* **CSV export.** `rows` is a sequence that serializes each row as it is read,
-  and the route is a `StreamingResponse`. The population is built and sorted
-  before the response starts, so an unavailable source is still a 503 and never
-  a started-then-empty file. The bytes are unchanged.
+* **CSV export.** `rows` is a sequence that builds each row dict as it is
+  read, so one row dict exists at a time. The route writes the rows, 1,000 at a
+  time, into one encoded body, releases the population, and returns that body
+  in a plain `Response` with its `Content-Length`. Nothing is sent until the
+  file is complete: an unavailable source, or a failure while ANY row is
+  serialized, is a 503. The bytes are unchanged.
+
+  *Review fix (F1).* The first version of this change returned a
+  `StreamingResponse`. A streamed body puts `200` and its headers on the wire
+  before the last row is written, so a row failing to serialize part-way
+  through (reproduced with uvicorn: a failure after the first chunk) left the
+  client with a short, well-formed `search_terms_<window>_complete.csv` —
+  a clean header and 1,000 complete rows. test_51 fails on that version with
+  "a failed export started as HTTP 200 with 1001 complete lines".
 
 ### 4.4 SQL attribution without a query
 
@@ -203,6 +215,17 @@ unavailable.
 `Exception`, so a `MemoryError` from a builder was answered with the
 db-unavailable shape — a reason that is false. Each now lets it through.
 
+Below the routes, the readers a build calls each re-raise `MemoryError` before
+their broad handler: the grouped-row and per-date cost readers (in the cursor
+loop and in row conversion, streamed or listed), the annotation reader, the FX,
+canonical-spend, identity and SQL-contact readers, and
+`_search_term_sql_attribution`. One did not: `fetch_reviews_for_identities`
+(the Flagged page's durable review decisions) answered out of memory as
+"review state unavailable", and every flagged row then published
+`review_state_status: "unavailable"` for a false reason. It now re-raises
+(review fix; test_52 fails on the first version of this change with "DID NOT
+RAISE MemoryError"). Readers of other pages were not audited here.
+
 ## 5. Proof
 
 `tests/test_pr_ads_173a_search_terms_pages_memory.py` (in CI's PostgreSQL step
@@ -217,15 +240,22 @@ and did-run list):
   with nothing flagged; invalid parameters — publish payloads **equal as whole
   documents** to the ones captured from commit `6c1cb04` by
   `tests/pr_ads_173a_scenarios.py` and committed in `tests/fixtures/`. Nothing
-  is normalized before comparing. The capture hands the old code its grouped
+  is normalized before comparing, and the comparison is of the canonical
+  serialized bytes (`json.dumps(sort_keys=True)` sha256, the capture's own
+  digest), not Python `==`, which would accept `0` for `0.0` or `False`
+  (test_23 shows the difference). The capture hands the old code its grouped
   rows in the order the new statement specifies (§4.1); on this dataset the
   old code's payloads were identical with and without that.
 * **Measured, production-scale synthetic data.** Every route at `180d` and
   `all_time`, each in a fresh interpreter, with a limit under 150 MB and an
   assertion that the page was actually published (16 cases).
 * **Failure paths.** A failed cost read and a failed FX read are unavailable on
-  every route (and the export is a 503); `MemoryError` is raised by every
-  builder and every route handler; a stream that breaks midway is unavailable;
+  every route (and the export is a 503); a row that fails to serialize is a
+  503, never a started 200 (test_51); `MemoryError` from any reader a build
+  calls is raised by every builder and every route handler (test_42, with the
+  readers replaced) and by the real readers themselves, raised from their
+  cursors and row conversion (test_44, test_52); a stream that breaks midway is
+  unavailable;
   a consumer's own failure is raised; an unconfigured account reads nothing.
 * **Pure.** The compact unit equals the pre-173A dict field for field after the
   same merges; the page slice equals the slice of the full sort for every sort;
@@ -240,7 +270,7 @@ does not. Every existing test passes unmodified.
 
 ## 6. Not guarded, and why
 
-No route needs a refusal guard at the sizes measured: the largest is 107 MB.
+No route needs a refusal guard at the sizes measured: the largest is 120 MB.
 None was added.
 
 ## 7. Not fixed
@@ -253,15 +283,20 @@ None was added.
 2. **Concurrent requests add up.** Nothing serialises population builds. Three
    simultaneous `all_time` Patterns requests are ≈ 320 MB on top of idle.
 3. **A build holds two pooled connections at once** — the snapshot, plus one
-   briefly for each `revenue_repository` read. The pool has ten.
+   briefly for each `revenue_repository` read. The pool has ten, so this halves
+   the number of concurrent builds at which `ThreadedConnectionPool.getconn`
+   raises ("connection pool exhausted"): about five simultaneous Search Terms
+   requests instead of ten. The read that gets no connection reports
+   unavailable — for the identity read, campaign identity unavailable — rather
+   than waiting. Not redesigned here.
 4. **The snapshot covers `search_terms` and `waste_terms` only.** Canonical
    spend, campaign identity, FX rates, review decisions and SQL contacts are
    read on their own connections, as before.
-5. **The CSV export holds the sorted population for as long as the client takes
-   to download the file** (≈ 95 MB at `all_time` here). A failure while a row
-   is being serialized mid-download ends the transfer without its final chunk;
-   it cannot become a 503 once the response has started. (The population read,
-   the FX conversion and the sort all happen before it starts.)
+5. **The CSV export holds the whole file in memory while it is sent** (≈ 20 MB
+   at `all_time` here); the population is released before the response is
+   returned. Building the file before sending it is what makes a failure a 503
+   instead of a short "complete" file (§4.3); peak growth is ≈ 117–120 MB,
+   ≈ 23 MB above the streamed version.
 6. **Patterns still unifies every term of the window** (62,706 here); n-grams
    are computed in Python.
 7. **The Flagged page still builds the complete population.** It could take

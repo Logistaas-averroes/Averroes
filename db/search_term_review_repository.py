@@ -101,6 +101,11 @@ def fetch_reviews_for_identities(term_identities: list) -> dict:
                 rows = [_normalise(r) for r in _rows_as_dicts(cur)]
         return {"available": True,
                 "rows": {r["term_identity"]: r for r in rows}}
+    except MemoryError:
+        # PR-ADS-173A — out of memory is not "review state unavailable": the
+        # Flagged page would publish every row as review-unavailable for a
+        # reason that is false.
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("fetch_reviews_for_identities failed: %s", exc)
         return _unavailable(rows={})
