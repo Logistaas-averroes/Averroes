@@ -1024,6 +1024,8 @@ def api_waste(
         payload = build_flagged_search_terms(
             window_key, page=1, page_size=_WASTE_ROW_LIMIT, sort="spend",
             high_spend_usd=high_spend)
+    except MemoryError:
+        raise                      # PR-ADS-173A — never an "empty" answer
     except Exception as exc:  # noqa: BLE001
         log.error("[api/waste] canonical flagged view failed: %s", exc, exc_info=True)
         return _empty()
@@ -3110,6 +3112,11 @@ def _search_term_evidence_call(window: str, builder, *args, fallback=None, **kwa
         return builder(*args, **kwargs)
     except (EvidenceWindowError, SearchTermQueryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MemoryError:
+        # PR-ADS-173A — out of memory is not "the database is unavailable".
+        # Answering with the db-unavailable shape would state a reason that is
+        # false; the request fails as what it is.
+        raise
     except Exception as exc:  # noqa: BLE001
         log.error("[api/search-term-evidence] error: %s", exc, exc_info=True)
         return (fallback or unavailable_terms_response)(window)
@@ -3377,11 +3384,17 @@ def api_search_term_evidence_export(
     """CSV export of the COMPLETE server-filtered Search Term Universe for the
     selected window (never a silently truncated page). 503 when the source is
     unavailable — an empty file is never presented as a complete export.
-    Requires auth. Read-only."""
+    Requires auth. Read-only.
+
+    PR-ADS-173A: the file is STREAMED. The complete population is built and
+    sorted before the response starts (so an unavailable source is still a 503,
+    never a started-then-empty file); each row is then serialized and written
+    as it is sent, in the same order and the same CSV dialect, instead of every
+    row dict and the whole file being held in memory at once."""
     import csv  # noqa: PLC0415
     import io  # noqa: PLC0415
 
-    from fastapi.responses import Response as FastAPIResponse  # noqa: PLC0415
+    from fastapi.responses import StreamingResponse  # noqa: PLC0415
 
     from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
     from services.search_term_evidence_service import (  # noqa: PLC0415
@@ -3394,6 +3407,8 @@ def api_search_term_evidence_export(
             sql_state=sql_state)
     except (EvidenceWindowError, SearchTermQueryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.error("[api/search-term-evidence/export] error: %s", exc, exc_info=True)
         raise HTTPException(status_code=503,
@@ -3402,9 +3417,7 @@ def api_search_term_evidence_export(
         raise HTTPException(status_code=503,
                             detail="Search terms source unavailable.")
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow([
+    header = [
         "search_term", "review_state", "campaign", "mapping_status",
         "reported_spend_usd", "clicks", "impressions", "cpc_usd",
         "platform_conversions", "junk_categories", "matched_patterns",
@@ -3412,29 +3425,47 @@ def api_search_term_evidence_export(
         "attributed_sqls", "sql_attribution_status", "sql_attribution_source",
         "sql_attribution_coverage", "sql_ambiguity_reason",
         "first_seen", "last_seen", "window", "window_start", "window_end",
-    ])
-    for r in payload["rows"]:
-        writer.writerow([
-            r["search_term"], r["state"], r["campaign_name"],
-            r["mapping_status"],
-            "" if r["spend_usd"] is None else r["spend_usd"],
-            r["clicks"], r["impressions"],
-            "" if r["cpc_usd"] is None else r["cpc_usd"],
-            "" if r["conversions"] is None else r["conversions"],
-            "; ".join(r["junk_categories"]), "; ".join(r["matched_patterns"]),
-            "" if r.get("attributed_sqls") is None else r.get("attributed_sqls"),
-            r.get("sql_attribution_status") or "",
-            r.get("sql_attribution_source") or "",
-            "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
-            r.get("sql_ambiguity_reason") or "",
-            r["first_seen"] or "", r["last_seen"] or "",
-            payload["window"], payload["window_start"] or "",
-            payload["window_end"] or "",
-        ])
+    ]
+
+    def _csv_chunks():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(header)
+        pending = 0
+        for r in payload["rows"]:
+            writer.writerow([
+                r["search_term"], r["state"], r["campaign_name"],
+                r["mapping_status"],
+                "" if r["spend_usd"] is None else r["spend_usd"],
+                r["clicks"], r["impressions"],
+                "" if r["cpc_usd"] is None else r["cpc_usd"],
+                "" if r["conversions"] is None else r["conversions"],
+                "; ".join(r["junk_categories"]), "; ".join(r["matched_patterns"]),
+                "" if r.get("attributed_sqls") is None else r.get("attributed_sqls"),
+                r.get("sql_attribution_status") or "",
+                r.get("sql_attribution_source") or "",
+                "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
+                r.get("sql_ambiguity_reason") or "",
+                r["first_seen"] or "", r["last_seen"] or "",
+                payload["window"], payload["window_start"] or "",
+                payload["window_end"] or "",
+            ])
+            pending += 1
+            if pending >= _EXPORT_ROWS_PER_CHUNK:
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+                pending = 0
+        yield buf.getvalue()
+
     filename = f"search_terms_{payload['window']}_complete.csv"
-    return FastAPIResponse(
-        content=buf.getvalue(), media_type="text/csv",
+    return StreamingResponse(
+        _csv_chunks(), media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+#: Rows serialized per chunk of the streamed Search Terms CSV (PR-ADS-173A).
+_EXPORT_ROWS_PER_CHUNK = 1000
 
 
 # ---------------------------------------------------------------------------

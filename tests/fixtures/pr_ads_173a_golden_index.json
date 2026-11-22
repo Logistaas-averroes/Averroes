@@ -1,0 +1,1893 @@
+{
+ "captured_from_commit": "6c1cb0480c97fd110d1145be9a279b8e7b73159f",
+ "captured_with": "python tests/pr_ads_173a_scenarios.py --sorted-reader --out <file>  (cwd = the pre-change checkout)",
+ "payloads_file": "pr_ads_173a_golden_payloads.json.gz",
+ "payloads_sha256": "704cc34879f8d6d0f399b4096e60f26bc0ce1bce6e16a8af7af9795e6a25ac5a",
+ "scenario_count": 364,
+ "scenarios": {
+  "export/180d": {
+   "csv_lines": 92,
+   "sha256": "31363e147af011887606e44399a6e807e7d1ef5d08cbdb103e4252183f06d5ea"
+  },
+  "export/30d": {
+   "csv_lines": 77,
+   "sha256": "972378562838ca40b2ffd13bded17c9e04e297d65c58feec9f3f7bbbbc3b78d1"
+  },
+  "export/7d": {
+   "csv_lines": 52,
+   "sha256": "75e96164262ced130ac2061566778547c7676b61860671e70c8b64007e87feb6"
+  },
+  "export/all_time": {
+   "csv_lines": 108,
+   "sha256": "6c00b30789c014a968d0a318a9abc13b16f40b9ca5fc1249d0088962eb8dfead"
+  },
+  "export/all_time/campaign=C": {
+   "csv_lines": 18,
+   "sha256": "1375b0b9792c7f881da7bdc44fe1bab1bf23f63a230f2d4ab25bbd9dc127bb94"
+  },
+  "export/all_time/min_spend=5": {
+   "csv_lines": 62,
+   "sha256": "37ae79bb14f422443bad552d4dc61cdc0024e7331db755810fbd273217a7f2c0"
+  },
+  "export/all_time/q=jobs": {
+   "csv_lines": 21,
+   "sha256": "d051e43736b83822a2968e5727de7e824332fac1e228df76a0b5a1867d3bd4ca"
+  },
+  "export/all_time/q=none": {
+   "csv_lines": 1,
+   "sha256": "bb5d206a658e2b9e61a206a283a7a0d72e810a30049d6330853879db58fdc873"
+  },
+  "export/all_time/sort=clicks": {
+   "csv_lines": 108,
+   "sha256": "5d1f6c7107fd3f91699e1e3d0348a3b61c6fd9d09cf64fd4851edc4d5e316cd4"
+  },
+  "export/all_time/sort=term": {
+   "csv_lines": 108,
+   "sha256": "7e0f299630834613785c18708e74552931d60f4bce7a183ed22bc6347638775b"
+  },
+  "export/all_time/sql_state=unavailable": {
+   "csv_lines": 108,
+   "sha256": "6c00b30789c014a968d0a318a9abc13b16f40b9ca5fc1249d0088962eb8dfead"
+  },
+  "export/all_time/state=flagged": {
+   "csv_lines": 25,
+   "sha256": "b42e00e3caf87eda87387aba125fbe7e6d52f1b18050b387fcfdcd5a2e13ccf3"
+  },
+  "flagged/180d/sort=attributed_sqls": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "e2a8b5f9428451a7d393337a70e7218f481b13fde4293681f7b4c0f70e32120e",
+   "total_count": 22
+  },
+  "flagged/180d/sort=clicks": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "c8351fe4532767e1def33a8c353c6f85fbcf64b228f9e46d566bbc1e3057e2eb",
+   "total_count": 22
+  },
+  "flagged/180d/sort=last_seen": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "43a6e129b0d8e8b3c81065c5931cae3302f439880718266dbdea6114d43b3a8e",
+   "total_count": 22
+  },
+  "flagged/180d/sort=priority": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "0d1c5a9a70082aabcbf292ed40b1e79726099983cb5bebada39c7b5f409c2704",
+   "total_count": 22
+  },
+  "flagged/180d/sort=spend": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "52d62a447df74aa8929a1a74718061e906316013c00d1e8e74bf0eb53c675df8",
+   "total_count": 22
+  },
+  "flagged/180d/sort=term": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "f28137e61eb623481affb76067c040ce1807580d2a523e5a3667dd8d21b25765",
+   "total_count": 22
+  },
+  "flagged/30d/campaign=A": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "7188ddb5df3c926b0c156596b39967aef0e96724ff38190c6b42b81aa9164b54",
+   "total_count": 17
+  },
+  "flagged/30d/campaign=C": {
+   "actionable": true,
+   "rows": 1,
+   "sha256": "ee0d4369850ad95a5d6c37c5e4e2ba1677963887077258ab0c2205f5df5e0ccc",
+   "total_count": 1
+  },
+  "flagged/30d/campaign=name": {
+   "actionable": true,
+   "rows": 2,
+   "sha256": "782e65900da1e9d210c78f454a06338b18c5f8943f48914d60cd9ac5007a6b93",
+   "total_count": 2
+  },
+  "flagged/30d/combo": {
+   "actionable": true,
+   "rows": 4,
+   "sha256": "557964544fd0d8fc6a55f880e43a00ad53d1b92c2d1340bb4428b6c1d30d928d",
+   "total_count": 14
+  },
+  "flagged/30d/high_spend=3": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "6a092ec700cdd453219810566ca47c5a4a1310ddd4c368d6aaabb9e75b109ed2",
+   "total_count": 22
+  },
+  "flagged/30d/min_spend=5": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "2d5583a69adc70175452fb3ff507688b10e52105a9b87191ff72c8d9058dc5b8",
+   "total_count": 15
+  },
+  "flagged/30d/q=jobs": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "ef8e0b028cb25159b3d4300a3ef115d79b042f716a5dd522965015279c28583a",
+   "total_count": 19
+  },
+  "flagged/30d/q=none": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "0eac35693df0bbdb484694bacf271220064be9b28c871acbb77d818916531e1e",
+   "total_count": 0
+  },
+  "flagged/30d/q=shared name": {
+   "actionable": true,
+   "rows": 2,
+   "sha256": "be25e5f86f56d72ef400d935d6ba00430650394241689608597658b7dd674fdf",
+   "total_count": 2
+  },
+  "flagged/30d/reason=job_seeker": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "0627339073abf6e0ef776ee312cdd33c7eb43ac6d964a73ad31ba88274b670aa",
+   "total_count": 19
+  },
+  "flagged/30d/review=keep": {
+   "actionable": true,
+   "rows": 1,
+   "sha256": "448c36d73ba8c703aacfa27414558ec1637b1cbf8338ae72d283f18a596e3f10",
+   "total_count": 1
+  },
+  "flagged/30d/review=resolved": {
+   "actionable": true,
+   "rows": 1,
+   "sha256": "312e6497f76c2e52da246e356d5e918826205c2f9ead5050d02aa2dd86192f6f",
+   "total_count": 1
+  },
+  "flagged/30d/review=unreviewed": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "e935873284302a4b76169721cf95ffc04778a9b99a308d0c86adc045f0024811",
+   "total_count": 19
+  },
+  "flagged/30d/sort=attributed_sqls": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "fe440a6bd4bd92fd2ce73703531498fec3d90d560da42c2085b1f32a3cb84632",
+   "total_count": 22
+  },
+  "flagged/30d/sort=clicks": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "0deca4bbbac4895c262b9b59fbcfd126c13b32b0a7a5b41ecb46d7f4509bd34e",
+   "total_count": 22
+  },
+  "flagged/30d/sort=last_seen": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "3b0b9847876fded5aa281c044cb5fb11a301a34cc27172754a92e464e7f16e97",
+   "total_count": 22
+  },
+  "flagged/30d/sort=priority": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "17b2e3baebb6c96757d031d38af86f594c6993b4c2c13fab02c14eac4d3a725e",
+   "total_count": 22
+  },
+  "flagged/30d/sort=spend": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "d53115f20b04f40a4407af8fbc459898bb16e7523cbb6eaf882e1433faa8120c",
+   "total_count": 22
+  },
+  "flagged/30d/sort=term": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "c1c0c010810081ab6fe6191b6561e6a1bee17607bc285e4fba5c1b960b1edbf2",
+   "total_count": 22
+  },
+  "flagged/30d/sql_state=known_zero": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "7d3a30e04a3347aba19ccdb576c65717a95585a0cc67d575982505cb9972dc0d",
+   "total_count": 0
+  },
+  "flagged/30d/sql_state=unavailable": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "6f5d694934cdf38caa84b9e9348f27c8714f1ccc41c9486178916f5dea6b5689",
+   "total_count": 22
+  },
+  "flagged/7d/sort=attributed_sqls": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "fcf0a00e4158562c0c00fb6581a33c47edb0ab7162177e56e8f25a2c6afdebf9",
+   "total_count": 14
+  },
+  "flagged/7d/sort=clicks": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "be28cd922abd989046bb9e4e69959abc90cff0c03259eba9c2388aeb99951d5a",
+   "total_count": 14
+  },
+  "flagged/7d/sort=last_seen": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "c1d8af7d7de14df7cc13094e18675206bb0492119a7f3845ceaadc3299b00ad6",
+   "total_count": 14
+  },
+  "flagged/7d/sort=priority": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "e9817682c04f08a65bf0e54bb961571e5b8f6020b37e237b2802f1594892f314",
+   "total_count": 14
+  },
+  "flagged/7d/sort=spend": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "25ea75dbff49c08dfbc0a47641f90bca4a288fd167a0a2319c0d846c456ed996",
+   "total_count": 14
+  },
+  "flagged/7d/sort=term": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "7eedc50d026a52b668c09db3758fc496a55c013386f826b43b5c8f43a05c7f59",
+   "total_count": 14
+  },
+  "flagged/all_time/campaign=A": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "dff732130cb1b6528a518e3851b5359b3887c8dcbd05847653adbd9b1a861a22",
+   "total_count": 18
+  },
+  "flagged/all_time/campaign=C": {
+   "actionable": true,
+   "rows": 1,
+   "sha256": "89ed8449cf546aa3149d2aae3641cca2bd7e7ac2ba07d69fff6b73c875716f40",
+   "total_count": 1
+  },
+  "flagged/all_time/campaign=name": {
+   "actionable": true,
+   "rows": 2,
+   "sha256": "2438df0374be8774081a077ce9631724b300fef57a8ce400f6af88ee186acd9e",
+   "total_count": 2
+  },
+  "flagged/all_time/combo": {
+   "actionable": true,
+   "rows": 4,
+   "sha256": "2fc5643242188a4e113d83379fc89f44f31656bff9a2c40bf86cb01c9a0e8554",
+   "total_count": 14
+  },
+  "flagged/all_time/high_spend=3": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "20bf3629b4f552990212bb9e04b5d03431883c190d36838f73a19413c33aa861",
+   "total_count": 24
+  },
+  "flagged/all_time/min_spend=5": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "aa1c5a936819cfc8c82b84cc1bdd777da3a623c2faea070b3139aaa0f194237f",
+   "total_count": 15
+  },
+  "flagged/all_time/page=2": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "3bce17c09b177dc906f9b821afb43acd3aacef07f1539122ce9eb568c8805902",
+   "total_count": 24
+  },
+  "flagged/all_time/page=3": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "5686e72f4365eee6da3233180e95b0456a57a2b5adcb3b1c1bfd0244fafea9ec",
+   "total_count": 24
+  },
+  "flagged/all_time/page=30": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "48a7d6a4c8526ae4931315ebe01a2a27439f00c7e15445c70838ae9f5be93325",
+   "total_count": 24
+  },
+  "flagged/all_time/page=5": {
+   "actionable": true,
+   "rows": 4,
+   "sha256": "25b1b87453dd7ad21666cdeb85c704b56728b217bc12024df8ef6fe08d35c9f0",
+   "total_count": 24
+  },
+  "flagged/all_time/page=6": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "525b9ac19f8e74824c34218b26a6e22896e945dcfffe32ccbc1d2a050732cea0",
+   "total_count": 24
+  },
+  "flagged/all_time/q=jobs": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "b3dc5688e4fbfb840e28f7b6178e9c11d5344cbad4374b59a03dec6a90678fcc",
+   "total_count": 19
+  },
+  "flagged/all_time/q=none": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "e01bbccf1caf9f28f2823b6dda267e9d47c3dac5231f8b9de7181b301895a601",
+   "total_count": 0
+  },
+  "flagged/all_time/q=shared name": {
+   "actionable": true,
+   "rows": 2,
+   "sha256": "43c252367598d39d96044e4b14cef23e32a5611f7f2b326df98b5835e524b082",
+   "total_count": 2
+  },
+  "flagged/all_time/reason=job_seeker": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "7478124dab8d88c99f188f68741688d7db1df7226948e3a0d67efaf7e1e76c4d",
+   "total_count": 21
+  },
+  "flagged/all_time/review=keep": {
+   "actionable": true,
+   "rows": 1,
+   "sha256": "8cdc163cc273668ac2167a0c260d09b19c662868c64d3ab6d2be4e09d19c12dd",
+   "total_count": 1
+  },
+  "flagged/all_time/review=resolved": {
+   "actionable": true,
+   "rows": 1,
+   "sha256": "bd5fc36e272303e29dcf0c5a1c8912f1319462713b73736cdec1a0ac680b560d",
+   "total_count": 1
+  },
+  "flagged/all_time/review=unreviewed": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "e9e54a8f4d363bd0058dcce5fb0a5c3b4abf45669201c272bccbeab0eb93b7ce",
+   "total_count": 21
+  },
+  "flagged/all_time/sort=attributed_sqls": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "0c74c3369245bc226c53e82da318ae4bd58173d10d4982c3431805e5f3baaa4a",
+   "total_count": 24
+  },
+  "flagged/all_time/sort=clicks": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "a2831690fc1c6a2b275ff1b1c069e65c5794bbd56e32572c1dcfc3f8a28893c0",
+   "total_count": 24
+  },
+  "flagged/all_time/sort=last_seen": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "fb45292cead95dd5d6f1c8d85378dab33be844af580e218bf749fef415d74860",
+   "total_count": 24
+  },
+  "flagged/all_time/sort=priority": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "3e2cc5175658b0065920de9d69b5368a3101abc2f4980d29d5365af24d4a281e",
+   "total_count": 24
+  },
+  "flagged/all_time/sort=spend": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "5d7b83f276d327875d3862d3feb0c0066c37997720dc5d00a57625851391006a",
+   "total_count": 24
+  },
+  "flagged/all_time/sort=term": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "19dc09a0c97996763b13386ff5f78859fb4675b972d84c82d7496a3b3f196a6d",
+   "total_count": 24
+  },
+  "flagged/all_time/sql_state=known_zero": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "700282a97fe92dd012c2b51a89527abaed58ed7c62fe28de0606e0ecb205fc88",
+   "total_count": 0
+  },
+  "flagged/all_time/sql_state=unavailable": {
+   "actionable": true,
+   "rows": 5,
+   "sha256": "f4aac0bd67ee1bec061010700b4c42f55fac2354bdd6559163a3171117348974",
+   "total_count": 24
+  },
+  "flagged/error/sort": {
+   "raised": "SearchTermQueryError",
+   "sha256": "a4046745113132b03f051151bb5e409f49846db49666492d1b0f65388c3b4cc5"
+  },
+  "nothing_flagged:export/30d": {
+   "csv_lines": 77,
+   "sha256": "c80a76a48fdb8b2aa903e7e3a9f7aec168c87ee7f7486bf9cec2702063f36c17"
+  },
+  "nothing_flagged:export/all_time": {
+   "csv_lines": 108,
+   "sha256": "d0e08bb54a562cac0bf846f81019a9763184541fd27192f571f8e02753741a46"
+  },
+  "nothing_flagged:flagged/30d": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "075eed30284758db320e9567ff737dbc33ecbe1a4b23410b7fbf88ce78f5db2c",
+   "total_count": 0
+  },
+  "nothing_flagged:flagged/all_time": {
+   "actionable": true,
+   "rows": 0,
+   "sha256": "fa6fd18a240dfaebcd833fb2332bbf9636305a7db221b2c973c78a6c8a6b0f46",
+   "total_count": 0
+  },
+  "nothing_flagged:pattern_detail/30d/jobs": {
+   "db_unavailable": false,
+   "sha256": "d1e1f2df07071f188fb8be13d6e979fb04280c610ad6f024704a9093dd27f21a",
+   "terms": 16
+  },
+  "nothing_flagged:pattern_detail/all_time/jobs": {
+   "db_unavailable": false,
+   "sha256": "249bcda74a4bf0be6fc68fc587401a1ccfd92fe29deb629311e7e3bbda705868",
+   "terms": 16
+  },
+  "nothing_flagged:patterns/30d/n=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "2072c154dbded20dd3f1e0f9e64813d36371168297780efca572f4e8aed3008f",
+   "total_count": 32
+  },
+  "nothing_flagged:patterns/all_time/n=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "490b83328e3ed6e26cda6b8b2319ed9091e64554fb49ae2f24c5c2a74582d550",
+   "total_count": 33
+  },
+  "nothing_flagged:preview/30d/A": {
+   "available": true,
+   "rows": 0,
+   "sha256": "4aa7b762727253ce6dd75281950349757e30620a4e8398ab31bdef9fd692acb8",
+   "total_count": 0
+  },
+  "nothing_flagged:preview/all_time/A": {
+   "available": true,
+   "rows": 0,
+   "sha256": "93541cedecde1d0d85046eca938cb59b7ae5f214c9b20b72bb812e1d6aade64c",
+   "total_count": 0
+  },
+  "nothing_flagged:term/30d/freight jobs": {
+   "db_unavailable": false,
+   "sha256": "4e18c91a6d17b73d00bd15c5f7b7b304547d39a78f9e0c3417191245c671cbfc"
+  },
+  "nothing_flagged:term/all_time/freight jobs": {
+   "db_unavailable": false,
+   "sha256": "19f0c3d8e393647c1b0af085ce2982828d2e74a7ca2f4ca8484ad6e1a74ce77a"
+  },
+  "nothing_flagged:terms/30d": {
+   "rows": 7,
+   "sha256": "85eae0bc025e54e6f312f28227e110c2b3ca009cc8e40f02d39eeb7373184471",
+   "total_count": 76
+  },
+  "nothing_flagged:terms/30d/state=flagged": {
+   "rows": 0,
+   "sha256": "9356c99f4d2b1cb30ac4a2bd21e85acc1de298bcc3828d2b2e0614be46329771",
+   "total_count": 0
+  },
+  "nothing_flagged:terms/all_time": {
+   "rows": 7,
+   "sha256": "12201586aea292dd1bae1b23caf845805d1445633914b4b7c5387c94d1ee3892",
+   "total_count": 107
+  },
+  "nothing_flagged:terms/all_time/state=flagged": {
+   "rows": 0,
+   "sha256": "53a0920dba49c4c3ec2573ad780c895f8e6ae4464016167570a0e6da03cd6161",
+   "total_count": 0
+  },
+  "nothing_flagged:waste/30d": {
+   "sha256": "f702cdee698b536e1296d1bdfe152899beae4379e5100e24589b2ca82f5d00c5",
+   "total_count": 0,
+   "waste": 0
+  },
+  "nothing_flagged:waste/all_time": {
+   "sha256": "33ece3ddcfd072e7ad4c3290e5abc9c32feb9ec723a96b15ebf41e988c2176cd",
+   "total_count": 0,
+   "waste": 0
+  },
+  "pattern_detail/30d/freight": {
+   "db_unavailable": false,
+   "sha256": "3ae1907111b28c86601d709ee28216c2c1d02029f86d98ed3aa3c220a92cf9ac",
+   "terms": 33
+  },
+  "pattern_detail/30d/freight forwarding crm": {
+   "db_unavailable": false,
+   "sha256": "63b56f8a06b0c7cdf31a18852117d4620545f727c92d47c1c42914a6c519bd82",
+   "terms": 1
+  },
+  "pattern_detail/30d/freight jobs": {
+   "db_unavailable": false,
+   "sha256": "8b9447d6986bae98cf62473637789d8031578a0d4e9aa183434c5d028c2a8314",
+   "terms": 1
+  },
+  "pattern_detail/30d/freight software": {
+   "db_unavailable": false,
+   "sha256": "805b0786e74328c76642331d33d701a808a57df700d37dc03c7c52be90c80217",
+   "terms": 30
+  },
+  "pattern_detail/30d/freight/q": {
+   "db_unavailable": false,
+   "sha256": "20bfa8f9cc4cb5211cf20de8ba61053cad5778084a034afe66cc0346bc882ecf",
+   "terms": 5
+  },
+  "pattern_detail/30d/jobs": {
+   "db_unavailable": false,
+   "sha256": "930c5bd91092f2f2cbee72bd83c4456dc71b4f345aff92a187315ee8abfacec1",
+   "terms": 16
+  },
+  "pattern_detail/30d/jobs/campaign=A": {
+   "db_unavailable": false,
+   "sha256": "a3708ce8383924e16c0efd95812972ec8eadf096918c7078f650a682f44fc393",
+   "terms": 16
+  },
+  "pattern_detail/30d/jobs/state=flagged": {
+   "db_unavailable": false,
+   "sha256": "3efe2b82f61d665c7818e3df0035a9945349b294fb85b0c7b336ddc02b6e1afb",
+   "terms": 16
+  },
+  "pattern_detail/30d/logistics jobs": {
+   "db_unavailable": false,
+   "sha256": "185b2c8922ef36ad264b008e5b5e561c8b38bc2386e747ea3096c18e29af8fe6",
+   "terms": 14
+  },
+  "pattern_detail/30d/not a pattern": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "cf9d90974081118635c8d9e48003810e86f54f4dc5982576dfce1089ada6c56f",
+   "terms": 0
+  },
+  "pattern_detail/30d/tie": {
+   "db_unavailable": false,
+   "sha256": "99ca8504251518ea7c1c8a14c15b4d0d7262152d0424a0804710032c173cc95f",
+   "terms": 7
+  },
+  "pattern_detail/all_time/freight": {
+   "db_unavailable": false,
+   "sha256": "b87f120d1cfbf816ef52bb65126a4e6c7026628e56330b2eff592c259b87e0f4",
+   "terms": 63
+  },
+  "pattern_detail/all_time/freight forwarding crm": {
+   "db_unavailable": false,
+   "sha256": "eed6a91dd2ce507d9032f3faf2bf6a3ca02a22e8763b0201b1ae96c3d0130acc",
+   "terms": 1
+  },
+  "pattern_detail/all_time/freight jobs": {
+   "db_unavailable": false,
+   "sha256": "fa8a2273ccac5d7a29ed4683f24f993528f2b07cbf34a3d1f77d9f41792a865c",
+   "terms": 1
+  },
+  "pattern_detail/all_time/freight software": {
+   "db_unavailable": false,
+   "sha256": "224568b594bc1b4675c1e209a2f9193a17c5da2e65a0a2093d9f0eb54c60e37b",
+   "terms": 60
+  },
+  "pattern_detail/all_time/freight/q": {
+   "db_unavailable": false,
+   "sha256": "5cc996f2a5c03e71b3085d4b3a05774d13947dcbc7782b7d238c1aeda634a8a4",
+   "terms": 10
+  },
+  "pattern_detail/all_time/jobs": {
+   "db_unavailable": false,
+   "sha256": "5347fcf7f71c36955b838c9bae3d37ce04037a867709a701e53be04eb47c4de8",
+   "terms": 16
+  },
+  "pattern_detail/all_time/jobs/campaign=A": {
+   "db_unavailable": false,
+   "sha256": "34bc9e9e5fff572ced9acedee1cba011e4c70a5260334ab406929b4bdd29716e",
+   "terms": 16
+  },
+  "pattern_detail/all_time/jobs/state=flagged": {
+   "db_unavailable": false,
+   "sha256": "aafac112b9f76133eef0d19771201e1d23c9a6e4c6619af0cac9917525651469",
+   "terms": 16
+  },
+  "pattern_detail/all_time/logistics jobs": {
+   "db_unavailable": false,
+   "sha256": "68e23598d8b90a550c08f1a37fe2b2e43ec7485393133672fed80d5aba749825",
+   "terms": 14
+  },
+  "pattern_detail/all_time/not a pattern": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "5347ed0f6103e0bd8b9de0bd3e20c8fffb802759b9935aa00d6717a089c18a96",
+   "terms": 0
+  },
+  "pattern_detail/all_time/tie": {
+   "db_unavailable": false,
+   "sha256": "91dbc8cc8539993dcb0305687bd796aea64984abc4d0ab27f12c3987d23586b1",
+   "terms": 7
+  },
+  "patterns/180d/n=1": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "fc15394078bf017eb40f117b4aa8202313a430c8f5e471930fa25663e7552708",
+   "total_count": 32
+  },
+  "patterns/180d/n=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "cb97596d5b021a4d9c93dfb4eb4857ddec3b2c5d91813e01e2603346d2adb298",
+   "total_count": 32
+  },
+  "patterns/180d/n=3": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "2fe82c916ddd24320f57d5f076c55eb11b6c30c0543254fd4ab7d24f76e6b623",
+   "total_count": 10
+  },
+  "patterns/30d/n=1": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "b9ec77392c3e01d26de553e3d558f7ee30a4c2277bbb107bb9a80f6dc1deaed5",
+   "total_count": 32
+  },
+  "patterns/30d/n=1/campaign=B": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "6a323338ce596ea96b0444b2a1bdc9c72724bb5e69503540cb115c08943db7f4",
+   "total_count": 18
+  },
+  "patterns/30d/n=1/limit=1": {
+   "db_unavailable": false,
+   "rows": 1,
+   "sha256": "b836d3ae55bc747a0835e2ee6fe8f08d125227f0a409f94248fbe519e2e3410a",
+   "total_count": 32
+  },
+  "patterns/30d/n=1/limit=500": {
+   "db_unavailable": false,
+   "rows": 32,
+   "sha256": "62b991761d1f783c68b7018969ae0268396f6baf0062d80c3b364acf550aeed5",
+   "total_count": 32
+  },
+  "patterns/30d/n=1/min_spend=5": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "d13310969f24286fede0d3b09236d8b6511ababd8d2d893b0e18aa47c82016ca",
+   "total_count": 13
+  },
+  "patterns/30d/n=1/min_terms=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "bc5bbf9ed8e96f2d6c938123435c0cd7c2b0654498314d2f1d83abc07f9d7de5",
+   "total_count": 15
+  },
+  "patterns/30d/n=1/min_terms=5": {
+   "db_unavailable": false,
+   "rows": 6,
+   "sha256": "d49138505201979dab5a54f9809a88597873178ed92ce8f4d488a39248d56fcb",
+   "total_count": 6
+  },
+  "patterns/30d/n=1/min_terms=999": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "28384f6bdeaff6faccaeb782af6748ef670dfe89cc9430a3ab9b604880faff0a",
+   "total_count": 0
+  },
+  "patterns/30d/n=1/q=jobs": {
+   "db_unavailable": false,
+   "rows": 4,
+   "sha256": "6249e6ab7c459a59b2c6dc24707c74cba4514c2246433d390755431ccdff77bb",
+   "total_count": 4
+  },
+  "patterns/30d/n=1/q=none": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "dc91e5ef3f51f6d1c92e979877f879f9cd37a9256171c177f8929399e7e40b6d",
+   "total_count": 0
+  },
+  "patterns/30d/n=1/state=clean": {
+   "db_unavailable": false,
+   "rows": 4,
+   "sha256": "7ca8f055de0a00615aab9dcf7b8928ec432cde32f4491b1402729c521f4a59cf",
+   "total_count": 4
+  },
+  "patterns/30d/n=1/state=flagged": {
+   "db_unavailable": false,
+   "rows": 7,
+   "sha256": "2990d7faab26d57841f1ab43564563fee5ecb5e2802c3c506aa35118658b2726",
+   "total_count": 7
+  },
+  "patterns/30d/n=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "a5036a9235e49815fa4b44e57a25942531b3dd047a03e876e1b7a9d0386e3dc7",
+   "total_count": 32
+  },
+  "patterns/30d/n=2/campaign=B": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "686023fdff920cd38a35523897e600ed845d521c907f40e2317e6069878ef8ee",
+   "total_count": 14
+  },
+  "patterns/30d/n=2/limit=1": {
+   "db_unavailable": false,
+   "rows": 1,
+   "sha256": "93b73340cc9b511ab107b60ef662406f249b8047e1b3dec02f6db9c34aba6453",
+   "total_count": 32
+  },
+  "patterns/30d/n=2/limit=500": {
+   "db_unavailable": false,
+   "rows": 32,
+   "sha256": "d7170b562dcecd26f68e84bd74b1fcda6493a8328207c4ba66f11ca6080cfcd2",
+   "total_count": 32
+  },
+  "patterns/30d/n=2/min_spend=5": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "168e8c50663eec617cc3a0c3f8f1a728fe57f673f207a21f88208f0d1c716c8e",
+   "total_count": 12
+  },
+  "patterns/30d/n=2/min_terms=2": {
+   "db_unavailable": false,
+   "rows": 5,
+   "sha256": "e37b85549e932b46290743c939767425c7a92da9e891a2d1c0df62183af2f6df",
+   "total_count": 5
+  },
+  "patterns/30d/n=2/min_terms=5": {
+   "db_unavailable": false,
+   "rows": 3,
+   "sha256": "8bcf87614b0e96798eecee7d6c80bed939c0aba1ce000c3b4136211ebd362478",
+   "total_count": 3
+  },
+  "patterns/30d/n=2/min_terms=999": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "33657e0da2ff8444895e261489fd15ed24ac916505d43ab2c9f1f15d752a140d",
+   "total_count": 0
+  },
+  "patterns/30d/n=2/q=jobs": {
+   "db_unavailable": false,
+   "rows": 3,
+   "sha256": "1fe66b8ecf28f6fb3c67d56840305653aa96cb46082e3208a8d38a5da0145ac6",
+   "total_count": 3
+  },
+  "patterns/30d/n=2/q=none": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "ac386f5e976849c33e8a460b6f36152c873a49e7d988462d5b14d61acb2b7654",
+   "total_count": 0
+  },
+  "patterns/30d/n=2/state=clean": {
+   "db_unavailable": false,
+   "rows": 2,
+   "sha256": "2b2206237c89472b22ab00915f5156518d4b9b1e3c787e5f41aaec5357e3f7f6",
+   "total_count": 2
+  },
+  "patterns/30d/n=2/state=flagged": {
+   "db_unavailable": false,
+   "rows": 7,
+   "sha256": "e12d6b5f559c35b83ad0bf833878d7ee143f866e18b86e29a242ffaef1208bf6",
+   "total_count": 7
+  },
+  "patterns/30d/n=3": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "9b92f14096fb318f2d8f2020c310f233c8218abadc3888cd6ec329fb3d7d9665",
+   "total_count": 10
+  },
+  "patterns/7d/n=1": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "7d183644ce36f04c543c163096d6fcb0b3a54e91c8050890bce8d3547f78f79d",
+   "total_count": 29
+  },
+  "patterns/7d/n=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "f1d394efed1a5dc725a5935b9aa89846baa4e8ac2cf884603a03ae1354c1ad57",
+   "total_count": 28
+  },
+  "patterns/7d/n=3": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "3ab5349da23a813314cb9d91cdb24dd0233cc11a79ffa979f89fa9d92ff15273",
+   "total_count": 9
+  },
+  "patterns/all_time/n=1": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "8ed94ad1fe10514a8cd4b5c00e76f225ebd7d9d27ac030c1fbe72e7c0243d49b",
+   "total_count": 33
+  },
+  "patterns/all_time/n=1/campaign=B": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "c2000faa0a0f4561a4d243e5b7fd2b34e5035719813e8e2f346ce324777743a9",
+   "total_count": 19
+  },
+  "patterns/all_time/n=1/limit=1": {
+   "db_unavailable": false,
+   "rows": 1,
+   "sha256": "c91abc9f5e48760260470965f58e91f762fd9702df71d4e9abee537bf43a3c8f",
+   "total_count": 33
+  },
+  "patterns/all_time/n=1/limit=500": {
+   "db_unavailable": false,
+   "rows": 33,
+   "sha256": "b15837007f4be313481ef658499ae7cc1fef68dd3bde09afa18da1a6f0656883",
+   "total_count": 33
+  },
+  "patterns/all_time/n=1/min_spend=5": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "e4c0afa117ec29f151a3353f3eec44d00bdb242df4fedd9b99c21b0fa5989e2f",
+   "total_count": 13
+  },
+  "patterns/all_time/n=1/min_terms=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "e657a983405ed96a2c96577fae03054798f6b41580d4204cf45d21cc0aa47100",
+   "total_count": 15
+  },
+  "patterns/all_time/n=1/min_terms=5": {
+   "db_unavailable": false,
+   "rows": 6,
+   "sha256": "7c156004e4cfebd9775655cf137c268c42055a108c6d24498c7c11db676c5da0",
+   "total_count": 6
+  },
+  "patterns/all_time/n=1/min_terms=999": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "27492acd049308cfa0d378805f4fbf0840b581f7ecb205cc9680dedbff72e80d",
+   "total_count": 0
+  },
+  "patterns/all_time/n=1/q=jobs": {
+   "db_unavailable": false,
+   "rows": 4,
+   "sha256": "db50098ff97cf46bdd9365ce8641f77b08573dcdfc51efdf259ff2501f820835",
+   "total_count": 4
+  },
+  "patterns/all_time/n=1/q=none": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "1cd76f2638cdc21530aa2a5deac81c118b0c6699e21d28faa0e29dfab244136a",
+   "total_count": 0
+  },
+  "patterns/all_time/n=1/state=clean": {
+   "db_unavailable": false,
+   "rows": 2,
+   "sha256": "6d3efc15b18b40b0c62cac15ad150f960be450a4b508f34d3755037f0bc0a2e3",
+   "total_count": 2
+  },
+  "patterns/all_time/n=1/state=flagged": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "d9159252160fd5e37cedcf8bea539e921f09894221e16fb012b6e98b51277576",
+   "total_count": 12
+  },
+  "patterns/all_time/n=2": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "e245dae735250621d3cee253a4644be184b3442f90219b1d3b2e93ed6c5de39c",
+   "total_count": 33
+  },
+  "patterns/all_time/n=2/campaign=B": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "a836df5a342b243a46114d1099b2b8fc694c31369a554d7b6edee805dcd52de2",
+   "total_count": 15
+  },
+  "patterns/all_time/n=2/limit=1": {
+   "db_unavailable": false,
+   "rows": 1,
+   "sha256": "05fbde6ba7ab64544223b5296fe74acaad17b810a117e4026b42907d0f948e24",
+   "total_count": 33
+  },
+  "patterns/all_time/n=2/limit=500": {
+   "db_unavailable": false,
+   "rows": 33,
+   "sha256": "22538d7efc8a652009980a49f9607349a287646990d48b2d50db560b209cd68f",
+   "total_count": 33
+  },
+  "patterns/all_time/n=2/min_spend=5": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "1efce220efebefdab333496360e7bd17ede3036f6b027585b18431d8b737c4a0",
+   "total_count": 12
+  },
+  "patterns/all_time/n=2/min_terms=2": {
+   "db_unavailable": false,
+   "rows": 5,
+   "sha256": "dcc3ac2ba09e1624bc63078d7f92d0fffd49a10edfaca026ea984ceadd690f2b",
+   "total_count": 5
+  },
+  "patterns/all_time/n=2/min_terms=5": {
+   "db_unavailable": false,
+   "rows": 3,
+   "sha256": "56318cdcd07a5ab425c84a397290e0451bdfa95f5a6f65731e644573e3f064d9",
+   "total_count": 3
+  },
+  "patterns/all_time/n=2/min_terms=999": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "bc04e79861b5650c53fc6f1d19ead4d2321632e80a763c56eec741b52ca8e6b7",
+   "total_count": 0
+  },
+  "patterns/all_time/n=2/q=jobs": {
+   "db_unavailable": false,
+   "rows": 3,
+   "sha256": "00dcdb6211f6e8ee0c72cfe93c9930a4d017e80eabf8242922cc1a832582ab8c",
+   "total_count": 3
+  },
+  "patterns/all_time/n=2/q=none": {
+   "db_unavailable": false,
+   "rows": 0,
+   "sha256": "9ff4cfe8bccb9c7a48d54e76df4815ff801fc0713aae574645581ebe85f0a8f6",
+   "total_count": 0
+  },
+  "patterns/all_time/n=2/state=clean": {
+   "db_unavailable": false,
+   "rows": 1,
+   "sha256": "998b85939f69ace57c61975ef34e60415173dd80b4247465bb21e0b4fe8104c3",
+   "total_count": 1
+  },
+  "patterns/all_time/n=2/state=flagged": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "b5627c7526c13c37d797ef232a412fa93d22c6b23cab5e97354606460fc6cacb",
+   "total_count": 10
+  },
+  "patterns/all_time/n=3": {
+   "db_unavailable": false,
+   "rows": 8,
+   "sha256": "91225504e1df7fbb0841a7115f14cd1fc79185a91653701e155d314a57e12381",
+   "total_count": 11
+  },
+  "patterns/all_time/sort=flagged": {
+   "db_unavailable": false,
+   "rows": 6,
+   "sha256": "4e0e4034f90c2f88700af0504fc069624ffd0492389168732efd427c7eef7d1d",
+   "total_count": 33
+  },
+  "patterns/all_time/sort=pattern": {
+   "db_unavailable": false,
+   "rows": 6,
+   "sha256": "ae2361d7a68bef5348fb8ec58c7185997b50b18fd438deb108485b0110c5b252",
+   "total_count": 33
+  },
+  "patterns/all_time/sort=spend": {
+   "db_unavailable": false,
+   "rows": 6,
+   "sha256": "9c3d57815296f22c795e1b0d62b113a782abdef203248d60b9ed4ed02cece2b2",
+   "total_count": 33
+  },
+  "patterns/all_time/sort=terms": {
+   "db_unavailable": false,
+   "rows": 6,
+   "sha256": "23b760ee788b6dc99a25edecc68400ffa582c7464a47115c4c23e9213ac1cede",
+   "total_count": 33
+  },
+  "patterns/error/n": {
+   "raised": "SearchTermQueryError",
+   "sha256": "71f19ebf15de74199a3adbaca65fa4308a0bada54df73d8dc898fe983914a683"
+  },
+  "preview/180d/23094767501": {
+   "available": true,
+   "rows": 10,
+   "sha256": "f37e2694c448c37cd8c687f2c037a4607bbcddd2c5f7ed4bad105c648dd77d75",
+   "total_count": 17
+  },
+  "preview/180d/23094767502": {
+   "available": true,
+   "rows": 3,
+   "sha256": "a70abddf6ed879a5dfaea28815b0c8a679e42cc268cdf03c6dc64ea1b50db1a5",
+   "total_count": 3
+  },
+  "preview/180d/23094767503": {
+   "available": true,
+   "rows": 1,
+   "sha256": "d22dc6a65d6e1c1809654b5f18b9392569a4fafd3d4426b2dcf938d37427b99d",
+   "total_count": 1
+  },
+  "preview/180d/does-not-exist": {
+   "available": true,
+   "rows": 0,
+   "sha256": "a13e18563cc0609eabf96a347fe85248f6ed6d22938bc177eed997643f37b20e",
+   "total_count": 0
+  },
+  "preview/30d/23094767501": {
+   "available": true,
+   "rows": 10,
+   "sha256": "9bb3bfbb50d678f186b03b23241ea493fc0522edede748f3ed4789c9792c687c",
+   "total_count": 17
+  },
+  "preview/30d/23094767502": {
+   "available": true,
+   "rows": 3,
+   "sha256": "9de80a807015e71e3dd24e7f0d4dbf7ce869cbaa4b1a0645470252d3e7d81a91",
+   "total_count": 3
+  },
+  "preview/30d/23094767503": {
+   "available": true,
+   "rows": 1,
+   "sha256": "4345e9d55aef3cef0c9d35894bda99ac56a73229a8a2da2cd32796d3cd0814c1",
+   "total_count": 1
+  },
+  "preview/30d/does-not-exist": {
+   "available": true,
+   "rows": 0,
+   "sha256": "c7c4b42399976a1f9ac0e40b02857b3f4db0bd70cc02d25acde8b064f3c205d5",
+   "total_count": 0
+  },
+  "preview/7d/23094767501": {
+   "available": true,
+   "rows": 10,
+   "sha256": "3625d5f17731572267bc13e79c4c0e713f9cf303c6b2adcb2793182fc571e5ac",
+   "total_count": 10
+  },
+  "preview/7d/23094767502": {
+   "available": true,
+   "rows": 2,
+   "sha256": "1712f8e753d2230b9668885b377ae91a216cb296855a53cf1c4f878d809a7efb",
+   "total_count": 2
+  },
+  "preview/7d/23094767503": {
+   "available": true,
+   "rows": 1,
+   "sha256": "8d3676925b5c7e9de4c11b7fef5620a8affe6f79cc05a14083a1654dddf81d4f",
+   "total_count": 1
+  },
+  "preview/7d/does-not-exist": {
+   "available": true,
+   "rows": 0,
+   "sha256": "a4f86c457e90fe4aeb797ee30f5f617ad1aafb7d2fb58fa4dcd96296efc76393",
+   "total_count": 0
+  },
+  "preview/all_time/23094767501": {
+   "available": true,
+   "rows": 10,
+   "sha256": "8eefa5d0d3714b01e2b15033f6e1450e2c2cb02621a6bb968ecc6eb0133b1af5",
+   "total_count": 18
+  },
+  "preview/all_time/23094767502": {
+   "available": true,
+   "rows": 4,
+   "sha256": "791b33dff3a3b55fcbbff43d7b196f579ce4747aeb759e57595aac4d6ed4bbe7",
+   "total_count": 4
+  },
+  "preview/all_time/23094767503": {
+   "available": true,
+   "rows": 1,
+   "sha256": "41338745515e3b614f8fd069e309772ea11d37a61408c86186c01682bd488899",
+   "total_count": 1
+  },
+  "preview/all_time/does-not-exist": {
+   "available": true,
+   "rows": 0,
+   "sha256": "766f2b8b0be9988b6d8198ffcf83ac5f406facaf5b60864c6ea0dab9711b6d94",
+   "total_count": 0
+  },
+  "quarantine:flagged/30d": {
+   "actionable": false,
+   "rows": 0,
+   "sha256": "587d7df5e572905eb2d9047117bd61b733519e9e051c4ab237d24faaec53a3e9",
+   "total_count": null
+  },
+  "quarantine:flagged/30d/filtered": {
+   "actionable": false,
+   "rows": 0,
+   "sha256": "1736ea429762eaee05f853b2be51d2430f7f0a70ba0bdcf6b760fe63ef09e1a1",
+   "total_count": null
+  },
+  "quarantine:flagged/all_time": {
+   "actionable": false,
+   "rows": 0,
+   "sha256": "fb8e0809fd948b695d1e439e31649927d68bfec5f257245c2bb738d553c03a6c",
+   "total_count": null
+  },
+  "quarantine:flagged/all_time/filtered": {
+   "actionable": false,
+   "rows": 0,
+   "sha256": "569a8e7d1721646cb9751105d2320c3b01276d8e09d5361384b6a3212cafc1df",
+   "total_count": null
+  },
+  "quarantine:preview/30d/A": {
+   "available": false,
+   "rows": 0,
+   "sha256": "7441bfd2a3644fb1c1824fb4b4b7a8ae61895b1158960a96aeb811ac79573574",
+   "total_count": null
+  },
+  "quarantine:preview/all_time/A": {
+   "available": false,
+   "rows": 0,
+   "sha256": "34ff2a34b5a0ba6a471472354c5d73436a31d437b4f2a6cbd0acd1db58a99228",
+   "total_count": null
+  },
+  "quarantine:terms/30d": {
+   "rows": 7,
+   "sha256": "4def499d6498ec08d395a052daaac047a01d2f0c6e8e7ede8eafae9925a37fcc",
+   "total_count": 76
+  },
+  "quarantine:terms/all_time": {
+   "rows": 7,
+   "sha256": "a67184f4b833b07f6b22da85dd09ecbf02d6ea6fd0ea1db03c594e588c947161",
+   "total_count": 107
+  },
+  "quarantine:waste/30d": {
+   "db_unavailable": true,
+   "sha256": "1b581973c702740f5fae9657c495f28e3e000dceff22e640552186ff0117f49b",
+   "total_count": 0,
+   "waste": 0
+  },
+  "quarantine:waste/all_time": {
+   "db_unavailable": true,
+   "sha256": "aad3fd0e919411e161f159852a1f85b4d12be3cd7f014b02b64ca85e433d3588",
+   "total_count": 0,
+   "waste": 0
+  },
+  "term/30d/FREIGHT   jobs/23094767502": {
+   "db_unavailable": false,
+   "sha256": "74a9ed669add8c660fad022287e8ca421b6474771dfd6110f28d158bdb5035df"
+  },
+  "term/30d/Free TMS/None": {
+   "db_unavailable": false,
+   "sha256": "7f9041ac33379de16d1d81c6675fd1a5424df106016918beb6c1a75574dfe426"
+  },
+  "term/30d/Freight JOBS/None": {
+   "db_unavailable": false,
+   "sha256": "b63d724eb942949e838ef1a6281b5bcbcb27bf9780d8debc32982832c9aa5d98"
+  },
+  "term/30d/customs software/23094767501": {
+   "db_unavailable": false,
+   "sha256": "24a08b2d86349db44c2712301ad3df6f102feaa0f9760cd0ff3f6f74aa6176d6"
+  },
+  "term/30d/erp login/23094767503": {
+   "db_unavailable": false,
+   "sha256": "b52697849a201184fbf66c38790c4a23cca2a9e2d73f709adf8a7ef8ae3c9f12"
+  },
+  "term/30d/erp login/23094767504": {
+   "db_unavailable": false,
+   "sha256": "7a73a8d73c5dffd218a1a0a5aa26e60d69f4a2ff88f418a5e3149b208ea4259c"
+  },
+  "term/30d/erp login/None": {
+   "db_unavailable": false,
+   "sha256": "2529c3fcf178a02dcddd836f913af769eed019014b6a487226c541ec78e9cf55"
+  },
+  "term/30d/euro only term/None": {
+   "db_unavailable": false,
+   "sha256": "059289eaee3b54ac419ce6db803e46a36c6d522e6a4224fe42ff3250337cb8ab"
+  },
+  "term/30d/free logistics course/23094767502": {
+   "db_unavailable": false,
+   "sha256": "06dc693261b4a34b65d633e45176e4e46e2038c864e118623b2da0081d49cbe9"
+  },
+  "term/30d/free tms/23094767502": {
+   "db_unavailable": false,
+   "sha256": "83abd4a37f3e38f1fbb02f14a930a96f6e37fb57f0dff415aaa1afa291d3da37"
+  },
+  "term/30d/freight forwarding crm/23094767501": {
+   "db_unavailable": false,
+   "sha256": "1459d5e85d1cc183c38a13a88a912b70405f3b3bea7b2bb5f54c6a5c025fc8da"
+  },
+  "term/30d/freight jobs/23094767501": {
+   "db_unavailable": false,
+   "sha256": "3d70f64bdda262b969761f9555273f30bd517bf4cdecae6013a3e9870679de6b"
+  },
+  "term/30d/freight jobs/does-not-exist": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "57991200f3fdc60a716621968b5fae51268850a87730f16e7a3e5456dc53134b"
+  },
+  "term/30d/ksa freight forwarder/23094767506": {
+   "db_unavailable": false,
+   "sha256": "3ed2b27f393da4bef5485d2da95e3a25ab3111b4981d0d9c974fa7cfe3aa9de9"
+  },
+  "term/30d/label drift term/23094767505": {
+   "db_unavailable": false,
+   "sha256": "a8e9a5e4681a1707a72b7bb6b3fd42c2c7ec79119c07e9ac76266c91f695ba77"
+  },
+  "term/30d/legacy currency term/23094767501": {
+   "db_unavailable": false,
+   "sha256": "f67c69d66632a75ae546e332993735a8b3002dcbde23a202a92267365d59777e"
+  },
+  "term/30d/mixed currency term/23094767502": {
+   "db_unavailable": false,
+   "sha256": "9d347c413b71e3bd73b9a5322a4bdbd8716a0a0cb780e8a011211b5167c311f2"
+  },
+  "term/30d/never searched here/None": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "57991200f3fdc60a716621968b5fae51268850a87730f16e7a3e5456dc53134b"
+  },
+  "term/30d/no cost term/23094767501": {
+   "db_unavailable": false,
+   "sha256": "99612a4ea20cecf94ff1ff32f5d7d50faff6c33c423f7d4be1af548dc7d526ce"
+  },
+  "term/30d/nvocc salary/23094767501": {
+   "db_unavailable": false,
+   "sha256": "48171f47a4d630bdaa323fa37b256f1d439fde39fc6e8e3963837a81f924fac1"
+  },
+  "term/30d/tie jobs/23094767503": {
+   "db_unavailable": false,
+   "sha256": "da9e325600d4259fb442345aa84da3efb4348f5085e5a27a04cac178bb71ad45"
+  },
+  "term/30d/tie jobs/None": {
+   "db_unavailable": false,
+   "sha256": "ea15af0aac5f625f97dd0fc1027dad70f29941fd352c1191e7857ef117e5bc28"
+  },
+  "term/30d/tms course/23094767501": {
+   "db_unavailable": false,
+   "sha256": "e7ddcd03567d1e0ec84672f07ad6bafb53b009ea97903312060686ca49c2b8b4"
+  },
+  "term/30d/usd term/23094767502": {
+   "db_unavailable": false,
+   "sha256": "3ca99eaafb8a39d9b8865b3e1fe33fa54a63449a1dc75f3168e15fd20d5ce611"
+  },
+  "term/7d/FREIGHT   jobs/23094767502": {
+   "db_unavailable": false,
+   "sha256": "bba903f19fdf9e4345efc3ea6706d4acb2f2e75fd35826f7801de9bc89500cc6"
+  },
+  "term/7d/Free TMS/None": {
+   "db_unavailable": false,
+   "sha256": "b400e2cf4d49db8437bf05f4255cd9791f84f96f9d0f956120abf5fa8edd884b"
+  },
+  "term/7d/Freight JOBS/None": {
+   "db_unavailable": false,
+   "sha256": "731ea941373df3c014cf3e176499f6db11e33f1107f05d6857ec65993dafe857"
+  },
+  "term/7d/customs software/23094767501": {
+   "db_unavailable": false,
+   "sha256": "750ab0b297221e8c39ad2ebe102599be02794cf7f72f5c014df2b33583d3b190"
+  },
+  "term/7d/erp login/23094767503": {
+   "db_unavailable": false,
+   "sha256": "0977a02f2d7ec803a0ecaaa35e0c636a5cd944aa8fd6efc327d433909e98b807"
+  },
+  "term/7d/erp login/23094767504": {
+   "db_unavailable": false,
+   "sha256": "715b6137656a3e27fe6f78145e0c4dc0864fe5a587d0dc121016cb8a89a83bd8"
+  },
+  "term/7d/erp login/None": {
+   "db_unavailable": false,
+   "sha256": "675b5c254e2a5c59f0b56398ce847bdd5d622f0cf646377d1cb8a2dd1973a941"
+  },
+  "term/7d/euro only term/None": {
+   "db_unavailable": false,
+   "sha256": "11442c3e39699db344086fe7bc579e8742710e83cb76bf24e33748ecfff3e9e5"
+  },
+  "term/7d/free logistics course/23094767502": {
+   "db_unavailable": false,
+   "sha256": "120841d6b88b85334411b641f890cc7bd9ef59c50c7ff9029f399bf52857c953"
+  },
+  "term/7d/free tms/23094767502": {
+   "db_unavailable": false,
+   "sha256": "c760e07e2ed9ea718d50fc21657fb3a742fd80d3d5093afb443b149bf4b17314"
+  },
+  "term/7d/freight forwarding crm/23094767501": {
+   "db_unavailable": false,
+   "sha256": "3cf0b500f39907091b5b4e7a4cf2a0247f30598ba4b7b22ffed3424960c79a06"
+  },
+  "term/7d/freight jobs/23094767501": {
+   "db_unavailable": false,
+   "sha256": "d1cb760d787f60cfd79aab461cb41157166f9e6fbc15d65f444a091623dd997a"
+  },
+  "term/7d/freight jobs/does-not-exist": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "1f3f26489cbf27ca8436766676bbad745c3e488ea2cef00393058b353c1accc9"
+  },
+  "term/7d/ksa freight forwarder/23094767506": {
+   "db_unavailable": false,
+   "sha256": "7e4f891f7455cb2efa1f7934df04eecfc90e6f2d57b3907b96ca6e9297a42e37"
+  },
+  "term/7d/label drift term/23094767505": {
+   "db_unavailable": false,
+   "sha256": "b78602981f66b4bc6b04fb49b4d7d9e472d48c1c2bbc3c321115130db7df0b31"
+  },
+  "term/7d/legacy currency term/23094767501": {
+   "db_unavailable": false,
+   "sha256": "e48678d79988eec31a83191cb7e556acbbd8ffb38f7e8fd882f0dd09663abe0b"
+  },
+  "term/7d/mixed currency term/23094767502": {
+   "db_unavailable": false,
+   "sha256": "d2e6c72747e25fdc3ebea80d347e2bba66b2b332a672660fe68f8871aa3a4d20"
+  },
+  "term/7d/never searched here/None": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "1f3f26489cbf27ca8436766676bbad745c3e488ea2cef00393058b353c1accc9"
+  },
+  "term/7d/no cost term/23094767501": {
+   "db_unavailable": false,
+   "sha256": "2f15f9feec745fed9dc48f86293fa7e102b7ba45cafb1299bc47dcd2e67a5b73"
+  },
+  "term/7d/nvocc salary/23094767501": {
+   "db_unavailable": false,
+   "sha256": "898ac9f9d3184603b0c9e5c356a41df73bc09331dcd20f264df4ad214234aef5"
+  },
+  "term/7d/tie jobs/23094767503": {
+   "db_unavailable": false,
+   "sha256": "252e9c4ae7a0519e967f99b9e8b7280ccdbdf34d46c7b910b752c8b79abc03aa"
+  },
+  "term/7d/tie jobs/None": {
+   "db_unavailable": false,
+   "sha256": "1290a405a4ff56a9007221f15b1e8b9e7bc9e0d03eab4b60b52c0586d694a7c2"
+  },
+  "term/7d/tms course/23094767501": {
+   "db_unavailable": false,
+   "sha256": "ccc3543790599097915e307497d65a5747a2bf031fdfd85b924895b41440f294"
+  },
+  "term/7d/usd term/23094767502": {
+   "db_unavailable": false,
+   "sha256": "64de8529c19edaa185ea0f2a2006e68f66a62ecfcf21d8b956d41d8730c9be88"
+  },
+  "term/all_time/FREIGHT   jobs/23094767502": {
+   "db_unavailable": false,
+   "sha256": "f7224d418c283ab83aeba6957b798db30b2e9b263fab5e292926eaabbcb38956"
+  },
+  "term/all_time/Free TMS/None": {
+   "db_unavailable": false,
+   "sha256": "c359700f066e18a6028356013e57df39b411834b638d6de08f1dfce6fdecc678"
+  },
+  "term/all_time/Freight JOBS/None": {
+   "db_unavailable": false,
+   "sha256": "b1fc1eb6cbf97e1deec49672e70e29ea7c6e5661d23e1f691ad93ddb14b44348"
+  },
+  "term/all_time/customs software/23094767501": {
+   "db_unavailable": false,
+   "sha256": "34520bef7d1b1b5e535062b7e66215e803f4bcfbaa577b245c5e88e4c9de820f"
+  },
+  "term/all_time/erp login/23094767503": {
+   "db_unavailable": false,
+   "sha256": "9391a60eaf69b55dbb8de345fb3b54cebb80f7dc6be8dbd01343f05b8075ea2a"
+  },
+  "term/all_time/erp login/23094767504": {
+   "db_unavailable": false,
+   "sha256": "83670c1e6473c36063596e383a3a706939780b1e1604ed5e6a84f42666e70aa5"
+  },
+  "term/all_time/erp login/None": {
+   "db_unavailable": false,
+   "sha256": "4e21ddc5d128d188e0d4b96f77a571ed0c89bd6125cce377a73ba2e441321f56"
+  },
+  "term/all_time/euro only term/None": {
+   "db_unavailable": false,
+   "sha256": "c6a38f0a33a93430f3113d18c0ae3210fa1a05b56b5569c4fcdd7a6b996d2b23"
+  },
+  "term/all_time/free logistics course/23094767502": {
+   "db_unavailable": false,
+   "sha256": "db6a816d5bda823766d3d287ab0c52a34699bcf5b8831505ad194a719ca343dc"
+  },
+  "term/all_time/free tms/23094767502": {
+   "db_unavailable": false,
+   "sha256": "fffb443fe4070bfa304e664611fe29414dadb1a520dfd74634232b01d7f7f79a"
+  },
+  "term/all_time/freight forwarding crm/23094767501": {
+   "db_unavailable": false,
+   "sha256": "0a93f503a76bb8f9c1ec19ce3f3d224ee2f42854395a3bad2d3d488b17e32f43"
+  },
+  "term/all_time/freight jobs/23094767501": {
+   "db_unavailable": false,
+   "sha256": "819261960d6769224cfd77a9d494b43ca6634b11ccdf6b66d7a8892251e01dd6"
+  },
+  "term/all_time/freight jobs/does-not-exist": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "fb62ae5ad58eb98c1fe2d04f8ceb95161eba36880be275bc810ac096a85b413d"
+  },
+  "term/all_time/ksa freight forwarder/23094767506": {
+   "db_unavailable": false,
+   "sha256": "2a14c807bf1487158c1ce49a793443ff18ab66c4d21b0b5062f1829761671634"
+  },
+  "term/all_time/label drift term/23094767505": {
+   "db_unavailable": false,
+   "sha256": "6c9775f7c327f59bbc4573d1c9e321e44f99544f2f7f80966ffbd22a4d102bf2"
+  },
+  "term/all_time/legacy currency term/23094767501": {
+   "db_unavailable": false,
+   "sha256": "03248cbf81ad2fc9fde1f0089ab9f1b0f5c9107e09de770da72c34ee2c5f7ab2"
+  },
+  "term/all_time/mixed currency term/23094767502": {
+   "db_unavailable": false,
+   "sha256": "d626bdb76a1672353330c91e17582f684a752e26e6cb18f7d6f916abf7f8e439"
+  },
+  "term/all_time/never searched here/None": {
+   "_not_found": true,
+   "db_unavailable": false,
+   "sha256": "fb62ae5ad58eb98c1fe2d04f8ceb95161eba36880be275bc810ac096a85b413d"
+  },
+  "term/all_time/no cost term/23094767501": {
+   "db_unavailable": false,
+   "sha256": "09eb25c4d8abe96b1aeadbf5a7cf8a6ff400e92e5c8668c1a993a32b801a6d26"
+  },
+  "term/all_time/nvocc salary/23094767501": {
+   "db_unavailable": false,
+   "sha256": "0d27841d52f316f75c2be2cb45c6e7ab4c603576054e547921a24cf09b2cdd83"
+  },
+  "term/all_time/tie jobs/23094767503": {
+   "db_unavailable": false,
+   "sha256": "a774c9c255b56eefa8b14283f315094dc219b00b5c715d83cc7a9bcefff64c4d"
+  },
+  "term/all_time/tie jobs/None": {
+   "db_unavailable": false,
+   "sha256": "a86b0800f86c8e97d877497952b232a28734818786133d7078b62c2646bc3b8c"
+  },
+  "term/all_time/tms course/23094767501": {
+   "db_unavailable": false,
+   "sha256": "6be311a9afb7c3285f0bfacf6e2012d68be69732419da16db290fb6b394c3765"
+  },
+  "term/all_time/usd term/23094767502": {
+   "db_unavailable": false,
+   "sha256": "6e1c97ef17ecdfe655c8b4b218a5de7d456e0e70fc67111f95b4d0547f47bc06"
+  },
+  "terms/180d/sort=attributed_sqls": {
+   "rows": 7,
+   "sha256": "9e8c1655392d9651e490ba82e42987e1593bb84ef6e832c1de24067a3243a163",
+   "total_count": 91
+  },
+  "terms/180d/sort=clicks": {
+   "rows": 7,
+   "sha256": "472b62283749b4d53b4d66bb7c04ef07592f919a6296880847e8a32d84d80354",
+   "total_count": 91
+  },
+  "terms/180d/sort=clicks/page=3": {
+   "rows": 7,
+   "sha256": "420d485dbb3e58bc8904ef1a13ffe9afdbce288db72777b31ab3e4a4c092e81c",
+   "total_count": 91
+  },
+  "terms/180d/sort=conversions": {
+   "rows": 7,
+   "sha256": "62c1529a9317e0085f4916d7b78c2229f44bdb1b72f08b200abbc532b76f0c21",
+   "total_count": 91
+  },
+  "terms/180d/sort=cpc": {
+   "rows": 7,
+   "sha256": "ce8ec85a09f215f63b1af6cd923e25bebfd7fb10fdff8d9c14f9a0b0ca8c73ed",
+   "total_count": 91
+  },
+  "terms/180d/sort=cpc/page=3": {
+   "rows": 7,
+   "sha256": "6738e216488e1f49655ab836dfc74b84e1ff5061f5d33ebe2f6f9749db91df0a",
+   "total_count": 91
+  },
+  "terms/180d/sort=last_seen": {
+   "rows": 7,
+   "sha256": "19bcddfb1a050fb2586e505567f11a3b1ccb42d7507094158bf02daaa3145715",
+   "total_count": 91
+  },
+  "terms/180d/sort=last_seen/page=3": {
+   "rows": 7,
+   "sha256": "a6a2b36bddb018c58b8ebc670e797742772da923615e52226c4ab352e6a982b2",
+   "total_count": 91
+  },
+  "terms/180d/sort=spend": {
+   "rows": 7,
+   "sha256": "34d0f1d762ccba0d4a7b9e92ad7d5e20f16688a64b751d6e2e5a60a982d81bd6",
+   "total_count": 91
+  },
+  "terms/180d/sort=term": {
+   "rows": 7,
+   "sha256": "4162c43c0e603447d4e692606d654d71f91ba5bb25a261250de87bd7c82ce398",
+   "total_count": 91
+  },
+  "terms/180d/sort=term/page=3": {
+   "rows": 7,
+   "sha256": "2d3cf971dfa808eed20abc0d2ccfc97043be1c8d13d67e66022c3b2f11d69c79",
+   "total_count": 91
+  },
+  "terms/30d/campaign=A": {
+   "rows": 7,
+   "sha256": "e843a18d9a1e692d4bdd72811dd698f50ebfb8007170b0509e49418d90abae86",
+   "total_count": 44
+  },
+  "terms/30d/campaign=C": {
+   "rows": 2,
+   "sha256": "6ddf15eeec25ed61ee3391a2c28e9c07aa67199825e27712b9c2f80909ba6b78",
+   "total_count": 2
+  },
+  "terms/30d/campaign=D": {
+   "rows": 2,
+   "sha256": "dc1b76b05dce4947d483c7caf02e1932b7661547dfbf6cff7ce96fc9a2cb381c",
+   "total_count": 2
+  },
+  "terms/30d/campaign=E": {
+   "rows": 2,
+   "sha256": "3124ccca8d8cec82d6ce7cbf013a29077328850a4920885dbc3bd32eb4e4fbf7",
+   "total_count": 2
+  },
+  "terms/30d/campaign=F": {
+   "rows": 2,
+   "sha256": "1d83b3759fd9d70f41a42f6ddda5b5e8799f3a513a802a8174bb12c884d5244c",
+   "total_count": 2
+  },
+  "terms/30d/campaign=unknown": {
+   "rows": 0,
+   "sha256": "4e540484e02a633d0c619e5a42c584861973de0a2ba34091f5bfb888ce893e5b",
+   "total_count": 0
+  },
+  "terms/30d/combo": {
+   "rows": 7,
+   "sha256": "c0a509af2889a844e49911c7a82f8787c903f90c40ebce5d9720585e3734e5e8",
+   "total_count": 15
+  },
+  "terms/30d/combo/page=2": {
+   "rows": 5,
+   "sha256": "5e7872fe0f2521c053339dc351b00c2c51d0695743d6043239dccbc2954aad7f",
+   "total_count": 15
+  },
+  "terms/30d/junk=job_seeker": {
+   "rows": 7,
+   "sha256": "0f29d571bb29158aa8e3f99c6cb3d8d18c04458ce66fa25ff82f51167aa44398",
+   "total_count": 19
+  },
+  "terms/30d/junk=weird_reason": {
+   "rows": 1,
+   "sha256": "db74647599e966f15ca5d309fcea396040257a6e9ffb37ce6d84fe10e724d026",
+   "total_count": 1
+  },
+  "terms/30d/min_spend=5": {
+   "rows": 7,
+   "sha256": "bf24840dbef9dab3a4b74578ee1b35988681003c031d8593e2e8c1a492949964",
+   "total_count": 43
+  },
+  "terms/30d/min_spend=huge": {
+   "rows": 0,
+   "sha256": "b69b75ae8f8f13bd0c4d66ba79da3e2fd5d506aad00466d06cb445baaef1e68d",
+   "total_count": 0
+  },
+  "terms/30d/q=Freight JOBS": {
+   "rows": 2,
+   "sha256": "904cc209743942016875b5c42378e58dc0e9e1787019c8489bebc45a22ab5da9",
+   "total_count": 2
+  },
+  "terms/30d/q=JOBS": {
+   "rows": 7,
+   "sha256": "56c865a3e974623e098d7e54371f8c12ee997ab50cc9830145563c0918757a00",
+   "total_count": 20
+  },
+  "terms/30d/q=freight": {
+   "rows": 7,
+   "sha256": "3725e7e5119a7ff423ab2c992862293001d4bab64f19737afe7f696eb169e6cb",
+   "total_count": 34
+  },
+  "terms/30d/q=none": {
+   "rows": 0,
+   "sha256": "d85fac14d834ee775ed7624c27bcbdb6b1443e28b05aee506f8d511fa9832b3f",
+   "total_count": 0
+  },
+  "terms/30d/sort=attributed_sqls": {
+   "rows": 7,
+   "sha256": "c3719b11b66e0ae26415e9bdbe33e4ae6ac6fe37c38f00b9f6ea6e76bf43090b",
+   "total_count": 76
+  },
+  "terms/30d/sort=clicks": {
+   "rows": 7,
+   "sha256": "589484e8935ed8dfa8fc3d0747114f2f3e50d81563b18cda4615f89645ae5f15",
+   "total_count": 76
+  },
+  "terms/30d/sort=conversions": {
+   "rows": 7,
+   "sha256": "ad29c5aad664e1f8a60b92569dd56d471c1e9cc8d0fa5bc130b9f79b0e6c8325",
+   "total_count": 76
+  },
+  "terms/30d/sort=cpc": {
+   "rows": 7,
+   "sha256": "24e326951995f7db7e2cdc1ea1298e74ba7a21c31474a66a6f62c0c32802aa37",
+   "total_count": 76
+  },
+  "terms/30d/sort=last_seen": {
+   "rows": 7,
+   "sha256": "a0a7f86386ff6ca941cb1ded410d96d17b9c0223e085c81718028d12e0889cbf",
+   "total_count": 76
+  },
+  "terms/30d/sort=spend": {
+   "rows": 7,
+   "sha256": "4def499d6498ec08d395a052daaac047a01d2f0c6e8e7ede8eafae9925a37fcc",
+   "total_count": 76
+  },
+  "terms/30d/sort=term": {
+   "rows": 7,
+   "sha256": "0f14eca53083f72af8548376f52e7269504046f914b054ee3f030317148ae6dc",
+   "total_count": 76
+  },
+  "terms/30d/sql_state=all": {
+   "rows": 7,
+   "sha256": "a29c1e1689a1c6a5f3ccfaa13aad921e4031893efe510724998916ef54365bc5",
+   "total_count": 76
+  },
+  "terms/30d/sql_state=has_sql": {
+   "rows": 0,
+   "sha256": "20c616038cce5da48c1e1be8d2ce024d87343820f36bc31e947a91d341c8e13b",
+   "total_count": 0
+  },
+  "terms/30d/sql_state=known_zero": {
+   "rows": 0,
+   "sha256": "522cea067823336534f920f1dc7807a9fce21cabd054ba32d8675825612851ff",
+   "total_count": 0
+  },
+  "terms/30d/sql_state=unavailable": {
+   "rows": 7,
+   "sha256": "c43b890e76aef34f3fab70e094752657c8bad989d7528c1d879cb762392046a8",
+   "total_count": 76
+  },
+  "terms/30d/state=clean": {
+   "rows": 7,
+   "sha256": "98560cebe5b22e5d22ab1b5defc4db7d9631335859316f6951b4b63340839146",
+   "total_count": 16
+  },
+  "terms/30d/state=flagged": {
+   "rows": 7,
+   "sha256": "a1e9e0699a32facc607520d5f7ec7d02806451c346a4856964c7f501959aa8d9",
+   "total_count": 22
+  },
+  "terms/30d/state=needs_review": {
+   "rows": 7,
+   "sha256": "a72934d10ca96ecf5d5ca7afea7234fc3d245407f0e3435673422551cd7cbea4",
+   "total_count": 38
+  },
+  "terms/7d/sort=attributed_sqls": {
+   "rows": 7,
+   "sha256": "1e38646bd9fc5fa3d3bf6b1603576158afeaf65be69ba03da8773fe9e030dc84",
+   "total_count": 51
+  },
+  "terms/7d/sort=clicks": {
+   "rows": 7,
+   "sha256": "40c1d621d609e161f4904e018fbf25077a817bab07f30ea3a0340fa569c3a435",
+   "total_count": 51
+  },
+  "terms/7d/sort=conversions": {
+   "rows": 7,
+   "sha256": "5ec80ae5ad650b4bbc3df539de1517f80ec9940f1437cda019ed70150734194e",
+   "total_count": 51
+  },
+  "terms/7d/sort=cpc": {
+   "rows": 7,
+   "sha256": "684cf027c631480312ae532da0b6118776aff7616e406714f437865bc600f857",
+   "total_count": 51
+  },
+  "terms/7d/sort=last_seen": {
+   "rows": 7,
+   "sha256": "f050ae6da2dbd958bfb1166c7487c992d5a26a4a45e6f5f813dcad9bf1e4ecaa",
+   "total_count": 51
+  },
+  "terms/7d/sort=spend": {
+   "rows": 7,
+   "sha256": "91f3acc111e03bddb3498343b09bcb1dde9d4c4be92d24f02d7eb6a6aa8eb66a",
+   "total_count": 51
+  },
+  "terms/7d/sort=term": {
+   "rows": 7,
+   "sha256": "a14d102248762431c3e8b9869ed77e58bcae4fc2c6711ae24a7e1be7052ed9e2",
+   "total_count": 51
+  },
+  "terms/all_time/campaign=A": {
+   "rows": 7,
+   "sha256": "6aa402a6fb21bdc7b26149268b60ce98f9351ec6d8839b878666ea4dd0cc84f4",
+   "total_count": 44
+  },
+  "terms/all_time/campaign=C": {
+   "rows": 7,
+   "sha256": "7d04f446f10cb0772ef6768dfb55f0f1d13ee7ea9683c611364ef4939ba5538a",
+   "total_count": 17
+  },
+  "terms/all_time/campaign=D": {
+   "rows": 7,
+   "sha256": "ea531388e37a99e0ca7ba734ddb14a62a6e60ea479e7e5136c37197072e17d9c",
+   "total_count": 17
+  },
+  "terms/all_time/campaign=E": {
+   "rows": 2,
+   "sha256": "3923275511af85b662549333aaddabe979211bd306f573e275486a8ec684152a",
+   "total_count": 2
+  },
+  "terms/all_time/campaign=F": {
+   "rows": 2,
+   "sha256": "c5338c01477bdc0dccaf3b819a2ed72d06e7625699399602298e95da60a10b24",
+   "total_count": 2
+  },
+  "terms/all_time/campaign=unknown": {
+   "rows": 0,
+   "sha256": "e735bb2bfbbd47a12b4dfc3e41c04c0b5040f1231658a1cc96acf937b9159289",
+   "total_count": 0
+  },
+  "terms/all_time/combo": {
+   "rows": 7,
+   "sha256": "d08a94c6df173a87628fc3919b7d5e4ef452beb275307a21065ea2d49d35316f",
+   "total_count": 15
+  },
+  "terms/all_time/combo/page=2": {
+   "rows": 5,
+   "sha256": "5d24f5c177f9556d37cd61944ecee05ce4b5b55dafaef5bf35cb345fa2223d4b",
+   "total_count": 30
+  },
+  "terms/all_time/junk=job_seeker": {
+   "rows": 7,
+   "sha256": "08021d17ad3f37b60994e6b1fd821c21ddca5d911d47727e01f435e239ff8da9",
+   "total_count": 20
+  },
+  "terms/all_time/junk=weird_reason": {
+   "rows": 1,
+   "sha256": "0810f234e369e0651fd8bc3b980c9720b7f102d60bc4cce72d571e16024ea57f",
+   "total_count": 1
+  },
+  "terms/all_time/min_spend=5": {
+   "rows": 7,
+   "sha256": "e9685cea2de53f553a025972a5588421896dfdbacd9a8845df0b61c87f7ce154",
+   "total_count": 61
+  },
+  "terms/all_time/min_spend=huge": {
+   "rows": 0,
+   "sha256": "1eb8d480e599faefa6658b6a43ea9a91900276c164ad763de69ba59b442aec82",
+   "total_count": 0
+  },
+  "terms/all_time/page=15": {
+   "rows": 7,
+   "sha256": "25f6795a71cf579070de113bb3dc2b203bb6254b2da83938396f16cee85c53e6",
+   "total_count": 107
+  },
+  "terms/all_time/page=16": {
+   "rows": 2,
+   "sha256": "3ce84cda005232d99baf80cc643472063ef58d6b2db90fadc9da5c0d54080bea",
+   "total_count": 107
+  },
+  "terms/all_time/page=17": {
+   "rows": 0,
+   "sha256": "3e72c265475417a38d9b6ccc1b85a5929142c7b9e655e1a7141c41f97c62754b",
+   "total_count": 107
+  },
+  "terms/all_time/page=2": {
+   "rows": 7,
+   "sha256": "c399cd06f1de540ebf9ede2d2590bb00ff0926e3c2eff29d396ba82e15dddec8",
+   "total_count": 107
+  },
+  "terms/all_time/page=3": {
+   "rows": 7,
+   "sha256": "bd9336ac9f9b2bed9d5db3adef8a867c0a253e22c1f8700bbb072a6f5a4223fe",
+   "total_count": 107
+  },
+  "terms/all_time/page=40": {
+   "rows": 0,
+   "sha256": "3b52853aeb76315d06df344ad90701fea258d72e9a505c6db66d64cbbbf0c356",
+   "total_count": 107
+  },
+  "terms/all_time/page=5": {
+   "rows": 7,
+   "sha256": "ee4be3439c44a538896c9b6090c944f796efcc7c9d2c957dd10d9ccf5263ecb6",
+   "total_count": 107
+  },
+  "terms/all_time/page_size=200": {
+   "rows": 107,
+   "sha256": "5b1471f74a4a1813e6dacf58fc9f5acd8b265ba761dfc872ae9603b6aa51d0a2",
+   "total_count": 107
+  },
+  "terms/all_time/q=Freight JOBS": {
+   "rows": 2,
+   "sha256": "197d1d03ab58aeec51f5c57bb600061ccdd89049e8486ddd0dbd2d66d1a293ee",
+   "total_count": 2
+  },
+  "terms/all_time/q=JOBS": {
+   "rows": 7,
+   "sha256": "acb7802164bde57875715d6242e5659ed6ffdce6e7bfd63ea86d9c2a1ae675c0",
+   "total_count": 20
+  },
+  "terms/all_time/q=freight": {
+   "rows": 7,
+   "sha256": "78ea3fa58ab721bc83b9b36d7d638d256fdc5d18860c872e10717a93e6ebfcdc",
+   "total_count": 64
+  },
+  "terms/all_time/q=none": {
+   "rows": 0,
+   "sha256": "8f2fa35881c38ebfee8cf9138421214573d9a0ebb23e0e1b48fcc8f6f0963836",
+   "total_count": 0
+  },
+  "terms/all_time/sort=attributed_sqls": {
+   "rows": 7,
+   "sha256": "51d1e67190f11200577c08adbec94008a562eaa1a780c04ee72d50e1c11207c8",
+   "total_count": 107
+  },
+  "terms/all_time/sort=clicks": {
+   "rows": 7,
+   "sha256": "4e00662425b9062bfb21e8ee80c0f6dc93a70cb4e20c9c70b6f2f52eacfedbc1",
+   "total_count": 107
+  },
+  "terms/all_time/sort=conversions": {
+   "rows": 7,
+   "sha256": "b522ed3eaa007bece4e1c77a4debd34c89da4eab455e9b54b105d4c1647171d6",
+   "total_count": 107
+  },
+  "terms/all_time/sort=cpc": {
+   "rows": 7,
+   "sha256": "87bd9e6bb8ef3f10d8c890d9c38a6e0e71ed5348b44f78397c3021c15551d743",
+   "total_count": 107
+  },
+  "terms/all_time/sort=last_seen": {
+   "rows": 7,
+   "sha256": "797a328fece4bb82f9352575458833cec9282da4805db2112b4c95cc0891bb36",
+   "total_count": 107
+  },
+  "terms/all_time/sort=spend": {
+   "rows": 7,
+   "sha256": "a67184f4b833b07f6b22da85dd09ecbf02d6ea6fd0ea1db03c594e588c947161",
+   "total_count": 107
+  },
+  "terms/all_time/sort=term": {
+   "rows": 7,
+   "sha256": "d17180b287976390936bab177fad4c63cae73d0c4cb489b471f7b269289e0c8b",
+   "total_count": 107
+  },
+  "terms/all_time/sql_state=all": {
+   "rows": 7,
+   "sha256": "b1b2115df3e45f965352f8b34273b0166fe5e53749360882d4895f05ee95aca7",
+   "total_count": 107
+  },
+  "terms/all_time/sql_state=has_sql": {
+   "rows": 0,
+   "sha256": "9a521377ef4c896d966c0338e1464edcd1a100b24b0d8529320b762abbb961e0",
+   "total_count": 0
+  },
+  "terms/all_time/sql_state=known_zero": {
+   "rows": 0,
+   "sha256": "41651a2869a515b041ef5595850354de28c17ac9bc69d81872bb08b62cd8fbec",
+   "total_count": 0
+  },
+  "terms/all_time/sql_state=unavailable": {
+   "rows": 7,
+   "sha256": "8080e0c5a3cdf4aba2ffa025557193bfdabdb4b6024798ad254556032f308b86",
+   "total_count": 107
+  },
+  "terms/all_time/state=clean": {
+   "rows": 7,
+   "sha256": "0a4163486040bd58cc2e822d33321dd3954ab56c82ce0c1fecb5c8a877a6252f",
+   "total_count": 30
+  },
+  "terms/all_time/state=flagged": {
+   "rows": 7,
+   "sha256": "aeeb080f398a7c5b10198312b066118ec7d29e369d04ed8082bb1c4f5d3b6e11",
+   "total_count": 24
+  },
+  "terms/all_time/state=needs_review": {
+   "rows": 7,
+   "sha256": "c21c1db8a5f8b085fbc10e6636e53e58adbd8344fd5f43fcd3603c2e590327e1",
+   "total_count": 53
+  },
+  "terms/error/sort": {
+   "raised": "SearchTermQueryError",
+   "sha256": "e4542afea3e659159f83108f8c29555bf747a9f17ea2ddcdf881780c8ccfb1ea"
+  },
+  "terms/error/state": {
+   "raised": "SearchTermQueryError",
+   "sha256": "3f93677f897f6081bc87e2bed5bc270784e513ee7bb4d12510939a58c7c3a338"
+  },
+  "terms/error/window": {
+   "raised": "EvidenceWindowError",
+   "sha256": "18191356e80a6fcbdc3b0e646e3c33d5a233909e91665ec8dc58ced88e8c9037"
+  },
+  "waste/180d": {
+   "sha256": "797b2fd54d4208684bead7d155845dc0acb7872750a8ffcc5334bb81478cb115",
+   "total_count": 22,
+   "waste": 22
+  },
+  "waste/30d": {
+   "sha256": "1edef34b722b4a82d0da5567ef406d84f4aaa3dab2bd3fb99289ab138e1c1f20",
+   "total_count": 22,
+   "waste": 22
+  },
+  "waste/7d": {
+   "sha256": "e3552e05e84ba9b32badc650da54866f11a9a3933e7e5040850f82b412b1d339",
+   "total_count": 14,
+   "waste": 14
+  },
+  "waste/all_time": {
+   "sha256": "21081698b437912eeaff1582cdca4bc7b93d80cabeb93e9760ea61eaa445dc2d",
+   "total_count": 24,
+   "waste": 24
+  }
+ }
+}
