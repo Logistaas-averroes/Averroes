@@ -190,20 +190,23 @@ def test_search_terms_stays_under_platform_evidence():
     # PR-ADS-162F renamed the group "Platform Evidence" to "Google Ads" and
     # "CRM & Revenue" to "Sales Results". The rule is unchanged: the four
     # ad-platform evidence pages sit together, and the retired page is absent.
-    section = _INDEX_HTML.split("<!-- Google Ads (PR-ADS-162F")[1]
-    section = section.split("<!-- Sales Results (PR-ADS-162F")[0]
+    # PR-ADS-174A: the group is the Campaigns item's strip; Countries (geo)
+    # is a menu item of its own.
+    section = _INDEX_HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
     assert 'data-page="search-terms"' in section
     assert 'data-page="campaigns"' in section
     assert 'data-page="keywords"' in section
-    assert 'data-page="geo"' in section
+    assert 'data-page="geo" data-nav-item="countries"' in _INDEX_HTML
     # And the retired page is not there.
     assert 'data-page="waste"' not in section
 
 
 def test_gclid_attribution_moves_to_admin():
-    admin = _INDEX_HTML.split(">Admin</li>")[1]
+    # PR-ADS-174A: "Admin" is the System item's strip, "Sales Results" the
+    # Pipeline item's.
+    admin = _INDEX_HTML.split('data-section="system"')[1].split("</nav>")[0]
     assert 'data-page="gclid-attribution"' in admin
-    crm = _INDEX_HTML.split("<!-- Sales Results (PR-ADS-162F")[1].split("<!-- Admin -->")[0]
+    crm = _INDEX_HTML.split('data-section="pipeline"')[1].split("</nav>")[0]
     assert 'data-page="gclid-attribution"' not in crm
 
 

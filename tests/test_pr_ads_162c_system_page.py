@@ -700,28 +700,26 @@ def test_37_system_is_routable_admin_only_and_uses_the_clean_chrome():
             '!(_currentUser && _currentUser.role === "admin");') in denied
 
 
-def test_38_the_technical_pages_are_folded_under_advanced_and_still_reachable():
+def test_38_the_technical_pages_sit_under_system_and_are_still_reachable():
+    """PR-ADS-174A: the five technical pages were folded under a collapsed
+    "Advanced tools" sidebar group (ADVANCED_ADMIN_PAGES, .nav-advanced, the
+    toggle). They are now the System item's tab strip, after System itself;
+    the fold is gone because the strip lists them without one."""
     html = (ROOT / "static/index.html").read_text()
     js = (ROOT / "static/app.js").read_text()
     css = (ROOT / "static/styles.css").read_text()
-    folded = set(re.findall(
-        r'<li(?: id="[a-z-]+")? class="nav-advanced">\s*<a class="nav-item[^"]*" '
-        r'data-page="([a-z-]+)"', html))
-    assert folded == ADVANCED
-    declared = set(re.findall(r'"([a-z-]+)"', re.search(
-        r"const ADVANCED_ADMIN_PAGES = \[(.*?)\];", js).group(1)))
-    assert declared == ADVANCED
+    system = html[html.index('data-section="system"'):]
+    system = system[:system.index("</nav>")]
+    tabs = re.findall(r'class="section-tab[^"]*" data-page="([a-z-]+)"', system)
+    assert tabs[0] == "system" and set(tabs[1:]) == ADVANCED and len(tabs) == 6
     pages = re.search(r"const PAGES = \[(.*?)\];", js, re.S).group(1)
     for page in ADVANCED:
         assert f'"{page}"' in pages and f'id="page-{page}"' in html
-    # collapsed by default; opening is one class on the nav
-    assert ".sidebar__nav .nav-advanced { display: none; }" in css
-    assert ".sidebar__nav.sidebar__nav--advanced-open .nav-advanced" in css
-    assert 'id="nav-advanced-toggle"' in html and 'aria-expanded="false"' in html
-    # a deep link to a folded page opens the group
-    assert "if (ADVANCED_ADMIN_PAGES.includes(page)) setAdvancedNavOpen(true);" in js
-    # an admin-hidden item stays hidden when the group opens
-    assert ".nav-advanced[hidden] { display: none; }" in css
+    assert "ADVANCED_ADMIN_PAGES" not in js and "setAdvancedNavOpen" not in js
+    assert "nav-advanced" not in html and "nav-advanced" not in css
+    # an admin-hidden tab stays hidden: the tab style sets display, so [hidden]
+    # needs its own rule
+    assert re.search(r"\.section-tab\[hidden\] \{\s*display: none;", css)
 
 
 def test_39_the_page_links_to_every_advanced_page():

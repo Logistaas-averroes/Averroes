@@ -265,11 +265,17 @@ def test_08_an_old_bookmark_lands_on_the_dashboard():
 
 
 def test_09_every_remaining_sidebar_page_still_routes():
-    nav = re.findall(r'class="nav-item[^"]*" data-page="([a-z0-9-]+)"', HTML)
+    # PR-ADS-174A: a page is reached from the six sidebar items or from an
+    # item's tab strip; an item's first page appears in both, so the 16 are
+    # counted as distinct pages (each tab appears once).
+    tabs = re.findall(r'class="section-tab[^"]*" data-page="([a-z0-9-]+)"', HTML)
+    assert len(tabs) == len(set(tabs))
+    nav = sorted(set(re.findall(r'class="nav-item[^"]*" data-page="([a-z0-9-]+)"', HTML))
+                 | set(tabs))
     pages = _pages()
     # PR-ADS-165A: 18 until the Unit Economics page was deleted.
     # PR-ADS-168B: 17 until the Revenue by Source page was deleted.
-    assert len(nav) == len(set(nav)) == 16
+    assert len(nav) == 16
     assert set(nav) <= pages, sorted(set(nav) - pages)
     for page in sorted(nav):
         assert f'id="page-{page}"' in HTML, page
@@ -277,10 +283,12 @@ def test_09_every_remaining_sidebar_page_still_routes():
     # every page section still present has a route (no orphaned markup)
     sections = set(re.findall(r'<section id="page-([a-z0-9-]+)"', HTML))
     assert sections <= pages, sorted(sections - pages)
-    # the four Google Ads evidence pages are exactly what the group now holds
-    group = HTML.split("<!-- Google Ads (PR-ADS-162F")[1].split("<!-- Sales Results")[0]
+    # what the Google Ads group held (campaigns, search-terms, keywords, geo)
+    # is now the Campaigns item's strip, with Countries an item of its own
+    # (PR-ADS-174A)
+    group = HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
     assert re.findall(r'data-page="([a-z0-9-]+)"', group) == [
-        "campaigns", "search-terms", "keywords", "geo"]
+        "campaigns", "roas-campaigns", "keywords", "search-terms"]
 
 
 def test_10_the_doctrine_registry_holds_no_entry_for_the_deleted_surfaces():

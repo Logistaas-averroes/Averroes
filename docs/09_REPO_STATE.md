@@ -6292,3 +6292,39 @@ it compares ("Campaign, Country and Deals pages agree with the mart"). The
 uncalled `revenue_repository.fetch_source_deal_details` is deleted (its name
 stays banned in the audit lists). `docs/56` §7.2 notes PR-ADS-171B's Paid
 Social contact split.
+
+## PR-ADS-174A — the six-item menu
+
+**What.** Navigation only (`docs/57`). The sidebar's 11 entries, four group
+labels and the "Advanced tools" fold are replaced by the owner's six items:
+Overview (`dashboard`), Channels, Campaigns (campaigns, Campaign Revenue &
+Spend, Keyword Evidence, Search Terms), Countries (Countries, Country Revenue &
+Spend), Pipeline (Leads, Deals) and System (System, Data Runs, System Status,
+Revenue Health, Admin Backfill, GCLID Attribution). An item with more than one
+page shows them as a tab strip at the top of the page, styled as the
+Dashboard's `.dashboard-tab`. The strip is the only sub-page pattern.
+
+**Unchanged.** Every page id, `PAGES`, `RETIRED_PAGE_REDIRECTS` (an old
+`#/revenue-by-source` bookmark still lands on Channels, which is now
+highlighted), hash aliases, loaders, refresh wiring, window selectors, page
+content and every Dashboard `target_page`. The Dashboard page keeps its
+`<h1>Dashboard</h1>`; only the menu label is "Overview".
+
+**Gating.** `showApp()` hides the same four admin-only entries by the same ids
+(`nav-system-item`, `nav-health-item`, `nav-revenue-health-item`,
+`nav-backfill-item`). They are now System tabs. `navigate()` checks are
+unchanged. An item opens the first page the viewer may see, and an item with
+none is hidden. A non-admin's System item opens Data Runs and shows Data Runs
+and GCLID Attribution, the same two pages a non-admin could open before.
+
+**Code.** `NAV_ITEMS`, `navItemForPage`, `navVisiblePages`, `applyNavGating`
+and `renderNavActive` are in `static/app.js`. `ADVANCED_ADMIN_PAGES`,
+`setAdvancedNavOpen`, the toggle and the `.nav-advanced` / `.nav-item--admin`
+CSS are deleted.
+
+**Tests.** `tests/test_pr_ads_174a_six_item_menu.py` has 17 cases. The menu
+table, the lookup and the gating code are run in `node` against a stand-in DOM
+built from `index.html`. Eleven existing cases that pinned the old menu shape
+were updated; each is listed with its old and new expectation in `docs/57` §7.
+
+**Not verified.** Browser rendering.
