@@ -587,7 +587,9 @@ disclosure. A re-read never takes a day with verified spend to zero
   smallest of its clean prefix's newest timestamp, every unprocessed deal's
   and the read's keyset position (`_resume_checkpoint`). Two out-of-place
   rows ending one page can still skip; the `total` guard catches that only
-  beyond the contact slack and when no mid-scan addition masks it. A test
+  beyond the contact slack and when no mid-scan addition masks it, and not
+  at all on a read that stops early (429, cap, timeout), where the stored
+  keyset position can sit past them. A test
   fake must keep the index value and the returned value apart
   (`tests/test_pr_ads_175a_contact_scan_index_lag.py`).
 

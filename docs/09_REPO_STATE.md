@@ -6389,6 +6389,13 @@ count was considered and not done: a record counted in `total` and modified
 before it was read looks identical, so a deal edited mid-scan would turn a
 clean read into a false `gap_proven`, and it would compare HubSpot's clock
 with ours.
+When the read STOPS EARLY (429, timeout, unreadable page, cap, stall) the
+guard never runs: two out-of-place rows ending an earlier page can then put
+the stored keyset position past unread records, and the next run's own
+`total` cannot see them (review round 2: 300 deals, 5098/5099 lagged at the
+end of page 1, a 429 from request 3 → run 2 `success` with 51 deals never
+written). It needs two adjacent lagged rows and a later stop in the same
+read; at c903091 one lagged row and a stop were enough.
 
 **Tests.** `tests/test_pr_ads_175a_contact_scan_index_lag.py` (6). Its fake
 keeps the index value (filters, sort, `total`) apart from the returned value,
