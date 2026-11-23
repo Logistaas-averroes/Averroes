@@ -706,6 +706,10 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
     for r in rows or []:
         row = {**r, **{k: None for k in figures if k in r}, "metrics": None,
                "withheld_reason": reason}
+        if not r.get("is_residual"):
+            # PR-ADS-176B-F1 (M1): a row whose figures are withheld is not
+            # judged on the figures it had before they were withheld.
+            row["verdict"], row["verdict_reason"] = "outcome_withheld", reason
         # PR-ADS-170A-F1: the residual row's spend parts are withheld with it.
         # PR-ADS-176A: so are its itemised outside-market countries, and every
         # row's deal ids (a population is a figure).
@@ -722,6 +726,14 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
         out.append(row)
     return out
 
+
+#: PR-ADS-176B-F1 (truth audit m8): the lead population behind every country
+#: row's leads / SQLs and their totals — ``db.revenue_repository.
+#: fetch_lead_quality``: paid-search leads with a real campaign (pseudo- and
+#: email campaigns excluded), on the contact's HubSpot creation date; a
+#: qualified lead is the latest status category 'qualified'. Declared beside
+#: ``revenue_scope``, never in it.
+COUNTRY_LEAD_SCOPE = "paid_search_with_campaign"
 
 #: PR-ADS-176B: why a Countries-page total is not published when the row it
 #: needs gives no reason of its own.
@@ -801,7 +813,8 @@ def _country_page_blocks(rows: list, spend_truth: dict, *,
     for r in rows or []:
         region = (None if r.get("is_residual")
                   else country_regions.region_for_code(r.get("country_code")))
-        out.append({**r, "region": region})
+        # PR-ADS-176B-F1 (m8): the lead population behind leads / SQLs.
+        out.append({**r, "region": region, "lead_scope": COUNTRY_LEAD_SCOPE})
     markets = [r for r in out if not r.get("is_residual")]
     geo_ready = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
     gate_reason = next(iter(spend_truth.get("country_gap_codes") or []), None) \
@@ -828,6 +841,11 @@ def _country_page_blocks(rows: list, spend_truth: dict, *,
         metrics[cwt.PERIOD_REVENUE_PER_AD_SPEND] = cwt.derive_period_revenue_per_ad_spend(
             metrics["revenue_usd"], spend.get("value"),
             spend_reason=spend.get("reason"))
+        ratio = metrics[cwt.PERIOD_REVENUE_PER_AD_SPEND]
+        if (spend.get("blocked_by_country") and ratio.get("status") != cwt.PUBLISHED
+                and ratio.get("reason") == spend.get("reason")):
+            # m4: the ratio is unknown because THAT market's spend is.
+            ratio["blocked_by_country"] = spend["blocked_by_country"]
         return {
             "spend": spend["value"],
             "leads": metrics["leads"]["value"],
@@ -841,9 +859,11 @@ def _country_page_blocks(rows: list, spend_truth: dict, *,
 
     country_totals = {
         **_totals(markets),
-        "markets": len(markets),
+        # m9: with no settled day nothing was measured — not "0 markets".
+        "markets": None if empty_window else len(markets),
         "population": "listed_markets",
         "revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+        "lead_scope": COUNTRY_LEAD_SCOPE,
     }
     by_region: dict = {}
     for r in markets:
@@ -851,6 +871,8 @@ def _country_page_blocks(rows: list, spend_truth: dict, *,
     regional_mix = [{"region": region, "countries": len(by_region[region]),
                      **_totals(by_region[region])}
                     for region in country_regions.REGION_ORDER if region in by_region]
+    if empty_window:
+        regional_mix = None             # m9: unknown, not an empty list
     return out, country_totals, regional_mix
 
 

@@ -311,6 +311,85 @@ def test_12_an_owner_labelled_criterion_is_the_carrier_of_its_code(live_db, tmp_
         "Iran", "Pakistan"]
 
 
+# ── the one Countries page (PR-ADS-176B-F1, truth audit M2) ────────────────
+# Cases 10 and 12 asserted on the deleted #/geo page that a $0 resting on the
+# owner's labels says so ("$0 owner label"). PR-ADS-176B dropped that half
+# with the page; these restore it on the page that is left — the mart's
+# country view rendered by the real renderRoasCountriesPage — with the 176A
+# fixtures (the mart's business window, reconciled campaign spend).
+def _countries_page(mart) -> str:
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app(
+        '_currentUser = {"username": "u", "role": "admin"}; '
+        "roasCountryMart = %s; roasCountriesData = roasCountryMart.rows || []; "
+        'renderRoasCountriesPage(); __els["roas-countries-table-body"].innerHTML'
+        % json.dumps(json.loads(json.dumps(mart, default=str))))
+
+
+def _countries_row_html(html: str, name: str) -> str:
+    i = html.index(f'aria-label="Open {name} detail"')
+    return html[html.rfind("<tr", 0, i):html.index("</tr>", i)]
+
+
+def test_10_b_on_countries_a_zero_resting_on_both_labels_says_so(live_db, monkeypatch):
+    """Case 10's page half. Cuba (2192) and Iran (2364) spend in the window;
+    Pakistan won a deal and has no geo row. Without the labels that spend has
+    no country and Pakistan reads Unavailable; with them its $0 stands — on
+    the labels, which the cell says."""
+    from tests.test_pr_ads_176a_country_builder_pg_integration import (
+        _deal, _mart, _seed, _sync)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(C2192, 2.0), (C2364, 1.0)])
+    _sync(live_db)
+    _deal(live_db, "d-pk", "Pakistan")
+    mart = _mart()
+    assert mart["spend_truth"]["country_spend_status"] == "verified"
+    rows = {r.get("country_code"): r for r in mart["rows"]}
+    assert (rows["PK"]["spend"], rows["PK"]["spend_reason"]) == (0.0, None)
+    assert rows["PK"]["zero_rests_on_owner_labels"] == ["2192", "2364"]
+    assert rows["GB"]["zero_rests_on_owner_labels"] == []
+    html = _countries_page(mart)
+    pk = _countries_row_html(html, "Pakistan")
+    assert re.search(
+        r'\$0 <span class="owner-label-note" title="This \$0 rests on the owner\'s '
+        r'country label for Google Ads locations 2192, 2364\. Google Ads reports those '
+        r'locations without a country; without the label that spend could be this '
+        r'country\'s and the figure would read &quot;Unavailable&quot;\.">owner label</span>',
+        pk), pk
+    # The owner note on the labelled countries themselves: Iran is a listed
+    # market, Cuba is in the residual's "In residual" items.
+    assert "set by owner" in _countries_row_html(html, "Iran")
+    cuba = html[html.index("</span>Cuba"):]
+    assert "set by owner" in cuba[:cuba.index("</td>")]
+    assert html.count(">owner label</span>") == 1
+
+
+def test_12_b_on_countries_a_zero_carried_by_a_labelled_criterion_says_so(
+        live_db, monkeypatch):
+    """Case 12's page half. Iran's only carrier is 2364, on the owner's word,
+    and it is outside the window; an unlisted code-less criterion has spend
+    inside it. Iran (a deal, no geo row) is $0 and says why; Pakistan,
+    carried by nothing, reads Unavailable."""
+    from tests.test_pr_ads_176a_country_builder_pg_integration import (
+        LOOSE, _deal, _mart, _seed, _sync, _window_dates, _write_spend as _ws)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    start, _today_ = _window_dates("last_6_months")
+    _seed(live_db, yesterday_geo=[(LOOSE, 3.0)])
+    _ws([_spend_rows(C2364, start - timedelta(days=20), 0.42, campaign="111")])
+    _sync(live_db)
+    _deal(live_db, "d-ir", "Iran")
+    _deal(live_db, "d-pk", "Pakistan")
+    mart = _mart()
+    rows = {r.get("country_code"): r for r in mart["rows"]}
+    assert (rows["IR"]["spend"], rows["IR"]["zero_rests_on_owner_labels"]) == (0.0, ["2364"])
+    assert rows["PK"]["spend"] is None
+    assert rows["PK"]["spend_reason"] == "spend_location_unresolved"
+    html = _countries_page(mart)
+    assert ("$0 <span class=\"owner-label-note\" title=\"This $0 rests on the owner's "
+            "country label for Google Ads location 2364." in _countries_row_html(html, "Iran"))
+    assert UNAVAILABLE_NO_COUNTRY in _countries_row_html(html, "Pakistan")
+
+
 def test_13_a_stored_google_code_beats_the_label_and_the_mismatch_is_surfaced(
         live_db, tmp_path, caplog):
     """Google one day reports 2192 as Mexico. Every row of 2192 is then
@@ -813,8 +892,11 @@ def test_24_the_map_hover_and_the_revenue_pages_carry_the_marker_and_the_mismatc
         "const fmtMoney = (v) => '$' + Number(v).toFixed(2);\n"
         "const fmtCompactCurrency = (v, c) => (c === 'GBP' ? '£' : c + ' ') + Number(v).toFixed(2);\n"
         + "".join(source_of(n) for n in (
+            # PR-ADS-176B-F1 (m5): residualSpendCell prints cents through
+            # fmtCountrySpendCents.
             "ownerLabelledCountryText", "ownerLabelMismatchText",
-            "ownerLabelMismatchNotice", "residualSpendCell", "ctryOutsideMarketsText"))
+            "ownerLabelMismatchNotice", "fmtCountrySpendCents", "residualSpendCell",
+            "ctryOutsideMarketsText"))
         + "console.log(JSON.stringify(["
         "ownerLabelledCountryText('owner_labelled'), ownerLabelledCountryText('google_ads'),"
         "ownerLabelMismatchNotice({mismatches: []}), ownerLabelMismatchNotice(undefined),"

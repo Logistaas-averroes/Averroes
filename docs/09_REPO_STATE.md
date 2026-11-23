@@ -6685,6 +6685,26 @@ test files changed, each because a page, key or layout it pinned was deleted or
 merged; the table, with reasons, is in `docs/58` §7.9. The `#/geo` PG suites
 (165A, 167A, 170A) keep every `/api/geo` payload assertion; their page
 assertions are restated on the rows, and the page rules that still apply are
-guarded on the one Countries page.
+guarded on the one Countries page — except the "$0 rests on an owner label"
+disclosure, which this PR dropped and F1 restores (below).
 
 **Next.** 176C retires `/api/geo` and `services/country_evidence_service.py`.
+
+### PR-ADS-176B-F1 — truth audit round 1
+
+* **M1** A row whose spend (zero rule) or revenue (won deals, no proven amount)
+  is unknown is not judged: verdict `spend_unknown` / `revenue_unknown` with
+  `verdict_reason`, badge "Not judged — …", outside the four decision filters.
+  It read "Watch" / "Learning" on `spend or 0`.
+* **M2** `zero_rests_on_owner_labels` on mart country rows (the shared zero
+  rule), and "$0 owner label" on the Countries page — lost with `#/geo`.
+* **M3** The `country_totals` gate is tested: an FX-only gap publishes no total
+  (native GBP on rows was publishable as USD under the mutation).
+* **Minor** reconciliation footer label and the blocking market's name (m4);
+  cents in the residual (m5); "listed markets" on Won Revenue (m6); the
+  response's window for links and the drawer, and a cleared deal-list cache on
+  reload (m7); `lead_scope` declared and labelled (m8); `None` mix and market
+  count with no settled day (m9).
+
+Tests: 11 new cases (one-page 14–20, PG 06–07, 170A 10b / 12b), all failing on
+`4d0921e` (case 15 under the named mutation). Details in `docs/58` §7.10.

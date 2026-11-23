@@ -55,13 +55,14 @@ _PERIOD = {"cohort_basis": "close_date_outcomes_over_same_window_spend",
 
 
 def _market(name, code, region, spend, *, leads=1, sqls=0, deals=1, revenue=1000.0,
-            spend_reason=None, verdict="winner"):
+            spend_reason=None, verdict="winner", verdict_reason=None):
     ratio = (round(revenue / spend, 2) if spend else None)
     return {
         "country": name, "country_code": code, "region": region, "is_residual": False,
         "spend": spend, "spend_reason": spend_reason, "leads": leads, "sqls": sqls,
         "closed_won_deals": deals, "customers": None, "won_revenue": revenue,
         "period_revenue_per_ad_spend": ratio, "verdict": verdict,
+        "verdict_reason": verdict_reason, "lead_scope": "paid_search_with_campaign",
         "deal_ids": [f"d-{code}"] if deals is not None else None,
         "metrics": {
             "closed_won_deals": _metric(deals), "revenue_usd": _metric(revenue),
@@ -104,16 +105,20 @@ def _residual(spend=15.0, items=True):
 def _mart(status="verified", *, rows=None, totals=None, gaps=(), primary=None, message=None):
     rows = rows if rows is not None else [
         _market("United Kingdom", "GB", "Europe", 250.0, deals=2, revenue=6000.0),
+        # PR-ADS-176B-F1 (M1): the server no longer judges a row whose spend
+        # is unknown — this fixture said "watch", the defect itself.
         _market("Pakistan", "PK", "APAC", None, revenue=900.0,
-                spend_reason="spend_location_unresolved", verdict="watch"),
+                spend_reason="spend_location_unresolved", verdict="spend_unknown",
+                verdict_reason="spend_location_unresolved"),
         _residual(),
     ]
     totals = totals if totals is not None else {
         "spend": None, "leads": 3, "sqls": 0, "closed_won_deals": 3, "won_revenue": 6900.0,
         "period_revenue_per_ad_spend": None, "markets": 2, "population": "listed_markets",
-        "revenue_scope": "google_ads_source",
+        "revenue_scope": "google_ads_source", "lead_scope": "paid_search_with_campaign",
         "metrics": {
-            "spend": _metric(None, "unavailable", "spend_location_unresolved"),
+            "spend": _metric(None, "unavailable", "spend_location_unresolved",
+                             blocked_by_country="Pakistan"),
             "leads": _metric(3), "sqls": _metric(0), "closed_won_deals": _metric(3),
             "revenue_usd": _metric(6900.0),
             "period_revenue_per_ad_spend": _metric(None, "unavailable",
@@ -193,7 +198,9 @@ def test_03_the_geo_page_is_deleted_whole():
         assert f'id="{el}"' not in HTML, el
     for fn in ("loadGeo", "renderGeoMap", "renderGeoTable", "applyGeoSearch",
                "geoSpendVerdict", "geoSpendCell", "geoLeadCell", "geoTopText",
-               "geoFmtSpend", "ownerZeroNote", "junkRateBadge"):
+               "geoFmtSpend", "junkRateBadge"):
+        # (ownerZeroNote went with the page and is back for Countries:
+        # PR-ADS-176B-F1, truth audit M2 — case 16.)
         assert not re.search(r"\bfunction %s\(" % fn, JS), fn
     assert "/api/geo" not in JS
     assert "choropleth" not in JS and "Plotly" not in JS
@@ -277,6 +284,8 @@ def test_07_every_withheld_figure_names_its_reason_never_a_dash_or_zero():
     html = _page(_mart())
     kpi = re.search(r'data-kpi="spend".*?dash-kpi-card__source', html, re.DOTALL).group(0)
     assert "Unavailable" in kpi and "some spend in this window has no country" in kpi
+    # m4: the total names the market whose spend is unknown.
+    assert "Pakistan: some spend in this window has no country" in kpi
     ratio = re.search(r'data-kpi="period_revenue_per_ad_spend".*?dash-kpi-card__source',
                       html, re.DOTALL).group(0)
     assert "Unavailable" in ratio and "some spend in this window has no country" in ratio
@@ -302,7 +311,8 @@ def test_08_outside_market_countries_are_in_residual_sub_rows():
     order = sorted(("revenue-residual-name", "</span>Cuba", "</span>Fiji"), key=body.find)
     assert [body.find(m) > -1 for m in order] == [True] * 3
     assert order == ["revenue-residual-name", "</span>Cuba", "</span>Fiji"]
-    for name, spend in (("</span>Cuba", "$3"), ("</span>Fiji", "$9")):
+    # PR-ADS-176B-F1 (m5): in cents — $2.50 and $8.75, not "$3" / "$9".
+    for name, spend in (("</span>Cuba", "$2.50"), ("</span>Fiji", "$8.75")):
         cells = _cells(html, name)
         assert "In residual" in cells[0]
         assert cells[2].strip() == spend
@@ -400,3 +410,129 @@ def test_13_the_deleted_page_s_row_rules_hold_on_countries():
     assert re.sub(r"<[^>]+>", "", cells[4]).strip() == "Unavailable"      # SQLs
     assert "Owner country label not applied" in html
     assert "location 2192: the owner set CU, Google Ads reports MX" in html
+
+
+# ── PR-ADS-176B-F1: truth audit round 1 ─────────────────────────────────────
+def test_14_a_row_that_is_not_judged_says_so_and_no_decision_filter_holds_it():
+    """M1. The badge for the server's not-judged verdicts, never "Watch" /
+    "Learning", and the four decision chips never select such a row."""
+    out = _run("[getBusinessVerdictBadge('spend_unknown'), getBusinessVerdictBadge('revenue_unknown'),"
+               " filterRoasCountryRows([{verdict: 'spend_unknown'}, {verdict: 'revenue_unknown'},"
+               " {verdict: 'watch'}], 'watch').length,"
+               " ['winner', 'watch', 'waste', 'learning'].map((f) => filterRoasCountryRows("
+               "[{verdict: 'spend_unknown'}, {verdict: 'revenue_unknown'}], f).length)]")
+    assert "Not judged — spend unknown" in out[0] and "Not judged — revenue unknown" in out[1]
+    assert out[2] == 1 and out[3] == [0, 0, 0, 0]
+    pk = _cells(_page(_mart()), 'aria-label="Open Pakistan detail"')
+    assert "Not judged — spend unknown" in pk[9] and "Watch" not in pk[9]
+
+
+def _fx_only_rows():
+    """`_country_page_blocks` over rows exactly as the mart withholds them for
+    an FX-only gap (`_withhold_country_rows_when_geo_not_ready`): every figure
+    None except native GBP spend, kept on `spend`."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from services import revenue_decision_mart as mart
+    st = {"country_spend_status": "unavailable",
+          "country_gap_codes": ["fx_coverage_incomplete"]}
+    rows = mart._withhold_country_rows_when_geo_not_ready([
+        {"country": "United Kingdom", "country_code": "GB", "is_residual": False,
+         "spend": 250.0, "spend_native": 200.0, "spend_usd": 250.0, "leads": 2,
+         "sqls": 1, "closed_won_deals": 1, "won_revenue": 500.0, "metrics": None,
+         "verdict": "winner"}], st)
+    return mart, st, rows
+
+
+def test_15_an_fx_only_gap_publishes_no_country_total():
+    """M3. Under an FX-only gap the rows keep native GBP on `spend`. The
+    totals' gate is the only thing between that and "200.0" published as the
+    USD country spend. Mutating `if geo_ready and not empty_window:` to
+    `if True:` (in services/revenue_decision_mart.py) fails this case."""
+    mart, st, rows = _fx_only_rows()
+    assert rows[0]["spend"] == 200.0 and rows[0]["verdict"] == "outcome_withheld"
+    _, totals, mix = mart._country_page_blocks(rows, st)
+    for key in ("spend", "leads", "sqls", "closed_won_deals", "won_revenue",
+                "period_revenue_per_ad_spend"):
+        assert totals[key] is None, key
+        m = totals["metrics"]["revenue_usd" if key == "won_revenue" else key]
+        assert m["status"] == "unavailable" and m["value"] is None, key
+        assert (m["reason"] == "fx_coverage_incomplete"
+                or (m.get("blocked_by") or {}).get("reason") == "fx_coverage_incomplete"), key
+    assert mix[0]["spend"] is None
+
+
+def test_16_a_zero_resting_on_an_owner_label_says_so():
+    """M2, in the page: a $0 with `zero_rests_on_owner_labels` carries the
+    note, in the cell and in the drawer; a plain $0 does not."""
+    row = _market("Pakistan", "PK", "APAC", 0.0, revenue=300.0, verdict="watch")
+    row["zero_rests_on_owner_labels"] = ["2192"]
+    cell = _run("roasCountrySpendCell(%s)" % json.dumps(row))
+    assert cell.startswith("$0 ") and ">owner label</span>" in cell
+    assert "location 2192. Google Ads reports that location without a country" in cell
+    assert ">owner label</span>" in _run("renderCountryDrawer(%s)" % json.dumps(row))
+    row["zero_rests_on_owner_labels"] = []
+    assert _run("roasCountrySpendCell(%s)" % json.dumps(row)) == "$0"
+
+
+def test_17_a_reload_discards_every_cached_deal_list():
+    """m7. Refresh or a settled-day rollover reloads the rows; a deal list
+    cached (or still in flight) from before must not sit beside them."""
+    out = _run("roasCountryDrilldownCache = {'last_6_months:GB': {details: [1]}};"
+               " const g = roasCountryDrilldownGen; loadRoasCountries();"
+               " [Object.keys(roasCountryDrilldownCache).length, roasCountryDrilldownGen > g]")
+    assert out == [0, True]
+
+
+def test_18_the_blockers_link_names_the_window_of_the_response():
+    """m7. The page's figures are the response's window; the "View blockers"
+    link said the selector's (here YTD) instead."""
+    mart = _mart()
+    mart["rows"][0]["metrics"]["customers"] = _metric(None, "withheld",
+                                                      "customer_identity_unresolved")
+    html = _run('_currentUser = {"username": "u", "role": "admin"}; '
+                "_roasBusinessWindow = 'ytd'; roasCountryMart = %s; "
+                "roasCountriesData = roasCountryMart.rows; renderRoasCountriesPage(); "
+                '__els["roas-countries-table-body"].innerHTML' % json.dumps(mart))
+    assert "cte_window=business%2Flast_6_months" in html
+    assert "business%2Fytd" not in html
+
+
+def test_19_no_settled_day_has_no_mix_and_no_market_count():
+    """m9. Nothing was measured: `regional_mix` and `markets` are unknown —
+    None — not an empty list or 0."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from services.revenue_decision_mart import _country_page_blocks
+    st = {"country_spend_status": "unavailable", "country_gap_codes": ["no_settled_day_in_window"]}
+    _, totals, mix = _country_page_blocks([], st, empty_window=True)
+    assert mix is None and totals["markets"] is None
+    assert totals["metrics"]["spend"]["reason"] == "no_settled_day_in_window"
+
+
+def test_20_the_lead_population_and_the_labels_say_what_is_counted():
+    """m8 / m4 / m5 / m6. The lead population is declared beside (not in)
+    revenue_scope and labelled; the footer names the reconciliation; the
+    residual's parts are in cents ("$0 is spend in Cuba" cannot print); the
+    revenue card says listed markets."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from services.revenue_decision_mart import _country_page_blocks
+    st = {"country_spend_status": "verified", "country_gap_codes": []}
+    rows, totals, _ = _country_page_blocks(
+        [{"country": "United Kingdom", "country_code": "GB", "is_residual": False,
+          "spend": 1.0, "leads": 1, "sqls": 0, "closed_won_deals": 0, "won_revenue": 0.0}], st)
+    assert totals["lead_scope"] == rows[0]["lead_scope"] == "paid_search_with_campaign"
+    assert totals["revenue_scope"] == "google_ads_source"
+    html = _page(_mart())
+    assert "Paid-search leads with a campaign" in html
+    assert "Geo ↔ campaign spend reconciliation · Verified" in html
+    assert "Country spend · Verified" not in html
+    rev = re.search(r'data-kpi="revenue".*?dash-kpi-card__source', html, re.S).group(0)
+    assert "listed markets" in rev
+    cell = _run("residualSpendCell(%s)" % json.dumps({
+        "spend": 0.62, "spend_components": {"outside_listed_markets": 0.39,
+                                            "country_unidentified": 0.23, "geo_unassigned": 0},
+        "outside_listed_market_countries": ["Cuba"]}))
+    assert cell.startswith("$0.62<br>") and "$0.39 is spend in Cuba" in cell
+    assert "$0 is spend" not in cell and "$0.23 has no country" in cell

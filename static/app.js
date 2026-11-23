@@ -10880,6 +10880,18 @@ function ownerLabelMismatchNotice(block) {
   return text ? `<p class="mapping-notice mapping-notice--warn owner-label-mismatch" role="status">${escapeHtml(text)}</p>` : "";
 }
 
+/** PR-ADS-170A-F1, restored by PR-ADS-176B-F1 (truth audit M2) for the one
+ *  Countries page: a published $0 that stands only on the owner's labels says
+ *  so — whether the country's own carrier is owner-labelled or labelled spend
+ *  in the window would otherwise have no country. The row carries
+ *  `zero_rests_on_owner_labels` (the mart, the zero rule's evidence). */
+function ownerZeroNote(row) {
+  const on = Array.isArray((row || {}).zero_rests_on_owner_labels) ? row.zero_rests_on_owner_labels : [];
+  if (!on.length) return "";
+  const title = `This $0 rests on the owner's country label for Google Ads location${on.length === 1 ? "" : "s"} ${on.join(", ")}. Google Ads reports ${on.length === 1 ? "that location" : "those locations"} without a country; without the label that spend could be this country's and the figure would read "Unavailable".`;
+  return ` <span class="owner-label-note" title="${escapeHtml(title)}">owner label</span>`;
+}
+
 /** The residual row's Spend cell on Country Revenue & Spend. The row's spend is
  *  a sum of named parts (server: `spend_components`); the part whose country
  *  is KNOWN but is not a listed market is stated, never left inside a number
@@ -10888,9 +10900,11 @@ function residualSpendCell(r) {
   const c = (r || {}).spend_components || {};
   const out = c.outside_listed_markets;
   const names = Array.isArray(r.outside_listed_market_countries) ? r.outside_listed_market_countries : [];
-  if (!(out > 0)) return fmtMoney(r.spend);
+  // PR-ADS-176B-F1 (m5): in cents — whole dollars printed "$0 is spend in
+  // Cuba" for 39 cents, and the parts did not add up to the row.
+  if (!(out > 0)) return escapeHtml(fmtCountrySpendCents(r.spend));
   const rest = (c.geo_unassigned || 0) + (c.country_unidentified || 0);
-  return `${fmtMoney(r.spend)}<br><small class="metric-reason">${escapeHtml(fmtMoney(out))} is spend in ${names.length ? escapeHtml(names.join(", ")) : "countries"} — known ${names.length === 1 ? "country" : "countries"}, not among the listed markets${rest > 0 ? `; ${escapeHtml(fmtMoney(rest))} has no country` : ""}</small>`;
+  return `${escapeHtml(fmtCountrySpendCents(r.spend))}<br><small class="metric-reason">${escapeHtml(fmtCountrySpendCents(out))} is spend in ${names.length ? escapeHtml(names.join(", ")) : "countries"} — known ${names.length === 1 ? "country" : "countries"}, not among the listed markets${rest > 0 ? `; ${escapeHtml(fmtCountrySpendCents(rest))} has no country` : ""}</small>`;
 }
 
 const GEO_ROW_SPEND_REASONS = {
@@ -16571,6 +16585,10 @@ function getBusinessVerdictBadge(verdict) {
     case "mapping_required": return '<span class="roas-verdict-badge roas-verdict-badge--mapping" title="Spend mapping required before this campaign can be judged">Mapping required</span>';
     // PR-ADS-161E: the row's closed-won outcome is withheld — it is not judged.
     case "outcome_withheld": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Closed-won deals for this row are withheld, so it is not judged">Outcome withheld</span>';
+    // PR-ADS-176B-F1 (truth audit M1): unknown spend or revenue is not judged —
+    // never "watch" / "learning" on a figure nobody measured.
+    case "spend_unknown": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="This row&#39;s spend is unknown, so it is not judged">Not judged — spend unknown</span>';
+    case "revenue_unknown": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="This row has won deals whose revenue is unknown, so it is not judged">Not judged — revenue unknown</span>';
     default:         return '<span class="roas-verdict-badge">' + escapeHtml(verdict || "—") + '</span>';
   }
 }
@@ -17711,28 +17729,53 @@ function fmtCountrySpend(v) {
   return fmtMoney(v);
 }
 
+// PR-ADS-176B-F1 (m5): a country spend in cents, for the residual's parts and
+// its itemised countries — small figures where whole dollars would print "$0"
+// (or "$3" for $2.50). Below a cent reads "<$0.01"; never "$0" for spend.
+function fmtCountrySpendCents(v) {
+  if (v === null || v === undefined) return "Unavailable";
+  if (v > 0 && v < 0.01) return "<$0.01";
+  return "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// m4: a total withheld because ONE market's figure is unknown names that
+// market beside the reason ("Pakistan: some spend in this window has no
+// country"). `html` is the canonical rendering of `metrics[key]`.
+function withBlockedCountry(html, s, key) {
+  const m = (((s || {}).metrics) || {})[ROW_METRIC_KEYS[key] || key] || {};
+  if (m.status === "published" || !m.blocked_by_country) return html;
+  return html.replace('<small class="metric-reason">',
+    `<small class="metric-reason">${escapeHtml(m.blocked_by_country)}: `);
+}
+
 // The Dashboard KPI cards, over the server's `country_totals`: the listed
 // markets' figures summed by the mart (never here), each {value, status,
 // reason}. Customers have no card: a row's customers are distinct companies
 // and are never summed across countries (docs/48).
 function renderRoasCountrySummary(data) {
   const s = (data && data.country_totals) || {};
-  const opts = businessBlockerOpts();
+  // m7: the blockers link names the window of THIS response.
+  const opts = campBlockerOpts(data);
   const residual = (roasCountriesData || []).find((r) => r && r.is_residual) || null;
   const known = (key) => s[key] !== null && s[key] !== undefined;
   const markets = (s.markets === null || s.markets === undefined) ? null : s.markets;
   const cards = [
-    { key: "spend", label: "Country Spend", value: rowMetricHtml(s, "spend", fmtCountrySpend, opts),
+    { key: "spend", label: "Country Spend",
+      value: withBlockedCountry(rowMetricHtml(s, "spend", fmtCountrySpend, opts), s, "spend"),
       sub: `USD · ${markets === null ? "listed markets" : `${fmtCount(markets)} listed ${markets === 1 ? "market" : "markets"} in this window`}`,
       source: "Google Ads country spend · listed markets only", ok: known("spend") },
-    { key: "sqls", label: "SQLs", value: rowMetricHtml(s, "sqls", fmtCount, opts),
-      sub: "Qualified leads · by lead country", source: "HubSpot leads", ok: known("sqls") },
-    { key: "deals", label: "Closed-Won Deals", value: rowMetricHtml(s, "closed_won_deals", fmtCount, opts),
+    { key: "sqls", label: "SQLs",
+      value: withBlockedCountry(rowMetricHtml(s, "sqls", fmtCount, opts), s, "sqls"),
+      sub: `${countryLeadScopeLabel(s.lead_scope)} · listed markets`, source: "HubSpot leads", ok: known("sqls") },
+    { key: "deals", label: "Closed-Won Deals",
+      value: withBlockedCountry(rowMetricHtml(s, "closed_won_deals", fmtCount, opts), s, "closed_won_deals"),
       sub: "Google Ads-source · listed markets", source: "HubSpot Closed-Won", ok: known("closed_won_deals") },
-    { key: "revenue", label: "Won Revenue", value: rowMetricHtml(s, "won_revenue", fmtMoney, opts),
-      sub: "USD · Google Ads-source", source: "HubSpot Closed-Won", ok: known("won_revenue") },
+    { key: "revenue", label: "Won Revenue",
+      value: withBlockedCountry(rowMetricHtml(s, "won_revenue", fmtMoney, opts), s, "won_revenue"),
+      sub: "USD · Google Ads-source · listed markets", source: "HubSpot Closed-Won", ok: known("won_revenue") },
     { key: "period_revenue_per_ad_spend", label: PERIOD_RATIO_LABEL,
-      value: rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, opts),
+      value: withBlockedCountry(rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, opts),
+        s, "period_revenue_per_ad_spend"),
       sub: PERIOD_RATIO_DISCLOSURE, source: "Won revenue ÷ country spend, this window",
       ok: known("period_revenue_per_ad_spend") },
     { key: "residual", label: "Residual Spend",
@@ -17757,7 +17800,16 @@ function countryResidualSpendValue(r) {
   if (r.spend === null || r.spend === undefined) {
     return countrySpendUnavailableHtml(r.spend_reason || r.withheld_reason, "dash-unavailable");
   }
-  return escapeHtml(fmtCountrySpend(r.spend));
+  return escapeHtml(fmtCountrySpendCents(r.spend));
+}
+
+// m8: the lead population the lead and qualified-lead columns count (the mart declares
+// it as `lead_scope`; db.revenue_repository.fetch_lead_quality).
+const COUNTRY_LEAD_SCOPE_LABELS = {
+  paid_search_with_campaign: "Paid-search leads with a campaign · SQL = HubSpot qualified · by lead country",
+};
+function countryLeadScopeLabel(scope) {
+  return COUNTRY_LEAD_SCOPE_LABELS[scope] || "Leads · by lead country";
 }
 
 function renderRoasCountryFilters() {
@@ -17840,9 +17892,10 @@ function countrySpendUnavailableHtml(reason, cls) {
 
 function roasCountrySpendCell(r) {
   // PR-ADS-176B: a row the gate withholds names the gate's gap.
+  // PR-ADS-176B-F1 (M2): a $0 that stands only on the owner's labels says so.
   return (r.spend === null || r.spend === undefined)
     ? countrySpendUnavailableHtml(r.spend_reason || r.withheld_reason, "dash-unavailable")
-    : escapeHtml(fmtCountrySpend(r.spend));
+    : escapeHtml(fmtCountrySpend(r.spend)) + (r.spend === 0 ? ownerZeroNote(r) : "");
 }
 
 function roasCountryCtaButtons(run) {
@@ -17868,6 +17921,7 @@ async function loadRoasCountries() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.countries;
   setWindowRangeLoading("roas-countries-range");
+  resetCountryDrilldowns();
 
   roasCountriesStatus = "loading";
   const body = document.getElementById("roas-countries-table-body");
@@ -17984,14 +18038,14 @@ function renderRoasCountriesPage() {
         </div>
       </div>
       ${renderRoasCountryFilters()}
-      ${renderRoasCountryTable(filtered)}
+      ${renderRoasCountryTable(filtered, campBlockerOpts(data))}
     </section>
     <div class="dash-main-grid ctry-lower-grid">
       <section class="dash-panel dash-anim ctry-region-panel" aria-label="Regional mix">
         ${renderCountriesRegionalMix(data)}
       </section>
       <aside class="dash-panel dash-anim ctry-residual-panel" aria-label="Residual">
-        ${renderCountriesResidualPanel(residualRows[0] || null)}
+        ${renderCountriesResidualPanel(residualRows[0] || null, campBlockerOpts(data))}
       </aside>
     </div>
     ${renderCountriesTruthFooter(data)}
@@ -18022,7 +18076,7 @@ function renderCountriesRegionalMix(data) {
   if (!rows.length) {
     return `${header}<p class="rev-breakdown-empty">No listed market has activity in this window.</p>`;
   }
-  const opts = businessBlockerOpts();
+  const opts = campBlockerOpts(data);
   const metricKey = _countriesRegionalBarMetric(rows);
   const fmt = { won_revenue: fmtMoney, closed_won_deals: fmtCount, spend: fmtCountrySpend }[metricKey];
   const metricLabel = { won_revenue: "won revenue", closed_won_deals: "closed-won deals", spend: "spend" }[metricKey] || "activity";
@@ -18032,7 +18086,7 @@ function renderCountriesRegionalMix(data) {
     const known = val !== null && val !== undefined;
     const pct = (metricKey && known && max > 0) ? Math.max(2, (val / max) * 100) : 0;
     const barVal = !metricKey ? escapeHtml(`${fmtCount(r.countries || 0)} ${r.countries === 1 ? "market" : "markets"}`)
-      : rowMetricHtml(r, metricKey, fmt, opts);
+      : withBlockedCountry(rowMetricHtml(r, metricKey, fmt, opts), r, metricKey);
     return `
       <li class="ctry-region-row">
         <div class="ctry-region-row__top">
@@ -18042,7 +18096,7 @@ function renderCountriesRegionalMix(data) {
         <div class="ctry-region-bar"><span class="ctry-region-bar__fill" style="width:${pct.toFixed(1)}%;background:#129ef5"></span></div>
         <div class="ctry-region-row__meta">
           <span>${escapeHtml(fmtCount(r.countries || 0))} ${r.countries === 1 ? "market" : "markets"}</span>
-          <span>Spend ${rowMetricHtml(r, "spend", fmtCountrySpend, opts)}</span>
+          <span>Spend ${withBlockedCountry(rowMetricHtml(r, "spend", fmtCountrySpend, opts), r, "spend")}</span>
           <span>SQLs ${rowMetricHtml(r, "sqls", fmtCount, opts)}</span>
           <span>Won deals ${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</span>
         </div>
@@ -18056,7 +18110,7 @@ function renderCountriesRegionalMix(data) {
 // The residual panel: the one bucket no listed market owns. Its spend parts
 // are named (outside the listed markets / no country / not assigned by
 // Google's geographic view) — never spread across real countries.
-function renderCountriesResidualPanel(res) {
+function renderCountriesResidualPanel(res, opts) {
   const header = `
     <div class="dash-panel__header">
       <div>
@@ -18067,11 +18121,11 @@ function renderCountriesResidualPanel(res) {
   if (!res) {
     return `${header}<p class="rev-breakdown-empty">No residual in this window.</p>`;
   }
-  const opts = businessBlockerOpts();
+  opts = opts || campBlockerOpts(roasCountryMart);
   const c = res.spend_components || null;
   // A part the server measured at zero adds nothing to the breakdown.
   const part = (label, v) => (v === null || v === undefined || v === 0) ? ""
-    : `<li>${escapeHtml(label)}: ${escapeHtml(fmtCountrySpend(v))}</li>`;
+    : `<li>${escapeHtml(label)}: ${escapeHtml(fmtCountrySpendCents(v))}</li>`;
   const parts = c ? `
     <ul class="ctry-residual-parts">
       ${part("Countries outside the listed markets", c.outside_listed_markets)}
@@ -18103,7 +18157,7 @@ function renderCountriesTruthFooter(data) {
     <footer class="dash-truth-footer">
       ${chip("Campaign spend", st.campaign_spend_status)}
       ${chip("FX", st.fx_status)}
-      ${chip("Country spend", st.country_spend_status)}
+      ${chip("Geo ↔ campaign spend reconciliation", st.country_spend_status)}
       <span class="dash-footer-chip">Revenue: HubSpot closed-won · Google Ads-source</span>
     </footer>`;
 }
@@ -18281,7 +18335,7 @@ function renderCountryResidualItemRow(item) {
     <tr class="ctry-row ctry-row--residual ctry-row--residual-item" aria-label="${escapeHtml(item.country || "Country")} — in the residual, not a listed market">
       <td class="ctry-td ctry-td--name"><span class="ctry-residual-item__arrow" aria-hidden="true">↳</span>${escapeHtml(item.country || item.country_code || "Country")}${ownerLabelledCountryNote(item.provenance)} <span class="revenue-residual-badge">In residual</span></td>
       <td class="ctry-td--region">Outside the listed markets</td>
-      <td class="ctry-num">${(item.spend === null || item.spend === undefined) ? countrySpendUnavailableHtml(null, "dash-unavailable") : escapeHtml(fmtCountrySpend(item.spend))}</td>
+      <td class="ctry-num">${(item.spend === null || item.spend === undefined) ? countrySpendUnavailableHtml(null, "dash-unavailable") : escapeHtml(fmtCountrySpendCents(item.spend))}</td>
       <td class="ctry-num">${countryInResidualCell()}</td>
       <td class="ctry-num">${countryInResidualCell()}</td>
       <td class="ctry-num">${countryInResidualCell()}</td>
@@ -18292,7 +18346,7 @@ function renderCountryResidualItemRow(item) {
     </tr>`;
 }
 
-function renderRoasCountryTable(rows) {
+function renderRoasCountryTable(rows, opts) {
   if (!rows.length) {
     return `
       <div class="revenue-empty-inline">
@@ -18300,14 +18354,16 @@ function renderRoasCountryTable(rows) {
       </div>
     `;
   }
-  const opts = businessBlockerOpts();
+  // m7: the blockers link names the window of the response on screen.
+  opts = opts || campBlockerOpts(roasCountryMart);
+  const leadsTitle = escapeHtml(countryLeadScopeLabel((rows.find((r) => r && r.lead_scope) || {}).lead_scope));
   const headerRow = `
     <tr>
       <th>Country</th>
       <th>Region</th>
       <th>Spend</th>
-      <th>Leads</th>
-      <th>SQLs</th>
+      <th title="${leadsTitle}">Leads</th>
+      <th title="${leadsTitle}">SQLs</th>
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across countries">Customers</th>
       <th>Won Revenue</th>
@@ -18382,11 +18438,29 @@ let roasCountryExpandedKey = null;       // eslint-disable-line no-unused-vars
 let roasCountryDrilldownCache = {};
 let roasCountryDrilldownLoading = {};    // eslint-disable-line no-unused-vars
 let roasCountryDrilldownError = {};      // eslint-disable-line no-unused-vars
+// m7: bumped by every loadRoasCountries; a deal list read under an older
+// generation is not cached or shown.
+let roasCountryDrilldownGen = 0;
+
+// The business window of the country response on screen (m7), not the
+// selector's: a drawer lists the deals of the rows it sits under.
+function roasCountryWindowKey() {
+  return ((roasCountryMart || {}).window || {}).key || getRoasBusinessWindow();
+}
+
+// PR-ADS-176B-F1 (m7), called by loadRoasCountries: a reload (Refresh, a new
+// window, a settled-day rollover) discards every cached deal list, and a deal
+// list still in flight from before it is dropped on arrival — never shown
+// beside the new rows' counts.
+function resetCountryDrilldowns() {
+  roasCountryDrilldownCache = {};
+  roasCountryDrilldownGen += 1;
+}
 
 // Stable key: window + country identity (prefer the safer ISO code).
-function countryDrilldownKey(country, countryCode) {
+function countryDrilldownKey(country, countryCode, windowKey) {
   const id = (countryCode || country || "").toString();
-  return `${getRoasBusinessWindow()}:${id}`;
+  return `${windowKey || roasCountryWindowKey()}:${id}`;
 }
 
 // One detail <tr> inside the drawer table. Every cell routes through
@@ -18439,10 +18513,12 @@ function renderCountryDrilldown(data) {
     </div>`;
 }
 
-async function loadCountryDrilldown(country, countryCode, drawerRow) {
+async function loadCountryDrilldown(country, countryCode, drawerRow, windowKey) {
   const container = drawerRow.querySelector(".country-drilldown-panel");
   if (!container) return;
-  const key = countryDrilldownKey(country, countryCode);
+  const window_ = windowKey || roasCountryWindowKey();
+  const gen = roasCountryDrilldownGen;
+  const key = countryDrilldownKey(country, countryCode, window_);
   if (roasCountryDrilldownCache[key]) {
     container.innerHTML = renderCountryDrilldown(roasCountryDrilldownCache[key]);
     return;
@@ -18450,7 +18526,6 @@ async function loadCountryDrilldown(country, countryCode, drawerRow) {
   container.innerHTML = `<p class="country-drilldown-muted">Loading country client details…</p>`;
   roasCountryDrilldownLoading[key] = true;
   try {
-    const window_ = getRoasBusinessWindow();
     const codeParam = countryCode
       ? `&country_code=${encodeURIComponent(countryCode)}`
       : "";
@@ -18464,6 +18539,7 @@ async function loadCountryDrilldown(country, countryCode, drawerRow) {
       return;
     }
     const data = await res.json();
+    if (gen !== roasCountryDrilldownGen) return;   // the page reloaded meanwhile
     roasCountryDrilldownCache[key] = data;
     container.innerHTML = renderCountryDrilldown(data);
   } catch (err) {
@@ -18481,8 +18557,8 @@ async function loadCountryDrilldown(country, countryCode, drawerRow) {
 // population: same scope, same days, same exclusions — PR-ADS-176A). A row
 // whose deal count is withheld has no deal list to read: the drawer says
 // withheld, never "no deals". The residual never opens a drawer.
-function renderCountryDrawer(r) {
-  const opts = businessBlockerOpts();
+function renderCountryDrawer(r, data) {
+  const opts = campBlockerOpts(data || roasCountryMart);
   const name = countryDisplayName(r.country);
   const links = [["deals", "Open Deals"], ["revenue-health", "Open Revenue Health"]]
     .filter(([page]) => dashCanNavigate(page))
@@ -18522,10 +18598,12 @@ function openCountryDrawer(idx) {
     drawer.className = "ctry-drawer";
     panel.appendChild(drawer);
   }
-  drawer.innerHTML = renderCountryDrawer(r);
-  roasCountryExpandedKey = countryDrilldownKey(r.country, r.country_code);
+  const data = roasCountryMart;
+  const windowKey = ((data || {}).window || {}).key;
+  drawer.innerHTML = renderCountryDrawer(r, data);
+  roasCountryExpandedKey = countryDrilldownKey(r.country, r.country_code, windowKey);
   if (r.closed_won_deals !== null && r.closed_won_deals !== undefined) {
-    loadCountryDrilldown(r.country || "", r.country_code || "", drawer);
+    loadCountryDrilldown(r.country || "", r.country_code || "", drawer, windowKey);
   }
   if (drawer.scrollIntoView) drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }

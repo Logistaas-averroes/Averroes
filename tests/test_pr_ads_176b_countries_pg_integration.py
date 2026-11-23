@@ -23,6 +23,7 @@ or row ``region``.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 import re
 import sys
 from pathlib import Path
@@ -36,10 +37,10 @@ from tests.test_pr_ads_165a_countries_pg_integration import (  # noqa: E402,F401
     CUSTOMER, RATE, UAE, live_db,
 )
 from tests.test_pr_ads_167a_settled_coverage_consumers_pg_integration import (  # noqa: E402
-    _before_the_morning_sync,
+    _before_the_morning_sync, _window_dates,
 )
 from tests.test_pr_ads_176a_country_builder_pg_integration import (  # noqa: E402
-    FIJI, LOOSE, _dash, _deal, _lead, _mart, _seed, _sync,
+    CUBA_OWNER_LABELLED, FIJI, LOOSE, _dash, _deal, _lead, _mart, _seed, _sync,
 )
 
 US = ("2840", "US", "United States")
@@ -202,3 +203,64 @@ def test_05_the_page_renders_the_real_payload(live_db, monkeypatch):
     blocked = _render(_mart())
     assert "revenue-blocked-card" in blocked and "Nothing to run" in blocked
     assert "ctry-table" not in blocked and "data-kpi=" not in blocked
+
+
+# ── PR-ADS-176B-F1: truth audit round 1 ─────────────────────────────────────
+DECISIONS = {"winner", "watch", "waste", "learning"}
+
+
+def test_06_a_row_with_unknown_spend_or_revenue_is_not_judged(live_db, monkeypatch):
+    """M1. Pakistan (a $300 deal, no geo row, the zero rule withholds its
+    spend) was classified on `spend or 0`: "Watch — SQLs exist but weak". A
+    row whose spend or revenue is unknown gets a not-judged verdict with its
+    reason, outside the four decision filters, and its badge says so."""
+    from tests.test_pr_ads_153e_b_pg_integration import _insert
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _ready(live_db, loose=True)
+    _deal(live_db, "d-pk", "Pakistan", amount=300.0)
+    mart = _mart()
+    pk = _row(mart, "PK")
+    assert pk["spend"] is None and pk["closed_won_deals"] == 1
+    assert pk["verdict"] not in DECISIONS, pk["verdict"]
+    assert (pk["verdict"], pk["verdict_reason"]) == ("spend_unknown",
+                                                    "spend_location_unresolved")
+    assert _row(mart, "US")["verdict"] in DECISIONS          # measured: judged
+    html = _render(mart)
+    tr = html[html.rfind("<tr", 0, html.index('aria-label="Open Pakistan detail"')):]
+    tr = tr[:tr.index("</tr>")]
+    assert "Not judged — spend unknown" in tr
+    assert ">Watch<" not in tr and ">Learning<" not in tr
+
+    # Won deals whose revenue is unknown: a deal with no proven amount.
+    _, today = _window_dates("last_6_months")
+    _insert(live_db, "d-us-noamt", close_date=(today - timedelta(days=1)).isoformat()
+            + "T12:00:00+00:00", amount=None, revenue_usd=None,
+            currency_status="missing_amount", currency_reason="amount_missing",
+            country="United States", gclid="g-noamt", group="google_ads",
+            attribution_status="google_ads")
+    mart = _mart()
+    us = _row(mart, "US")
+    assert us["closed_won_deals"] == 2 and us["won_revenue"] is None
+    assert us["verdict"] == "revenue_unknown" and us["verdict_reason"]
+    assert "Not judged — revenue unknown" in _render(mart)
+
+
+def test_07_a_zero_resting_on_an_owner_label_says_so(live_db, monkeypatch):
+    """M2. Cuba's owner-labelled criterion 2192 has spend in the window;
+    Pakistan won a deal and has no geo row. Without the label that spend has
+    no country and Pakistan's $0 would be withheld. The deleted #/geo page
+    said so ("owner label"); the mart row and the Countries page did not."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(CUBA_OWNER_LABELLED, 2.0)])
+    _sync(live_db)
+    _deal(live_db, "d-pk", "Pakistan", amount=300.0)
+    mart = _mart()
+    pk = _row(mart, "PK")
+    assert (pk["spend"], pk["spend_reason"]) == (0.0, None)
+    assert pk["zero_rests_on_owner_labels"] == ["2192"]
+    assert _row(mart, "GB")["zero_rests_on_owner_labels"] == []
+    html = _render(mart)
+    tr = html[html.rfind("<tr", 0, html.index('aria-label="Open Pakistan detail"')):]
+    cell = re.findall(r"<td[^>]*>(.*?)</td>", tr[:tr.index("</tr>")], re.S)[2]
+    assert cell.startswith("$0 ") and ">owner label</span>" in cell
+    assert "Google Ads location 2192." in cell

@@ -507,7 +507,10 @@ figure.
   on the real page, ready and blocked.
 
 Existing tests changed — each because a page, a route key or a layout it pinned
-was deleted or merged; every truth property they guarded is kept or ported:
+was deleted or merged. 176B claimed every truth property they guarded was kept
+or ported. **That was wrong**: the 170A "$0 rests on an owner label" disclosure
+(cases 10 / 12's page half) was dropped with `#/geo` and not carried to the
+mart rows. PR-ADS-176B-F1 restores it (§7.10, M2).
 
 | Test | Change | Why |
 | --- | --- | --- |
@@ -528,3 +531,52 @@ was deleted or merged; every truth property they guarded is kept or ported:
 | `165a_countries_pg` | the `loadGeo` renders and their probe are removed; every payload assertion stays; 05, 06, 17, 18, 20, 21 assert on the rows what the page printed; `_assert_no_spend_figure_anywhere` → `_assert_no_spend_figure_in_the_payload` | page deleted, endpoint kept |
 | `167a_countries_zero_rule_pg` | each page cell assertion is the same assertion on the row | same |
 | `170a_owner_labelled_geo_pg` (11, 14, 18, 24) | row assertions for the deleted table; the owner note's call sites on the Countries page (row, drawer, "In residual" items); no `#/geo` notice element | same |
+
+### 7.10 Truth audit round 1 (PR-ADS-176B-F1)
+
+**M1 — a Decision badge on unmeasured figures.** `classify_verdict` reads
+`spend or 0`, so Pakistan (spend withheld by the zero rule, a $300 deal) read
+"Watch — SQLs exist but weak", and a row with won deals but unknown revenue
+read "Watch" too. `revenue_attribution_service._finalize_row` now gives such a
+row a not-judged verdict with `verdict_reason`, as `outcome_withheld` works:
+`spend_unknown` (the spend reason) or `revenue_unknown` (the revenue metric's
+reason). A row the gate withholds wholesale is `outcome_withheld` with the gap
+(`_withhold_country_rows_when_geo_not_ready`). `getBusinessVerdictBadge`
+prints "Not judged — spend unknown" / "— revenue unknown"; none of the four
+decision chips selects them. The one-page fixture that hard-coded Pakistan
+`watch` encoded the defect and now carries `spend_unknown`.
+
+**M2 — the owner-label zero disclosure, restored.** The rule moved from the
+deleted page into `country_spend_zero_rule.zero_rests_on_owner_labels`
+(carried by an owner-labelled criterion, or owner-labelled spend in the window
+and no Google carrier). The mart's country rows carry
+`zero_rests_on_owner_labels`; `roasCountrySpendCell` (the table and the drawer)
+prints "$0 owner label" with the criterion ids, through the restored
+`ownerZeroNote`. 170A cases 10b / 12b restore cases 10 / 12's page half on the
+Countries page. (`country_evidence_service` keeps its own copy until 176C.)
+
+**M3 — the totals' gate, tested.** Under an FX-only gap the rows keep native GBP
+on `spend`; without `if geo_ready and not empty_window` `country_totals`
+published it as USD. One-page case 15 runs the real withholding and the real
+totals and fails when that line is mutated to `if True:`.
+
+**Minor.** m4: the footer chip names the "Geo ↔ campaign spend reconciliation";
+a total withheld by one market names it ("Pakistan: some spend in this window
+has no country", `blocked_by_country`, also in Regional Mix). m5: the residual's
+spend, its parts and its itemised countries print cents (`fmtCountrySpendCents`,
+also in `residualSpendCell`), so "$0 is spend in Cuba" cannot print. m6: the Won
+Revenue card says "listed markets". m7: the blockers links, the drawer and its
+deal read use the response's `window.key` (`campBlockerOpts(data)`,
+`roasCountryWindowKey()`), and every reload clears the deal-list cache and
+drops a deal list still in flight (`roasCountryDrilldownGen`). m8: rows and
+`country_totals` declare `lead_scope: "paid_search_with_campaign"`
+(`fetch_lead_quality`), labelled on the SQLs card and the Leads / SQLs headers;
+`revenue_scope` is unchanged. m9: with no settled day, `regional_mix` and
+`country_totals.markets` are `None`.
+
+**Tests.** New: one-page 14–20, PG 06–07, 170A 10b / 12b — all fail on
+`4d0921e`; case 15's gate assertion held there and fails under the `if True:`
+mutation. Changed: one-page 03 (`ownerZeroNote` is back), 07 (the blocking
+market is named), 08 (cents: "$2.50" / "$8.75", not "$3" / "$9") and the
+fixture (Pakistan `spend_unknown`, `lead_scope`); 170A case 24's node harness
+loads `fmtCountrySpendCents`, which `residualSpendCell` now calls.

@@ -171,6 +171,27 @@ def zero_spend_verdict(evidence: dict | None, code) -> tuple:
     return False, R_SPEND_LOCATION_UNRESOLVED
 
 
+def zero_rests_on_owner_labels(evidence: dict | None, code) -> list:
+    """The owner-labelled criteria a PUBLISHED ``$0`` for ``code`` rests on.
+
+    PR-ADS-170A-F1, shared since PR-ADS-176B-F1 (it lived only in the deleted
+    Countries evidence page): the country's own carrier when the owner
+    labelled it, and every owner-labelled criterion in the window unless a
+    Google-named criterion carries the code (labelled spend would otherwise
+    have no country and withhold the zero). ``[]`` when the zero stands
+    without any label. Only meaningful where ``zero_spend_verdict`` publishes.
+    """
+    ev = evidence or {}
+    c = _code(code)
+    rests: set = set()
+    owner_carrier = (ev.get("carried_by_owner") or {}).get(c)
+    if owner_carrier:
+        rests.add(str(owner_carrier))
+    if c not in (ev.get("carried_by_google") or set()):
+        rests.update(str(x) for x in ev.get("owner_in_window") or () if x)
+    return sorted(rests)
+
+
 def read_country_spend(start, end, customer_id, candidate_codes) -> dict:
     """The window's per-country geo spend AND its zero-rule evidence, from ONE
     snapshot, scoped to ``customer_id`` (the configured account; None keeps
@@ -204,5 +225,5 @@ def read_country_spend(start, end, customer_id, candidate_codes) -> dict:
 
 __all__ = [
     "R_SPEND_LOCATION_UNRESOLVED", "R_ZERO_EVIDENCE_UNREADABLE", "assess",
-    "read_country_spend", "zero_spend_verdict",
+    "read_country_spend", "zero_rests_on_owner_labels", "zero_spend_verdict",
 ]

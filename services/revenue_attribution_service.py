@@ -305,6 +305,15 @@ def confidence_from_tiers(tiers: list) -> str:
 #: PR-ADS-161E: the verdict of a row whose closed-won outcome is withheld or
 #: unreadable — never "waste" or "watch" over an unknown deal count.
 VERDICT_OUTCOME_WITHHELD = "outcome_withheld"
+#: PR-ADS-176B-F1 (truth audit M1): a row whose SPEND is unknown (the zero
+#: rule withheld it) or whose REVENUE is unknown beside known won deals is not
+#: judged either. ``classify_verdict`` reads None as 0, so such a row read
+#: "watch" or "learning" on figures nobody measured. Each carries
+#: ``verdict_reason``; none is one of the four decision filters.
+VERDICT_SPEND_UNKNOWN = "spend_unknown"
+VERDICT_REVENUE_UNKNOWN = "revenue_unknown"
+NOT_JUDGED_VERDICTS = frozenset({VERDICT_OUTCOME_WITHHELD, VERDICT_SPEND_UNKNOWN,
+                                 VERDICT_REVENUE_UNKNOWN})
 
 
 def classify_verdict(
@@ -493,12 +502,21 @@ def _finalize_row(
     # "waste" / "watch" would be a verdict on a number nobody published — a
     # revenue-producing campaign must never read "cut" because its deals are
     # withheld (an unplaced Google Ads deal, an undated won deal).
+    verdict_reason = None
     if deals is None:
         verdict = VERDICT_OUTCOME_WITHHELD
+    elif spend_withheld_reason:
+        # PR-ADS-176B-F1 (M1): an unmeasured spend is not $0.
+        verdict, verdict_reason = VERDICT_SPEND_UNKNOWN, spend_withheld_reason
+    elif deals > 0 and won_revenue is None:
+        # Won deals with unknown revenue: "weak revenue" is not known either.
+        verdict = VERDICT_REVENUE_UNKNOWN
+        verdict_reason = (((metrics or {}).get("revenue_usd") or {}).get("reason")
+                          or cwt.R_REVENUE_UNPROVEN)
     # PR-ADS-120: an unmapped campaign has incomplete spend truth — it is never
     # classed winner/waste/watch; the decision is "mapping_required".
     if spend_mapping_unavailable or spend_state == "unmapped":
-        verdict = "mapping_required"
+        verdict, verdict_reason = "mapping_required", None
 
     notes = _row_notes(bucket, confidence)
     if lead_metrics_withheld:
@@ -558,6 +576,9 @@ def _finalize_row(
         "metrics": metrics,
         "confidence": confidence,
         "verdict": verdict,
+        # PR-ADS-176B-F1: why a row is not judged (spend_unknown /
+        # revenue_unknown); None otherwise.
+        "verdict_reason": verdict_reason,
         "spend_mapping": "unavailable" if spend_mapping_unavailable else "matched",
         # PR-ADS-120: mapped_exact | mapped_manual | unmapped | verified_zero_spend.
         "spend_state": spend_state,
@@ -1089,6 +1110,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
                 spend_state = "verified_zero_spend"
         # PR-ADS-176A: the shared zero rule, for a real country with no geo row.
         zero_withheld = None
+        zero_rests_on: list = []
         if (by_country and zero_rule_evidence is not None
                 and not bucket.get("spend_rows_seen")
                 and getattr(bucket.get("country_identity"), "is_country", False)):
@@ -1096,6 +1118,12 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             _ok, _why = _zero_rule.zero_spend_verdict(
                 zero_rule_evidence, bucket["country_identity"].code)
             zero_withheld = None if _ok else _why
+            if _ok:
+                # PR-ADS-176B-F1 (M2): a published $0 that stands only on the
+                # owner's labels says so — the PR-ADS-170A-F1 rule of the
+                # deleted Countries evidence page, from the same evidence.
+                zero_rests_on = _zero_rule.zero_rests_on_owner_labels(
+                    zero_rule_evidence, bucket["country_identity"].code)
         finalized = _finalize_row(
             bucket, legacy_gclid=False,
             revenue_available=revenue_available,
@@ -1119,6 +1147,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             # resolution of the display label (which is how a row could carry a
             # code that disagreed with the bucket it was in).
             identity = bucket.get("country_identity")
+            finalized["zero_rests_on_owner_labels"] = zero_rests_on
             finalized["country_key"] = key
             finalized["country"] = identity.label if identity else bucket["display"]
             finalized["country_code"] = identity.code if identity else None
