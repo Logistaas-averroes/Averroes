@@ -6482,17 +6482,20 @@ and then failed twice on November:
   Because the ad-set level now writes campaign rows, it handles the account
   like the campaign backfill: stored through `refresh_account` (the identity
   guard), and a failed account read recorded in `meta_ads_account_sync_state`.
-* **B — stop, don't fail.** At `--level adset` an end later than the account's
-  local yesterday (the last day the campaign level can be verified) is cut
-  there and reported per account: `requested_to`,
+* **B — report the cut.** The end was already capped at the account's local
+  yesterday (the last day the campaign level can be verified); the first
+  production failure was the stale STORED campaign level, fixed by A. What B
+  adds: at `--level adset` an end later than that day is reported per
+  account where it is cut: `requested_to`,
   `campaign_verifiable_through`, `stopped_at`, `stop_reason`
   (`meta_adset_end_after_last_verifiable_day`), `stop_detail`. Days before it
   are stored; no later day is read. Without `--level` nothing changed.
 * **C — lead type and attribution.** `config/thresholds.yaml`
   `meta_ads.native_lead_action_type: "onsite_conversion.lead_grouped"`, on the
-  production evidence recorded in `docs/53` §4 (five lead types with identical
-  counts on every row and month; native lead forms only; Meta's on-Facebook
-  lead counter). The 171C rules hold: published only for an account whose
+  evidence recorded in `docs/53` §4 (the owner's statement that the ads use
+  native lead forms only, and five lead types with identical counts on every
+  row and month; Meta's definition of the type was not retrieved). The 171C
+  rules hold: published only for an account whose
   stored rows carry that exact key; never summed. The read function now
   returns `meta_reported_leads_attribution` (`{settings, rows_without_setting,
   status, detail}`, from the stored `attribution_setting` column; `not_stored`
@@ -6532,3 +6535,34 @@ registered in the PostgreSQL step and its did-run list);
 
 **Full suite** (with the one documented baseline deselect): 6521 passed,
 1 skipped, 1 deselected, 0 failed. The 171A/171B/171C/171D modules: 411 passed.
+
+**Review round 1** (independent review: ship, no blocker; one commit on top).
+
+* m1 — the FX-partial step of `_backfill_adset_chunk` is now tested end to end
+  (`test_09`: GBP account, rates unavailable → chunk `partial`
+  `fx_rates_missing`, run `partial`, script exit 3, both ledgers `verified`).
+  Replacing the step with `if False:` fails it.
+* m2 — `docs/53` §6: the ad-set backfill advances the System page's "Meta Ads
+  spend" line (it reads the campaign coverage ledger), as the campaign
+  backfill already did; `sync_batches` / `sync_state` / `runs` do not move.
+* m3 — tripwire: for an account whose stored rows carry the configured type,
+  any stored row on which it differs from `lead` (or appears without it) makes
+  `meta_reported_leads` unavailable for that account
+  (`meta_lead_action_types_diverged`), adds a `config_problems` entry naming
+  the account, rows and first day, and sets
+  `accounts[].meta_reported_lead_types_diverged`
+  (`db/meta_ads_repository.py::fetch_meta_adset_spend`, same snapshot;
+  `services/meta_ads_adset_truth_service.py`). `test_10` (lead=5,
+  onsite_conversion.lead_grouped=3) fails on 8c90950. `docs/53` §4 and the
+  config comment now say the choice rests on the owner's statement and the
+  five identical counts only; Meta's definition was not retrieved.
+* m4 — stale text: the `--level` help; the §10 smoke example shows
+  `1d_view_7d_click`; "stop, don't fail" corrected everywhere — the end was
+  already capped at the account's local yesterday, 171D adds the reporting,
+  and the production failure was fixed by the campaign re-read.
+* m5 — `test_11`: a failed account read during an ad-set backfill is recorded
+  in `meta_ads_account_sync_state` exactly as the campaign backfill records
+  it (fails against c903091's account handling).
+
+Round 1 full suite (one baseline deselect): 6524 passed, 1 skipped,
+1 deselected, 0 failed.

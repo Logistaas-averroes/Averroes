@@ -12,10 +12,10 @@ changes none of its rules.
 
 **PR-ADS-171D** (2026-11-23) made the ad-set backfill work on the live
 account: each month re-reads its campaign level first and reconciles the ad
-sets to that live read (§3, §6), an end past the last verifiable day stops
-there instead of failing (§6), the native lead action type is set on
-production evidence (§4), and the attribution setting is reported beside the
-lead counts (§7). §10 is the corrected owner procedure.
+sets to that live read (§3, §6) — which is what fixes both production
+failures — an end past the last verifiable day is now reported where it is
+cut (§6), the native lead action type is set (§4), and the attribution
+setting is reported beside the lead counts (§7). §10 is the corrected owner procedure.
 
 ---
 
@@ -230,14 +230,27 @@ an account with one lead mechanism, are five names for one count — which is
 exactly why they are never added together (that would have published 1,555
 for July instead of 311).
 
-`onsite_conversion.lead_grouped` is the one chosen: it is Meta's on-Facebook
-lead counter — leads submitted on Meta's own (native) forms, what Ads
-Manager shows as on-Facebook leads — which is the only lead mechanism these
-ads use. The other four are wider or offsite-named families that happen to
-equal it here. This rests on the production observation above and the
-owner's statement about the forms; Meta's `AdsActionStats` reference, which
-would define the types, still could not be retrieved (above), so if the
-account ever adds website leads the choice must be revisited, not assumed.
+`onsite_conversion.lead_grouped` is the one chosen. **The choice rests on
+two things only: the owner's statement that the ads use Meta native lead
+forms and nothing else, and the five identical counts observed on every
+stored row.** Meta's definition of these types was not retrieved — the
+`AdsActionStats` reference could not be read (above) — so nothing here
+claims what Meta says the type means. The name (an on-Facebook,
+"onsite" grouped lead conversion) fits a native-form count, and on this
+account it equals every other lead type; that is all that is known.
+
+**Tripwire.** Because the choice rests on "identical", the read function
+checks it on every read: for an account whose stored rows have carried the
+configured type (otherwise it is already unavailable,
+`meta_lead_action_type_not_observed`), if any stored row carries a count for
+the configured type that differs from `lead`'s (or carries one without the
+other) — e.g. `lead = 5`, `onsite_conversion.lead_grouped = 3` — then
+`meta_reported_leads` is unavailable for that account
+(`meta_lead_action_types_diverged`), `config_problems` carries an entry naming
+the account, the number of diverging day-rows and the first such day, and
+`accounts[].meta_reported_lead_types_diverged` says the same. The configured
+type can therefore never silently become a subset (for example if website
+leads are added). The raw per-type counts stay published.
 
 The 171C rules are unchanged: the configured type publishes **only for an
 account whose stored rows have carried that exact key on some day**
@@ -357,17 +370,28 @@ PR-ADS-171D changed how each month is loaded
    level.
 
 **The end.** The last day the campaign level can be verified is the
-account's local yesterday — today is in progress and is never read. That is
-the default end. A `--to` later than it is cut at it and reported, per
+account's local yesterday — today is in progress and is never read. The end
+was already that day by default and already capped at it (171A/171C); what
+171D adds is that a `--to` later than it is now REPORTED where it is cut, per
 account: `requested_to`, `campaign_verifiable_through`, `stopped_at`,
 `stop_reason` (`meta_adset_end_after_last_verifiable_day`) and `stop_detail`.
 The days before it are stored normally; no day after it is read or stored.
-Before 171D the newest day of a month could be one the daily sync had not yet
-read (2026-11-23, 04:2x UTC: the end was 22 Nov, the campaign level stood at
-21 Nov), and the whole month failed `meta_adset_campaign_base_unverified`.
+
+The first production failure was not the cap. At 04:2x UTC on 2026-11-23 the
+end was 22 Nov — correctly, Amman's local yesterday — but the STORED campaign
+level stood at 21 Nov because the 06:00 UTC daily sync had not run, so the
+whole month failed `meta_adset_campaign_base_unverified`. The campaign re-read
+above is what fixes that: the month's campaign level, 22 Nov included, is
+read and verified seconds before its ad sets.
 
 * So the campaign backfill no longer has to run first, and `--to` is never
   needed.
+* **It advances the System page's "Meta Ads spend" line**, exactly as the
+  campaign backfill already did: that line reads the campaign coverage
+  ledger (`meta_ads_spend_coverage`), and the re-read writes verified rows
+  there. It does not move `sync_batches`, `sync_state` or `runs` — the
+  dataset's freshness and proven-through date still belong to the daily
+  sync.
 * `--accept-zero-restatement` at `--level adset` lifts the refusal for
   **ad-set rows only**. The campaign re-read never takes it: a campaign day
   going to zero is accepted, if ever, by the campaign-level backfill with
@@ -552,7 +576,7 @@ the ad-set backfill does, and fails that month loudly with
      campaign <id>: ad sets <b>, campaign row <b> USD
    Rows w/o actions : <n> of <n> (no `actions` key: unknown, not zero)
    Rows w/o clicks  : <n> of <n>; w/o impressions: <n>
-   Attribution      : 7d_click_1d_view
+   Attribution      : 1d_view_7d_click
    Lead action types: <n> (Meta-reported; overlapping — never add them together)
      lead = <n>
      onsite_conversion.lead_grouped = <n>
@@ -630,8 +654,8 @@ the ad-set backfill does, and fails that month loudly with
   under a name it may not deserve. *PR-ADS-171D: confirmed by production
   observation — `onsite_conversion.lead_grouped` (§4).*
 * **The ad-set backfill re-reads the campaign level of each month** (PR-ADS-171D)
-  instead of trusting a campaign row from an earlier run, and stops at the
-  last verifiable day instead of failing the month. It therefore writes the
+  instead of trusting a campaign row from an earlier run, and reports where
+  it cut an end past the last verifiable day. It therefore writes the
   campaign tables — only through the campaign chunk sync, never with the
   zero-restatement override.
 * **A row with no `actions` key is unknown, and one such row withholds the

@@ -71,6 +71,10 @@ REASON_LEAD_TYPE_NOT_OBSERVED = "meta_lead_action_type_not_observed"
 #: Some day's row carried no ``actions`` at all: the count is unknown there.
 REASON_ACTIONS_MISSING = "meta_actions_missing_on_some_days"
 REASON_COUNT_MISSING = "meta_count_missing_on_some_days"
+#: PR-ADS-171D tripwire. In this account's stored rows the configured type and
+#: `lead` differ on some day: the premise of the choice (identical counts) no
+#: longer holds, and the configured type could be counting a subset.
+REASON_LEAD_TYPES_DIVERGED = "meta_lead_action_types_diverged"
 
 LEADS_DISCLOSURE = (
     "Meta-reported leads are Meta's own attributed counts under each ad "
@@ -177,6 +181,18 @@ def attribution_summary(rows: list) -> dict:
                        else None)}
 
 
+def _tripped(figures: dict, diverged_rows: int) -> dict:
+    """``meta_reported_leads`` made unavailable when the lead-type tripwire
+    fired for the account (``meta_lead_action_types_diverged``). The raw
+    per-type counts are left as they are: they are Meta's, not our choice."""
+    if diverged_rows:
+        leads = figures["meta_reported_leads"]
+        figures["meta_reported_leads"] = {
+            **_metric(None, REASON_LEAD_TYPES_DIVERGED),
+            "action_type": leads.get("action_type")}
+    return figures
+
+
 def _frame(start_date, end_date, settled, base) -> dict:
     return {
         "start_date": start_date.isoformat() if start_date else None,
@@ -257,7 +273,9 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                    "required_through": entry.get("required_through"),
                    "adset_coverage": "verified", "reason": None, "detail": None,
                    # Has this account's stored detail ever carried the type?
-                   "meta_reported_leads_type_observed": None}
+                   "meta_reported_leads_type_observed": None,
+                   # PR-ADS-171D tripwire: {rows, first_day} or None.
+                   "meta_reported_lead_types_diverged": None}
         accounts.append(summary)
 
         def block(status, reason, detail, coverage):
@@ -324,6 +342,24 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
             continue
         observed = read.get("action_type_observed") if stored_type else None
         summary["meta_reported_leads_type_observed"] = observed
+        # The tripwire speaks only for a type the account has emitted: an
+        # unobserved type is already unavailable for its own reason.
+        diverged = (read.get("lead_types_diverged")
+                    if stored_type and observed is True else None)
+        diverged_rows = int((diverged or {}).get("rows") or 0)
+        summary["meta_reported_lead_types_diverged"] = diverged if diverged_rows else None
+        if diverged_rows:
+            frame["config_problems"].append({
+                "key": "meta_ads.native_lead_action_type",
+                "reason": REASON_LEAD_TYPES_DIVERGED,
+                "account_id": account_id,
+                "detail": (f"account {account_id}: on {diverged_rows} stored "
+                           "day-row(s) (first "
+                           f"{diverged.get('first_day')}) the configured type's "
+                           "count differs from `lead`'s; it was chosen because "
+                           "they were identical. Meta-reported leads are "
+                           "unavailable for this account until the choice is "
+                           "reviewed.")})
         fx_reason = (meta.REASON_FX_UNSUPPORTED
                      if (currency or "") not in priced else meta.REASON_FX_MISSING)
         for r in read["rows"]:
@@ -342,7 +378,8 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                     else None, fx_reason, currency=meta.REPORTING_CURRENCY),
                 "impressions": _metric(r.get("impressions"), REASON_COUNT_MISSING),
                 "clicks": _metric(r.get("clicks"), REASON_COUNT_MISSING),
-                **lead_metrics(r, lead_type, type_observed=observed),
+                **_tripped(lead_metrics(r, lead_type, type_observed=observed),
+                           diverged_rows),
                 "attribution_settings": r.get("attribution_settings") or [],
                 "attribution_setting_missing_rows":
                     int(r.get("attribution_setting_missing_rows") or 0),

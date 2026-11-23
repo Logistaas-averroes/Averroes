@@ -112,10 +112,12 @@ meta_ads:
   # ads use Meta native lead forms only, and Meta returned five lead types
   # with IDENTICAL counts on every row and month (`lead`,
   # `onsite_conversion.lead_grouped`, and three `offsite_*_add_meta_leads`).
-  # `onsite_conversion.lead_grouped` is Meta's on-Facebook (native form) lead
-  # counter. It still publishes only for an account whose stored rows have
-  # carried this exact key on some day; otherwise `meta_reported_leads` is
-  # unavailable (`meta_lead_action_type_not_observed`), never 0.
+  # The choice rests on the owner's statement and those identical counts
+  # only; Meta's definition of the type was not retrieved. It publishes only
+  # for an account whose stored rows have carried this exact key on some day
+  # (otherwise `meta_lead_action_type_not_observed`, never 0), and is
+  # unavailable (`meta_lead_action_types_diverged`) for an account whose
+  # stored rows ever show it differing from `lead`.
   native_lead_action_type: "onsite_conversion.lead_grouped"
 
 contact_reconciliation:

@@ -408,9 +408,14 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
     any day, not only the range. Only a type the account has been seen to
     emit can be read as "Meta reported none" on a day it is absent; None when
     no type was asked about.
+
+    ``lead_types_diverged`` — with ``observed_action_type`` other than
+    ``lead``: ``{rows, first_day}`` over every stored row of this account on
+    which that type's count and ``lead``'s differ (one present without the
+    other counts). None when not asked.
     """
     empty = {"available": False, "rows": [], "mismatches": [],
-             "action_type_observed": None}
+             "action_type_observed": None, "lead_types_diverged": None}
     account_id = str(account_id)
     scope = "account_id = %s AND spend_date BETWEEN %s AND %s"
     try:
@@ -531,8 +536,27 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
                         "AND jsonb_exists(meta_reported_lead_actions, %s))",
                         (account_id, str(observed_action_type)))
                     observed = bool(cur.fetchone()[0])
+
+                # PR-ADS-171D tripwire. The configured type was chosen because
+                # it equalled `lead` (and three other types) on every stored
+                # row. A stored row of this account, any day, on which the two
+                # differ — or one is present without the other — means the
+                # choice may now count a subset. Same snapshot as the rows.
+                diverged = None
+                if observed_action_type and str(observed_action_type) != "lead":
+                    cur.execute(
+                        "SELECT COUNT(*), MIN(spend_date) "
+                        "FROM meta_ads_adset_daily_spend "
+                        "WHERE account_id = %s "
+                        "AND meta_reported_lead_actions IS NOT NULL "
+                        "AND (meta_reported_lead_actions ->> 'lead') IS DISTINCT FROM "
+                        "    (meta_reported_lead_actions ->> %s)",
+                        (account_id, str(observed_action_type)))
+                    count, first = cur.fetchone()
+                    diverged = {"rows": int(count or 0), "first_day": _iso(first)}
         return {"available": True, "rows": rows, "mismatches": mismatches,
-                "account_id": account_id, "action_type_observed": observed}
+                "account_id": account_id, "action_type_observed": observed,
+                "lead_types_diverged": diverged}
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_meta_adset_spend failed: %s", exc)
         return empty

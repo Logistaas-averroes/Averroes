@@ -564,7 +564,8 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
     the ad sets and reconciles them to that just-stored, live campaign read;
     see :func:`_backfill_adset_chunk`). At ``adset`` an end later than the
     account's local yesterday (the last day the campaign level can be
-    verified) stops there and is reported (``stopped_at``), not failed.
+    verified) is cut there, as at every level, and is reported
+    (``stopped_at``).
 
     ``account_ids`` defaults to every configured account; an id that is not
     configured is refused. For each account ``date_to`` defaults to, and is
@@ -653,8 +654,9 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
     if adsets:
         # PR-ADS-171D. The last day the campaign level can be verified is the
         # account's local yesterday: today is in progress and is never read.
-        # An end after it is cut there and SAID, not failed and not silent —
-        # the days before it are stored normally, and no day after it is.
+        # The end was already capped there (above); an end after it is now
+        # also SAID, not silent. The days before it are stored normally and no
+        # day after it is.
         out.update(requested_to=date_to.isoformat() if date_to else None,
                    campaign_verifiable_through=yesterday.isoformat(),
                    stopped_at=None, stop_reason=None, stop_detail=None)

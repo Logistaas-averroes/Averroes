@@ -36,6 +36,7 @@ from tests import meta_ads_fakes as fakes
 from tests.meta_ads_fakes import (
     ACCOUNT_ID, ADSET_A1, ADSET_A2, ADSET_B1, CAMPAIGN_A, CAMPAIGN_B,
     OLD_ACCOUNT_ID, SENTINEL_TOKEN, SENTINEL_TOKEN_2, FakeGraph, actions,
+    error_response,
 )
 
 NEW, OLD = ACCOUNT_ID, OLD_ACCOUNT_ID
@@ -397,6 +398,10 @@ def test_06_the_configured_lead_type_publishes_where_the_account_has_observed_it
         "action_type": "onsite_conversion.lead_grouped"}
     assert {a["account_id"]: a["meta_reported_leads_type_observed"]
             for a in out["accounts"]} == {NEW: False, OLD: True}
+    # Identical counts on every row: the tripwire is silent.
+    assert out["config_problems"] == []
+    assert {a["account_id"]: a["meta_reported_lead_types_diverged"]
+            for a in out["accounts"]} == {NEW: None, OLD: None}
     # The attribution setting the counts are under, from the stored rows.
     assert out["meta_reported_leads_attribution"] == {
         "settings": [ATTRIBUTION], "rows_without_setting": 0,
@@ -449,3 +454,113 @@ def test_08_the_daily_step_reads_both_levels_in_one_run_and_absorbs_a_restatemen
     assert levels == ["campaign", "account", "adset"]
     assert dict(((d, c), m) for d, c, m in _campaign_rows(live_db))[
         ("2026-11-21", CAMPAIGN_A)] == 61_320_000
+
+
+# ── review round 1 ────────────────────────────────────────────────────────
+
+def test_09_a_verified_month_without_usd_rates_is_partial_end_to_end(
+        live_db, monkeypatch, capsys):
+    """m1. A non-USD account (the new one, GBP) whose USD rates cannot be
+    fetched: the campaign re-read is verified but `partial`, so the ad-set
+    month is `partial` with `fx_rates_missing`, the run is `partial`, the
+    script exits 3 — and both ledgers say `verified`."""
+    graph = _production()
+    graph.default.adset("120219876543210099", "120211234567890199", "2026-11-20",
+                        "10.00", actions=actions(link_click=5),
+                        attribution_setting=ATTRIBUTION)
+    fakes.configure(monkeypatch, graph)
+
+    def no_rate(rate_date, base, quote):
+        raise RuntimeError("FX provider unavailable")
+    monkeypatch.setattr(fx_service, "fetch_fx_rate", no_rate)
+    # The real backfill, on the production clock.
+    real = meta.run_backfill
+    monkeypatch.setattr(meta, "run_backfill",
+                        lambda *a, **k: real(*a, now=PROD_NOW, **k))
+    from scripts import backfill_meta_ads_spend as script
+    code = script.main(["--from", "2026-11-01", "--level", "adset",
+                        "--account", NEW])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert out["status"] == "partial" and out["reason"] == meta.REASON_FX_MISSING
+    [chunk] = out["accounts"][0]["chunks"]
+    assert (chunk["chunk_start"], chunk["chunk_end"]) == ("2026-11-01", "2026-11-21")
+    assert chunk["status"] == "partial" and chunk["reason"] == meta.REASON_FX_MISSING
+    assert chunk["coverage_status"] == "verified" and chunk["rows_written"] == 1
+    assert chunk["campaign_reread"]["status"] == "partial"
+    assert chunk["campaign_reread"]["fx_status"] == "missing"
+    for table in ("meta_ads_spend_coverage", "meta_ads_adset_coverage"):
+        assert _ledger(live_db, table, NEW) == [
+            ("2026-11-01", "2026-11-21", "verified", None)], table
+
+
+def test_10_a_configured_type_that_diverges_from_lead_trips_the_wire(
+        live_db, monkeypatch):
+    """m3. The configured type was chosen because it equalled `lead` on every
+    stored row. One stored row where they differ (lead=5,
+    onsite_conversion.lead_grouped=3) and the configured type could be a
+    subset: `meta_reported_leads` is unavailable for that account and
+    `config_problems` names it."""
+    graph = _production()
+    graph.accounts[OLD].adset(
+        ADSET_A2, CAMPAIGN_A, "2026-11-21", "30.65",
+        actions=actions(lead=5, onsite_conversion__lead_grouped=3),
+        attribution_setting=ATTRIBUTION)
+    graph.default.adset("120219876543210099", "120211234567890199", "2026-11-21",
+                        "10.00", actions=actions(lead=2,
+                                                 onsite_conversion__lead_grouped=2),
+                        attribution_setting=ATTRIBUTION)
+    fakes.configure(monkeypatch, graph)
+    _fx(monkeypatch)
+    assert meta.run_backfill(NOV_1, None, now=PROD_NOW, level="adset")["status"] \
+        == "success"
+    out = adset_truth.build_meta_adset_breakdown_for_days(
+        NOV_1, date(2026, 11, 21), settled=True, now=PROD_NOW)
+    assert out["status"] == "published"
+    problems = [p for p in out["config_problems"]
+                if p["reason"] == "meta_lead_action_types_diverged"]
+    assert [p["account_id"] for p in problems] == [OLD]
+    assert "2026-11-21" in problems[0]["detail"]
+    assert {a["account_id"]: a["meta_reported_lead_types_diverged"]
+            for a in out["accounts"]} == {
+        NEW: None, OLD: {"rows": 1, "first_day": "2026-11-21"}}
+    rows = {r["adset_id"]: r for r in out["rows"]}
+    # Every ad set of the diverging account — not only the diverging one.
+    for adset_id in (ADSET_A1, ADSET_A2):
+        assert rows[adset_id]["meta_reported_leads"] == {
+            "value": None, "status": "unavailable",
+            "reason": "meta_lead_action_types_diverged",
+            "action_type": "onsite_conversion.lead_grouped"}, adset_id
+    # Meta's own per-type counts stay as Meta reported them.
+    assert rows[ADSET_A2]["meta_reported_lead_actions"]["value"] == {
+        "lead": 5, "onsite_conversion.lead_grouped": 3}
+    # The other account, identical on every row, still publishes.
+    assert rows["120219876543210099"]["meta_reported_leads"]["value"] == 2
+
+
+def test_11_a_failed_account_read_in_an_adset_backfill_is_recorded(
+        live_db, monkeypatch):
+    """m5. The ad-set backfill handles the account as the campaign backfill
+    does: an account Meta refuses to describe is recorded in
+    meta_ads_account_sync_state, and nothing else is written."""
+    graph = _production()
+    graph.accounts[OLD].refusal = error_response(
+        400, 100, subcode=33, message="Unsupported get request.",
+        type_="GraphMethodException")
+    fakes.configure(monkeypatch, graph)
+    out = meta.run_backfill(NOV_1, None, now=PROD_NOW, level="adset",
+                            account_ids=[OLD])
+    assert out["status"] == "failed"
+    assert out["reason"] == meta.REASON_NOT_READABLE
+    assert q(live_db, "SELECT account_id, last_status, last_reason, "
+                      "not_readable_since IS NOT NULL "
+                      "FROM meta_ads_account_sync_state") == [
+        (OLD, "failed", meta.REASON_NOT_READABLE, True)]
+    assert graph.insight_calls() == []
+    assert _adset_rows(live_db) == [] and _campaign_rows(live_db) == []
+    # The same refusal through the campaign backfill records the same row.
+    live = q(live_db, "SELECT last_status, last_reason "
+                      "FROM meta_ads_account_sync_state")
+    meta.run_backfill(NOV_1, None, now=PROD_NOW, account_ids=[OLD])
+    assert q(live_db, "SELECT last_status, last_reason "
+                      "FROM meta_ads_account_sync_state") == live

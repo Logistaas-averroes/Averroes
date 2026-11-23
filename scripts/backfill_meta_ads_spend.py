@@ -36,8 +36,9 @@ no ads in a month is recorded as a verified zero in seconds.
                to that live read. A month whose campaign re-read fails stops
                with ITS reason and stores no ad-set row. ``--to`` is not
                needed: the end is the account's local yesterday, the last day
-               the campaign level can be verified; a later ``--to`` stops
-               there and is reported (``stopped_at``), not failed. At this
+               the campaign level can be verified; a later ``--to`` is cut
+               there (as it always was) and is now reported (``stopped_at``,
+               ``stop_reason``). At this
                level ``--accept-zero-restatement`` lifts the refusal for
                ad-set rows only. ``--dry-run``, ``--resume`` and ``--account``
                mean the same. Without ``--level`` this command does exactly
@@ -81,8 +82,8 @@ def _parse(argv=None) -> argparse.Namespace:
                              "default: every configured account)")
     parser.add_argument("--level", choices=("campaign", "adset"),
                         default="campaign",
-                        help="campaign (default) or adset: the ad-set detail "
-                             "of months whose campaign level is verified")
+                        help="campaign (default) or adset: the ad-set detail; "
+                             "each month re-reads its campaign level first")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--accept-zero-restatement", action="store_true",
