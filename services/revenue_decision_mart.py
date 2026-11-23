@@ -286,6 +286,9 @@ def _spend_truth_block(core: dict) -> dict:
         # gate's own messages, so a blocked card names THIS window's gap (the
         # pre-morning-sync settle gap is not "no geo spend — run the sync").
         "country_gap_message": geo_gate.describe_geo_gap(country_gap_codes),
+        # Truth audit MINOR 1: the gap that message is about — the card's next
+        # step and run button follow THIS code, never a different one.
+        "country_gap_primary": geo_gate.primary_geo_gap(country_gap_codes),
         "geo_coverage_missing_ranges": health.get("geo_coverage_missing_ranges") or [],
         "failed_geo_dates": health.get("failed_geo_dates") or [],
         "country_gap_reason": health.get("country_gap_reason"),
@@ -668,6 +671,7 @@ def _withhold_empty_settled_window(spend_truth: dict, summary: dict,
         "country_roas_unblockable": False, "country_gap_codes": [reason],
         "country_gap_reason": geo_gate.describe_geo_gap([reason]),
         "country_gap_message": geo_gate.describe_geo_gap([reason]),
+        "country_gap_primary": geo_gate.primary_geo_gap([reason]),
     })
     readiness = {k: (False if k.endswith("_ready") else v)
                  for k, v in readiness.items()}

@@ -1046,6 +1046,15 @@ _GEO_GAP_PRIORITY = (
 )
 
 
+def primary_geo_gap(gap_codes) -> str | None:
+    """The ONE gap a card names, by repair priority (``_GEO_GAP_PRIORITY``),
+    or None. PR-ADS-176A truth audit MINOR 1: a blocked card's cause, next step
+    and run button all follow this code, so they cannot name two different
+    gaps. :func:`describe_geo_gap` is this code's message."""
+    codes = set(gap_codes or ())
+    return next((c for c in _GEO_GAP_PRIORITY if c in codes), None)
+
+
 def describe_geo_gap(gap_codes) -> str | None:
     """The operator-facing sentence for a set of gap codes, or None if there are none.
 

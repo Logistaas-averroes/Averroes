@@ -6599,20 +6599,35 @@ one rule.
   step comes from `country_gap_codes`. The settle gap no longer says "run the
   Geo Sync".
 
+**Truth audit round 1** (`docs/58` §2, §6):
+
+* The Dashboard no longer blames FX when the zero rule withholds spend.
+* The residual row publishes no period ratio (`residual_not_a_market`).
+* Regional Mix and `countries_with_spend` state no zero over unknowns.
+* The blocked card's cause, next step and run buttons follow one primary gap.
+* No deal denominators are published while the gate withholds.
+* The spend metric names `spend_location_unresolved`.
+* The drawer's exclusions are read for the row's account.
+* `deal_ids` is None beside a withheld count, and the audit checks it.
+* Withheld spend renders "Unavailable" with its reason.
+
 **Owner decisions 2026-11-23** for 176B: business windows with Current Quarter
 as the default, a strict spend gate, and no lead-quality columns. These are
 recorded in `docs/58` §3.
 
-**Tests.** `tests/test_pr_ads_176a_country_builder_pg_integration.py` has 11
-cases and is registered in CI. Nine fail on origin/main; case 02 is the
-counterfactual. Case 10 checks that the geo snapshot fails closed. Existing
-tests changed:
+**Tests.** `tests/test_pr_ads_176a_country_builder_pg_integration.py` has 24
+cases and is registered in CI. Nine of the first eleven fail on origin/main;
+case 02 is the counterfactual. Case 10 checks that the geo snapshot fails
+closed. Every truth-audit case fails on `98e0b5e`, except the guards 15 and
+16, which fail under mutation. Existing tests changed:
 
 * ten geo-reader fakes now accept the account-scope argument;
 * the structural snapshot test in 167a `test_11` follows the carriers read
   into the shared rule;
 * a `tests/conftest.py` autouse fixture restores `db.connection._pool` after
-  every test, so PG fixtures no longer leak a pool over a stopped cluster.
+  every test, so PG fixtures no longer leak a pool over a stopped cluster;
+* 124 / 127 now assert the gap-driven CTA call
+  `roasCountryCtaButtons(guide.run)`.
 
 Details are in `docs/58` §6.
 

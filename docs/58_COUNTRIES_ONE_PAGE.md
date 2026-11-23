@@ -64,8 +64,17 @@ The rule's effect on each surface:
 * Dashboard: `_build_country_rows` gives `spend_native` / `spend_usd` `None`
   and `spend_reason`. The listed markets' total (`verified_spend_*`) is then
   unknown and is withheld, with `kpis.verified_spend_reason` and
-  `zero_withheld_countries`. The `unavailable` entry names the markets and
-  the cause instead of "requires verified FX".
+  `zero_withheld_countries`. The other figures follow:
+  * The `unavailable` entries, the "Unavailable" decision card and the ratio
+    reason name the markets and the cause. Before the truth audit they said "FX
+    coverage is incomplete — native GBP spend is still shown", although FX
+    was verified and native spend was withheld too.
+  * `metric_truth.country_attributed_spend_usd` is `not_ready` with
+    `unavailable_reason: spend_location_unresolved`.
+  * `kpis.countries_with_spend` is `None`, because it counts rows whose spend
+    is unknown. The KPI reads "Countries with spend withheld".
+  * Country Revenue & Spend and the Dashboard print "Unavailable — some spend
+    in this window has no country", never "—".
 
 ### 2.2 Code-less criteria count, on the residual
 
@@ -87,17 +96,33 @@ added to it. Leads, SQLs, deals and revenue on an item are `"in_residual"`,
 never `0`. When the gate withholds the residual, these items are withheld
 with it.
 
+The residual row never publishes a period ratio (truth audit M2). Its spend
+belongs to no market, and its deals' CRM countries are no listed market.
+These are two unrelated populations. Before the audit, £3 of code-less spend
+beside a $5,000 deal from "Atlantis" published 1333.33, and with no residual
+revenue it published 0.0. `period_revenue_per_ad_spend` and
+`period_spend_per_customer_won` are now `None`, with their metrics
+`unavailable` / `residual_not_a_market`. This matches the spend-only residual
+row.
+
 ### 2.4 Each drawer lists its row's own population
 
 * Country Revenue & Spend drawer (`build_country_deal_details`): it now uses
   the settled-day window and `settled_revenue_bounds`, the same days as the
-  row. It also applies the same "not Google Ads" label exclusions. Before
-  this, a deal closed today appeared in a drawer whose row did not count it.
+  row. It also applies the same "not Google Ads" label exclusions, read for
+  the same account as the row. Before this, a deal closed today appeared in a
+  drawer whose row did not count it. The unscoped campaign spend read also
+  took another account's mappings (its `MIN(customer_id)`), and with them an
+  excluded deal.
 * Dashboard drawer: each mart country row now carries `deal_ids`, the deals it
   counts. The drawer lists exactly those, at `google_ads_source` scope. Before
   this it listed every won deal of the country from any channel, and so did
   the revenue verdict's deal denominators. The mart withholds `deal_ids` along
-  with the row's other figures.
+  with the row's other figures. A row whose deal count is withheld carries
+  `deal_ids: None`, never `[]`, and the reader-cutover audit's proof-list check
+  now knows `deal_ids`. When any row's population is withheld,
+  `country_revenue_disclosure` publishes no deal denominators (`None`, never
+  `0`).
 
 ### 2.5 The Dashboard geo read is the configured account's
 
@@ -116,19 +141,43 @@ contract, and none is. In `static/app.js`, `CTRY_STATUS_META` /
 `CTRY_NEXT_ACTION` are re-keyed to the new strings, so colours and next
 actions stay the same.
 
-### 2.7 The blocked card names the gap (the only UI change)
+Regional Mix follows the country rule (truth audit M3):
 
-The mart's `spend_truth` now carries `country_gap_message`, which is
-`describe_geo_gap(country_gap_codes)`. `renderCountrySpendUnreconciledState`
-prints that message as the cause. The next step comes from the gap codes
-(`COUNTRY_GAP_NEXT_STEP`):
+* a withheld deal count reads "Closed-won outcome withheld", never "Spend
+  without a won deal";
+* an unknown spend reads "Geo attribution needs review", never "No spend in
+  window".
 
-* before the morning sync: "Nothing to run: the morning sync re-reads the
-  newest day …";
-* never-fetched coverage still says to run the Geo Sync.
+### 2.7 The blocked card names the gap
+
+The mart's `spend_truth` now carries two fields:
+
+* `country_gap_primary`: the one gap, by the gate's repair priority
+  (`google_ads_geo_sync_service.primary_geo_gap`);
+* `country_gap_message`: that gap's sentence.
+
+`renderCountrySpendUnreconciledState` takes its cause, its next step
+(`COUNTRY_GAP_NEXT_STEP`) and its run buttons (`COUNTRY_GAP_RUN` →
+`roasCountryCtaButtons(run)`) from that one code. Before the truth audit, the
+cause came from the full list and the next step from a subset, so
+`[campaign_coverage_incomplete, spend_not_reread_since_day_ended]` named
+campaign coverage and then said "Nothing to run". An admin also saw "Nothing
+to run" beside a "Run Google Ads Geo Sync" button.
+
+* Before the morning sync: "Nothing to run: the morning sync re-reads the
+  newest day …". There is no run button, and no "ask an admin to run".
+* Never-fetched coverage still says to run the Geo Sync and offers it.
 
 The old "no canonical geo spend yet — run the Geo Sync" copy is kept only for
 a payload that names no gap.
+
+The UI changes in this PR:
+
+* this card;
+* the re-keyed status maps;
+* the spend cells and the KPI sub-line (§2.1).
+
+There is no navigation or layout change.
 
 ## 3. Decisions
 
@@ -175,11 +224,18 @@ new owner call.
 
 ## 6. Tests
 
-`tests/test_pr_ads_176a_country_builder_pg_integration.py`: 11 cases, 10 of
-them on PostgreSQL. The file is registered in the PG step and the did-run
-list. Nine fail on origin/main. Case 02 is the counterfactual and passes on
-both. Case 10 needs the new module; it fails when its `except` is mutated
-away.
+`tests/test_pr_ads_176a_country_builder_pg_integration.py`: 24 cases. The
+file is registered in the PG step and the did-run list.
+
+* Nine of the first eleven fail on origin/main. Case 02 is the counterfactual
+  and passes on both. Case 10 fails when its `except` is mutated away.
+* The truth-audit round strengthened 01b and 09 and added 01c, 09b, 11–14, 16b,
+  17a, 17b and 18. All of these fail on `98e0b5e`.
+* Cases 15 and 16 guard claims that were already true at `98e0b5e`. Each fails
+  under a mutation that removes its guard:
+  * case 15 fails when the mart's or the Dashboard's withholding of
+    `deal_ids` / items is removed;
+  * case 16 fails when the drawer's exclusion filter is removed.
 
 * 01a: Pakistan reads Unavailable on the mart country view. Jordan's `$0`
   stands.
@@ -200,6 +256,20 @@ away.
   `renderCountrySpendUnreconciledState` from the real mart payload.
 * 10: a geo snapshot that cannot open reads as unreadable geo, with no zero
   proven. It never crashes.
+* Truth audit:
+  * 01b (M1): no FX blame.
+  * 01c (MINOR 3): the spend metric names the cause.
+  * 09 / 09b (MINOR 1): as admin and as viewer, case-insensitive, no run
+    button for the settle gap; one gap drives cause, step and CTA.
+  * 11 (M2): the residual ratio, with and without residual revenue.
+  * 12 / 12b / 13 (M3): Regional Mix and `countries_with_spend`, through the
+    zero rule, an unreadable Dashboard geo read and a withheld deal count.
+  * 14 (MINOR 2): no deal denominators while the gate withholds.
+  * 15 / 16 / 16b (MINOR 4): withheld `deal_ids` and items; the drawer's
+    exclusion, on one and on two accounts.
+  * 17a / 17b (MINOR 5): `deal_ids` is None beside a withheld count; the
+    audit catches `[]`.
+  * 18 (MINOR 6 / M3): the cells and the KPI, in the node harness.
 
 Existing tests changed:
 
@@ -213,6 +283,12 @@ Existing tests changed:
   * the page calls `zero_rule.assess(` inside the same snapshot block;
   * `assess` makes the carriers read;
   * `assess` opens no snapshot of its own.
+* Truth-audit round: `test_pr_ads_124::test_blocked_country_card_has_recovery_cta`
+  and `test_pr_ads_127::test_country_card_copy_branches_on_status` asserted
+  the literal call `roasCountryCtaButtons()`. That call is the
+  gap-independent CTA that MINOR 1 removes. Both now assert
+  `roasCountryCtaButtons(guide.run)`. Their other assertions are unchanged,
+  and the admin / non-admin copy they check is still there.
 * `analysis/sql_doctrine_registry.py` now classifies the two new
   sub-item builders. Their `"sqls": "in_residual"` is a marker, not a count.
 * `tests/conftest.py` gains an autouse fixture, `_restore_db_pool`. It returns

@@ -609,7 +609,9 @@ def test_blocked_country_card_has_recovery_cta():
     end = JS.find("\nfunction ", start + 1)
     assert end != -1
     blocked = JS[start:end]
-    assert "roasCountryCtaButtons()" in blocked
+    # PR-ADS-176A truth audit MINOR 1: the card passes which runs its gap
+    # warrants (no run button when nothing should be run).
+    assert "roasCountryCtaButtons(guide.run)" in blocked
 
 
 def test_country_cta_navigates_and_runs_jobs():

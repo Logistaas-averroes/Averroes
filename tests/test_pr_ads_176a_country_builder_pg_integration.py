@@ -26,6 +26,7 @@ failed on origin/main before this PR.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -180,6 +181,27 @@ def test_01_b_the_dashboard_countries_payload_applies_the_same_rule(live_db, mon
     assert k["zero_withheld_countries"] == ["Pakistan"]
     why = next(u for u in page["unavailable"] if u["metric"] == "verified_spend_usd")
     assert "Pakistan" in why["reason"] and "FX" not in why["reason"]
+    # Truth audit M1: FX is verified here, and native spend is withheld too. No
+    # card and no unavailable reason may blame FX or say native spend is shown.
+    assert _mart()["spend_truth"]["fx_status"] == "verified"
+    texts = ([c["headline"] + " " + c["body"] for c in page["decision_cards"]]
+             + [u["reason"] for u in page["unavailable"]])
+    for t in texts:
+        assert not re.search(r"\bfx\b", t, re.I), t
+        assert not re.search(r"native[^.]*(still )?shown", t, re.I), t
+    assert any("Pakistan" in t for t in texts if "period revenue" in t.lower()), texts
+
+
+def test_01_c_the_spend_metric_contract_names_the_zero_rule(live_db, monkeypatch):
+    """Truth audit MINOR 3: in a ready window the zero rule withholds the
+    listed markets' spend; the metric contract must say why, so the KPI card
+    and the parity audit name the cause rather than none."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _zero_rule_scenario(live_db)
+    page = _dash()
+    mt = page["metric_truth"]["country_attributed_spend_usd"]
+    assert (mt["truth_status"], mt.get("unavailable_reason")) == (
+        "not_ready", "spend_location_unresolved")
 
 
 def test_02_with_nothing_unresolved_in_the_window_a_spend_less_market_is_a_measured_zero(
@@ -347,20 +369,299 @@ def test_09_before_the_morning_sync_the_blocked_card_names_the_settle_gap(
     assert st["country_spend_status"] == "unavailable"
     assert "spend_not_reread_since_day_ended" in st["country_gap_codes"]
     from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
-    html = _run_app("renderCountrySpendUnreconciledState(%s)"
-                    % json.dumps(json.loads(json.dumps(st, default=str))))
-    assert "last synced while it was still in progress" in html
-    assert "The morning sync re-reads it" in html
-    assert "Nothing to run" in html
-    assert "no canonical Google Ads geo spend" not in html
-    assert "Run Google Ads Geo Sync" not in html
+    st_js = json.dumps(json.loads(json.dumps(st, default=str)))
+    # Truth audit MINOR 1: as an ADMIN, who is the one offered the run button,
+    # and case-insensitively — the CTA button reads "Run Google Ads Geo Sync",
+    # a non-admin's note "Ask an admin to run Google Ads Geo Sync".
+    for user in ('{"username": "a", "role": "admin"}', '{"username": "v", "role": "viewer"}'):
+        html = _run_app("_currentUser = %s; renderCountrySpendUnreconciledState(%s)"
+                        % (user, st_js))
+        assert "last synced while it was still in progress" in html
+        assert "The morning sync re-reads it" in html
+        assert "Nothing to run" in html
+        assert "no canonical google ads geo spend" not in html.lower()
+        assert "run google ads geo sync" not in html.lower(), user
+        assert 'data-country-cta="run-' not in html, user
 
-    # A window never synced at all still says to run the sync.
+    # A window never synced at all still says to run the sync — and offers it.
     never = {"country_spend_status": "unavailable",
              "country_gap_codes": ["geo_coverage_incomplete"],
+             "country_gap_primary": "geo_coverage_incomplete",
              "country_gap_message": "part of this window was never synced"}
-    html = _run_app("renderCountrySpendUnreconciledState(%s)" % json.dumps(never))
+    html = _run_app('_currentUser = {"role": "admin"}; '
+                    "renderCountrySpendUnreconciledState(%s)" % json.dumps(never))
     assert "Run Google Ads Geo Sync" in html
+    assert 'data-country-cta="run-geo-sync"' in html
+
+
+def test_09_b_the_cause_and_the_next_step_come_from_the_same_gap(tmp_path):
+    """Truth audit MINOR 1: with two gaps the cause was the gate's FIRST
+    (campaign coverage) and the next step the settle gap's "Nothing to run" —
+    a card that names a gap and then says to wait for another. Both now come
+    from the one primary gap the server names."""
+    from services import google_ads_geo_sync_service as geo
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    codes = ["campaign_coverage_incomplete", "spend_not_reread_since_day_ended"]
+    st = {"country_spend_status": "unavailable", "country_gap_codes": codes,
+          "country_gap_message": geo.describe_geo_gap(codes),
+          "country_gap_primary": getattr(geo, "primary_geo_gap", lambda c: None)(codes)}
+    assert st["country_gap_primary"] == "campaign_coverage_incomplete"
+    html = _run_app('_currentUser = {"role": "admin"}; '
+                    "renderCountrySpendUnreconciledState(%s)" % json.dumps(st))
+    assert "complete canonical campaign spend coverage" in html
+    assert "Nothing to run" not in html
+    assert "Spend Backfill" in html
+
+
+# ── truth audit, round 1 ─────────────────────────────────────────────────────
+def _residual(mart):
+    return next(r for r in mart["rows"] if r["is_residual"])
+
+
+def test_11_the_residual_row_never_publishes_a_period_ratio(live_db, monkeypatch):
+    """Truth audit M2. The residual row holds spend no market can be said to own
+    and deals no market can be said to have won: a ratio between them divides
+    two unrelated populations. £3 code-less spend beside a $5,000 deal whose CRM
+    country is "Atlantis" published 1333.33; with no residual revenue, 0.0."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(LOOSE, 3.0)])
+    _sync(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")
+    res = _residual(_mart())
+    assert res["spend"] == pytest.approx(3.0 * RATE)
+    assert res["period_revenue_per_ad_spend"] is None            # was 0.0
+    m = res["metrics"]["period_revenue_per_ad_spend"]
+    assert (m["value"], m["status"], m["reason"]) == (None, "unavailable",
+                                                      "residual_not_a_market")
+    _deal(live_db, "d-atlantis", "Atlantis", amount=5000.0)
+    res = _residual(_mart())
+    assert res["closed_won_deals"] == 1 and res["won_revenue"] == 5000.0
+    assert res["period_revenue_per_ad_spend"] is None            # was 1333.33
+    m = res["metrics"]["period_revenue_per_ad_spend"]
+    assert (m["status"], m["reason"]) == ("unavailable", "residual_not_a_market")
+    assert res["metrics"]["period_spend_per_customer_won"]["status"] == "unavailable"
+
+
+def _lead(cluster, contact_id, country):
+    """One paid-search lead created yesterday, not qualified (no SQL)."""
+    _, today = _window_dates(WINDOW)
+    created = datetime.combine(today - timedelta(days=1), datetime.min.time(),
+                               tzinfo=timezone.utc) + timedelta(hours=10)
+    with cluster.connect() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO runs (run_type, started_at, status) VALUES "
+                    "('daily', now(), 'success') RETURNING id")
+        run_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO leads (run_id, run_date, contact_id, country, "
+            "status_category, campaign_name, keyword, source_type, "
+            "contact_created_at) VALUES (%s, CURRENT_DATE, %s, %s, 'junk', "
+            "'brand - uk', 'tms', 'paid_search', %s)",
+            (run_id, contact_id, country, created))
+        conn.commit()
+
+
+def test_12_regional_mix_never_states_a_zero_over_an_unknown_spend(live_db, monkeypatch):
+    """Truth audit M3(a). Pakistan (a lead, no SQL, no deal, never a geo row)
+    has its spend withheld by the zero rule: APAC — Pakistan alone — read
+    "No spend in window", and the KPI counted 0 countries with spend over rows
+    whose spend is unknown."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(LOOSE, 3.0)])
+    _sync(live_db)
+    _lead(live_db, "c-pk", "Pakistan")
+    page = _dash()
+    pk = _dash_row(page, "PK")
+    assert (pk["spend_native"], pk["closed_won_deals"], pk["sqls"]) == (None, 0, 0)
+    apac = next(r for r in page["regional_mix"] if r["region"] == "APAC")
+    assert apac["spend_native"] is None
+    assert apac["status"] != "No spend in window"
+    assert apac["status"] == "Geo attribution needs review"
+    assert page["kpis"]["countries_with_spend"] is None
+
+
+def test_12_b_an_unreadable_dashboard_geo_read_is_no_region_s_zero(live_db, monkeypatch):
+    """M3(a), the other way spend becomes unknown: the Dashboard's own geo read
+    fails while the mart's succeeds."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _sync(live_db)
+    _deal(live_db, "d-pk", "Pakistan")
+    import types
+    import services.dashboard_countries_service as d
+    from services import country_spend_zero_rule as zr
+    monkeypatch.setattr(d, "zero_rule", types.SimpleNamespace(
+        read_country_spend=lambda *a, **k: {
+            "spend": {"available": False, "has_rows": False, "rows": []},
+            "zero_rule": None},
+        zero_spend_verdict=zr.zero_spend_verdict,
+        R_SPEND_LOCATION_UNRESOLVED=zr.R_SPEND_LOCATION_UNRESOLVED))
+    page = _dash()
+    assert all(r["spend_native"] is None for r in page["countries"])
+    assert not any(r["status"] == "No spend in window" for r in page["regional_mix"])
+    assert page["kpis"]["countries_with_spend"] is None
+
+
+def test_13_a_region_whose_deal_count_is_withheld_is_not_spend_without_a_won_deal(
+        live_db, monkeypatch):
+    """Truth audit M3(b). No deal sync state: the ledger is not current, so
+    every market's won-deal count is withheld. Europe (UK: £200 spend) read
+    "Spend without a won deal" — a claim about a count nobody published."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")          # never published: no sync state
+    page = _dash()
+    uk = _dash_row(page, "GB")
+    assert uk["closed_won_deals"] is None and uk["spend_native"] == pytest.approx(200.0)
+    europe = next(r for r in page["regional_mix"] if r["region"] == "Europe")
+    assert europe["closed_won_deals"] is None
+    assert europe["status"] == "Closed-won outcome withheld"
+
+
+def test_14_a_withheld_geo_gate_publishes_no_deal_denominators(live_db, monkeypatch):
+    """Truth audit MINOR 2. Before the morning sync the gate withholds every
+    country figure (the mart's deal_ids with them), and the revenue disclosure
+    published closed_won_deals 0 / revenue_proven_deals 0 over a population
+    nobody counted. Withheld means absent."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _sync(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")
+    _before_the_morning_sync(live_db)
+    disc = _dash()["country_revenue_disclosure"]
+    for k in ("closed_won_deals", "revenue_proven_deals", "revenue_unavailable_deals"):
+        assert disc[k] is None, (k, disc[k])
+
+
+def test_15_withheld_rows_carry_no_population_and_no_itemised_spend(live_db, monkeypatch):
+    """Truth audit MINOR 4: claims of PR-ADS-176A nothing guarded. With the geo
+    gate withholding, the mart's rows carry no deal_ids and its residual no
+    outside-market items; the Dashboard's residual carries no items."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(FIJI, 7.0)])
+    _sync(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")
+    ready = _mart()
+    assert _mart_row(ready, "GB")["deal_ids"] == ["d-uk"]
+    assert _residual(ready)["outside_listed_market_items"]
+    _before_the_morning_sync(live_db)
+    mart = _mart()
+    assert all(r["deal_ids"] is None for r in mart["rows"])
+    assert _residual(mart)["outside_listed_market_items"] is None
+    assert _dash()["residual"]["outside_listed_market_items"] is None
+
+
+def _identity(cluster, customer, label, *, method="not_google_ads"):
+    with cluster.connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO google_ads_campaign_identity (customer_id, "
+            "external_campaign_label, match_method, approved_at, approved_by) "
+            "VALUES (%s, %s, %s, now(), 'owner')", (customer, label, method))
+        conn.commit()
+
+
+def test_16_the_drawer_applies_the_row_s_not_google_ads_exclusion(live_db, monkeypatch):
+    """Truth audit MINOR 4. A label the admin marked "not Google Ads" is not in
+    the row; it must not be in the row's drawer either."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _sync(live_db)
+    _identity(live_db, CUSTOMER, "offline import")
+    _deal(live_db, "d-uk", "United Kingdom")
+    from tests.test_pr_ads_153e_b_pg_integration import _insert
+    _, today = _window_dates(WINDOW)
+    close = datetime.combine(today - timedelta(days=1), datetime.min.time(),
+                             tzinfo=timezone.utc) + timedelta(hours=12)
+    _insert(live_db, "d-offline", close_date=close.isoformat(), amount=700.0,
+            revenue_usd=700.0, country="United Kingdom", gclid="g-off",
+            campaign="offline import", group="google_ads",
+            attribution_status="google_ads")
+    from services.revenue_attribution_service import build_country_deal_details
+    row = _mart_row(_mart(), "GB")
+    assert row["deal_ids"] == ["d-uk"]
+    drawer = build_country_deal_details(WINDOW, "United Kingdom", "GB")
+    assert [d["deal_record_id"] for d in drawer["details"]] == ["d-uk"]
+
+
+def test_16_b_the_drawer_reads_the_exclusions_of_the_row_s_account(live_db, monkeypatch):
+    """Truth audit MINOR 4. The drawer read campaign spend with no account
+    scope and took its mappings from that read's MIN(customer_id) — another
+    account's, which carries no exclusion — so the excluded deal came back."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    import db.writers as writers
+    start, today, yesterday = _seed(live_db)
+    _sync(live_db)
+    other = "0000000001"                       # sorts before the configured id
+    assert writers.upsert_campaign_daily_spend([{
+        "customer_id": other, "currency_code": "GBP", "campaign_id": "777",
+        "campaign_name": "other account", "spend_date": yesterday,
+        "cost_micros": 50_000_000, "source_query_version": "t"}]) == 1
+    _identity(live_db, CUSTOMER, "offline import")
+    from tests.test_pr_ads_153e_b_pg_integration import _insert
+    close = datetime.combine(yesterday, datetime.min.time(),
+                             tzinfo=timezone.utc) + timedelta(hours=12)
+    _insert(live_db, "d-offline", close_date=close.isoformat(), amount=700.0,
+            revenue_usd=700.0, country="United Kingdom", gclid="g-off",
+            campaign="offline import", group="google_ads",
+            attribution_status="google_ads")
+    from services.revenue_attribution_service import build_country_deal_details
+    row = _mart_row(_mart(), "GB")
+    assert row["closed_won_deals"] == 0 and row["deal_ids"] == []
+    drawer = build_country_deal_details(WINDOW, "United Kingdom", "GB")
+    assert [d["deal_record_id"] for d in drawer["details"]] == []
+
+
+def test_17_a_withheld_deal_count_carries_no_deal_ids(live_db, monkeypatch):
+    """Truth audit MINOR 5. With no deal sync state the won-deal count is
+    withheld (None) and the row carried ``deal_ids: []`` — an empty proof
+    list reads as "no deals"."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")
+    rows = _mart()["rows"]
+    gb = _mart_row({"rows": rows}, "GB")
+    assert gb["closed_won_deals"] is None
+    assert gb["deal_ids"] is None
+
+
+def test_17_b_the_reader_cutover_audit_knows_deal_ids_is_a_proof_list():
+    """Truth audit MINOR 5: the audit's proof-list check names ``deal_ids``."""
+    from scripts import audit_customer_revenue_reader_cutover as audit
+    withheld = {"status": "unavailable", "value": None, "reason": "x"}
+    for ids in ([], ["d1"]):
+        a = audit.Audit()
+        audit.page_leak_checks(a, "k", "page", {}, {"rows": [{
+            "country": "Pakistan", "closed_won_deals": None,
+            "metrics": {"closed_won_deals": withheld}, "deal_ids": ids}]})
+        assert a.checks.get("withheld_not_reconstructable") is False, ids
+    a = audit.Audit()
+    audit.page_leak_checks(a, "k", "page", {}, {"rows": [{
+        "country": "Pakistan", "closed_won_deals": None,
+        "metrics": {"closed_won_deals": withheld}, "deal_ids": None}]})
+    assert a.checks.get("withheld_not_reconstructable") is not False
+
+
+def test_18_the_country_tables_print_unavailable_with_the_reason(tmp_path):
+    """Truth audit MINOR 6 and M3. Country Revenue & Spend printed "—" for
+    Pakistan's withheld spend; the Dashboard printed "Unavailable" with no
+    reason; the KPI printed "—" for a withheld count of countries with spend."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    row = {"country": "Pakistan", "country_code": "PK", "spend": None,
+           "spend_reason": "spend_location_unresolved", "leads": 0, "sqls": 0,
+           "closed_won_deals": 1, "metrics": None, "verdict": "learning"}
+    out = _run_app("renderRoasCountryTable([%s])" % json.dumps(row))
+    assert "Unavailable" in out and "some spend in this window has no country" in out
+    assert "<td>—</td>" not in out.split("Pakistan", 1)[1].split("</td>", 2)[1] + "</td>"
+    dash = {"country_name": "Pakistan", "spend_native": None, "spend_usd": None,
+            "spend_reason": "spend_location_unresolved", "native_currency": "GBP"}
+    cell = _run_app("ctrySpendCell(%s)" % json.dumps(dash))
+    assert "Unavailable" in cell and "some spend in this window has no country" in cell
+    kpi = _run_app("renderCtryKpiRow(%s)" % json.dumps(
+        {"kpis": {"countries_with_spend": None, "verified_spend_native": {"amount": None},
+                  "verified_spend_usd": None, "verified_spend_reason": "spend_location_unresolved"},
+         "metric_truth": {"country_attributed_spend_usd": {
+             "unavailable_reason": "spend_location_unresolved"}}}))
+    assert "countries with spend withheld" in kpi.lower()
+    assert "Country spend withheld — some spend in this window has no country" in kpi
 
 
 # ── the shared read fails closed ─────────────────────────────────────────────

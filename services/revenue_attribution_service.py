@@ -389,6 +389,10 @@ def _row_notes(bucket: dict, confidence: str) -> list:
     return notes
 
 
+#: PR-ADS-176A truth audit M2: why the residual row publishes no period ratio.
+R_RESIDUAL_NOT_A_MARKET = "residual_not_a_market"
+
+
 def _finalize_row(
     bucket: dict,
     *,
@@ -403,6 +407,7 @@ def _finalize_row(
     canonical_base: dict | None = None,
     gate: dict | None = None,
     spend_withheld_reason: str | None = None,
+    residual: bool = False,
 ) -> dict:
     # PR-ADS-176A: ``spend_withheld_reason`` — a country with no geo spend row
     # whose $0 the shared zero rule (``services.country_spend_zero_rule``)
@@ -449,6 +454,17 @@ def _finalize_row(
         period_ratio = canon[cwt.PERIOD_REVENUE_PER_AD_SPEND]
         period_per_customer = canon[cwt.PERIOD_SPEND_PER_CUSTOMER_WON]
         metrics = canon["metrics"]
+        if residual:
+            # PR-ADS-176A truth audit M2: the residual row's spend (no market
+            # can be said to own it) and its deals (whose CRM country is no
+            # listed market) are two unrelated populations; a ratio between
+            # them measures nothing. As `_geo_spend_only_residual_row`: none.
+            period_ratio = period_per_customer = None
+            metrics = {**metrics,
+                       cwt.PERIOD_REVENUE_PER_AD_SPEND: cwt.metric(
+                           None, cwt.UNAVAILABLE, R_RESIDUAL_NOT_A_MARKET),
+                       cwt.PERIOD_SPEND_PER_CUSTOMER_WON: cwt.metric(
+                           None, cwt.UNAVAILABLE, R_RESIDUAL_NOT_A_MARKET)}
     else:
         # The local-JSON diagnostic path: its revenue is withheld wholesale by
         # `_withhold_json_revenue`; nothing here is published.
@@ -1091,6 +1107,8 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             canonical_base=canonical_base,
             gate=gate,
             spend_withheld_reason=zero_withheld,
+            residual=bool(by_country and getattr(bucket.get("country_identity"),
+                                                 "is_residual", False)),
         )
         if group_field == "campaign_name":
             finalized["campaign_id"] = key
@@ -1108,9 +1126,12 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             finalized["is_residual"] = bool(identity.is_residual) if identity else False
             # PR-ADS-176A: the row's own deal population, so a drawer lists
             # exactly the deals this row counts — same scope, same days.
-            finalized["deal_ids"] = sorted({str(d.get("deal_id"))
-                                            for d in bucket.get("deal_rows") or []
-                                            if d.get("deal_id")})
+            # Truth audit MINOR 5: a withheld deal count has no proof list —
+            # None, never [] (which reads as "no deals").
+            finalized["deal_ids"] = (
+                None if finalized.get("closed_won_deals") is None
+                else sorted({str(d.get("deal_id")) for d in bucket.get("deal_rows") or []
+                             if d.get("deal_id")}))
             if identity is not None and identity.is_residual:
                 # The residual carries real revenue, so it must not be scored as
                 # a market: no ROAS verdict, no "top campaign", and an explicit
@@ -2672,7 +2693,16 @@ def build_country_deal_details(window: str, country: str,
         r.setdefault("raw_campaign_name", r.get("campaign_name"))
     # Apply the canonical identity map (exact-normalized auto-links + approved
     # manual mappings) so raw deal labels resolve to the canonical campaign name.
-    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
+    # PR-ADS-176A truth audit MINOR 4: the SAME account scope as the row
+    # (`_build_from_db` → `canonical_campaign_spend_block(…, configured id)`).
+    # Unscoped, the read's customer_id is MIN(customer_id) over every account,
+    # and the drawer took ANOTHER account's mappings — without this account's
+    # "not Google Ads" exclusions.
+    from services.google_ads_spend_service import (  # noqa: PLC0415
+        configured_customer_id as _configured_customer_id,
+    )
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date,
+                                                    _configured_customer_id())
     canonical_access = bool(canonical.get("available"))
     approved = (repo.fetch_campaign_identity(canonical.get("customer_id")).get("mappings", [])
                 if canonical_access else [])

@@ -747,7 +747,11 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
     ``geo_available`` / ``revenue_connected`` gate the totals so an EMPTY leaderboard
     (a source outage, where ``any([])`` would otherwise be False) never fabricates a
     $0 / 0-customer total presented as measured truth."""
-    countries_with_spend = sum(1 for r in country_rows if (r.get("spend_native") or 0) > 0)
+    # PR-ADS-176A truth audit M3: a count over rows whose spend is unknown is
+    # unknown — the geo read failed, or the zero rule withheld a market's $0.
+    countries_with_spend = (
+        None if (not geo_available or any(r.get("spend_native") is None for r in country_rows))
+        else sum(1 for r in country_rows if (r.get("spend_native") or 0) > 0))
     # Unknown when any market's deal count is withheld — never a lowered count.
     countries_with_closed_won_deals = (
         None if any(r.get("closed_won_deals") is None for r in country_rows)
@@ -877,11 +881,23 @@ def _build_regional_mix(country_rows: list, country_roas_unblockable: bool) -> l
         customers = None if b["deals_incomplete"] else b["closed_won_deals"]
         won = None if b["revenue_incomplete"] else _round2(b["won_revenue_usd"])
         ratio = _period_ratio(won, usd) if country_roas_unblockable else None
-        status = (STATUS_REVENUE_PROVEN if (customers or 0) > 0 and (won or 0) > 0
-                  else (STATUS_WON_DEAL_REVENUE_UNPROVEN if (customers or 0) > 0
-                        else (STATUS_SQL_PRODUCER if (sqls or 0) > 0
-                              else (STATUS_SPEND_NO_WON_DEAL if (native or 0) > 0
-                                    else STATUS_NO_SPEND))))
+        # PR-ADS-176A truth audit M3: the region's status follows the country
+        # status rule (`_country_status`) — a withheld deal count is not a
+        # "spend without a won deal", and an unknown spend is not "no spend".
+        if customers is None:
+            status = STATUS_OUTCOME_WITHHELD
+        elif customers > 0 and (won or 0) > 0:
+            status = STATUS_REVENUE_PROVEN
+        elif customers > 0:
+            status = STATUS_WON_DEAL_REVENUE_UNPROVEN
+        elif (sqls or 0) > 0:
+            status = STATUS_SQL_PRODUCER
+        elif (native or 0) > 0:
+            status = STATUS_SPEND_NO_WON_DEAL
+        elif native is None:
+            status = STATUS_GEO_REVIEW
+        else:
+            status = STATUS_NO_SPEND
         out.append({
             "region": region,
             "countries": b["countries"],
@@ -938,6 +954,19 @@ def _fmt_usd_short(value) -> str:
     if abs(v) >= 1_000:
         return f"${v / 1_000:.1f}k"
     return f"${v:.0f}"
+
+
+def _zero_withheld_text(kpis: dict) -> str | None:
+    """PR-ADS-176A truth audit M1: why the listed markets' spend is withheld
+    when the shared zero rule withheld a market's $0 — never FX: FX may be
+    verified, and native spend is withheld too. None when that is not why."""
+    if kpis.get("verified_spend_reason") != zero_rule.R_SPEND_LOCATION_UNRESOLVED:
+        return None
+    names = ", ".join(kpis.get("zero_withheld_countries") or []) or "A market"
+    return (f"{names} had no Google Ads geo spend row in this window, and the window "
+            "holds spend Google reported against a location no stored row names, "
+            "which may be theirs — so their spend is not $0, and the listed markets' "
+            "spend (native and USD) is withheld with it")
 
 
 def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
@@ -1063,6 +1092,10 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
         headline = "Geo period revenue / ad spend unavailable"
         body = ("Country period revenue / ad spend is withheld because Google Ads geographic spend does not "
                 "reconcile with the canonical campaign spend — never a fabricated ratio.")
+    elif _zero_withheld_text(kpis):
+        headline = "Listed-market spend & geo period revenue / ad spend unavailable"
+        body = (f"{_zero_withheld_text(kpis)}. Geo period revenue / ad spend is "
+                "withheld for the same reason — never a fabricated figure or ratio.")
     elif not fx_ok or not usd_present:
         headline = "USD spend & geo period revenue / ad spend unavailable"
         body = ("USD spend and geo period revenue / ad spend are withheld because FX coverage is incomplete — "
@@ -1132,13 +1165,9 @@ def _build_truth_status(spend_truth: dict, readiness: dict,
 def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
                        deal_proof_available: bool, deal_proof_reason=None) -> list:
     out = []
-    if kpis.get("verified_spend_reason") == zero_rule.R_SPEND_LOCATION_UNRESOLVED:
+    if _zero_withheld_text(kpis):
         out.append({"metric": "verified_spend_usd",
-                    "reason": ("Listed-market spend is withheld: "
-                               + ", ".join(kpis.get("zero_withheld_countries") or [])
-                               + " had no Google Ads geo spend row, and this window "
-                               "holds spend Google reported against a location no "
-                               "stored row names, which may be theirs — not $0.")})
+                    "reason": f"Listed-market spend is withheld: {_zero_withheld_text(kpis)}."})
     elif kpis.get("verified_spend_usd") is None:
         out.append({"metric": "verified_spend_usd",
                     "reason": "USD spend requires verified FX; native GBP spend is shown instead."})
@@ -1155,6 +1184,9 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
             ratio_reason = gap_reason or (
                 "Geo period revenue / ad spend requires Google Ads geographic spend that reconciles "
                 "with the canonical campaign spend — it does not for this window.")
+        elif _zero_withheld_text(kpis):
+            ratio_reason = ("Geo period revenue / ad spend requires the listed markets' spend — "
+                            f"{_zero_withheld_text(kpis)}.")
         elif not fx_ok or not usd_present:
             ratio_reason = ("Geo period revenue / ad spend requires verified FX / USD spend; native GBP spend is "
                            "shown instead.")
@@ -1328,9 +1360,13 @@ def _assemble(window: str, now: datetime | None) -> dict:
         # PR-ADS-155-F1-F1: the real deal denominators behind that verdict, so
         # the disclosure counts DEALS and a reader can check the arithmetic
         # rather than take the verdict's word for it.
+        # PR-ADS-176A truth audit MINOR 2: the drawers are the mart rows' own
+        # populations (`deal_ids`). A row whose population is withheld (None)
+        # makes every count over the drawers unknown — never 0.
         "country_revenue_deal_counts": (
             country_attributed_deal_counts(country_rows)
-            if deal_proof_available and revenue_connected else {
+            if (deal_proof_available and revenue_connected
+                and not any(m.get("deal_ids") is None for m in mart_rows)) else {
                 "closed_won_deals": None, "revenue_proven_deals": None,
                 "revenue_unavailable_deals": None}),
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
@@ -1399,6 +1435,9 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
               "residual_revenue_usd", "geo_period_revenue_per_ad_spend"):
         if k in kpis:
             kpis[k] = None
+    if not keep_native:
+        # PR-ADS-176A truth audit M3: a count of rows whose spend is withheld.
+        kpis["countries_with_spend"] = None
     if reason == canonical_contract.NO_SETTLED_DAY_IN_WINDOW:
         # No completed day: the window's own deal / revenue verdicts are not
         # "published zeros" either.
@@ -1579,8 +1618,11 @@ def build_dashboard_countries(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if (_geo_ready and kpis.get("verified_spend_usd") is not None)
                           else canonical_contract.TRUTH_NOT_READY),
-         # PR-ADS-167A: a withheld figure names why.
-         "unavailable_reason": (None if _geo_ready else _geo_gap_reason),
+         # PR-ADS-167A: a withheld figure names why. PR-ADS-176A truth audit
+         # MINOR 3: in a ready window the zero rule can withhold it too.
+         "unavailable_reason": (_geo_gap_reason if not _geo_ready
+                                else kpis.get("verified_spend_reason")
+                                if kpis.get("verified_spend_usd") is None else None),
          "customer_id": spend_truth.get("customer_id")},
         # PR-ADS-154C-F3: this page's SQL headline is the REAL-COUNTRY total —
         # 14 against the mart's 16 in the production quarter — because the SQLs
