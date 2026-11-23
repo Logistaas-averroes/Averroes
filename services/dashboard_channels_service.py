@@ -671,7 +671,7 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                          f"{top['channel_label']} won {top['closed_won_deals']} deal"
                          f"{'s' if top['closed_won_deals'] != 1 else ''}. Spend is unavailable "
                          "because it is not a connected spend source."),
-                "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+                "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
             })
         elif any(c.get("closed_won_deals") is None for c in channel_rows):
             # PR-ADS-161E: a withheld deal count is unknown, not zero.
@@ -705,14 +705,14 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                         f"{'s' if top['closed_won_deals'] != 1 else ''}")
                      + ", but no spend ratio is available until a real spend source "
                        "is connected."),
-            "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     else:
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No unmeasured demand channels",
             "body": "Every channel producing SQLs either has connected spend or no won deals yet.",
-            "target_page": "revenue-by-source", "target_label": "Open Revenue by Source",
+            "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
     # Investigate — unclassified revenue.

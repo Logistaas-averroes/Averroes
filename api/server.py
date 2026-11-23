@@ -56,7 +56,6 @@ Protected endpoints (require authenticated session):
   GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
   POST /api/lead-reconciliation/run — Admin-only Lead Event-Date Reconciliation (local DB writes only; reads HubSpot read-only; PR-ADS-115).
   GET  /api/lead-reconciliation/status — Latest Lead Reconciliation progress/result (admin-only; PR-ADS-115).
-  GET  /api/revenue-by-source      — Read-only Revenue by Acquisition Source by business window (PR-ADS-117).
   GET  /api/source-attribution-health — Durable source classification/attribution counts (PR-ADS-117).
   POST /api/source-attribution-backfill/run — Admin-only durable source-classification backfill (local DB only; PR-ADS-117).
   GET  /api/source-attribution-backfill/status — Latest source backfill progress/result (admin-only; PR-ADS-117).
@@ -5727,10 +5726,11 @@ async def get_revenue_performance(
     """Canonical Revenue Decision Mart (PR-ADS-125).
 
     ONE backend contract that every Revenue & Attribution page reads from.
-    ``view`` selects the grain — campaign | country | source | deal — while the
+    ``view`` selects the grain — campaign | country | deal — while the
     business ``window``, ``spend_truth`` and ``summary`` blocks are the SAME
     canonical truth regardless of view. This ends per-page spend/FX/mapping
-    disagreement: Campaign, Country, Source and Deals obey one brain.
+    disagreement: Campaign, Country and Deals obey one brain. PR-ADS-168B
+    deleted the ``source`` view with the Revenue by Source page (400 now).
 
     Doctrine is never loosened: canonical Google Ads campaign-daily spend is the
     only spend denominator, HubSpot closed-won is revenue truth, no fake $0, no
@@ -5803,35 +5803,6 @@ async def get_revenue_performance_country_detail(
         ) from exc
 
 
-@app.get("/api/revenue-performance/source-platform-detail")
-async def get_revenue_performance_source_platform_detail(
-    window: str = Query(default="current_quarter"),
-    source_group: str = Query(..., description="Source group id, e.g. organic"),
-    source_channel: str = Query(..., description="Source channel id, e.g. organic_social"),
-    source_platform: str = Query(..., description="Source platform id, e.g. linkedin"),
-    _user=Depends(require_auth),
-):
-    """Clients / deals behind ONE source platform (PR-ADS-133).
-
-    Read-only lazy drilldown for the Revenue by Source drawer. Returns the
-    closed-won deal detail rows (company / contact / deal record ids, amount,
-    close date, source attribution) for the requested group → channel → platform,
-    using the same taxonomy the page rows use. Never writes to Google Ads or
-    HubSpot; never fabricates ids, names or amounts.
-    """
-    from services.source_attribution_service import build_source_platform_detail  # noqa: PLC0415
-
-    try:
-        return build_source_platform_detail(window, source_group, source_channel, source_platform)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("Source platform detail failed: %s", exc)
-        raise HTTPException(
-            status_code=500, detail="Source platform detail computation failed"
-        ) from exc
-
-
 @app.get("/api/revenue-performance/audit")
 async def get_revenue_performance_audit(
     window: str = Query(default="current_quarter"),
@@ -5840,7 +5811,7 @@ async def get_revenue_performance_audit(
     """Revenue Decision Mart audit (PR-ADS-125).
 
     Read-only. Compares every current revenue page (Campaign Revenue & Spend, Country Revenue & Spend, formerly ROAS by
-    Country, Revenue by Source, Deals) against the canonical mart and reports,
+    Country, Deals) against the canonical mart and reports,
     per page, the current value, the mart value, the difference, a pass/fail
     status, and — when they differ — exactly why (different source table, date
     grain, campaign mapping, geo reconciliation, FX coverage, or source
@@ -6376,28 +6347,6 @@ def api_lead_reconciliation_status(request: Request, job_id: Optional[str] = Non
         "finished_at": job.get("finished_at"),
         "job": job,
     }
-
-
-@app.get("/api/revenue-by-source")
-async def get_revenue_by_source(
-    window: str = Query(default="current_quarter"),
-    _user=Depends(require_auth),
-):
-    """Revenue by Acquisition Source (PR-ADS-117).
-
-    Read-only. Pipeline + closed-won revenue across Google Ads, Other Paid,
-    Organic, Offline, and Unclassified. Only Google Ads carries spend and period revenue / ad spend; every
-    other group is revenue-only. Leads/SQLs use contact_created_at; Won Revenue
-    uses deal_close_date; both use the selected business window.
-    """
-    from services.source_attribution_service import build_revenue_by_source  # noqa: PLC0415
-    try:
-        return build_revenue_by_source(window)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("Revenue by source failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Revenue by source computation failed") from exc
 
 
 @app.get("/api/source-attribution-health")

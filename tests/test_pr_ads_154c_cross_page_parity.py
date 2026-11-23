@@ -559,7 +559,8 @@ LEGACY_READ_REGISTRY = {
     ("services/revenue_attribution_service.py", "fetch_campaign_pollution_report"): "diagnostic",
     ("services/revenue_attribution_service.py", "fetch_lead_date_grain_health"): "diagnostic",
     ("services/revenue_attribution_service.py", "fetch_lead_quality"): "detail_rows",
-    ("services/source_attribution_service.py", "fetch_source_contact_details"): "detail_rows",
+    # PR-ADS-168B: the Revenue by Source drawer read (fetch_source_contact_details)
+    # is deleted with build_source_platform_detail.
 }
 
 #: Repository functions that read a legacy truth table (`leads`, `geo`,

@@ -172,6 +172,8 @@ def test_source_spend_truth_block_shape(monkeypatch):
 
 
 # ════════════════ 2. Audit passes against the mart ════════════════
+# PR-ADS-168B: Revenue by Source is no longer a page the mart audit compares,
+# and the mart `source` view is deleted; the three cases about them went too.
 
 
 # Coherent durable dataset so the mart's canonical spend == source spend.
@@ -235,45 +237,6 @@ def _patch_full_durable(monkeypatch):
     monkeypatch.setattr(writers, "source_attribution_health_counts",
                         lambda: {"contacts_classified": 0, "deals_attributed": 0,
                                  "ambiguous_deals": 0, "unclassified_deals": 0})
-
-
-def test_audit_revenue_by_source_passes(monkeypatch):
-    _patch_full_durable(monkeypatch)
-    from services.revenue_decision_mart import build_revenue_performance_audit
-
-    audit = build_revenue_performance_audit(WINDOW, now=NOW)
-    by_key = {p["page_key"]: p for p in audit["pages"]}
-    src = by_key["revenue_by_source"]
-    # Revenue by Source spend equals the mart canonical spend, and passes.
-    assert src["current_value"] == src["mart_value"] == CANONICAL_USD
-    assert src["current_value"] != GEO_USD
-    assert src["status"] == "pass"
-    # No different_source_table reason after the fix.
-    assert "different_source_table" not in src["reasons"]
-
-
-def test_source_google_spend_equals_mart_top(monkeypatch):
-    _patch_full_durable(monkeypatch)
-    from services.revenue_decision_mart import build_revenue_decision_mart
-
-    mart = build_revenue_decision_mart(view="source", window=WINDOW, now=NOW)
-    google = next(g for g in mart["rows"] if g["group"] == "google_ads")
-    # The Google Ads section spend == the canonical top-line USD spend.
-    assert google["spend"] == mart["spend_truth"]["usd_spend"] == CANONICAL_USD
-    assert google["spend"] != GEO_USD
-    # The mart source view carries the spend-truth proof block.
-    assert mart["source_spend_truth"]["geo_spend_used"] is False
-
-
-def test_audit_no_source_table_reason_even_when_fx_differs(monkeypatch):
-    # Even if a source page differs, PR-ADS-140 removes the different_source_table
-    # reason (both read the same canonical table now).
-    from services.revenue_decision_mart import _difference_reasons
-    st = {"fx_status": "incomplete", "campaign_spend_status": "verified",
-          "country_spend_status": "verified"}
-    reasons = _difference_reasons("revenue_by_source", st, status="fail")
-    assert "different_source_table" not in reasons
-    assert "different_fx_coverage" in reasons
 
 
 # ════════════════ 3. FX incomplete case ════════════════
@@ -461,43 +424,5 @@ def test_touched_backend_files_are_read_only():
 
 
 # ════════════════ 8. Frontend ════════════════
-
-
-def test_frontend_renders_canonical_spend_with_proof_chip():
-    # Google Ads section spend reads the canonical group spend + native GBP subline.
-    fn = JS[JS.find("function renderSourceGroupSection"):
-            JS.find("function renderSourceGroupSection") + 2200]
-    assert "source_spend_truth" in JS
-    assert "renderSourceSpendProofChip" in fn
-    assert "source-spend-native" in fn or "native" in fn
-    # The proof chip states the canonical campaign spend source.
-    chip = JS[JS.find("function renderSourceSpendProofChip"):
-              JS.find("function renderSourceSpendProofChip") + 500]
-    assert "canonical campaign spend" in chip
-    assert "diagnostic" in chip or "geo_spend_note" in chip
-
-
-def test_frontend_status_label_covers_all_states():
-    # Slice the whole function body (it grew past a fixed 900-char window when
-    # PR-ADS-161E added the period-ratio label + disclosure).
-    start = JS.find("function sourceStatusLabel")
-    assert start != -1
-    fn = JS[start:JS.find("\n}\n", start) + 3]
-    # Google states use the backend spend_status_label; non-google stays revenue-only.
-    assert "spend_status_label" in fn
-    assert "Revenue-only — no connected spend source" in fn
-
-
-def test_frontend_page_passes_spend_truth_to_sections():
-    page = JS[JS.find("function renderRevenueBySourcePage"):
-              JS.find("function renderRevenueBySourcePage") + 1400]
-    assert "source_spend_truth" in page
-    assert "renderSourceGroupSection(g, gi, spendTruth)" in page
-
-
-def test_frontend_no_fake_zero_or_fabricated_values():
-    # No fabricated $0 / 0.00x in the Google spend chip: null renders "Unavailable".
-    fn = JS[JS.find("function renderSourceGroupSection"):
-            JS.find("function renderSourceGroupSection") + 2200]
-    assert 'group.spend === null' in fn
-    assert '"Unavailable"' in fn
+# PR-ADS-168B: the Revenue by Source renderers are deleted; their four
+# frontend cases went with them.

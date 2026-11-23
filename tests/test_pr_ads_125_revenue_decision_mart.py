@@ -264,7 +264,7 @@ def test_all_views_use_the_same_window_resolver(monkeypatch):
     expected = resolve_window(WINDOW, now=NOW)
 
     windows = {}
-    for view in ("campaign", "source", "deal"):
+    for view in ("campaign", "deal"):  # PR-ADS-168B: no `source` view
         out = _mart(view, monkeypatch)
         w = out["window"]
         assert w["key"] == expected["key"] == "ytd"
@@ -364,23 +364,8 @@ def test_country_view_uses_canonical_geo_source(monkeypatch):
     assert {"United Kingdom", "Germany"} <= countries
 
 
-# ── 4. Revenue by Source Google Ads spend equals mart Google Ads spend ──────
-
-def test_source_google_ads_spend_equals_mart(monkeypatch):
-    _patch_durable(monkeypatch)
-    from services.source_attribution_service import build_revenue_by_source
-    from services.revenue_decision_mart import build_revenue_decision_mart
-
-    page = build_revenue_by_source(WINDOW, now=NOW)
-    mart = build_revenue_decision_mart(view="source", window=WINDOW, now=NOW)
-
-    page_google = next(g for g in page["groups"] if g["group"] == "google_ads")
-    mart_google = next(g for g in mart["rows"] if g["group"] == "google_ads")
-    assert mart_google["spend"] == page_google["spend"]
-    # Only Google Ads carries spend; every other source group is revenue-only.
-    for g in mart["rows"]:
-        if g["group"] != "google_ads":
-            assert g["spend"] is None
+# ── 4. (PR-ADS-168B) Revenue by Source and the mart `source` view are deleted;
+#       the test comparing their Google Ads spend went with them. ──────────
 
 
 # ── 5. Deals revenue equals mart deal revenue ───────────────────────────────
@@ -402,19 +387,19 @@ def test_deals_revenue_equals_mart_deal_revenue(monkeypatch):
 
 def test_fx_coverage_is_shared_across_views(monkeypatch):
     statuses = {_mart(v, monkeypatch)["spend_truth"]["fx_status"]
-                for v in ("campaign", "country", "source", "deal")}
+                for v in ("campaign", "country", "deal")}
     assert statuses == {"verified"}
 
 
 def test_campaign_mapping_status_is_shared_across_views(monkeypatch):
     statuses = {_mart(v, monkeypatch)["spend_truth"]["campaign_spend_status"]
-                for v in ("campaign", "country", "source", "deal")}
+                for v in ("campaign", "country", "deal")}
     assert statuses == {"verified"}
 
 
 def test_country_reconciliation_status_is_shared_across_views(monkeypatch):
     statuses = {_mart(v, monkeypatch, window=CLOSED_WINDOW)["spend_truth"]["country_spend_status"]
-                for v in ("campaign", "country", "source", "deal")}
+                for v in ("campaign", "country", "deal")}
     assert statuses == {"verified"}
     # PR-ADS-167A (owner decision 2026-11-20): over YTD, which includes today,
     # the COUNTRY view measures through yesterday and is verified; the views
@@ -424,7 +409,7 @@ def test_country_reconciliation_status_is_shared_across_views(monkeypatch):
     assert country["spend_truth"]["country_spend_status"] == "verified"
     assert country["window"]["through_reason"] == "today_not_settled"
     assert country["window"]["end_date"] == "2026-06-21"
-    for v in ("campaign", "source", "deal"):
+    for v in ("campaign", "deal"):
         other = _mart(v, monkeypatch)
         assert other["window"]["end_date"] == "2026-06-22"
         assert other["window"]["through_reason"] is None
@@ -484,7 +469,7 @@ def test_fx_incomplete_never_labels_native_gbp_as_usd(monkeypatch):
     assert mart["summary"]["spend_usd"] != 10000.0
 
     # The same truth holds for every view (shared spend_truth).
-    for view in ("country", "source", "deal"):
+    for view in ("country", "deal"):
         other = build_revenue_decision_mart(view=view, window=WINDOW, now=NOW)
         assert other["spend_truth"]["usd_spend"] is None
         assert other["summary"]["spend_usd"] is None
@@ -509,7 +494,8 @@ def test_audit_compares_every_page_against_the_mart(monkeypatch):
     audit = build_revenue_performance_audit(WINDOW, now=NOW)
     assert audit["window"]["key"] == "ytd"
     keys = {p["page_key"] for p in audit["pages"]}
-    assert keys == {"roas_by_campaign", "roas_by_country", "revenue_by_source", "deals"}
+    # PR-ADS-168B: Revenue by Source is deleted, so it is no longer compared.
+    assert keys == {"roas_by_campaign", "roas_by_country", "deals"}
 
     by_key = {p["page_key"]: p for p in audit["pages"]}
     for page in audit["pages"]:
@@ -525,13 +511,6 @@ def test_audit_compares_every_page_against_the_mart(monkeypatch):
     # (YTD through yesterday), and the audit says which days those were.
     assert by_key["roas_by_country"]["window"]["end_date"] == "2026-06-21"
     assert by_key["roas_by_country"]["window"]["through_reason"] == "today_not_settled"
-
-    # The Source page reports spend on a different basis (geo native vs canonical
-    # USD) — the audit must surface the difference WITH a concrete reason.
-    src = by_key["revenue_by_source"]
-    if src["status"] != "pass":
-        assert src["reasons"], "a differing page must explain why it differs"
-        assert "different_source_table" in src["reasons"]
 
 
 def test_audit_flags_geo_reconciliation_difference(monkeypatch):
@@ -589,7 +568,7 @@ def test_building_the_mart_invokes_no_write_functions(monkeypatch):
     from services.revenue_decision_mart import (
         build_revenue_decision_mart, build_revenue_performance_audit,
     )
-    for view in ("campaign", "country", "source", "deal"):
+    for view in ("campaign", "country", "deal"):
         build_revenue_decision_mart(view=view, window=WINDOW, now=NOW)
     build_revenue_performance_audit(WINDOW, now=NOW)
 
@@ -698,4 +677,4 @@ def test_audit_endpoint_returns_pages(monkeypatch):
                      cookies={"ads_session": cookie})
     assert res.status_code == 200, res.text
     body = res.json()
-    assert "pages" in body and len(body["pages"]) == 4
+    assert "pages" in body and len(body["pages"]) == 3  # PR-ADS-168B

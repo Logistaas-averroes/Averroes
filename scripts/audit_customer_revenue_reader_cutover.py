@@ -122,8 +122,11 @@ INVENTORY = (
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/source_attribution_service.py",
-     "surface": "/api/revenue-by-source; Revenue by Source. PR-ADS-168A: "
-                "/api/channel-funnel `outcomes` (build_channel_outcomes); Channels",
+     "surface": "build_revenue_by_source: the Dashboard Overview / Revenue / "
+                "Deals / Channels source breakdowns (PR-ADS-168B deleted the "
+                "Revenue by Source page, /api/revenue-by-source and the mart "
+                "`source` view). PR-ADS-168A: /api/channel-funnel `outcomes` "
+                "(build_channel_outcomes); Channels",
      "existing_source": "bucket deal count, bucket proven sum",
      "existing_meaning": "won deals as customers; customer rate over leads",
      "canonical_replacement": "reader_row per group / channel / platform; "
@@ -347,6 +350,8 @@ READER_ENTRY_POINTS = (
     "fetch_durable_outcome_populations", "fetch_won_revenue",
     "fetch_campaign_deal_details", "fetch_country_deal_details",
     "fetch_revenue_deals", "fetch_source_revenue", "fetch_source_revenue_daily",
+    # PR-ADS-168B review: fetch_source_deal_details is deleted; the name stays
+    # (as build_unit_economics does) so a module that brings it back is a reader.
     "fetch_source_deal_details", "fetch_sql_lead_details",
     "source_attribution_health_counts",
 )
@@ -1136,7 +1141,6 @@ def _page_builders():
         return build
     return (
         ("revenue_decision_mart", mart),
-        ("revenue_decision_mart_source", mart_view("source")),
         ("revenue_decision_mart_country", mart_view("country")),
         ("revenue_attribution", mod("services.revenue_attribution_service",
                                     "build_revenue_attribution")),

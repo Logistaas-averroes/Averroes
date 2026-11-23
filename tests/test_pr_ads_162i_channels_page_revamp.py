@@ -314,7 +314,8 @@ def test_13_the_page_has_no_attribution_ratio_wording():
 def test_14_the_window_buttons_are_exactly_the_windows_the_api_accepts():
     from analysis.evidence_windows import resolve_evidence_window
     html = (ROOT / "static/index.html").read_text()
-    page = html[html.index('id="page-channels"'):html.index('id="page-revenue-by-source"')]
+    start = html.index('id="page-channels"')
+    page = html[start:html.index('</section>', start)]
     buttons = re.findall(r'data-channels-window="([a-z0-9_]+)"', page)
     assert buttons == ["30d", "60d", "180d", "all_time"]
     for key in buttons:
@@ -340,7 +341,7 @@ def test_15_a_failed_load_does_not_leave_the_previous_figures_on_screen():
 def test_16_every_control_the_renderer_emits_is_wired():
     src = (ROOT / "static/app.js").read_text()
     wiring = src[src.index("// Wire up Channels controls"):
-                 src.index("// Wire up Revenue by Source controls")]
+                 src.index("// Force-close help drawer on startup")]
     for attr in ("data-channels-window", "data-channel-stage",
                  "data-channel-sort", "data-channel-toggle",
                  "data-channel-expand-all"):

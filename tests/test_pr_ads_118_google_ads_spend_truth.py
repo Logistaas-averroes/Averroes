@@ -550,7 +550,8 @@ def test_failed_spend_chunk_not_completed_and_resumes(monkeypatch):
 def test_revenue_pages_hide_global_chrome():
     # All five Revenue & Attribution pages are revenue pages.
     m = JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 200]
-    for p in ("roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"):
+    # PR-ADS-168B: Revenue by Source is deleted, so it is no longer listed.
+    for p in ("roas-campaigns", "roas-countries", "deals", "revenue-health"):
         assert f'"{p}"' in m
     nav = JS[JS.find("function navigate(page, options)"):JS.find("function navigate(page, options)") + 3400]
     assert "isRevenuePage(page)" in nav

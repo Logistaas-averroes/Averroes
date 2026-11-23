@@ -304,10 +304,8 @@ def test_app_renders_reconciliation_required_on_mismatch():
     assert 'google_ads_source_sqls_status === "mismatch"' in _APP
 
 
-def test_app_source_page_has_scoped_sql_chip():
-    assert "function sourceGaSqlsChip" in _APP
-    assert ">Google Ads-source SQLs<" in _APP
-    assert "campaign-attributable" in _APP
+# PR-ADS-168B: test_app_source_page_has_scoped_sql_chip is deleted with
+# sourceGaSqlsChip and the Revenue by Source page it rendered on.
 
 
 def test_app_disclosure_of_campaign_attributable_subset():

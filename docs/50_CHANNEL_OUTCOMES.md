@@ -231,7 +231,12 @@ is withheld.
    on a click ID.
 2. Closed deals whose contacts were acquired before the funnel window appear
    on channel rows the funnel shows with 0 contacts.
-3. The settle rule on campaign spend applies to Channels only; Revenue by
-   Source and the mart still judge campaign spend coverage by chunk status
-   (167A known gap 2).
-4. Revenue by Source is not removed here (PR-ADS-168B).
+3. The settle rule on campaign spend applies to Channels only; the mart
+   (and the Dashboard source breakdowns, `build_revenue_by_source`) still
+   judge campaign spend coverage by chunk status (167A known gap 2).
+4. ~~Revenue by Source is not removed here.~~ **PR-ADS-168B removed it**
+   (`docs/56_REVENUE_BY_SOURCE_REMOVED.md`): the page, `/api/revenue-by-source`,
+   `/api/revenue-performance/source-platform-detail` and the mart `source`
+   view are deleted, `#/revenue-by-source` lands on this page, and its Source
+   Attribution Backfill panel moved to Revenue Health. Channels is now the one
+   page for closed-won deals, customers and revenue per channel.

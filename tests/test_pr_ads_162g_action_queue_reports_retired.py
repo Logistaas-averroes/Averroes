@@ -268,7 +268,8 @@ def test_09_every_remaining_sidebar_page_still_routes():
     nav = re.findall(r'class="nav-item[^"]*" data-page="([a-z0-9-]+)"', HTML)
     pages = _pages()
     # PR-ADS-165A: 18 until the Unit Economics page was deleted.
-    assert len(nav) == len(set(nav)) == 17
+    # PR-ADS-168B: 17 until the Revenue by Source page was deleted.
+    assert len(nav) == len(set(nav)) == 16
     assert set(nav) <= pages, sorted(set(nav) - pages)
     for page in sorted(nav):
         assert f'id="page-{page}"' in HTML, page

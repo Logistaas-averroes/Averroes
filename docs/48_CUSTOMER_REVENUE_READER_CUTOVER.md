@@ -200,7 +200,9 @@ description.
 * **Revenue attribution** (Campaign / Country Revenue & Spend): `reader_row`
   per campaign, country and summary, plus the placement gate.
 * **Revenue by Source:** `reader_row` per group, channel and platform. The
-  "Customer Rate" column (won deals ÷ leads) is retired.
+  "Customer Rate" column (won deals ÷ leads) is retired. *(PR-ADS-168B deleted
+  the page, its routes and the mart `source` view; `build_revenue_by_source`
+  remains a reader for the Dashboard source breakdowns — `docs/56`.)*
 * **Mapping review, Unit Economics:** `reader_row`. CAC is unavailable;
   Spend per Customer Won This Period is over canonical customers.
 * **Dashboards:**

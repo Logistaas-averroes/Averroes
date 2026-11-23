@@ -1303,12 +1303,17 @@ def test_45_api_text_never_calls_the_period_ratio_roas(monkeypatch):
     """The Mart's diagnostics, attribution warnings and geo-gap reasons are
     rendered on screen. They said "carries spend/ROAS", "Country ROAS is shown",
     "Geo ROAS is withheld"; the audit now builds the source and country Mart
-    views and reads every string."""
+    views and reads every string.
+
+    PR-ADS-168B deleted the mart `source` view (and with it the
+    `source_spend_scope` diagnostic this case used to mutate). The audit now
+    builds the country view; the load-bearing half mutates its diagnostics."""
     from services import google_ads_geo_sync_service as geo
     assert not [m for m in geo.GEO_GAP_MESSAGES.values()
                 if audit._names_ratio_in_text(m)]
     names = [n for n, _ in audit._page_builders()]
-    assert {"revenue_decision_mart_source", "revenue_decision_mart_country"} <= set(names)
+    assert "revenue_decision_mart_country" in names
+    assert "revenue_decision_mart_source" not in names     # PR-ADS-168B
     from tests import test_pr_ads_137_dashboard_campaigns as t137
     from tests.canonical_ledger_fixtures import from_legacy_deal_rows
     t137._patch_durable(monkeypatch)
@@ -1316,17 +1321,12 @@ def test_45_api_text_never_calls_the_period_ratio_roas(monkeypatch):
     patch_canonical_ledger(monkeypatch, rows,
                            company_associations=company_evidence(rows))
     from services.revenue_decision_mart import build_revenue_decision_mart
-    mart = build_revenue_decision_mart(view="source", window="ytd", now=t137.NOW)
-    diags = mart["diagnostics"]
-    scope = next(d for d in diags if d.get("code") == "source_spend_scope")
-    assert "period revenue / ad spend" in scope["message"]
+    mart = build_revenue_decision_mart(view="country", window="ytd", now=t137.NOW)
     assert audit.ratio_name_violations(mart) == []
     old = json.loads(json.dumps(mart))
-    for d in old["diagnostics"]:
-        if d.get("code") == "source_spend_scope":
-            d["message"] = ("Only the Google Ads source carries spend/ROAS; every "
-                            "other source group is revenue-only (ROAS unavailable, "
-                            "never $0).")
+    old["diagnostics"].append({
+        "code": "country_spend_residual",
+        "message": "Country ROAS is shown with an explicit residual."})
     assert audit.ratio_name_violations(old)
 
 

@@ -39,7 +39,13 @@ jobs:
     # every test so far passing (the suite takes ~40 min locally on its own).
     # No test in that PR sleeps: its changed modules run in 2.4 minutes. 75
     # gives the next year of growth room; a hang still ends the job.
-    timeout-minutes: 75
+    #
+    # PR-ADS-168B: 75 lasted a week. PR-ADS-171B's green run took 62m48s
+    # (PG step 26m, contract 3m, full suite 33m) because the PG modules run in
+    # both the PG step and the full suite, and PR-ADS-172A/173A added
+    # production-scale memory fixtures. 100 restores the margin; a hang still
+    # ends the job.
+    timeout-minutes: 100
     steps:
       # Full history: the whitespace check below diffs against the base branch,
       # and actions/checkout fetches a single commit by default.
