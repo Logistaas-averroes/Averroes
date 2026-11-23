@@ -5579,11 +5579,13 @@ function ctrySpendCell(row) {
     // PR-ADS-176A truth audit MINOR 6: Unavailable WITH the reason the row carries.
     return countrySpendUnavailableHtml(row.spend_reason, "dash-unavailable");
   }
+  // PR-ADS-176B-F2: a published $0 resting on owner labels says so.
+  const zeroNote = row.spend_native === 0 ? ownerZeroNote(row) : "";
   const native = escapeHtml(fmtCompactCurrency(row.spend_native, row.native_currency || "GBP"));
   if (row.spend_usd !== null && row.spend_usd !== undefined) {
-    return `${native} <span class="ctry-usd">· ${escapeHtml(fmtMoney(row.spend_usd))}</span>`;
+    return `${native} <span class="ctry-usd">· ${escapeHtml(fmtMoney(row.spend_usd))}</span>${zeroNote}`;
   }
-  return native;
+  return native + zeroNote;
 }
 
 function ctryRoasCell(row) {

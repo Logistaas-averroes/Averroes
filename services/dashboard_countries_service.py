@@ -505,6 +505,7 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
         key = _country_key(country_name, country_code)
         spend = geo_maps["by_key"].get(key) if key else None
         spend_reason = None
+        zero_rests_on: list = []
         if spend is not None:
             native_spend = spend.get("native")
             usd_spend = spend.get("usd")
@@ -521,6 +522,11 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             native_spend = 0.0
             usd_spend = 0.0
             fx_complete = True
+            # PR-ADS-176B-F2: a $0 that stands only on the owner's labels says
+            # so, from the same zero-rule evidence (one rule: the shared one).
+            zero_rests_on = zero_rule.zero_rests_on_owner_labels(
+                zero_evidence, country_identity.resolve(
+                    name=country_name, code=country_code).code)
         elif geo_available:
             # No geo row, and the zero is not proven: unknown, never $0.
             native_spend = None
@@ -574,6 +580,9 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             "fx_complete": fx_complete,
             # PR-ADS-176A: why spend is None when the zero rule withheld it.
             "spend_reason": spend_reason,
+            # PR-ADS-176B-F2: the owner-labelled criteria a published $0
+            # rests on ([] for any other spend).
+            "zero_rests_on_owner_labels": zero_rests_on,
             "sqls": m.get("sqls"),
             "closed_won_deals": customers,
             # PR-ADS-161E: this market's customers — distinct proven HubSpot

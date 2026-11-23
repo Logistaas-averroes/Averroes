@@ -536,3 +536,59 @@ def test_20_the_lead_population_and_the_labels_say_what_is_counted():
         "outside_listed_market_countries": ["Cuba"]}))
     assert cell.startswith("$0.62<br>") and "$0.39 is spend in Cuba" in cell
     assert "$0 is spend" not in cell and "$0.23 has no country" in cell
+
+
+# ── PR-ADS-176B-F2: truth audit round 2 ─────────────────────────────────────
+def _run_async(script, *, js=None):
+    """`_run_app`, awaiting the script's final expression (a Promise)."""
+    import shutil
+    import subprocess
+    import tempfile
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _APP_JS, _VM_HARNESS
+    harness = _VM_HARNESS.replace(
+        "process.stdout.write(JSON.stringify(out === undefined ? null : out));",
+        "Promise.resolve(out).then((v) => "
+        "process.stdout.write(JSON.stringify(v === undefined ? null : v)));")
+    assert harness != _VM_HARNESS, "the 161B harness tail changed"
+    node = shutil.which("node")
+    assert node, "node is required: CI runs `node --check static/app.js`"
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "harness.js").write_text(harness, encoding="utf-8")
+        (d / "app.js").write_text(js if js is not None else _APP_JS.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+        (d / "probe.js").write_text(script, encoding="utf-8")
+        out = subprocess.run([node, str(d / "harness.js"), str(d / "app.js"),
+                              str(d / "probe.js")], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout)
+
+
+_IN_FLIGHT = """
+let __resolve;
+fetch = () => new Promise((r) => { __resolve = r; });
+const __panel = { innerHTML: "" };
+const __drawer = { querySelector: (s) => (s === ".country-drilldown-panel" ? __panel : null) };
+const __p = loadCountryDrilldown("Pakistan", "PK", __drawer, "last_6_months");
+const __loading = __panel.innerHTML;
+resetCountryDrilldowns();             // a reload while the deal list is in flight
+__resolve({ ok: true, json: async () => ({ details: [{ deal_name: "STALE-DEAL" }],
+                                           source_health: { status: "ready" } }) });
+__p.then(() => [Object.keys(roasCountryDrilldownCache).length, __loading, __panel.innerHTML])
+"""
+
+
+def test_21_a_deal_list_in_flight_across_a_reload_is_dropped():
+    """Round 2, item 2. A deal list requested before a reload (Refresh, a new
+    window, a settled-day rollover) resolves after it: it is neither cached
+    nor written into the drawer beside the new rows' counts. Deleting
+    `if (gen !== roasCountryDrilldownGen) return;` fails this case."""
+    cached, loading, panel = _run_async(_IN_FLIGHT)
+    assert "Loading country client details" in loading
+    assert cached == 0
+    assert panel == loading and "STALE-DEAL" not in panel
+    # Mutation: without the generation check the stale list is cached and shown.
+    guard = "    if (gen !== roasCountryDrilldownGen) return;   // the page reloaded meanwhile\n"
+    assert JS.count(guard) == 1
+    cached, _, panel = _run_async(_IN_FLIGHT, js=JS.replace(guard, ""))
+    assert cached == 1 and "STALE-DEAL" in panel

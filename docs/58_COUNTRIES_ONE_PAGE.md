@@ -545,6 +545,9 @@ reason). A row the gate withholds wholesale is `outcome_withheld` with the gap
 prints "Not judged — spend unknown" / "— revenue unknown"; none of the four
 decision chips selects them. The one-page fixture that hard-coded Pakistan
 `watch` encoded the defect and now carries `spend_unknown`.
+`_finalize_row` is shared, so this also changes **Campaign Revenue & Spend**:
+a campaign with won deals and withheld revenue now reads "Not judged —
+revenue unknown" (it read "Watch"); pinned in `161e` case 05.
 
 **M2 — the owner-label zero disclosure, restored.** The rule moved from the
 deleted page into `country_spend_zero_rule.zero_rests_on_owner_labels`
@@ -580,3 +583,21 @@ mutation. Changed: one-page 03 (`ownerZeroNote` is back), 07 (the blocking
 market is named), 08 (cents: "$2.50" / "$8.75", not "$3" / "$9") and the
 fixture (Pakistan `spend_unknown`, `lead_scope`); 170A case 24's node harness
 loads `fmtCountrySpendCents`, which `residualSpendCell` now calls.
+
+### 7.11 Truth audit round 2 (PR-ADS-176B-F2)
+
+Verdict: merge; four small items.
+
+1. The `carried_by_google` exclusion in
+   `country_spend_zero_rule.zero_rests_on_owner_labels` is tested: Jordan
+   (carried by its own Google criterion) rests on no label while Pakistan rests
+   on `["2192"]` (176B PG case 08; fails when the condition is `if True:`).
+2. The in-flight deal-list drop is tested: a deal list requested before
+   `resetCountryDrilldowns()` and resolved after it is neither cached nor
+   written (one-page case 21; fails with the generation check deleted).
+3. Dashboard → Countries: a published `$0` carries
+   `zero_rests_on_owner_labels` from the same zero-rule evidence (the shared
+   function, no second rule), and `ctrySpendCell` appends `ownerZeroNote`
+   (176B PG case 09).
+4. The Campaign Revenue & Spend consequence of M1 is documented (§7.10) and
+   pinned; the unused `NOT_JUDGED_VERDICTS` set is deleted.

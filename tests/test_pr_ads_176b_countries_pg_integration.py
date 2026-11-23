@@ -264,3 +264,45 @@ def test_07_a_zero_resting_on_an_owner_label_says_so(live_db, monkeypatch):
     cell = re.findall(r"<td[^>]*>(.*?)</td>", tr[:tr.index("</tr>")], re.S)[2]
     assert cell.startswith("$0 ") and ">owner label</span>" in cell
     assert "Google Ads location 2192." in cell
+
+
+# ── PR-ADS-176B-F2: truth audit round 2 ─────────────────────────────────────
+def test_08_a_zero_its_own_google_criterion_carries_rests_on_no_label(
+        live_db, monkeypatch):
+    """Round 2, item 1. Jordan's code is carried by its own Google criterion
+    (2400, outside the window): its $0 stands without any owner label, so it
+    says nothing. Pakistan, carried by nothing, stands only because Cuba's
+    owner-labelled spend has a country — ["2192"]. Mutating the
+    `carried_by_google` exclusion in `zero_rests_on_owner_labels` to
+    `if True:` gives Jordan ["2192"] and fails this case."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(CUBA_OWNER_LABELLED, 2.0)])
+    _sync(live_db)
+    _deal(live_db, "d-jo", "Jordan", amount=200.0)
+    _deal(live_db, "d-pk", "Pakistan", amount=300.0)
+    mart = _mart()
+    jo, pk = _row(mart, "JO"), _row(mart, "PK")
+    assert (jo["spend"], pk["spend"]) == (0.0, 0.0)
+    assert jo["zero_rests_on_owner_labels"] == []
+    assert pk["zero_rests_on_owner_labels"] == ["2192"]
+
+
+def test_09_the_dashboard_zero_resting_on_an_owner_label_says_so(live_db, monkeypatch):
+    """Round 2, item 3. Dashboard → Countries takes its $0 from the same zero
+    rule and printed it plain. Its row now carries the same
+    `zero_rests_on_owner_labels` and its spend cell appends the note."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(CUBA_OWNER_LABELLED, 2.0)])
+    _sync(live_db)
+    _deal(live_db, "d-jo", "Jordan", amount=200.0)
+    _deal(live_db, "d-pk", "Pakistan", amount=300.0)
+    page = _dash()
+    rows = {r.get("country_code"): r for r in page["countries"]}
+    pk, jo = rows["PK"], rows["JO"]
+    assert (pk["spend_native"], pk["zero_rests_on_owner_labels"]) == (0.0, ["2192"])
+    assert (jo["spend_native"], jo["zero_rests_on_owner_labels"]) == (0.0, [])
+    cell = _run_app("ctrySpendCell(%s)" % json.dumps(_json(pk)))
+    assert cell.startswith("£0") and ">owner label</span>" in cell
+    assert "Google Ads location 2192." in cell
+    assert ">owner label</span>" not in _run_app("ctrySpendCell(%s)" % json.dumps(_json(jo)))

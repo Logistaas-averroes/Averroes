@@ -6708,3 +6708,14 @@ disclosure, which this PR dropped and F1 restores (below).
 
 Tests: 11 new cases (one-page 14–20, PG 06–07, 170A 10b / 12b), all failing on
 `4d0921e` (case 15 under the named mutation). Details in `docs/58` §7.10.
+
+### PR-ADS-176B-F2 — truth audit round 2 (merge, four small items)
+
+* The `carried_by_google` exclusion and the in-flight deal-list drop are now
+  guarded (176B PG case 08, one-page case 21), each failing under its mutation.
+* Dashboard → Countries: a `$0` resting on owner labels carries
+  `zero_rests_on_owner_labels` (the shared zero rule) and says "owner label"
+  (176B PG case 09).
+* M1 reaches Campaign Revenue & Spend too: won deals with withheld revenue read
+  "Not judged — revenue unknown" (`docs/58` §7.10, `161e` case 05). The unused
+  `NOT_JUDGED_VERDICTS` set is deleted.

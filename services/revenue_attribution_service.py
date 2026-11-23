@@ -312,8 +312,6 @@ VERDICT_OUTCOME_WITHHELD = "outcome_withheld"
 #: ``verdict_reason``; none is one of the four decision filters.
 VERDICT_SPEND_UNKNOWN = "spend_unknown"
 VERDICT_REVENUE_UNKNOWN = "revenue_unknown"
-NOT_JUDGED_VERDICTS = frozenset({VERDICT_OUTCOME_WITHHELD, VERDICT_SPEND_UNKNOWN,
-                                 VERDICT_REVENUE_UNKNOWN})
 
 
 def classify_verdict(
