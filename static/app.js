@@ -5471,9 +5471,10 @@ let dashCountriesStatus = "loading";
 // Country status → colour + dot class (market map bubbles + badges).
 const CTRY_STATUS_META = {
   "Revenue proven": { color: "#22b07d", dot: "ctry-dot--proven" },
-  "Customer proven": { color: "#3ac6a1", dot: "ctry-dot--customer" },
+  // PR-ADS-176A: computed from won DEALS, so the status no longer says "customer".
+  "Won deal, revenue not proven": { color: "#3ac6a1", dot: "ctry-dot--customer" },
   "SQL producer": { color: "#129ef5", dot: "ctry-dot--sql" },
-  "Spend without customer proof": { color: "#ff8a3d", dot: "ctry-dot--waste" },
+  "Spend without a won deal": { color: "#ff8a3d", dot: "ctry-dot--waste" },
   "FX unavailable": { color: "#8896a6", dot: "ctry-dot--muted" },
   "Geo attribution needs review": { color: "#7c5cff", dot: "ctry-dot--attr" },
   "No spend in window": { color: "#b6bfca", dot: "ctry-dot--muted" },
@@ -5485,9 +5486,9 @@ function ctryStatusColor(status) {
 
 const CTRY_NEXT_ACTION = {
   "Revenue proven": "Scale — open Country Revenue & Spend",
-  "Customer proven": "Confirm revenue attribution",
+  "Won deal, revenue not proven": "Confirm revenue attribution",
   "SQL producer": "Review SQL quality",
-  "Spend without customer proof": "Review — spend without proof",
+  "Spend without a won deal": "Review — spend without a won deal",
   "FX unavailable": "FX incomplete — USD spend and period ratio withheld",
   "Geo attribution needs review": "Open Revenue Health",
   "No spend in window": "No spend to judge",
@@ -18416,16 +18417,49 @@ function renderCountryResidualWarning(spendTruth) {
 //   - "mismatch"    → geo spend exists but does NOT reconcile with canonical
 //                     campaign spend (review the Geo Sync mismatch totals).
 //   - "unavailable" → there is no canonical geo spend yet (run the Geo Sync).
+// PR-ADS-176A: the next step for an UNAVAILABLE country spend gate, from the
+// payload's gap codes (spend_truth.country_gap_codes). "Run Geo Sync" is the
+// fix only when geo spend was never fetched; before the morning sync, the
+// newest day is simply not re-read yet, and running anything is wrong advice.
+const COUNTRY_GAP_NEXT_STEP = {
+  spend_not_reread_since_day_ended: "Nothing to run: the morning sync re-reads the newest day of this window. Re-check this page after it.",
+  window_includes_day_in_progress: "Choose a window that ends before today, or re-check after the morning sync.",
+  no_settled_day_in_window: "No day of this window has ended yet. Re-check after the first morning sync in it.",
+  spend_reread_failed: "Open Revenue Health: the sync that should have re-read the newest day failed.",
+  account_time_zone_unknown: "Open Revenue Health: the Google Ads account time zone is not on record.",
+  geo_coverage_incomplete: "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.",
+  geo_coverage_has_failed_chunks: "Re-run Google Ads Geo Sync in Revenue Health for the failed range, then re-check this page.",
+};
+// The order the geo gate itself ranks gaps in (google_ads_geo_sync_service
+// _GEO_GAP_PRIORITY), restricted to the codes above.
+const COUNTRY_GAP_NEXT_STEP_ORDER = [
+  "no_settled_day_in_window", "geo_coverage_incomplete", "geo_coverage_has_failed_chunks",
+  "account_time_zone_unknown", "spend_reread_failed", "spend_not_reread_since_day_ended",
+  "window_includes_day_in_progress",
+];
+function countryGapNextStep(codes) {
+  const have = new Set(codes || []);
+  const code = COUNTRY_GAP_NEXT_STEP_ORDER.find((c) => have.has(c));
+  return code ? COUNTRY_GAP_NEXT_STEP[code] : null;
+}
+
 function renderCountrySpendUnreconciledState(spendTruth) {
   const st = spendTruth || {};
   const status = st.country_spend_status;
   const isMismatch = status === "mismatch";
+  // PR-ADS-176A: name WHICH gap (spend_truth.country_gap_message / _codes);
+  // the "no geo spend yet" copy only when the payload names none.
+  const gapMessage = (!isMismatch && st.country_gap_message) ? String(st.country_gap_message) : null;
   const cause = isMismatch
     ? "Country geo spend exists, but it does not reconcile with canonical Google Ads campaign spend for this window."
-    : "There is no canonical Google Ads geo spend for this window yet, so country Period Revenue / Ad Spend cannot be computed safely.";
+    : (gapMessage
+      || "There is no canonical Google Ads geo spend for this window yet, so country Period Revenue / Ad Spend cannot be computed safely.");
+  const gapStep = isMismatch ? null : countryGapNextStep(st.country_gap_codes);
   const nextStep = isMismatch
     ? "Open Revenue Health and review the Google Ads Geo Sync totals."
-    : "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.";
+    : (gapStep || (gapMessage
+      ? "Open Revenue Health and review the Google Ads Geo Sync coverage for this window."
+      : "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page."));
   const chip = (label, value, ok) =>
     `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
        <span>${label}</span><strong>${escapeHtml(value)}</strong>
@@ -18465,7 +18499,7 @@ function renderCountrySpendUnreconciledState(spendTruth) {
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
       <h3>Country Period Revenue / Ad Spend is blocked</h3>
-      <p>${cause}</p>
+      <p>${escapeHtml(cause)}</p>
       ${totalsHtml}
       <div class="revenue-status-label">Current status</div>
       <div class="revenue-status-grid">

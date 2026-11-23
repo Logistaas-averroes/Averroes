@@ -286,9 +286,16 @@ def test_11_countries_reads_spend_identities_and_carriers_in_one_snapshot():
     body = ast.get_source_segment(page, fn)
     i_snap = body.index("geo_reads.enter_context(repo.geo_read_snapshot())")
     i_with = body.index("with contextlib.ExitStack() as geo_reads:")
+    # PR-ADS-176A: the carriers read moved, with the zero rule, into the ONE
+    # shared rule (`services.country_spend_zero_rule.assess`), which reads them
+    # in the caller's snapshot. The page calls it inside the same block.
     reads = [body.index(r) for r in ("repo.fetch_geo_daily_spend_by_country(",
                                      "repo.fetch_geo_criterion_identities(",
-                                     "repo.fetch_geo_code_carriers(")]
+                                     "zero_rule.assess(")]
+    shared = (ROOT / "services" / "country_spend_zero_rule.py").read_text(encoding="utf-8")
+    assess = shared[shared.index("def assess("):shared.index("\ndef zero_spend_verdict(")]
+    assert "repo.fetch_geo_code_carriers(" in assess
+    assert "repo.geo_read_snapshot()" not in assess.split("\"\"\"")[2]  # no snapshot of its own
     assert i_with < i_snap < min(reads)
     # All three reads sit inside the ExitStack block (indented under it).
     with_indent = len(body[:i_with].rsplit("\n", 1)[1])

@@ -194,7 +194,7 @@ def _patch_business_total_stack(monkeypatch, rows=None, *, available=True):
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_total",
                         lambda s, e, *_a, **_k: {"available": False, "has_rows": False})
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country",
-                        lambda s, e: {"available": False, "has_rows": False, "rows": []})
+                        lambda s, e, *_a, **_k: {"available": False, "has_rows": False, "rows": []})
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "fetch_sync_state",

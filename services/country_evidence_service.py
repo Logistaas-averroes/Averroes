@@ -163,7 +163,9 @@ from services.google_ads_spend_service import (  # noqa: E402
 #: not on record, so "the day ended" has no meaning.
 #: A country with no spend row, in a window that holds spend Google reported
 #: against a location no stored row names: that spend may be this country's.
-R_SPEND_LOCATION_UNRESOLVED = "spend_location_unresolved"
+# PR-ADS-176A: the zero rule's own code, from the one shared rule.
+from services import country_spend_zero_rule as zero_rule  # noqa: E402
+R_SPEND_LOCATION_UNRESOLVED = zero_rule.R_SPEND_LOCATION_UNRESOLVED
 R_LEADS_UNREADABLE = "lead_summary_unreadable"
 
 #: Columns the legacy `geo` snapshot carried and the canonical table does not.
@@ -572,30 +574,21 @@ def build_country_evidence(*, days: int | None, window_key: str,
         # under one criterion, and that criterion resolved.)
         loose = joined.get("spend:unresolved")
         unresolved_usd = None
-        unresolved_spend_present = False
-        if loose is not None and loose["_spend_parts"]:
-            if loose["_spend_published"]:
-                unresolved_usd = round(loose["_spend_usd"], 2)
-                unresolved_spend_present = loose["_spend_usd"] != 0
-            else:
-                unresolved_spend_present = True      # amount unknown: not "none"
-        # PR-ADS-167A — which spend-less countries that loose spend CANNOT be.
-        # Google keys one country under one criterion. A location no stored row
-        # names is therefore not a country whose code another criterion carries on
-        # record. So a resolved country with no spend row is still a measured $0
-        # while unresolved spend is in the window, if and only if:
-        #   (a) the window is covered (checked above: `covered`);
-        #   (b) every unresolved criterion in the window is code-less EVERYWHERE —
-        #       none is a criterion whose rows disagree (that one IS some country);
-        #   (c) the country's code is carried on record by exactly one criterion,
-        #       and that criterion carries no other code. A country never seen in
-        #       geo spend at all (leads, no Google spend ever) could be the loose
-        #       location, so it stays unavailable while there is loose spend.
-        # The evidence read failing is "carried by nothing": fail closed.
-        carried: set = set()
+        if loose is not None and loose["_spend_parts"] and loose["_spend_published"]:
+            unresolved_usd = round(loose["_spend_usd"], 2)
+        # PR-ADS-176A: which spend-less countries that loose spend CANNOT be is
+        # the ONE shared zero rule (``services.country_spend_zero_rule``, moved
+        # there from here unchanged), which Country Revenue & Spend and the
+        # Dashboard's Countries tab now apply too. It reads the carriers inside
+        # THIS snapshot. In short: a resolved country with no spend row is a
+        # measured $0 while unresolved spend is in a covered window if and only
+        # if every unresolved criterion is code-less everywhere and the
+        # country's code is carried on record by exactly one criterion that
+        # carries nothing else. A country never seen in geo spend could be the
+        # loose location, so it stays unavailable. The evidence read failing
+        # is "carried by nothing": fail closed.
         # PR-ADS-170A: a zero that stands because the country's ONE carrier is
         # an owner-labelled criterion stands on the owner's word; say so.
-        carried_by_owner: dict = {}
         # PR-ADS-170A-F1: the same disclosure for the OTHER zero that rests on
         # the owner's word. With owner-labelled spend in the window, a
         # spend-less country's $0 stands only because the label took that
@@ -603,23 +596,16 @@ def build_country_evidence(*, days: int | None, window_key: str,
         # under a criterion of its own (``carried_by_google``), in which case
         # the zero would stand without any label.
         owner_in_window = sorted(c["criterion_id"] for c in owner_geo["criteria"])
-        carried_by_google: set = set()
-        if covered and (unresolved_spend_present or owner_in_window) \
-                and not conflicting_criteria:
-            candidates = sorted({
-                row["country_code"] for row in joined.values()
-                if row["country_resolved"] and row["country_code"]
-                and not row["_spend_parts"]})
-            if candidates:
-                found = repo.fetch_geo_code_carriers(candidates)
-                if found.get("available"):
-                    for code, holders in (found.get("carriers") or {}).items():
-                        if len(holders) == 1 and holders[0].get("codes") == [code]:
-                            carried.add(code)
-                            if holders[0].get("provenance") == OWNER_LABELLED:
-                                carried_by_owner[code] = holders[0].get("criterion_id")
-                            else:
-                                carried_by_google.add(code)
+        zero_evidence = None
+        if covered:
+            zero_evidence = zero_rule.assess(
+                spend_rows,
+                sorted({row["country_code"] for row in joined.values()
+                        if row["country_resolved"] and row["country_code"]
+                        and not row["_spend_parts"]}),
+                owner_labelled_criteria=owner_in_window)
+        carried_by_owner: dict = dict((zero_evidence or {}).get("carried_by_owner") or {})
+        carried_by_google: set = set((zero_evidence or {}).get("carried_by_google") or ())
     withheld_zero: list = []
     rows = []
     for row in joined.values():
@@ -638,10 +624,12 @@ def build_country_evidence(*, days: int | None, window_key: str,
             spend_usd, status, reason = None, "unavailable", R_FX_RATE_MISSING
         elif parts:
             spend_usd, status, reason = round(usd, 2), "published", None
-        elif (row["country_resolved"] and unresolved_spend_present
-              and row["country_code"] not in carried):
-            spend_usd, status, reason = (None, "unavailable",
-                                         R_SPEND_LOCATION_UNRESOLVED)
+        elif (row["country_resolved"]
+              and not zero_rule.zero_spend_verdict(zero_evidence,
+                                                   row["country_code"])[0]):
+            spend_usd, status, reason = (
+                None, "unavailable",
+                zero_rule.zero_spend_verdict(zero_evidence, row["country_code"])[1])
             withheld_zero.append(row["country"])
         elif row["country_resolved"]:
             # A resolved country, every day of the window settled, no spend row,

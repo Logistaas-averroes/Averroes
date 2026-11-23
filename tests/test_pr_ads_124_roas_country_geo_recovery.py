@@ -383,7 +383,7 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
         # by-country is the country ROW source.
         monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: geo_daily)
         monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_by_country",
-                            lambda s, e: _geo_by_country(geo_country))
+                            lambda s, e, *_a, **_k: _geo_by_country(geo_country))
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
 

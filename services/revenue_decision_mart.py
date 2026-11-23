@@ -282,6 +282,10 @@ def _spend_truth_block(core: dict) -> dict:
         # rather than only that the totals differ.
         "geo_coverage_status": health.get("geo_coverage_status"),
         "country_gap_codes": country_gap_codes,
+        # PR-ADS-176A: the operator sentence for those codes, from the geo
+        # gate's own messages, so a blocked card names THIS window's gap (the
+        # pre-morning-sync settle gap is not "no geo spend — run the sync").
+        "country_gap_message": geo_gate.describe_geo_gap(country_gap_codes),
         "geo_coverage_missing_ranges": health.get("geo_coverage_missing_ranges") or [],
         "failed_geo_dates": health.get("failed_geo_dates") or [],
         "country_gap_reason": health.get("country_gap_reason"),
@@ -663,6 +667,7 @@ def _withhold_empty_settled_window(spend_truth: dict, summary: dict,
         "geo_coverage_status": "unavailable", "country_spend_status": "unavailable",
         "country_roas_unblockable": False, "country_gap_codes": [reason],
         "country_gap_reason": geo_gate.describe_geo_gap([reason]),
+        "country_gap_message": geo_gate.describe_geo_gap([reason]),
     })
     readiness = {k: (False if k.endswith("_ready") else v)
                  for k, v in readiness.items()}
@@ -694,7 +699,10 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
         row = {**r, **{k: None for k in figures if k in r}, "metrics": None,
                "withheld_reason": reason}
         # PR-ADS-170A-F1: the residual row's spend parts are withheld with it.
-        for k in ("spend_components", "spend_geo_unassigned_usd"):
+        # PR-ADS-176A: so are its itemised outside-market countries, and every
+        # row's deal ids (a population is a figure).
+        for k in ("spend_components", "spend_geo_unassigned_usd",
+                  "outside_listed_market_items", "deal_ids"):
             if k in row:
                 row[k] = None
         if not fx_only:

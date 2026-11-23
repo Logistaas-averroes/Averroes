@@ -119,6 +119,32 @@ def _import_db_modules_before_any_fake_is_installed():
             pass
 
 
+@pytest.fixture(autouse=True)
+def _restore_db_pool():
+    """Every test leaves ``db.connection._pool`` as it found it (PR-ADS-176A).
+
+    About a dozen PostgreSQL fixtures assign ``connection._pool`` directly and
+    then stop their cluster, so the pool outlived the database it pointed at.
+    That was harmless while mock-based tests never reached ``get_conn``. Every
+    country builder now opens ``repo.geo_read_snapshot()`` (one snapshot for
+    the spend, identity and carriers reads), and every mart view goes through
+    the revenue contract that opens it. A dead pool left behind by an earlier
+    module then failed unrelated tests, depending on test order. The pool is
+    restored here, never closed: the cluster behind it is already gone.
+    """
+    try:
+        from db import connection
+    except Exception:  # noqa: BLE001 — no db package, nothing to restore
+        yield
+        return
+    before = getattr(connection, "_pool", None)
+    try:
+        yield
+    finally:
+        if getattr(connection, "_pool", None) is not before:
+            connection._pool = before
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _configured_google_ads_account():
     """Ensure a configured account for the session, without overriding one."""

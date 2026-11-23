@@ -184,7 +184,7 @@ def _patch_durable(monkeypatch, *, deals=None, sql_leads=None, revenue_connected
                         lambda s, e, *_a, **_k: {"available": True, "has_rows": True, "total_spend": 10000.0,
                                       "total_cost_micros": 10000_000_000, "currency_code": "GBP", "customer_id": "111"})
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country",
-                        lambda s, e: {"available": True, "has_rows": False, "rows": [], "total_spend": 10000.0,
+                        lambda s, e, *_a, **_k: {"available": True, "has_rows": False, "rows": [], "total_spend": 10000.0,
                                       "total_spend_usd": 13000.0, "fx_complete": True, "currency_code": "GBP",
                                       "customer_id": "111", "reporting_currency": "USD"})
     monkeypatch.setattr(repo, "fetch_spend_coverage",

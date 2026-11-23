@@ -127,6 +127,7 @@ jobs:
             tests/test_pr_ads_167a_geo_sync_country_codes_pg_integration.py \
             tests/test_pr_ads_167a_settled_coverage_consumers_pg_integration.py \
             tests/test_pr_ads_170a_owner_labelled_geo_pg_integration.py \
+            tests/test_pr_ads_176a_country_builder_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -252,6 +253,13 @@ jobs:
                            # applied by the readers, never written, a stored
                            # Google code wins, an unlisted id stays unresolved.
                            "tests.test_pr_ads_170a_owner_labelled_geo_pg_integration",
+                           # PR-ADS-176A. One rule per figure in the shared
+                           # country builder: the zero rule on the mart and
+                           # the Dashboard, conservation with code-less and
+                           # outside-market spend, each drawer the row's own
+                           # population, the scoped Dashboard geo read, and
+                           # the settle-gap blocked card from the real mart.
+                           "tests.test_pr_ads_176a_country_builder_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

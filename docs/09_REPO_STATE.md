@@ -6566,3 +6566,54 @@ registered in the PostgreSQL step and its did-run list);
 
 Round 1 full suite (one baseline deselect): 6524 passed, 1 skipped,
 1 deselected, 0 failed.
+
+## PR-ADS-176A — one rule per figure in the shared country builder
+
+**What.** Backend only (`docs/58`). Navigation and page layout are unchanged.
+The country builders behind Countries, Country Revenue & Spend and Dashboard →
+Countries now state only what the evidence supports, and each figure follows
+one rule.
+
+* **Zero rule.** `services/country_spend_zero_rule.py` holds the PR-ADS-167A
+  rule. It moved from `country_evidence_service` unchanged, and Countries, the
+  mart country rows (`_build_db_rows`) and the Dashboard all call it. A
+  spend-less market whose `$0` the rule cannot prove reads `None` with
+  `spend_location_unresolved` on every surface. Before, the mart and the
+  Dashboard printed `$0`. The Dashboard's listed-markets spend total is
+  withheld with that reason.
+* **Code-less criteria.** A criterion that names no country is bucketed into
+  the residual's `country_unidentified` component instead of being dropped. Σ
+  rows + residual = campaign total.
+* **Outside-market countries** are itemised as residual sub-items
+  (`outside_listed_market_items`) on the mart and the Dashboard. The items are
+  a breakdown, never additional. Their outcomes are `"in_residual"`.
+* **Drawers** list their row's own population. Country Revenue & Spend's
+  drawer uses settled-day bounds and the "not Google Ads" exclusions. The
+  Dashboard drawer lists the mart row's `deal_ids` at `google_ads_source`.
+* **Account scope.** The Dashboard's and the mart's per-country geo reads are
+  scoped to the configured customer (PR-ADS-154B).
+* **Statuses.** "Customer proven" is now "Won deal, revenue not proven".
+  "Spend without customer proof" is now "Spend without a won deal". The
+  `app.js` status maps are re-keyed to match.
+* **Blocked card.** `spend_truth.country_gap_message` is the cause. The next
+  step comes from `country_gap_codes`. The settle gap no longer says "run the
+  Geo Sync".
+
+**Owner decisions 2026-11-23** for 176B: business windows with Current Quarter
+as the default, a strict spend gate, and no lead-quality columns. These are
+recorded in `docs/58` §3.
+
+**Tests.** `tests/test_pr_ads_176a_country_builder_pg_integration.py` has 11
+cases and is registered in CI. Nine fail on origin/main; case 02 is the
+counterfactual. Case 10 checks that the geo snapshot fails closed. Existing
+tests changed:
+
+* ten geo-reader fakes now accept the account-scope argument;
+* the structural snapshot test in 167a `test_11` follows the carriers read
+  into the shared rule;
+* a `tests/conftest.py` autouse fixture restores `db.connection._pool` after
+  every test, so PG fixtures no longer leak a pool over a stopped cluster.
+
+Details are in `docs/58` §6.
+
+**Next.** 176B merges the two pages. 176C retires `/api/geo`.
