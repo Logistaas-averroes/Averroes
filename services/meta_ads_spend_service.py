@@ -57,6 +57,10 @@ REASON_NOT_READABLE = "meta_account_not_readable"
 REASON_BATCH = "sync_batch_not_opened"
 REASON_FX_MISSING = "fx_rates_missing"
 REASON_FX_UNSUPPORTED = "fx_currency_not_supported"
+#: PR-ADS-171D. The ad-set backfill was asked for days after the last day the
+#: campaign level can be verified (the account's local yesterday). It stopped
+#: at that day and stored the days before it; this is not a failure.
+REASON_ADSET_STOPPED = "meta_adset_end_after_last_verifiable_day"
 
 
 class MetaChunkFailed(RuntimeError):
@@ -553,12 +557,15 @@ def run_backfill(date_from: date, date_to: date | None = None, *,
     """Backfill ``[date_from, date_to]`` in monthly chunks, per account.
 
     ``level`` is ``campaign`` (the default: PR-ADS-171A's campaign-daily
-    spend, unchanged) or ``adset`` (PR-ADS-171C: the ad-set detail of months
-    whose campaign level is ALREADY verified — a month whose campaign level is
-    not fails ``meta_adset_campaign_base_unverified`` and stores nothing).
-    The ad-set level reads the account from Meta without storing it, and
-    writes only the two ad-set tables: it cannot change the campaign rows,
-    the campaign ledger or an account's sync state.
+    spend, unchanged) or ``adset`` (PR-ADS-171C, corrected in PR-ADS-171D:
+    each month first RE-READS the campaign level through :func:`sync_chunk` —
+    the same reconciliation, the same atomic replace and the same
+    zero-restatement refusal, never with the override — and only then reads
+    the ad sets and reconciles them to that just-stored, live campaign read;
+    see :func:`_backfill_adset_chunk`). At ``adset`` an end later than the
+    account's local yesterday (the last day the campaign level can be
+    verified) is cut there, as at every level, and is reported
+    (``stopped_at``).
 
     ``account_ids`` defaults to every configured account; an id that is not
     configured is refused. For each account ``date_to`` defaults to, and is
@@ -621,12 +628,15 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
            "error": None, "chunks": []}
     adsets = level == "adset"
     try:
-        # The ad-set level reads the account and stores nothing about it.
-        account = (meta_ads.fetch_account(account_id) if dry_run or adsets
+        # PR-ADS-171D: the ad-set level now re-reads and stores the campaign
+        # level, so it stores the account exactly as the campaign backfill
+        # does — refresh_account refuses a currency or zone change for an
+        # account with stored spend, which a bare fetch would not.
+        account = (meta_ads.fetch_account(account_id) if dry_run
                    else refresh_account(account_id))
     except Exception as exc:  # noqa: BLE001
         failure = describe_failure(exc)
-        if not dry_run and not adsets:
+        if not dry_run:
             db_writers.record_meta_account_sync(
                 account_id, "failed", reason=failure["reason"],
                 error=failure["error"], http_status=failure["http_status"],
@@ -641,6 +651,23 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
                currency=account.get("currency_code"),
                account_time_zone=account.get("time_zone_name"),
                date_from=date_from.isoformat(), date_to=end.isoformat())
+    if adsets:
+        # PR-ADS-171D. The last day the campaign level can be verified is the
+        # account's local yesterday: today is in progress and is never read.
+        # The end was already capped there (above); an end after it is now
+        # also SAID, not silent. The days before it are stored normally and no
+        # day after it is.
+        out.update(requested_to=date_to.isoformat() if date_to else None,
+                   campaign_verifiable_through=yesterday.isoformat(),
+                   stopped_at=None, stop_reason=None, stop_detail=None)
+        if date_to is not None and date_to > yesterday:
+            out.update(
+                stopped_at=yesterday.isoformat(), stop_reason=REASON_ADSET_STOPPED,
+                stop_detail=(
+                    f"asked through {date_to.isoformat()}; the campaign level "
+                    f"can be verified only through {yesterday.isoformat()}, "
+                    "the last complete day in the account's zone "
+                    f"({account.get('time_zone_name')}); no later day was read"))
     if date_from > end:
         return {**out, "status": "success", "reason": "nothing_to_backfill"}
 
@@ -664,8 +691,7 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
             out["chunks"].append({**entry, "status": "planned"})
             continue
         if adsets:
-            from services import meta_ads_adset_service  # noqa: PLC0415
-            result = meta_ads_adset_service.sync_adset_chunk(
+            result = _backfill_adset_chunk(
                 account, start, stop,
                 accept_zero_restatement=accept_zero_restatement)
         else:
@@ -683,6 +709,75 @@ def _backfill_account(account_id: str, date_from: date, date_to: date | None, *,
             return {**out, "status": wanted, "reason": first.get("reason"),
                     "error": first.get("error")}
     return {**out, "status": "success"}
+
+
+#: What the ad-set backfill reports of the campaign re-read it made.
+_REREAD_KEYS = ("status", "reason", "error", "coverage_status", "rows_written",
+                "days_restated", "max_restated_delta_micros", "days_zeroed",
+                "fx_status")
+
+
+def _backfill_adset_chunk(account: dict, start: date, end: date, *,
+                          accept_zero_restatement: bool = False) -> dict:
+    """PR-ADS-171D — one month of ``--level adset``. Never raises.
+
+    1. Re-read the CAMPAIGN level of the same account and days, now, through
+       :func:`sync_chunk`: reconciled to the account-level total, replaced
+       atomically, refused by ``MetaRestatementImplausible`` if it would take
+       a day with verified spend to zero. ``accept_zero_restatement`` is NOT
+       passed: at ``--level adset`` that flag lifts the refusal for ad-set
+       rows only, and a campaign day going to zero is accepted, if ever, by
+       the campaign-level backfill.
+    2. Only if that re-read is ``verified``, read the ad sets
+       (``meta_ads_adset_service.sync_adset_chunk``), which reconciles them per
+       day and campaign to the stored campaign rows — the rows step 1 wrote a
+       moment earlier. Live to live, at the same tolerance.
+
+    Before this, the ad-set backfill compared a live ad-set read with a
+    campaign row stored by an EARLIER run, so any restatement inside Meta's
+    adjustment window (2026-11-23: $0.02 on one campaign-day) made a recent
+    month unloadable; and a month whose newest day the daily sync had not yet
+    read failed whole (``meta_adset_campaign_base_unverified``).
+
+    A campaign re-read that is not verified fails the ad-set chunk with ITS
+    reason: no ad set is requested, no ad-set row is stored, and a ``failed``
+    row is recorded in the ad-set ledger (it never replaces a verified one).
+    A verified re-read whose USD rates are missing makes a verified ad-set
+    chunk ``partial``, as it makes the campaign backfill ``partial``.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services import meta_ads_adset_service as adset_service  # noqa: PLC0415
+
+    campaign = sync_chunk(account, start, end)          # never the override
+    reread = {k: campaign.get(k) for k in _REREAD_KEYS}
+    if campaign.get("coverage_status") != "verified":
+        account_id = account["account_id"]
+        zone = account.get("time_zone_name")
+        text = (f"the campaign level of {start.isoformat()}..{end.isoformat()} "
+                "could not be re-read and verified "
+                f"({campaign.get('reason')}: {campaign.get('error')}); "
+                "ad sets were not read")
+        recorded = db_writers.record_meta_adset_coverage_failure(
+            account_id, start, end, error_code=campaign.get("reason"),
+            error_message=text, http_status=campaign.get("http_status"),
+            account_time_zone=zone)
+        return {"chunk_start": start.isoformat(), "chunk_end": end.isoformat(),
+                "account_id": account_id, "currency": account.get("currency_code"),
+                "account_time_zone": zone, "level": "adset",
+                "external_writes_performed": False, "status": "failed",
+                "coverage_status": "failed",
+                "failed_coverage_recorded": bool(recorded), "rows_written": 0,
+                "pages_read": 0, "reason": campaign.get("reason"), "error": text,
+                "http_status": campaign.get("http_status"),
+                "error_code": campaign.get("error_code"),
+                "readable": campaign.get("readable"), "campaign_reread": reread}
+    result = adset_service.sync_adset_chunk(
+        account, start, end, accept_zero_restatement=accept_zero_restatement)
+    result["campaign_reread"] = reread
+    if result["status"] == "success" and campaign.get("status") != "success":
+        result.update(status=campaign.get("status"), reason=campaign.get("reason"),
+                      error=campaign.get("error"))
+    return result
 
 
 def batch_error_message(reason: str | None, error: str | None) -> str | None:

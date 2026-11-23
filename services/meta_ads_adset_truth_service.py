@@ -71,6 +71,10 @@ REASON_LEAD_TYPE_NOT_OBSERVED = "meta_lead_action_type_not_observed"
 #: Some day's row carried no ``actions`` at all: the count is unknown there.
 REASON_ACTIONS_MISSING = "meta_actions_missing_on_some_days"
 REASON_COUNT_MISSING = "meta_count_missing_on_some_days"
+#: PR-ADS-171D tripwire. In this account's stored rows the configured type and
+#: `lead` differ on some day: the premise of the choice (identical counts) no
+#: longer holds, and the configured type could be counting a subset.
+REASON_LEAD_TYPES_DIVERGED = "meta_lead_action_types_diverged"
 
 LEADS_DISCLOSURE = (
     "Meta-reported leads are Meta's own attributed counts under each ad "
@@ -143,6 +147,52 @@ def lead_metrics(row: dict, lead_type: str | None, *,
     return {"meta_reported_leads": leads, "meta_reported_lead_actions": raw}
 
 
+#: PR-ADS-171D. Whether the attribution setting the lead counts were
+#: computed under is on record for the published rows.
+ATTRIBUTION_STORED = "stored"
+ATTRIBUTION_PARTLY_STORED = "partly_stored"
+ATTRIBUTION_NOT_STORED = "not_stored"
+ATTRIBUTION_NO_ROWS = "no_rows"
+
+
+def attribution_summary(rows: list) -> dict:
+    """Pure. The attribution setting(s) behind ``meta_reported_leads``, read
+    from the stored rows only — never assumed, never a default.
+
+    ``settings``: the distinct stored values over ``rows``;
+    ``rows_without_setting``: stored day-rows that carry none; ``status``:
+    ``stored`` (every day-row carried one), ``partly_stored``, ``not_stored``
+    (none did — the setting is not on record) or ``no_rows``.
+    """
+    settings = sorted({s for r in rows or [] for s in r.get("attribution_settings") or []})
+    missing = sum(int(r.get("attribution_setting_missing_rows") or 0) for r in rows or [])
+    if not rows:
+        status = ATTRIBUTION_NO_ROWS
+    elif not settings:
+        status = ATTRIBUTION_NOT_STORED
+    elif missing:
+        status = ATTRIBUTION_PARTLY_STORED
+    else:
+        status = ATTRIBUTION_STORED
+    return {"settings": settings, "rows_without_setting": missing,
+            "status": status,
+            "detail": ("not stored: no stored ad-set row of this range carries "
+                       "an attribution setting" if status == ATTRIBUTION_NOT_STORED
+                       else None)}
+
+
+def _tripped(figures: dict, diverged_rows: int) -> dict:
+    """``meta_reported_leads`` made unavailable when the lead-type tripwire
+    fired for the account (``meta_lead_action_types_diverged``). The raw
+    per-type counts are left as they are: they are Meta's, not our choice."""
+    if diverged_rows:
+        leads = figures["meta_reported_leads"]
+        figures["meta_reported_leads"] = {
+            **_metric(None, REASON_LEAD_TYPES_DIVERGED),
+            "action_type": leads.get("action_type")}
+    return figures
+
+
 def _frame(start_date, end_date, settled, base) -> dict:
     return {
         "start_date": start_date.isoformat() if start_date else None,
@@ -168,7 +218,8 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
     """Meta ad-set figures over inclusive account-local days (``start_date``
     None for all time: each account from its first verified CAMPAIGN day).
 
-    ``{status, reason, detail, rows, accounts, native_lead_action_type, …}``.
+    ``{status, reason, detail, rows, accounts, native_lead_action_type,
+    meta_reported_leads_attribution, …}``.
     ``rows`` is empty unless ``status`` is ``published``; then it holds one
     entry per account, campaign and ad set with ``spend``, ``spend_usd``,
     ``impressions``, ``clicks``, ``meta_reported_leads`` and
@@ -196,8 +247,11 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                  "detail": LEAD_TYPE_NOT_STORED_DETAIL}]}
 
     def withheld(status, reason, detail=None, accounts=()):
+        # Withheld means absent: no attribution is reported for rows that are
+        # not published.
         return {**frame, "status": status, "reason": reason, "detail": detail,
-                "rows": [], "accounts": list(accounts)}
+                "rows": [], "accounts": list(accounts),
+                "meta_reported_leads_attribution": None}
 
     if base.get("state") not in campaign.PUBLISHING_STATES:
         unreadable = base.get("state") in (campaign.STATE_NOT_CONNECTED,
@@ -219,7 +273,9 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                    "required_through": entry.get("required_through"),
                    "adset_coverage": "verified", "reason": None, "detail": None,
                    # Has this account's stored detail ever carried the type?
-                   "meta_reported_leads_type_observed": None}
+                   "meta_reported_leads_type_observed": None,
+                   # PR-ADS-171D tripwire: {rows, first_day} or None.
+                   "meta_reported_lead_types_diverged": None}
         accounts.append(summary)
 
         def block(status, reason, detail, coverage):
@@ -286,6 +342,24 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
             continue
         observed = read.get("action_type_observed") if stored_type else None
         summary["meta_reported_leads_type_observed"] = observed
+        # The tripwire speaks only for a type the account has emitted: an
+        # unobserved type is already unavailable for its own reason.
+        diverged = (read.get("lead_types_diverged")
+                    if stored_type and observed is True else None)
+        diverged_rows = int((diverged or {}).get("rows") or 0)
+        summary["meta_reported_lead_types_diverged"] = diverged if diverged_rows else None
+        if diverged_rows:
+            frame["config_problems"].append({
+                "key": "meta_ads.native_lead_action_type",
+                "reason": REASON_LEAD_TYPES_DIVERGED,
+                "account_id": account_id,
+                "detail": (f"account {account_id}: on {diverged_rows} stored "
+                           "day-row(s) (first "
+                           f"{diverged.get('first_day')}) the configured type's "
+                           "count differs from `lead`'s; it was chosen because "
+                           "they were identical. Meta-reported leads are "
+                           "unavailable for this account until the choice is "
+                           "reviewed.")})
         fx_reason = (meta.REASON_FX_UNSUPPORTED
                      if (currency or "") not in priced else meta.REASON_FX_MISSING)
         for r in read["rows"]:
@@ -304,8 +378,11 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                     else None, fx_reason, currency=meta.REPORTING_CURRENCY),
                 "impressions": _metric(r.get("impressions"), REASON_COUNT_MISSING),
                 "clicks": _metric(r.get("clicks"), REASON_COUNT_MISSING),
-                **lead_metrics(r, lead_type, type_observed=observed),
+                **_tripped(lead_metrics(r, lead_type, type_observed=observed),
+                           diverged_rows),
                 "attribution_settings": r.get("attribution_settings") or [],
+                "attribution_setting_missing_rows":
+                    int(r.get("attribution_setting_missing_rows") or 0),
             })
 
     if blocked is not None:
@@ -313,4 +390,7 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
         # an account out does not add up to the published campaign spend.
         return withheld(*blocked, accounts=accounts)
     return {**frame, "status": STATUS_PUBLISHED, "reason": None, "detail": None,
-            "rows": rows, "accounts": accounts}
+            "rows": rows, "accounts": accounts,
+            # PR-ADS-171D: the setting the published lead counts are under,
+            # from the stored rows ("not stored" when none carries one).
+            "meta_reported_leads_attribution": attribution_summary(rows)}

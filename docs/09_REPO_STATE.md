@@ -6446,3 +6446,123 @@ round adds for a read that stopped early. The audit label
 `latest modification held` (`scripts/audit_crm_funnel_truth.py`) reads
 `MAX(last_modified_at)` from the contact table, not the sync state, so it is
 unchanged.
+
+## PR-ADS-171D — the ad-set backfill works on a live account (November 2026)
+
+**Why.** The owner's first production ad-set backfill (2026-11-23, Render
+shell, account 944370805110952, USD, Asia/Amman) verified Jan 2025 – Oct 2026
+and then failed twice on November:
+
+1. `--level adset --from 2025-01-01` at 04:2x UTC:
+   `meta_adset_campaign_base_unverified`. The backfill ended at the account's
+   local yesterday (22 Nov); the campaign level was verified only through
+   21 Nov because the 06:00 UTC daily sync had not run. The whole month was
+   discarded.
+2. Rerun with `--to 2026-11-21`: `meta_adset_reconciliation_mismatch` —
+   21 Nov, campaign 6951621703494, fresh ad-set rows 61,320,000 micros against
+   the STORED campaign row 61,300,000 micros (read by the previous morning's
+   sync). Meta had restated the day by $0.02 between the two reads. The
+   backfill compared a live ad-set read with an older stored campaign read, so
+   any restatement inside Meta's adjustment window made a recent range
+   unloadable.
+
+**What changed.**
+
+* **A — live-to-live.** `services/meta_ads_spend_service.py::_backfill_adset_chunk`:
+  each ad-set month first re-reads the campaign level of the same account and
+  days through the existing `sync_chunk` (account-total reconciliation, the
+  atomic `replace_meta_campaign_spend_chunk`, its `MetaRestatementImplausible`
+  refusal — never with `--accept-zero-restatement`), then calls the unchanged
+  `meta_ads_adset_service.sync_adset_chunk`, which reconciles the ad sets to
+  the rows just stored. Tolerance unchanged (one minor unit). A re-read that
+  is not verified fails the ad-set month with the re-read's reason, requests
+  no ad set, stores no ad-set row, records a `failed` ad-set ledger row. The
+  re-read lives in the backfill, not in the ad-set service: that module and
+  the daily ad-set step still cannot write a campaign table (171C `test_28`).
+  Because the ad-set level now writes campaign rows, it handles the account
+  like the campaign backfill: stored through `refresh_account` (the identity
+  guard), and a failed account read recorded in `meta_ads_account_sync_state`.
+* **B — report the cut.** The end was already capped at the account's local
+  yesterday (the last day the campaign level can be verified); the first
+  production failure was the stale STORED campaign level, fixed by A. What B
+  adds: at `--level adset` an end later than that day is reported per
+  account where it is cut: `requested_to`,
+  `campaign_verifiable_through`, `stopped_at`, `stop_reason`
+  (`meta_adset_end_after_last_verifiable_day`), `stop_detail`. Days before it
+  are stored; no later day is read. Without `--level` nothing changed.
+* **C — lead type and attribution.** `config/thresholds.yaml`
+  `meta_ads.native_lead_action_type: "onsite_conversion.lead_grouped"`, on the
+  evidence recorded in `docs/53` §4 (the owner's statement that the ads use
+  native lead forms only, and five lead types with identical counts on every
+  row and month; Meta's definition of the type was not retrieved). The 171C
+  rules hold: published only for an account whose
+  stored rows carry that exact key; never summed. The read function now
+  returns `meta_reported_leads_attribution` (`{settings, rows_without_setting,
+  status, detail}`, from the stored `attribution_setting` column; `not_stored`
+  says so, nothing is inferred; `None` when withheld) and each row's
+  `attribution_setting_missing_rows`. Production observation recorded in
+  `docs/53`: `1d_view_7d_click` (2026-11-23).
+* **D — owner steps.** `docs/53` §10: no `--to`, `--resume` with the same
+  `--from`; a recent-day mismatch can no longer come from the script's timing,
+  and §10 lists exactly when a month can still fail (a restatement in the
+  seconds between the two reads; VERIFY 3/4; a failed campaign re-read).
+
+**The daily step was not affected, and is unchanged**: it reads the campaign
+level, then the ad sets of the same window, in one run
+(`test_08` asserts the call order and that a 2-cent restatement reconciles).
+
+**Shown failing first.** On c903091 (origin/main) the new modules fail 12 of
+13: the two production scenarios reproduce the production errors verbatim —
+`meta_adset_campaign_base_unverified` for 2026-11-01..2026-11-22 (`test_01`,
+`test_02`) and `meta_adset_reconciliation_mismatch` "first 2026-11-21 …
+ad-set rows 61320000 micros, campaign row 61300000 micros" (`test_03`).
+`test_08` (the daily step) passes there by design: it verifies the step was
+never affected. Mutations, each caught: the campaign re-read given the
+override (`test_05`); the ad-set read made after a failed re-read (`test_04`).
+
+**Existing tests changed** (contracts this PR deliberately reverses, nothing
+loosened): 171C `test_33` comment (the ad-set backfill now stores the account);
+171C `test_34` (a month without a stored campaign base now loads; the month
+stops where its campaign re-read fails, with that reason, nothing stored);
+171C PG `test_12` (the ad-set backfill writes campaign tables only as a
+campaign backfill of the same months would — asserted equal — and still no
+batch, sync_state or run); 171C `test_08` and PG `test_02` state the
+unconfigured lead type explicitly instead of relying on the shipped config.
+
+**Tests.** `tests/test_pr_ads_171d_meta_adset_backfill_pg_integration.py` (9,
+registered in the PostgreSQL step and its did-run list);
+`tests/test_pr_ads_171d_meta_adset_backfill.py` (4).
+
+**Full suite** (with the one documented baseline deselect): 6521 passed,
+1 skipped, 1 deselected, 0 failed. The 171A/171B/171C/171D modules: 411 passed.
+
+**Review round 1** (independent review: ship, no blocker; one commit on top).
+
+* m1 — the FX-partial step of `_backfill_adset_chunk` is now tested end to end
+  (`test_09`: GBP account, rates unavailable → chunk `partial`
+  `fx_rates_missing`, run `partial`, script exit 3, both ledgers `verified`).
+  Replacing the step with `if False:` fails it.
+* m2 — `docs/53` §6: the ad-set backfill advances the System page's "Meta Ads
+  spend" line (it reads the campaign coverage ledger), as the campaign
+  backfill already did; `sync_batches` / `sync_state` / `runs` do not move.
+* m3 — tripwire: for an account whose stored rows carry the configured type,
+  any stored row on which it differs from `lead` (or appears without it) makes
+  `meta_reported_leads` unavailable for that account
+  (`meta_lead_action_types_diverged`), adds a `config_problems` entry naming
+  the account, rows and first day, and sets
+  `accounts[].meta_reported_lead_types_diverged`
+  (`db/meta_ads_repository.py::fetch_meta_adset_spend`, same snapshot;
+  `services/meta_ads_adset_truth_service.py`). `test_10` (lead=5,
+  onsite_conversion.lead_grouped=3) fails on 8c90950. `docs/53` §4 and the
+  config comment now say the choice rests on the owner's statement and the
+  five identical counts only; Meta's definition was not retrieved.
+* m4 — stale text: the `--level` help; the §10 smoke example shows
+  `1d_view_7d_click`; "stop, don't fail" corrected everywhere — the end was
+  already capped at the account's local yesterday, 171D adds the reporting,
+  and the production failure was fixed by the campaign re-read.
+* m5 — `test_11`: a failed account read during an ad-set backfill is recorded
+  in `meta_ads_account_sync_state` exactly as the campaign backfill records
+  it (fails against c903091's account handling).
+
+Round 1 full suite (one baseline deselect): 6524 passed, 1 skipped,
+1 deselected, 0 failed.

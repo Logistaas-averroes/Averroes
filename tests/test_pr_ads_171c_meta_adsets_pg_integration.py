@@ -229,6 +229,9 @@ def test_01_the_two_production_accounts_at_both_levels(live_db, monkeypatch):
 
 def test_02_the_read_function_publishes_each_figure_with_its_status(
         live_db, monkeypatch):
+    # No action type configured — the shipped state until PR-ADS-171D, which
+    # set one (its own module asserts what the configured type publishes).
+    monkeypatch.setattr(adsets, "native_lead_action_type", lambda: None)
     graph = _pair()
     fakes.configure(monkeypatch, graph)
     _run()
@@ -650,27 +653,47 @@ def test_11_all_time_counts_from_the_first_campaign_day_not_the_first_adset_day(
     assert _by_adset(whole)[ADSET_A1]["spend"]["value"] == 97.34
 
 
-def test_12_an_adset_backfill_writes_only_the_adset_tables(live_db, monkeypatch):
+def test_12_an_adset_backfill_writes_campaign_tables_only_through_the_campaign_sync(
+        live_db, monkeypatch):
+    # PR-ADS-171D changed this contract. Under 171C the ad-set backfill wrote
+    # ONLY the two ad-set tables and a month without a stored campaign base
+    # failed `meta_adset_campaign_base_unverified`. Now each month re-reads
+    # its campaign level first through the campaign chunk sync (the same
+    # reconciliation, atomic replace and zero-restatement refusal), so the
+    # campaign tables change exactly as a campaign backfill of the same month
+    # would change them — and in no other way.
     graph = _pair()
     fakes.configure(monkeypatch, graph)
-    # A month whose campaign level is not verified has no base.
     out = meta.run_backfill(date(2026, 11, 1), None, now=NOW, level="adset",
                             account_ids=[OLD])
-    assert out["status"] == "failed"
-    assert out["reason"] == "meta_adset_campaign_base_unverified"
-    assert _rows(live_db) == []
-    assert q(live_db, "SELECT COUNT(*) FROM meta_ads_account") == [(0,)]
+    assert out["status"] == "success", out
+    assert len(_rows(live_db)) == 6
+    assert _ledger(live_db) == [(OLD, "2026-11-01", "2026-11-17", "verified", 6,
+                                 142_340_000, None, 1)]
+    # The account is stored as the campaign backfill stores it (identity
+    # guard); no account sync state is written on success.
+    assert q(live_db, "SELECT account_id, currency_code, time_zone_name "
+                      "FROM meta_ads_account") == [(OLD, "USD", "Asia/Amman")]
     assert q(live_db, "SELECT COUNT(*) FROM meta_ads_account_sync_state") == [(0,)]
-    assert _ledger(live_db) == [(OLD, "2026-11-01", "2026-11-17", "failed", 0, 0,
-                                 "meta_adset_campaign_base_unverified", None)]
 
+    # What the campaign side holds after an ad-set backfill is what a
+    # campaign backfill of the same months holds: same rows, same ledger.
+    def campaign_content():
+        return (q(live_db, "SELECT account_id, campaign_id, spend_date::text, "
+                           "cost_micros FROM meta_ads_campaign_daily_spend "
+                           "ORDER BY 1, 2, 3"),
+                q(live_db, "SELECT account_id, spend_date::text, cost_micros "
+                           "FROM meta_ads_account_daily_spend ORDER BY 1, 2"),
+                q(live_db, "SELECT account_id, chunk_start::text, chunk_end::text, "
+                           "status, rows_written, cost_micros_total "
+                           "FROM meta_ads_spend_coverage ORDER BY 1, 2, 3"))
     assert meta.run_backfill(date(2026, 10, 1), None, now=NOW)["status"] == "success"
-    before = _campaign_side(live_db)
+    before = campaign_content()
     plan = meta.run_backfill(date(2026, 10, 1), None, now=NOW, level="adset",
                              dry_run=True)
     assert [c["status"] for a in plan["accounts"] for c in a["chunks"]] == [
         "planned"] * 4
-    assert _rows(live_db) == [] and len(_ledger(live_db)) == 1
+    assert len(_ledger(live_db)) == 1
 
     out = meta.run_backfill(date(2026, 10, 1), None, now=NOW, level="adset")
     assert out["status"] == "success" and out["level"] == "adset"
@@ -678,10 +701,9 @@ def test_12_an_adset_backfill_writes_only_the_adset_tables(live_db, monkeypatch)
         (NEW, "2026-10-01", "2026-10-31", "verified", 0),
         (NEW, "2026-11-01", "2026-11-16", "verified", 0),
         (OLD, "2026-10-01", "2026-10-31", "verified", 0),
-        # The failed row of the first attempt is now verified: same bounds.
         (OLD, "2026-11-01", "2026-11-17", "verified", 6)]
-    # No campaign table, no batch, no sync_state, no run.
-    assert _campaign_side(live_db) == before
+    assert campaign_content() == before
+    # Still a backfill: no batch, no sync_state, no run.
     assert q(live_db, "SELECT COUNT(*) FROM sync_batches") == [(0,)]
     assert q(live_db, "SELECT COUNT(*) FROM sync_state") == [(0,)]
     assert q(live_db, "SELECT COUNT(*) FROM runs") == [(0,)]

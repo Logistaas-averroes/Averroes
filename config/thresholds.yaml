@@ -106,14 +106,19 @@ meta_ads:
                            HUF, IDR, ILS, INR, ISK, JPY, KRW, MXN, MYR, NOK,
                            NZD, PHP, PLN, RON, SEK, SGD, THB, TRY, USD, ZAR]
   # PR-ADS-171C — the ONE Insights `action_type` that counts native lead-form
-  # submissions, published as `meta_reported_leads`. Null on purpose: Meta's
-  # reference does not name it, and the lead action types overlap, so no type
-  # is assumed. While it is null the raw per-type counts are stored and
-  # `meta_reported_leads` is unavailable (`meta_lead_action_type_unverified`).
-  # Set it only after `python -m scripts.meta_ads_smoke_test --adsets` has
-  # shown which types these accounts emit (docs/53 §4). Never a list: the
-  # types are not summed.
-  native_lead_action_type: null
+  # submissions, published as `meta_reported_leads`. Never a list: the lead
+  # action types overlap and are never summed.
+  # PR-ADS-171D — set on production evidence (docs/53 §4, 2026-11-23): the
+  # ads use Meta native lead forms only, and Meta returned five lead types
+  # with IDENTICAL counts on every row and month (`lead`,
+  # `onsite_conversion.lead_grouped`, and three `offsite_*_add_meta_leads`).
+  # The choice rests on the owner's statement and those identical counts
+  # only; Meta's definition of the type was not retrieved. It publishes only
+  # for an account whose stored rows have carried this exact key on some day
+  # (otherwise `meta_lead_action_type_not_observed`, never 0), and is
+  # unavailable (`meta_lead_action_types_diverged`) for an account whose
+  # stored rows ever show it differing from `lead`.
+  native_lead_action_type: "onsite_conversion.lead_grouped"
 
 contact_reconciliation:
   # PR-ADS-163C — the daily check that removes contacts deleted or merged away

@@ -359,7 +359,14 @@ def test_07_overlapping_lead_types_are_kept_apart_and_never_added_up(
 
 
 def test_08_no_lead_type_is_published_until_one_is_confirmed(monkeypatch):
-    # The shipped configuration names no action type.
+    # No action type configured. (This was the shipped configuration until
+    # PR-ADS-171D set `onsite_conversion.lead_grouped` on production evidence;
+    # the shipped value is asserted in test_pr_ads_171d_meta_adset_backfill.)
+    for unset in (None, "", "  "):
+        monkeypatch.setattr(meta, "_config", lambda unset=unset: {
+            "meta_ads": {"native_lead_action_type": unset}})
+        assert adsets.native_lead_action_type() is None
+    monkeypatch.setattr(meta, "_config", lambda: {"meta_ads": {}})
     assert adsets.native_lead_action_type() is None
     row = {"rows_without_actions": 0,
            "meta_reported_lead_action_counts": {"lead": 4, "onsite_conversion.lead_grouped": 4}}
@@ -984,7 +991,10 @@ def test_33_an_adset_backfill_plans_resumes_and_takes_one_account(
         ("2026-11-01", "2026-11-17", "success")]
     assert chunks[1]["rows_written"] == 6
     assert graph.insight_calls("adset", NEW) == []
-    # It stored nothing about the account, wrote no sync state, opened no batch.
+    # It wrote no sync state and opened no batch. (Since PR-ADS-171D it
+    # stores the account as the campaign backfill does — the identity guard of
+    # refresh_account — because it now re-reads the campaign level; what Meta
+    # answered is what was already on record.)
     assert store.synced == sync_calls
     assert json.dumps(store.accounts, default=str) == stored_accounts
     assert store.batches == []
@@ -1010,20 +1020,37 @@ def test_33_an_adset_backfill_plans_resumes_and_takes_one_account(
     assert len(graph.insight_calls("adset", OLD)) == before + 1
 
 
-def test_34_an_adset_backfill_of_a_month_without_a_campaign_base_stops(
+def test_34_an_adset_backfill_stops_at_a_month_whose_campaign_re_read_fails(
         monkeypatch, store):
+    # PR-ADS-171D changed this contract. Under 171C a month whose campaign
+    # level was not ALREADY stored failed `meta_adset_campaign_base_unverified`
+    # (production, 2026-11-23: a whole November discarded for one day the
+    # daily sync had not yet read). Now each month re-reads its campaign level
+    # first, so a month with no stored campaign base loads ...
     graph = _pair()
     fakes.configure(monkeypatch, graph)
-    # Only November was backfilled at campaign level.
     meta.run_backfill(date(2026, 11, 1), None, now=NOW, account_ids=[OLD])
     out = meta.run_backfill(date(2026, 10, 1), None, now=NOW, level="adset",
                             account_ids=[OLD])
+    assert out["status"] == "success", out
+    assert [(c["chunk_start"], c["campaign_reread"]["coverage_status"])
+            for c in out["accounts"][0]["chunks"]] == [
+        ("2026-10-01", "verified"), ("2026-11-01", "verified")]
+    # ... and the month stops only where its campaign re-read fails: then with
+    # THAT reason, no ad set requested, nothing stored, the account stopped.
+    store.adset_replaced.clear()
+    graph.accounts[OLD].hidden.add((CAMPAIGN_B, "2026-11-17"))
+    fakes.configure(monkeypatch, graph)
+    calls = len(graph.insight_calls("adset", OLD))
+    out = meta.run_backfill(date(2026, 11, 1), None, now=NOW, level="adset",
+                            account_ids=[OLD])
     assert out["status"] == "failed"
-    assert out["reason"] == "meta_adset_campaign_base_unverified"
+    assert out["reason"] == "meta_reconciliation_mismatch"
     account = out["accounts"][0]
     assert [c["status"] for c in account["chunks"]] == ["failed"]   # stopped
+    assert len(graph.insight_calls("adset", OLD)) == calls
     assert store.adset_replaced == []
-    assert store.adset_failures[0]["error_code"] == "meta_adset_campaign_base_unverified"
+    assert store.adset_failures[-1]["error_code"] == "meta_reconciliation_mismatch"
     # The script maps the outcome to its exit code and passes the level on.
     from scripts import backfill_meta_ads_spend as script
     seen = {}
