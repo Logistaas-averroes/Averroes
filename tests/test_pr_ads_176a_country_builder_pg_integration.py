@@ -190,6 +190,11 @@ def test_01_b_the_dashboard_countries_payload_applies_the_same_rule(live_db, mon
         assert not re.search(r"\bfx\b", t, re.I), t
         assert not re.search(r"native[^.]*(still )?shown", t, re.I), t
     assert any("Pakistan" in t for t in texts if "period revenue" in t.lower()), texts
+    # Round 2, item 3: the evidence says the spend is UNKNOWN, not that it is
+    # non-zero. "Their spend is not $0" overclaims; "their $0 is not proven".
+    for t in texts:
+        assert "spend is not $0" not in t, t
+    assert any("$0 is not proven" in t for t in texts), texts
 
 
 def test_01_c_the_spend_metric_contract_names_the_zero_rule(live_db, monkeypatch):
@@ -662,6 +667,144 @@ def test_18_the_country_tables_print_unavailable_with_the_reason(tmp_path):
              "unavailable_reason": "spend_location_unresolved"}}}))
     assert "countries with spend withheld" in kpi.lower()
     assert "Country spend withheld — some spend in this window has no country" in kpi
+
+
+# ── truth audit, round 2 ─────────────────────────────────────────────────────
+def _card(st, user="admin"):
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app('_currentUser = {"username": "u", "role": "%s"}; '
+                    "renderCountrySpendUnreconciledState(%s)" % (user, json.dumps(st)))
+
+
+def _next_step(html):
+    return html.split("Next step:</strong>", 1)[1].split("</div>", 1)[0]
+
+
+def _cause(html):
+    return html.split("</h3>", 1)[1].split("</p>", 1)[0]
+
+
+def test_19_unreadable_campaign_spend_is_named_as_such(live_db, monkeypatch):
+    """Round 2, item 1. With canonical campaign spend unreadable the contract
+    falls to `spend_source = "geo_fallback"`, which the mart counted as
+    readable: the gap `campaign_spend_unreadable` was never emitted and the
+    card blamed accounts or currencies (`comparison_not_like_for_like`) — a
+    comparison nobody made, because there was no baseline to compare."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _sync(live_db)
+    from db import revenue_repository as repo
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend",
+                        lambda *a, **k: {"available": False})
+    st = json.loads(json.dumps(_mart()["spend_truth"], default=str))
+    assert "campaign_spend_unreadable" in st["country_gap_codes"]
+    assert st["country_gap_primary"] == "campaign_spend_unreadable"
+    html = _card(st)
+    for part in (_cause(html), _next_step(html)):
+        assert not re.search(r"account|currenc", part, re.I), part
+    assert "campaign spend" in _cause(html)
+
+
+def test_20_a_gap_a_run_fixes_offers_that_run(tmp_path):
+    """Round 2, item 2. (a) The account time zone is written by the Spend
+    Backfill: `account_time_zone_unknown` offers it. (b) A secondary gap that
+    a run fixes offers that run even when the primary gap offers none. The
+    cause and the next step stay the primary's."""
+    tz = {"country_spend_status": "unavailable",
+          "country_gap_codes": ["account_time_zone_unknown"],
+          "country_gap_primary": "account_time_zone_unknown",
+          "country_gap_message": "the account time zone is not on record"}
+    admin, viewer = _card(tz, "admin"), _card(tz, "viewer")
+    assert 'data-country-cta="run-spend-backfill"' in admin
+    assert 'data-country-cta="run-geo-sync"' not in admin
+    assert "Ask an admin to run Google Ads Spend Backfill" in viewer
+
+
+def test_20_b_a_secondary_gap_a_run_fixes_offers_that_run(tmp_path):
+    """Round 2, item 2(b): the primary gap offers no run; a secondary one
+    (never-synced geo coverage) is fixed by the Geo Sync."""
+    two = {"country_spend_status": "unavailable",
+           "country_gap_codes": ["comparison_not_like_for_like", "geo_coverage_incomplete"],
+           "country_gap_primary": "comparison_not_like_for_like",
+           "country_gap_message": "measured over different accounts or currencies"}
+    admin, viewer = _card(two, "admin"), _card(two, "viewer")
+    assert 'data-country-cta="run-geo-sync"' in admin
+    assert "Ask an admin to run Google Ads Geo Sync" in viewer
+    assert "different accounts or currencies" in _cause(admin)
+    assert "different accounts or currencies" in _next_step(admin)
+
+
+def test_21_a_gap_without_a_primary_never_falls_back_to_run_geo_sync(tmp_path):
+    """Round 2, item 4. A payload with gap codes (or a message) but no
+    `country_gap_primary` fell through to the "no geo spend yet — run the Geo
+    Sync" default: guidance invented from the absence of a field."""
+    for st in ({"country_spend_status": "unavailable",
+                "country_gap_codes": ["spend_not_reread_since_day_ended"]},
+               {"country_spend_status": "unavailable",
+                "country_gap_message": "the newest day was last synced in progress"}):
+        for user in ("admin", "viewer"):
+            html = _card(st, user)
+            step = _next_step(html)
+            assert step.strip().startswith("Open Revenue Health and review"), step
+            assert "run google ads geo sync" not in html.lower(), (st, user)
+            assert 'data-country-cta="run-' not in html
+
+
+def test_22_withheld_country_rows_carry_no_deal_list(live_db, monkeypatch):
+    """Round 2, item 5 (the MINOR 5 class). Before the morning sync the gate
+    withholds every country's deal count, and each row still carried
+    `deals: []` — an empty proof list reads as "no deals"."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _sync(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")
+    _before_the_morning_sync(live_db)
+    page = _dash()
+    uk = _dash_row(page, "GB")
+    assert uk["closed_won_deals"] is None
+    assert uk["deals"] is None
+
+
+def test_22_b_a_market_whose_deal_count_is_unknown_has_no_deal_list(live_db, monkeypatch):
+    """Item 5, the row builder: no deal sync state, every market's won-deal
+    count is withheld, and `_build_country_rows` still gave `deals: []`."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db)
+    _deal(live_db, "d-uk", "United Kingdom")
+    uk = _dash_row(_dash(), "GB")
+    assert uk["closed_won_deals"] is None
+    assert uk["deals"] is None
+
+
+def test_22_c_the_audit_flags_any_deal_list_beside_a_withheld_count():
+    from scripts import audit_customer_revenue_reader_cutover as audit
+    withheld = {"status": "unavailable", "value": None, "reason": "x"}
+    for row in ({"country": "UK", "closed_won_deals": None,
+                 "metrics": {"closed_won_deals": withheld}, "deals": []},
+                {"country": "UK", "closed_won_deals": None, "metrics": None,
+                 "deals": []}):
+        a = audit.Audit()
+        audit.page_leak_checks(a, "k", "page", {}, {"rows": [row]})
+        assert a.checks.get("withheld_not_reconstructable") is False, row
+    a = audit.Audit()
+    audit.page_leak_checks(a, "k", "page", {}, {"rows": [{
+        "country": "UK", "closed_won_deals": None, "metrics": None, "deals": None}]})
+    assert a.checks.get("withheld_not_reconstructable") is not False
+
+
+def test_22_d_the_drawer_says_withheld_for_a_null_deal_list(tmp_path):
+    """Item 5, the UI: `deals: null` must not crash and must not read "No
+    closed-won deals" (which says there are none)."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    html = _run_app("ctryDealBody(%s, %s)" % (
+        json.dumps({"deals": None, "closed_won_deals": None}),
+        json.dumps({"deal_proof_available": True})))
+    assert "withheld" in html.lower()
+    assert "No closed-won deals" not in html
+    html = _run_app("ctryDealBody(%s, %s)" % (
+        json.dumps({"deals": [], "closed_won_deals": 0}),
+        json.dumps({"deal_proof_available": True})))
+    assert "No closed-won deals" in html
 
 
 # ── the shared read fails closed ─────────────────────────────────────────────

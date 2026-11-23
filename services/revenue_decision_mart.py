@@ -239,7 +239,11 @@ def _spend_truth_block(core: dict) -> dict:
     country_spend_status, country_gap_codes = geo_gate.resolve_country_spend_status(
         reconciled=health.get("country_spend_reconciled"),
         residual_eligible=bool(health.get("country_residual_eligible")),
-        campaign_spend_readable=(health.get("spend_source") is not None),
+        # PR-ADS-176A round 2: "geo_fallback" is the contract's name for
+        # "canonical campaign spend could not be read" — the baseline is
+        # unreadable, never readable-because-a-fallback-exists.
+        campaign_spend_readable=(health.get("spend_source")
+                                 not in (None, "geo_fallback")),
         campaign_coverage_complete=(health.get("spend_coverage_status") == "complete"),
         fx_complete=(health.get("fx_coverage_status") == "complete"),
         # Read fail-CLOSED. These used to be `.get(key, True)` and

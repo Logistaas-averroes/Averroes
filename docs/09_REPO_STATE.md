@@ -6611,6 +6611,16 @@ one rule.
 * `deal_ids` is None beside a withheld count, and the audit checks it.
 * Withheld spend renders "Unavailable" with its reason.
 
+**Truth audit round 2** (`docs/58` §2, §6):
+
+* Unreadable canonical campaign spend now reads as `campaign_spend_unreadable`.
+  The gate omits "not like for like" when there is no baseline to compare.
+* Run buttons are the union over all gap codes, and the time-zone gap offers
+  the Spend Backfill.
+* A gap with no primary is reviewed, never "run the Geo Sync".
+* The zero-rule copy says "$0 is not proven".
+* A withheld population carries `deals: None`, and the audit flags `deals: []`.
+
 **Owner decisions 2026-11-23** for 176B: business windows with Current Quarter
 as the default, a strict spend gate, and no lead-quality columns. These are
 recorded in `docs/58` §3.
@@ -6627,7 +6637,9 @@ closed. Every truth-audit case fails on `98e0b5e`, except the guards 15 and
 * a `tests/conftest.py` autouse fixture restores `db.connection._pool` after
   every test, so PG fixtures no longer leak a pool over a stopped cluster;
 * 124 / 127 now assert the gap-driven CTA call
-  `roasCountryCtaButtons(guide.run)`.
+  `roasCountryCtaButtons(guide.run)`;
+* two 138 cases now assert `deals is None` beside a withheld count
+  (round 2).
 
 Details are in `docs/58` §6.
 

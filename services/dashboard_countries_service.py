@@ -637,7 +637,10 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             "status": status,
             "attribution_status": attribution_status,
             "top_campaign": m.get("top_campaign"),
-            "deals": (deals_by_key.get(key) or []) if key is not None else [],
+            # PR-ADS-176A round 2: no proof list beside a withheld deal count
+            # or a withheld population — None, never [] (which reads "none").
+            "deals": (None if (customers is None or m.get("deal_ids") is None)
+                      else (deals_by_key.get(key) or []) if key is not None else []),
             "is_residual": False,
             "target_page": "roas-countries",
         })
@@ -965,8 +968,8 @@ def _zero_withheld_text(kpis: dict) -> str | None:
     names = ", ".join(kpis.get("zero_withheld_countries") or []) or "A market"
     return (f"{names} had no Google Ads geo spend row in this window, and the window "
             "holds spend Google reported against a location no stored row names, "
-            "which may be theirs — so their spend is not $0, and the listed markets' "
-            "spend (native and USD) is withheld with it")
+            "which may be theirs — so their $0 is not proven, and the listed "
+            "markets' spend (native and USD) is withheld with it")
 
 
 def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
@@ -1446,7 +1449,7 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
     out_rows = []
     for r in rows or []:
         row = {**r, **{k: None for k in row_geo_figures},
-               "metrics": None, "deals": [], "period_ratio_available": False,
+               "metrics": None, "deals": None, "period_ratio_available": False,
                "status": STATUS_COUNTRY_FIGURES_WITHHELD,
                "withheld_reason": reason}
         if not keep_native:

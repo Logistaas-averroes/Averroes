@@ -6030,16 +6030,9 @@ function wireCtryDrawers(root, d) {
   const open = (i) => {
     const r = rows[i];
     if (!r) return;
-    const deals = r.deals || [];
-    const dealProofAvailable = d.deal_proof_available !== false;
     const dealHead = CTRY_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
-    // When the deal ledger is unavailable we cannot prove OR disprove deals — say
-    // Unavailable, never "No closed-won deals" (which would imply the country has none).
-    const dealBody = !dealProofAvailable
-      ? `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`
-      : deals.length
-        ? deals.map((deal) => `<tr>${CTRY_DEAL_COLUMNS.map(([key]) => `<td class="ctry-deal-td ctry-deal-td--${key}">${ctryDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
-        : `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this country in this window.</td></tr>`;
+    // deal_proof_available === false → "unavailable"; deals === null → withheld.
+    const dealBody = ctryDealBody(r, d);
 
     const links = [
       ["roas-countries", "Open Country Revenue & Spend"],
@@ -6096,6 +6089,23 @@ function wireCtryDrawers(root, d) {
       if (idx >= 0) open(idx);
     });
   });
+}
+
+function ctryDealBody(r, d) {
+  const n = CTRY_DEAL_COLUMNS.length;
+  const none = `<tr><td colspan="${n}" class="rev-breakdown-empty">No closed-won deals to prove this country in this window.</td></tr>`;
+  const noProof = `<tr><td colspan="${n}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`;
+  // The drawer's deal rows. When the deal ledger is unavailable we cannot prove
+  // OR disprove deals — say Unavailable, never "No closed-won deals" (which would
+  // imply the country has none). PR-ADS-176A round 2: `deals: null` is a
+  // withheld population (the row's deal count is withheld) — said as withheld.
+  if (d && d.deal_proof_available === false) return noProof;
+  if (!r || r.deals === null || r.deals === undefined) {
+    return `<tr><td colspan="${n}" class="dash-unavailable">Closed-won deals are withheld for this country in this window.</td></tr>`;
+  }
+  return r.deals.length
+    ? r.deals.map((deal) => `<tr>${CTRY_DEAL_COLUMNS.map(([key]) => `<td class="ctry-deal-td ctry-deal-td--${key}">${ctryDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
+    : none;
 }
 
 function renderCtryTruthFooter(d) {
@@ -18471,19 +18481,32 @@ const COUNTRY_GAP_RUN = {
   geo_coverage_incomplete: "geo", geo_coverage_has_failed_chunks: "geo",
   spend_reread_failed: "geo", missing_geo_dates: "geo", campaign_spend_without_geo: "geo",
   campaign_coverage_incomplete: "spend",
+  // Round 2: the Spend Backfill writes the account time zone.
+  account_time_zone_unknown: "spend",
 };
+const COUNTRY_GAP_REVIEW_STEP = "Open Revenue Health and review the Google Ads Geo Sync coverage for this window.";
 function countryGapNextStep(primary) {
   return primary ? (COUNTRY_GAP_NEXT_STEP[primary] || null) : null;
+}
+// Round 2: the runs ALL gap codes warrant ("none" adds nothing), so a
+// secondary gap a run fixes still offers it; cause and step stay the primary's.
+function countryGapRuns(codes) {
+  const runs = new Set((codes || []).map((c) => COUNTRY_GAP_RUN[c]).filter(Boolean));
+  if (runs.has("geo") && runs.has("spend")) return "all";
+  return runs.has("geo") ? "geo" : runs.has("spend") ? "spend" : "none";
 }
 // { nextStep, run } for an unavailable card; run is "all" | "geo" | "spend" | "none".
 function countryGapGuidance(st, isMismatch) {
   if (isMismatch) return { nextStep: "Open Revenue Health and review the Google Ads Geo Sync totals.", run: "all" };
   const primary = st.country_gap_primary || null;
+  const codes = Array.isArray(st.country_gap_codes) ? st.country_gap_codes : [];
   if (primary) {
-    return { nextStep: countryGapNextStep(primary)
-      || "Open Revenue Health and review the Google Ads Geo Sync coverage for this window.",
-      run: COUNTRY_GAP_RUN[primary] || "none" };
+    return { nextStep: countryGapNextStep(primary) || COUNTRY_GAP_REVIEW_STEP,
+      run: countryGapRuns([primary, ...codes]) };
   }
+  // Round 2: a gap the payload names without its primary is reviewed, never
+  // answered with the "no geo spend yet — run the Geo Sync" default (fail closed).
+  if (codes.length || st.country_gap_message) return { nextStep: COUNTRY_GAP_REVIEW_STEP, run: "none" };
   return { nextStep: "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.", run: "all" };
 }
 

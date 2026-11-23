@@ -1037,21 +1037,24 @@ def page_leak_checks(a: Audit, key: str, page: str, pub: dict, payload,
                     if _is_figure(d.get(sib)):
                         leaks.append(f"{path}.{sib}={d.get(sib)} beside a "
                                      f"{mm.get('status')} {m}")
-                if m == "closed_won_deals" and d.get("deals"):
-                    leaks.append(f"{path}.deals (proof list) beside a withheld "
-                                 "deal count")
+                # PR-ADS-176A round 2: ANY list — [] included, which says "no
+                # deals" — beside a withheld count is a leak.
+                if m == "closed_won_deals" and d.get("deals") is not None:
+                    leaks.append(f"{path}.deals={d.get('deals')!r} (proof list) "
+                                 "beside a withheld deal count")
                 # PR-ADS-176A truth audit MINOR 5: `deal_ids` is a proof list
                 # too. Beside a withheld count it is None — an empty list says
                 # "no deals", which nobody counted.
                 if m == "closed_won_deals" and d.get("deal_ids") is not None:
                     leaks.append(f"{path}.deal_ids={d.get('deal_ids')!r} (proof "
                                  "list) beside a withheld deal count")
-        if ("deal_ids" in d and d.get("deal_ids") is not None
-                and "closed_won_deals" in d and d.get("closed_won_deals") is None
-                and not isinstance(metrics.get("closed_won_deals"), dict)):
-            # A row withheld wholesale (no metrics block): same rule.
-            leaks.append(f"{path}.deal_ids={d.get('deal_ids')!r} beside a "
-                         "withheld deal count")
+        for proof in ("deal_ids", "deals"):
+            if (proof in d and d.get(proof) is not None
+                    and "closed_won_deals" in d and d.get("closed_won_deals") is None
+                    and not isinstance(metrics.get("closed_won_deals"), dict)):
+                # A row withheld wholesale (no metrics block): same rule.
+                leaks.append(f"{path}.{proof}={d.get(proof)!r} beside a "
+                             "withheld deal count")
         for fam in withheld:
             for k in _FAMILY_KEYS[fam]:
                 if _is_figure(d.get(k)):

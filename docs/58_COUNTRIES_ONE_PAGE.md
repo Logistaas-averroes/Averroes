@@ -66,7 +66,9 @@ The rule's effect on each surface:
   unknown and is withheld, with `kpis.verified_spend_reason` and
   `zero_withheld_countries`. The other figures follow:
   * The `unavailable` entries, the "Unavailable" decision card and the ratio
-    reason name the markets and the cause. Before the truth audit they said "FX
+    reason name the markets and the cause. They say "their $0 is not proven",
+    never "their spend is not $0": the evidence says the spend is unknown
+    (round 2). Before the truth audit they said "FX
     coverage is incomplete — native GBP spend is still shown", although FX
     was verified and native spend was withheld too.
   * `metric_truth.country_attributed_spend_usd` is `not_ready` with
@@ -123,6 +125,12 @@ row.
   now knows `deal_ids`. When any row's population is withheld,
   `country_revenue_disclosure` publishes no deal denominators (`None`, never
   `0`).
+* Round 2: a Dashboard row whose deal count or population is withheld carries
+  `deals: None`, never `[]`. This holds in `_build_country_rows` and in
+  `_withhold_when_geo_not_ready`. The audit's proof-list check flags any
+  non-None `deals` beside a withheld count, `[]` included. The drawer
+  (`ctryDealBody`) says "Closed-won deals are withheld", never "No closed-won
+  deals".
 
 ### 2.5 The Dashboard geo read is the configured account's
 
@@ -156,9 +164,25 @@ The mart's `spend_truth` now carries two fields:
   (`google_ads_geo_sync_service.primary_geo_gap`);
 * `country_gap_message`: that gap's sentence.
 
-`renderCountrySpendUnreconciledState` takes its cause, its next step
-(`COUNTRY_GAP_NEXT_STEP`) and its run buttons (`COUNTRY_GAP_RUN` →
-`roasCountryCtaButtons(run)`) from that one code. Before the truth audit, the
+`renderCountrySpendUnreconciledState` takes its cause and its next step
+(`COUNTRY_GAP_NEXT_STEP`) from that one code.
+
+The run buttons (`roasCountryCtaButtons(run)`) are the union of
+`COUNTRY_GAP_RUN` over every gap code, so a secondary gap that a run fixes
+still offers that run (round 2). For example,
+`[comparison_not_like_for_like, geo_coverage_incomplete]` offers the Geo
+Sync. `account_time_zone_unknown` offers the Spend Backfill, which writes the
+account time zone.
+
+A payload that names gaps without a primary gets "Open Revenue Health and
+review…" and no run. It never falls back to the "run the Geo Sync" default.
+
+Round 2 also fixes unreadable campaign spend. When canonical campaign spend is
+unreadable (`spend_source = "geo_fallback"`), the mart now counts it as
+unreadable. The gate no longer reports `comparison_not_like_for_like`
+without a readable baseline: with no baseline there is no comparison, so
+"not like for like" is not a finding. The PR-ADS-154B ranking is unchanged.
+Before this fix the card blamed accounts or currencies. Before the truth audit, the
 cause came from the full list and the next step from a subset, so
 `[campaign_coverage_incomplete, spend_not_reread_since_day_ended]` named
 campaign coverage and then said "Nothing to run". An admin also saw "Nothing
@@ -231,6 +255,8 @@ file is registered in the PG step and the did-run list.
   and passes on both. Case 10 fails when its `except` is mutated away.
 * The truth-audit round strengthened 01b and 09 and added 01c, 09b, 11–14, 16b,
   17a, 17b and 18. All of these fail on `98e0b5e`.
+* Round 2 strengthened 01b and added 19, 20a, 20b, 21 and 22a–d. All of these
+  fail on `122eb3e`.
 * Cases 15 and 16 guard claims that were already true at `98e0b5e`. Each fails
   under a mutation that removes its guard:
   * case 15 fails when the mart's or the Dashboard's withholding of
@@ -270,6 +296,17 @@ file is registered in the PG step and the did-run list.
   * 17a / 17b (MINOR 5): `deal_ids` is None beside a withheld count; the
     audit catches `[]`.
   * 18 (MINOR 6 / M3): the cells and the KPI, in the node harness.
+* Truth audit, round 2:
+  * 01b: no "spend is not $0".
+  * 19: unreadable campaign spend, on the real mart, with the rendered cause
+    and step.
+  * 20a / 20b: runs for the time-zone gap and for secondary gaps, as admin and
+    as viewer.
+  * 21: no primary means no "run the Geo Sync".
+  * 22 / 22b: `deals: None` when the geo gate withholds and when the ledger
+    is not current.
+  * 22c: the audit flags `deals: []`.
+  * 22d: the drawer renders a null deal list as withheld.
 
 Existing tests changed:
 
@@ -289,6 +326,10 @@ Existing tests changed:
   gap-independent CTA that MINOR 1 removes. Both now assert
   `roasCountryCtaButtons(guide.run)`. Their other assertions are unchanged,
   and the admin / non-admin copy they check is still there.
+* Round 2: `test_pr_ads_138::test_deal_ledger_unavailable_does_not_claim_no_deals`
+  and `test_pr_ads_138::test_167a_a_…_withholds` asserted `deals == []` beside
+  a withheld or unknown deal count. That is the defect of round-2 item 5, so
+  both now assert `None`.
 * `analysis/sql_doctrine_registry.py` now classifies the two new
   sub-item builders. Their `"sqls": "in_residual"` is a marker, not a count.
 * `tests/conftest.py` gains an autouse fixture, `_restore_db_pool`. It returns
