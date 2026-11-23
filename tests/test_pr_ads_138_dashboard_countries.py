@@ -175,7 +175,7 @@ def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=No
     monkeypatch.setattr(repo, "fetch_sync_state", lambda: {"available": True, "datasets": {}})
     monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: dict(canon))
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: dict(GEO_CANONICAL_TOTAL))
-    monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(geo))
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e, *_a, **_k: dict(geo))
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_geo_coverage",
@@ -683,7 +683,9 @@ def test_deal_ledger_unavailable_does_not_claim_no_deals(monkeypatch):
     assert _ctry(out, "US")["won_revenue_usd"] is None, "an outage is not $0"
     assert out["kpis"]["won_revenue_usd"] is None
     # No deals attached, but the drawer must say Unavailable, not "no deals".
-    assert _ctry(out, "US")["deals"] == []
+    # PR-ADS-176A round 2: and the payload carries no proof list at all beside
+    # the unknown count — None, not [] (which reads "no deals").
+    assert _ctry(out, "US")["deals"] is None
 
 
 def test_drawer_handles_deal_proof_unavailable():
@@ -948,7 +950,8 @@ def test_167a_a_an_open_window_ends_yesterday_and_before_the_morning_sync_withho
         for f in ("spend_native", "spend_usd", "won_revenue_usd", "closed_won_deals",
                   "customers", "sqls", "period_revenue_per_ad_spend"):
             assert c[f] is None, (c["country_code"], f, c[f])
-        assert c["deals"] == [] and c["metrics"] is None
+        # PR-ADS-176A round 2: a withheld population has no proof list (None).
+        assert c["deals"] is None and c["metrics"] is None
         assert c["withheld_reason"] == "spend_not_reread_since_day_ended"
     for f in ("spend_native", "spend_usd", "won_revenue_usd", "closed_won_deals", "sqls"):
         assert early["residual"][f] is None, f

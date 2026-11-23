@@ -878,7 +878,10 @@ RULES: list[dict] = [
     _r("ras", "services/revenue_attribution_service.py", CLS_MIXED, _RAS,
        symbol=["_build_db_rows", "_build_db_summary", "_build_from_db", "_finalize_row",
                "_geo_spend_only_residual_row", "_new_bucket", "_row_notes",
-               "build_revenue_attribution_audit", "classify_verdict", "build_revenue_attribution"]),
+               "build_revenue_attribution_audit", "classify_verdict", "build_revenue_attribution",
+               # PR-ADS-176A: the residual's outside-market sub-items say their
+               # SQLs are "in_residual" — a marker, never a per-country count.
+               "outside_market_items"]),
     _m("src.module", "services/source_attribution_service.py", CLS_MIXED, _SRC, ["contact_created_at_ref"]),
     _r("src", "services/source_attribution_service.py", CLS_MIXED, _SRC,
        symbol=["_finalize_channels", "_unavailable_revenue_by_source",
@@ -898,7 +901,9 @@ RULES: list[dict] = [
                "_build_residual", "_build_unavailable", "_country_status",
                "build_dashboard_countries", "_residual_gap",
                # PR-ADS-167A: withholds the row / residual SQL split with the KPIs.
-               "_withhold_when_geo_not_ready"]),
+               "_withhold_when_geo_not_ready",
+               # PR-ADS-176A: outside-market sub-items' SQLs are "in_residual".
+               "_outside_market_items"]),
     _m("rev.module", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV, ["contact_created_at_ref"]),
     _r("rev", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV,
        symbol=["_build_customer_trend", "_build_kpis", "_build_unavailable", "build_dashboard_revenue"]),

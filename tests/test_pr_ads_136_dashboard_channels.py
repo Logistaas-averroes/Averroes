@@ -209,7 +209,7 @@ def _patch_durable(monkeypatch, *, canonical=None, revenue_connected=True,
     monkeypatch.setattr(repo, "fetch_sync_state", lambda: {"available": True, "datasets": {}})
     monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: dict(canon))
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: dict(GEO_CANONICAL_TOTAL))
-    monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(GEO_BY_COUNTRY))
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e, *_a, **_k: dict(GEO_BY_COUNTRY))
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity",

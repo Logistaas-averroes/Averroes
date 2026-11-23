@@ -239,7 +239,11 @@ def _spend_truth_block(core: dict) -> dict:
     country_spend_status, country_gap_codes = geo_gate.resolve_country_spend_status(
         reconciled=health.get("country_spend_reconciled"),
         residual_eligible=bool(health.get("country_residual_eligible")),
-        campaign_spend_readable=(health.get("spend_source") is not None),
+        # PR-ADS-176A round 2: "geo_fallback" is the contract's name for
+        # "canonical campaign spend could not be read" — the baseline is
+        # unreadable, never readable-because-a-fallback-exists.
+        campaign_spend_readable=(health.get("spend_source")
+                                 not in (None, "geo_fallback")),
         campaign_coverage_complete=(health.get("spend_coverage_status") == "complete"),
         fx_complete=(health.get("fx_coverage_status") == "complete"),
         # Read fail-CLOSED. These used to be `.get(key, True)` and
@@ -282,6 +286,13 @@ def _spend_truth_block(core: dict) -> dict:
         # rather than only that the totals differ.
         "geo_coverage_status": health.get("geo_coverage_status"),
         "country_gap_codes": country_gap_codes,
+        # PR-ADS-176A: the operator sentence for those codes, from the geo
+        # gate's own messages, so a blocked card names THIS window's gap (the
+        # pre-morning-sync settle gap is not "no geo spend — run the sync").
+        "country_gap_message": geo_gate.describe_geo_gap(country_gap_codes),
+        # Truth audit MINOR 1: the gap that message is about — the card's next
+        # step and run button follow THIS code, never a different one.
+        "country_gap_primary": geo_gate.primary_geo_gap(country_gap_codes),
         "geo_coverage_missing_ranges": health.get("geo_coverage_missing_ranges") or [],
         "failed_geo_dates": health.get("failed_geo_dates") or [],
         "country_gap_reason": health.get("country_gap_reason"),
@@ -663,6 +674,8 @@ def _withhold_empty_settled_window(spend_truth: dict, summary: dict,
         "geo_coverage_status": "unavailable", "country_spend_status": "unavailable",
         "country_roas_unblockable": False, "country_gap_codes": [reason],
         "country_gap_reason": geo_gate.describe_geo_gap([reason]),
+        "country_gap_message": geo_gate.describe_geo_gap([reason]),
+        "country_gap_primary": geo_gate.primary_geo_gap([reason]),
     })
     readiness = {k: (False if k.endswith("_ready") else v)
                  for k, v in readiness.items()}
@@ -694,7 +707,10 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
         row = {**r, **{k: None for k in figures if k in r}, "metrics": None,
                "withheld_reason": reason}
         # PR-ADS-170A-F1: the residual row's spend parts are withheld with it.
-        for k in ("spend_components", "spend_geo_unassigned_usd"):
+        # PR-ADS-176A: so are its itemised outside-market countries, and every
+        # row's deal ids (a population is a figure).
+        for k in ("spend_components", "spend_geo_unassigned_usd",
+                  "outside_listed_market_items", "deal_ids"):
             if k in row:
                 row[k] = None
         if not fx_only:

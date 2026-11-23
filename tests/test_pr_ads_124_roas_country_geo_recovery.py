@@ -383,7 +383,7 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
         # by-country is the country ROW source.
         monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: geo_daily)
         monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_by_country",
-                            lambda s, e: _geo_by_country(geo_country))
+                            lambda s, e, *_a, **_k: _geo_by_country(geo_country))
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
 
@@ -609,7 +609,9 @@ def test_blocked_country_card_has_recovery_cta():
     end = JS.find("\nfunction ", start + 1)
     assert end != -1
     blocked = JS[start:end]
-    assert "roasCountryCtaButtons()" in blocked
+    # PR-ADS-176A truth audit MINOR 1: the card passes which runs its gap
+    # warrants (no run button when nothing should be run).
+    assert "roasCountryCtaButtons(guide.run)" in blocked
 
 
 def test_country_cta_navigates_and_runs_jobs():

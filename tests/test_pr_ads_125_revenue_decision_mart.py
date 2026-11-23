@@ -211,7 +211,7 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
         repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: dict(geo_tot),
     )
     monkeypatch.setattr(
-        repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(geo_country),
+        repo, "fetch_geo_daily_spend_by_country", lambda s, e, *_a, **_k: dict(geo_country),
     )
     monkeypatch.setattr(
         repo, "fetch_spend_coverage",

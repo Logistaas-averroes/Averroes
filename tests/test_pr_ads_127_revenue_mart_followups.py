@@ -149,8 +149,9 @@ def test_country_card_copy_branches_on_status():
     assert "does not reconcile" in fn
     # No-geo wording (nothing to reconcile yet — run the geo sync).
     assert "no canonical Google Ads geo" in fn
-    # Both still surface the recovery CTA.
-    assert "roasCountryCtaButtons()" in fn
+    # Both still surface the recovery CTA. PR-ADS-176A truth audit MINOR 1:
+    # it is told which runs the card's gap warrants.
+    assert "roasCountryCtaButtons(guide.run)" in fn
 
 
 def test_country_call_site_passes_status():

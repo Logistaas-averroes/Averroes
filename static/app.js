@@ -5471,9 +5471,10 @@ let dashCountriesStatus = "loading";
 // Country status → colour + dot class (market map bubbles + badges).
 const CTRY_STATUS_META = {
   "Revenue proven": { color: "#22b07d", dot: "ctry-dot--proven" },
-  "Customer proven": { color: "#3ac6a1", dot: "ctry-dot--customer" },
+  // PR-ADS-176A: computed from won DEALS, so the status no longer says "customer".
+  "Won deal, revenue not proven": { color: "#3ac6a1", dot: "ctry-dot--customer" },
   "SQL producer": { color: "#129ef5", dot: "ctry-dot--sql" },
-  "Spend without customer proof": { color: "#ff8a3d", dot: "ctry-dot--waste" },
+  "Spend without a won deal": { color: "#ff8a3d", dot: "ctry-dot--waste" },
   "FX unavailable": { color: "#8896a6", dot: "ctry-dot--muted" },
   "Geo attribution needs review": { color: "#7c5cff", dot: "ctry-dot--attr" },
   "No spend in window": { color: "#b6bfca", dot: "ctry-dot--muted" },
@@ -5485,9 +5486,9 @@ function ctryStatusColor(status) {
 
 const CTRY_NEXT_ACTION = {
   "Revenue proven": "Scale — open Country Revenue & Spend",
-  "Customer proven": "Confirm revenue attribution",
+  "Won deal, revenue not proven": "Confirm revenue attribution",
   "SQL producer": "Review SQL quality",
-  "Spend without customer proof": "Review — spend without proof",
+  "Spend without a won deal": "Review — spend without a won deal",
   "FX unavailable": "FX incomplete — USD spend and period ratio withheld",
   "Geo attribution needs review": "Open Revenue Health",
   "No spend in window": "No spend to judge",
@@ -5589,7 +5590,8 @@ function renderDashboardCountries() {
 // Native GBP spend cell (never a "$"), with USD appended only when FX-safe.
 function ctrySpendCell(row) {
   if (row.spend_native === null || row.spend_native === undefined) {
-    return '<span class="dash-unavailable">Unavailable</span>';
+    // PR-ADS-176A truth audit MINOR 6: Unavailable WITH the reason the row carries.
+    return countrySpendUnavailableHtml(row.spend_reason, "dash-unavailable");
   }
   const native = escapeHtml(fmtCompactCurrency(row.spend_native, row.native_currency || "GBP"));
   if (row.spend_usd !== null && row.spend_usd !== undefined) {
@@ -5692,7 +5694,7 @@ function renderCtryKpiRow(d) {
       value: (k.geo_period_revenue_per_ad_spend !== null && k.geo_period_revenue_per_ad_spend !== undefined)
         ? escapeHtml(fmtPeriodRatio(k.geo_period_revenue_per_ad_spend))
         : '<span class="dash-unavailable">Unavailable</span>',
-      sub: `${(k.countries_with_spend === null || k.countries_with_spend === undefined) ? "—" : fmtCount(k.countries_with_spend)} countries with spend · ${PERIOD_RATIO_DISCLOSURE}`,
+      sub: `${(k.countries_with_spend === null || k.countries_with_spend === undefined) ? "Countries with spend withheld" : `${fmtCount(k.countries_with_spend)} countries with spend`} · ${PERIOD_RATIO_DISCLOSURE}`,
       delta: dashDeltaChip("geo_period_revenue_per_ad_spend", pc),
       source: "Revenue closed this window ÷ this window's verified USD spend",
       ok: k.geo_period_revenue_per_ad_spend !== null && k.geo_period_revenue_per_ad_spend !== undefined,
@@ -6028,16 +6030,9 @@ function wireCtryDrawers(root, d) {
   const open = (i) => {
     const r = rows[i];
     if (!r) return;
-    const deals = r.deals || [];
-    const dealProofAvailable = d.deal_proof_available !== false;
     const dealHead = CTRY_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
-    // When the deal ledger is unavailable we cannot prove OR disprove deals — say
-    // Unavailable, never "No closed-won deals" (which would imply the country has none).
-    const dealBody = !dealProofAvailable
-      ? `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`
-      : deals.length
-        ? deals.map((deal) => `<tr>${CTRY_DEAL_COLUMNS.map(([key]) => `<td class="ctry-deal-td ctry-deal-td--${key}">${ctryDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
-        : `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this country in this window.</td></tr>`;
+    // deal_proof_available === false → "unavailable"; deals === null → withheld.
+    const dealBody = ctryDealBody(r, d);
 
     const links = [
       ["roas-countries", "Open Country Revenue & Spend"],
@@ -6094,6 +6089,23 @@ function wireCtryDrawers(root, d) {
       if (idx >= 0) open(idx);
     });
   });
+}
+
+function ctryDealBody(r, d) {
+  const n = CTRY_DEAL_COLUMNS.length;
+  const none = `<tr><td colspan="${n}" class="rev-breakdown-empty">No closed-won deals to prove this country in this window.</td></tr>`;
+  const noProof = `<tr><td colspan="${n}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`;
+  // The drawer's deal rows. When the deal ledger is unavailable we cannot prove
+  // OR disprove deals — say Unavailable, never "No closed-won deals" (which would
+  // imply the country has none). PR-ADS-176A round 2: `deals: null` is a
+  // withheld population (the row's deal count is withheld) — said as withheld.
+  if (d && d.deal_proof_available === false) return noProof;
+  if (!r || r.deals === null || r.deals === undefined) {
+    return `<tr><td colspan="${n}" class="dash-unavailable">Closed-won deals are withheld for this country in this window.</td></tr>`;
+  }
+  return r.deals.length
+    ? r.deals.map((deal) => `<tr>${CTRY_DEAL_COLUMNS.map(([key]) => `<td class="ctry-deal-td ctry-deal-td--${key}">${ctryDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
+    : none;
 }
 
 function renderCtryTruthFooter(d) {
@@ -10846,6 +10858,8 @@ const GEO_COVERAGE_REASONS = {
   geo_coverage_ledger_unreadable: "the record of which days were synced could not be read",
   geo_rows_unreadable: "the synced country spend could not be read",
   google_ads_customer_id_not_configured: "no Google Ads account is configured",
+  // PR-ADS-176A truth audit MINOR 3: the zero rule withheld a market's $0.
+  spend_location_unresolved: "some spend in this window has no country",
 };
 
 /**
@@ -18243,15 +18257,37 @@ function renderRoasCountrySafeEmptyState() {
 // to ask an admin — never a dead-end "run geo sync" with no button. Defined here
 // (function declarations hoist) so it never widens the renderRoasCountriesPage →
 // table region that other tests scan.
-function roasCountryCtaButtons() {
+// PR-ADS-176A truth audit MINOR 1: `run` ("all" default | "geo" | "spend" |
+// "none") — no run button, and no "ask an admin to run", when nothing should
+// be run.
+// PR-ADS-176A truth audit MINOR 6: a withheld country spend reads
+// "Unavailable" with its reason (GEO_ROW_SPEND_REASONS, the Countries page's
+// own wording) — never "—", which reads as nothing to show.
+function countrySpendUnavailableHtml(reason, cls) {
+  const why = reason ? (GEO_ROW_SPEND_REASONS[reason] || reason) : null;
+  return `<span class="${cls}"${why ? ` title="${escapeHtml(why)}"` : ""}>Unavailable${why ? ` — ${escapeHtml(why)}` : ""}</span>`;
+}
+
+function roasCountrySpendCell(r) {
+  return (r.spend === null || r.spend === undefined)
+    ? countrySpendUnavailableHtml(r.spend_reason, "td--na") : fmtMoney(r.spend);
+}
+
+function roasCountryCtaButtons(run) {
+  const openHealth = `<button type="button" class="btn btn--secondary" data-country-cta="open-health">Open Revenue Health</button>`;
+  const mode = run || "all";
   const isAdmin = _currentUser && _currentUser.role === "admin";
-  const runButtons = isAdmin
-    ? `<button type="button" class="btn btn--primary" data-country-cta="run-geo-sync">Run Google Ads Geo Sync</button>
-       <button type="button" class="btn btn--secondary" data-country-cta="run-spend-backfill">Run Google Ads Spend Backfill</button>`
+  const geoBtn = `<button type="button" class="btn btn--primary" data-country-cta="run-geo-sync">Run Google Ads Geo Sync</button>`;
+  const spendBtn = `<button type="button" class="btn btn--secondary" data-country-cta="run-spend-backfill">Run Google Ads Spend Backfill</button>`;
+  const ask = mode === "spend"
+    ? `<p class="revenue-footnote">Ask an admin to run Google Ads Spend Backfill from Revenue Health.</p>`
     : `<p class="revenue-footnote">Ask an admin to run Google Ads Geo Sync from Revenue Health.</p>`;
+  const runButtons = mode === "none" ? "" : !isAdmin ? ask
+    : mode === "geo" ? geoBtn : mode === "spend" ? spendBtn : `${geoBtn}
+       ${spendBtn}`;
   return `
     <div class="revenue-cta-actions">
-      <button type="button" class="btn btn--secondary" data-country-cta="open-health">Open Revenue Health</button>
+      ${openHealth}
       ${runButtons}
     </div>`;
 }
@@ -18416,16 +18452,77 @@ function renderCountryResidualWarning(spendTruth) {
 //   - "mismatch"    → geo spend exists but does NOT reconcile with canonical
 //                     campaign spend (review the Geo Sync mismatch totals).
 //   - "unavailable" → there is no canonical geo spend yet (run the Geo Sync).
+// PR-ADS-176A: the next step for an UNAVAILABLE country spend gate. Truth
+// audit MINOR 1: it follows ONE code — spend_truth.country_gap_primary, the gap
+// the server's country_gap_message describes (google_ads_geo_sync_service
+// primary_geo_gap) — so the cause, the next step and the run buttons never
+// name two different gaps. "Run …" is offered only where running fixes it;
+// before the morning sync the newest day is simply not re-read yet.
+const COUNTRY_GAP_NEXT_STEP = {
+  spend_not_reread_since_day_ended: "Nothing to run: the morning sync re-reads the newest day of this window. Re-check this page after it.",
+  window_includes_day_in_progress: "Nothing to run: choose a window that ends before today, or re-check after the morning sync.",
+  no_settled_day_in_window: "Nothing to run: no day of this window has ended yet. Re-check after the first morning sync in it.",
+  spend_reread_failed: "Re-run Google Ads Geo Sync in Revenue Health: the sync that should have re-read the newest day failed.",
+  account_time_zone_unknown: "Open Revenue Health: the Google Ads account time zone is not on record.",
+  geo_coverage_incomplete: "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.",
+  geo_coverage_has_failed_chunks: "Re-run Google Ads Geo Sync in Revenue Health for the failed range, then re-check this page.",
+  campaign_coverage_incomplete: "Run Google Ads Spend Backfill in Revenue Health for the missing range, then re-check this page.",
+  campaign_spend_unreadable: "Open Revenue Health: canonical campaign spend could not be read.",
+  geo_rows_unreadable: "Open Revenue Health: the synced country spend could not be read.",
+  geo_coverage_ledger_unreadable: "Open Revenue Health: the record of synced days could not be read.",
+  missing_geo_dates: "Re-run Google Ads Geo Sync in Revenue Health for the days with no geographic spend.",
+  campaign_spend_without_geo: "Re-run Google Ads Geo Sync in Revenue Health for the campaigns with no geographic spend.",
+  fx_coverage_incomplete: "Open Revenue Health and review FX coverage for this window.",
+  comparison_not_like_for_like: "Open Revenue Health: the campaign and geographic totals span different accounts or currencies.",
+  totals_differ: "Open Revenue Health and review the Google Ads Geo Sync totals.",
+};
+// Which run buttons a gap warrants ("geo" / "spend" / none).
+const COUNTRY_GAP_RUN = {
+  geo_coverage_incomplete: "geo", geo_coverage_has_failed_chunks: "geo",
+  spend_reread_failed: "geo", missing_geo_dates: "geo", campaign_spend_without_geo: "geo",
+  campaign_coverage_incomplete: "spend",
+  // Round 2: the Spend Backfill writes the account time zone.
+  account_time_zone_unknown: "spend",
+};
+const COUNTRY_GAP_REVIEW_STEP = "Open Revenue Health and review the Google Ads Geo Sync coverage for this window.";
+function countryGapNextStep(primary) {
+  return primary ? (COUNTRY_GAP_NEXT_STEP[primary] || null) : null;
+}
+// Round 2: the runs ALL gap codes warrant ("none" adds nothing), so a
+// secondary gap a run fixes still offers it; cause and step stay the primary's.
+function countryGapRuns(codes) {
+  const runs = new Set((codes || []).map((c) => COUNTRY_GAP_RUN[c]).filter(Boolean));
+  if (runs.has("geo") && runs.has("spend")) return "all";
+  return runs.has("geo") ? "geo" : runs.has("spend") ? "spend" : "none";
+}
+// { nextStep, run } for an unavailable card; run is "all" | "geo" | "spend" | "none".
+function countryGapGuidance(st, isMismatch) {
+  if (isMismatch) return { nextStep: "Open Revenue Health and review the Google Ads Geo Sync totals.", run: "all" };
+  const primary = st.country_gap_primary || null;
+  const codes = Array.isArray(st.country_gap_codes) ? st.country_gap_codes : [];
+  if (primary) {
+    return { nextStep: countryGapNextStep(primary) || COUNTRY_GAP_REVIEW_STEP,
+      run: countryGapRuns([primary, ...codes]) };
+  }
+  // Round 2: a gap the payload names without its primary is reviewed, never
+  // answered with the "no geo spend yet — run the Geo Sync" default (fail closed).
+  if (codes.length || st.country_gap_message) return { nextStep: COUNTRY_GAP_REVIEW_STEP, run: "none" };
+  return { nextStep: "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.", run: "all" };
+}
+
 function renderCountrySpendUnreconciledState(spendTruth) {
   const st = spendTruth || {};
   const status = st.country_spend_status;
   const isMismatch = status === "mismatch";
+  // PR-ADS-176A: name WHICH gap (spend_truth.country_gap_message / _codes);
+  // the "no geo spend yet" copy only when the payload names none.
+  const gapMessage = (!isMismatch && st.country_gap_message) ? String(st.country_gap_message) : null;
   const cause = isMismatch
     ? "Country geo spend exists, but it does not reconcile with canonical Google Ads campaign spend for this window."
-    : "There is no canonical Google Ads geo spend for this window yet, so country Period Revenue / Ad Spend cannot be computed safely.";
-  const nextStep = isMismatch
-    ? "Open Revenue Health and review the Google Ads Geo Sync totals."
-    : "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.";
+    : (gapMessage
+      || "There is no canonical Google Ads geo spend for this window yet, so country Period Revenue / Ad Spend cannot be computed safely.");
+  const guide = countryGapGuidance(st, isMismatch);
+  const nextStep = guide.nextStep;
   const chip = (label, value, ok) =>
     `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
        <span>${label}</span><strong>${escapeHtml(value)}</strong>
@@ -18465,7 +18562,7 @@ function renderCountrySpendUnreconciledState(spendTruth) {
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
       <h3>Country Period Revenue / Ad Spend is blocked</h3>
-      <p>${cause}</p>
+      <p>${escapeHtml(cause)}</p>
       ${totalsHtml}
       <div class="revenue-status-label">Current status</div>
       <div class="revenue-status-grid">
@@ -18475,7 +18572,7 @@ function renderCountrySpendUnreconciledState(spendTruth) {
       </div>
       ${rootCauseHtml}
       <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(effectiveNextStep)}</div>
-      ${roasCountryCtaButtons()}
+      ${roasCountryCtaButtons(guide.run)}
     </div>`;
 }
 
@@ -18533,7 +18630,7 @@ function renderRoasCountryTable(rows) {
     return `
     <tr>
       <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}${spendOwnerNote(r)}</td>
-      <td>${fmtMoney(r.spend)}</td>
+      <td>${roasCountrySpendCell(r)}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
       <td>${rowMetricHtml(r, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>

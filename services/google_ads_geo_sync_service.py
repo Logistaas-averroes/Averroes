@@ -906,7 +906,11 @@ def resolve_country_spend_status(*, reconciled, residual_eligible,
     residual eligibility rules are unchanged, and this only adds preconditions.
     """
     gaps: list = []
-    if not comparison_like_for_like:
+    # PR-ADS-176A round 2: "not like for like" is a statement about a
+    # comparison of two totals. With no readable campaign baseline there is no
+    # comparison (the contract then reports like-for-like False only because
+    # nothing was compared), so the finding is the unreadable baseline alone.
+    if not comparison_like_for_like and campaign_spend_readable:
         gaps.append(GEO_GAP_NOT_LIKE_FOR_LIKE)
     if not campaign_spend_readable:
         gaps.append(GEO_GAP_CAMPAIGN_SPEND_UNREADABLE)
@@ -1044,6 +1048,15 @@ _GEO_GAP_PRIORITY = (
     GEO_GAP_FX_COVERAGE_INCOMPLETE,
     GEO_GAP_TOTALS_DIFFER,
 )
+
+
+def primary_geo_gap(gap_codes) -> str | None:
+    """The ONE gap a card names, by repair priority (``_GEO_GAP_PRIORITY``),
+    or None. PR-ADS-176A truth audit MINOR 1: a blocked card's cause and next
+    step follow this code, so they cannot name two different gaps.
+    :func:`describe_geo_gap` is this code's message."""
+    codes = set(gap_codes or ())
+    return next((c for c in _GEO_GAP_PRIORITY if c in codes), None)
 
 
 def describe_geo_gap(gap_codes) -> str | None:
