@@ -10,6 +10,13 @@ This PR adds the data and its read function. **No page and no API route shows
 it yet** (PR-ADS-171B / 171D). It builds on `docs/52` (PR-ADS-171A) and
 changes none of its rules.
 
+**PR-ADS-171D** (2026-11-23) made the ad-set backfill work on the live
+account: each month re-reads its campaign level first and reconciles the ad
+sets to that live read (§3, §6), an end past the last verifiable day stops
+there instead of failing (§6), the native lead action type is set on
+production evidence (§4), and the attribution setting is reported beside the
+lead counts (§7). §10 is the corrected owner procedure.
+
 ---
 
 ## 1. What is read
@@ -124,9 +131,17 @@ This is the guard against an ad set the `level=adset` read leaves out (an
 archived or deleted one, if Meta does that — VERIFY 3): its spend would be in
 the campaign row and missing from the ad-set rows.
 
-**The reconciliation is against the STORED campaign rows**, not a fresh
-campaign read, so what is stored at the two levels agrees by construction at
-the moment of the write. It can stop agreeing later: the campaign level is
+**The reconciliation is against the STORED campaign rows**, so what is stored
+at the two levels agrees by construction at the moment of the write. Both
+callers make that stored row a fresh one: the daily step reads the ad sets
+right after the campaign step re-read the same window in the same run, and
+— since PR-ADS-171D — the backfill re-reads the campaign level of the same
+month immediately before the ad-set read (§6). Before 171D the backfill
+compared a live ad-set read with a campaign row stored by an EARLIER run, so
+any restatement inside Meta's adjustment window failed the month: on
+2026-11-23, 21 Nov of campaign 6951621703494 read 61,320,000 micros at
+ad-set level against a stored 61,300,000 (read the previous morning) — Meta
+had restated the day by $0.02. It can stop agreeing later: the campaign level is
 re-read every morning, and if that morning's ad-set read then fails, the
 ad-set rows still describe the previous campaign figures while their ledger
 row still says `verified`. So the read function re-checks, in the database,
@@ -178,10 +193,11 @@ types are hierarchical. So:
   reports as `lead = 3`, `leadgen_grouped = 3` and
   `onsite_conversion.lead_grouped = 3` is three leads, not nine.
 * **`meta_reported_leads` is unavailable**, with the reason
-  `meta_lead_action_type_unverified`, until one type is confirmed.
-  `config/thresholds.yaml` → `meta_ads.native_lead_action_type` is `null`.
-  When it is set to ONE action type, the read function publishes that type's
-  count and nothing else. It is never a list.
+  `meta_lead_action_type_unverified`, while no type is configured. When
+  `config/thresholds.yaml` → `meta_ads.native_lead_action_type` names ONE
+  action type, the read function publishes that type's count and nothing
+  else. It is never a list. **PR-ADS-171D set it to
+  `onsite_conversion.lead_grouped`** — see "The production evidence" below.
 * **A configured type is not thereby evidence** (review round 1). A type the
   sync never stores — one without `lead` in it, e.g. a custom conversion's
   `offsite_conversion.custom.<id>` — is refused: `meta_reported_leads` is
@@ -196,8 +212,44 @@ types are hierarchical. So:
   two accounts, the one that has never emitted the type is unavailable for
   its rows while the other publishes, and any future total over both must be
   unavailable too. `accounts[].meta_reported_leads_type_observed` says which.
-* **The open question for the owner** is in §10 step 2: the smoke test prints
-  which lead-related action types the production account really emits.
+* **The open question for the owner** was §10 step 2: which lead-related
+  action types the production account really emits. Answered on
+  2026-11-23 (below).
+
+### The production evidence (PR-ADS-171D, 2026-11-23)
+
+The owner's ad-set backfill of 2026-11-23 (account 944370805110952, USD,
+Asia/Amman, read from the real output on the Render shell) stored, on every
+row and in every month, **five lead action types with identical counts**:
+`lead`, `onsite_conversion.lead_grouped`,
+`offsite_complete_registration_add_meta_leads`,
+`offsite_content_view_add_meta_leads` and `offsite_search_add_meta_leads`
+(e.g. July 2026: 311 each; October 2026: 235 each). The ads use **Meta native
+lead forms only** (the owner's statement). Five types that never differ, on
+an account with one lead mechanism, are five names for one count — which is
+exactly why they are never added together (that would have published 1,555
+for July instead of 311).
+
+`onsite_conversion.lead_grouped` is the one chosen: it is Meta's on-Facebook
+lead counter — leads submitted on Meta's own (native) forms, what Ads
+Manager shows as on-Facebook leads — which is the only lead mechanism these
+ads use. The other four are wider or offsite-named families that happen to
+equal it here. This rests on the production observation above and the
+owner's statement about the forms; Meta's `AdsActionStats` reference, which
+would define the types, still could not be retrieved (above), so if the
+account ever adds website leads the choice must be revisited, not assumed.
+
+The 171C rules are unchanged: the configured type publishes **only for an
+account whose stored rows have carried that exact key on some day**
+(otherwise `meta_lead_action_type_not_observed`, never 0), one type's count
+only, and a day without `actions` withholds the range's figure.
+
+**Attribution, production observation (2026-11-23):** the same output
+reported `attribution_setting = 1d_view_7d_click` — one-day view, seven-day
+click. It is recorded here as an observation of that account on that day, not
+a constant: the read function reports what the stored rows carry
+(`meta_reported_leads_attribution`, §7), and says "not stored" when no row
+carries one.
 
 ### Unknown is not zero
 
@@ -278,22 +330,61 @@ The ad-set step fetches no rates and has no `partial` of its own for FX.
 ## 6. Backfill
 
 ```
-python -m scripts.backfill_meta_ads_spend --from 2026-04-01 --level adset
+python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset
 ```
 
 `--level adset` backfills the ad-set detail, month by month, per account,
-with the same `--dry-run`, `--resume`, `--account`, `--to` and
-`--accept-zero-restatement`. **Without `--level` the command does exactly
-what it did before.**
+with the same `--dry-run`, `--resume` and `--account`. **Without `--level`
+the command does exactly what it did before.**
 
-* **Run the campaign level first, for the same range.** A month whose campaign
-  level is not verified fails `meta_adset_campaign_base_unverified`, stores
-  nothing, and that account stops there.
-* It reads the account from Meta without storing it, and writes only the two
-  ad-set tables: no campaign row, no campaign ledger row, no account sync
-  state, no `sync_batches` row, no `runs` row.
+PR-ADS-171D changed how each month is loaded
+(`services/meta_ads_spend_service.py::_backfill_adset_chunk`):
+
+1. **The campaign level of the same account and days is re-read first**, in
+   the same run, through the campaign chunk sync of 171A (`sync_chunk`):
+   reconciled to the account-level total, replaced atomically, recorded in
+   the campaign ledger, and refused by `MetaRestatementImplausible` if it
+   would take a day with verified spend to zero. Nothing is bypassed.
+2. **Only if that re-read is `verified`** are the ad sets read and
+   reconciled per day and campaign (§3) — to the rows step 1 stored seconds
+   earlier. Live to live, at the same one-minor-unit tolerance.
+3. **A re-read that is not `verified` fails the ad-set month with the
+   re-read's own reason** (e.g. `meta_reconciliation_mismatch`,
+   `meta_restatement_implausible`): no ad set is requested, no ad-set row is
+   stored, a `failed` row goes to the ad-set ledger (never replacing a
+   verified one), and that account stops there. A re-read whose USD rates are
+   missing leaves the month verified and the run `partial`, as at campaign
+   level.
+
+**The end.** The last day the campaign level can be verified is the
+account's local yesterday — today is in progress and is never read. That is
+the default end. A `--to` later than it is cut at it and reported, per
+account: `requested_to`, `campaign_verifiable_through`, `stopped_at`,
+`stop_reason` (`meta_adset_end_after_last_verifiable_day`) and `stop_detail`.
+The days before it are stored normally; no day after it is read or stored.
+Before 171D the newest day of a month could be one the daily sync had not yet
+read (2026-11-23, 04:2x UTC: the end was 22 Nov, the campaign level stood at
+21 Nov), and the whole month failed `meta_adset_campaign_base_unverified`.
+
+* So the campaign backfill no longer has to run first, and `--to` is never
+  needed.
+* `--accept-zero-restatement` at `--level adset` lifts the refusal for
+  **ad-set rows only**. The campaign re-read never takes it: a campaign day
+  going to zero is accepted, if ever, by the campaign-level backfill with
+  that flag, after checking in Meta.
+* Because it now writes the campaign level, it handles the account exactly
+  as the campaign backfill does: it stores it through `refresh_account`,
+  which refuses a currency or zone change for an account with stored spend,
+  and an account read that fails is recorded in `meta_ads_account_sync_state`
+  as the campaign backfill records it. Like every backfill it writes no
+  `sync_batches` row, no `sync_state` and no `runs` row.
 * `--resume` skips a month the **ad-set** ledger holds `verified` with those
-  bounds. A verified campaign month does not make an ad-set month done.
+  bounds (and so re-reads nothing for it). A verified campaign month does
+  not make an ad-set month done.
+
+The daily step was never affected: it reads the campaign level and then the
+ad sets of the same window in one run, minutes apart
+(`test_pr_ads_171d_meta_adset_backfill_pg_integration.py::test_08`).
 
 ---
 
@@ -319,6 +410,14 @@ One row per account, campaign and ad set. Each figure is
 | `impressions`, `clicks` | the sum | any day's row does not carry the figure (`meta_count_missing_on_some_days`) |
 | `meta_reported_leads` | the count of the ONE configured action type; 0 only when that exact type is in the account's stored rows on some day | no type is configured (`meta_lead_action_type_unverified`); the type is one the sync never stores (`meta_lead_action_type_not_stored`); the account has never carried it (`meta_lead_action_type_not_observed`); or a day carried no `actions` (`meta_actions_missing_on_some_days`) |
 | `meta_reported_lead_actions` | `{action_type: count}`, flagged `overlapping_types` | a day carried no `actions` |
+| `attribution_settings`, `attribution_setting_missing_rows` | the distinct settings the row's stored days carry, and how many stored none | — (never inferred) |
+
+**`meta_reported_leads_attribution`** (PR-ADS-171D, payload metadata beside
+`native_lead_action_type`): `{settings, rows_without_setting, status,
+detail}` over the published rows, read from the stored `attribution_setting`
+column only. `status` is `stored`, `partly_stored`, `not_stored` (with
+`detail` "not stored: …" — no default is ever filled in) or `no_rows`. It is
+`None` when the breakdown is not published: withheld means absent.
 
 **Which accounts a range needs, through which day, and what a retirement
 declaration means are not re-implemented**: the function calls
@@ -391,9 +490,12 @@ the ad-set backfill does, and fails that month loudly with
    rounds each row, a campaign with many ad sets could differ by more.
 5. **Which `action_type` is the count of native lead-form submissions**, and
    which lead types this account emits at all (§4). Not answerable from
-   Meta's documentation.
+   Meta's documentation. *Answered by production observation on
+   2026-11-23: five identical types; `onsite_conversion.lead_grouped`
+   configured (§4).*
 6. `use_unified_attribution_setting=true` is accepted with `ads_read`, and
-   `attribution_setting` is returned at `level=adset`.
+   `attribution_setting` is returned at `level=adset`. *Observed on
+   2026-11-23: `1d_view_7d_click` (§4).*
 7. Whether a row always carries `impressions` and `clicks` (a missing one
    makes that figure unavailable for the range, never zero). The smoke test
    prints `Rows w/o clicks`.
@@ -406,9 +508,10 @@ the ad-set backfill does, and fails that month loudly with
    (`meta_malformed_response`), including that chunk's ad-set spend: loud,
    not wrong.
 10. Timing: the campaign read and the ad-set read are two requests seconds
-    apart. If Meta restates a recent day between them, that morning's ad-set
-    chunk fails reconciliation, the run is `partial`, and the next run
-    corrects it.
+    apart — in the daily step, and since PR-ADS-171D in the backfill too. If
+    Meta restates a recent day between them, that ad-set chunk fails
+    reconciliation (the daily run is `partial` and the next run corrects it;
+    a backfill month fails and a rerun corrects it).
 
 `docs/52` §9 items 1–14 are unchanged and still open as listed there.
 
@@ -470,27 +573,53 @@ the ad-set backfill does, and fails that month loudly with
      campaign rows: **do not backfill ad sets**; report it.
 
    It prints ids, never names, and never a token.
-3. **Backfill the ad sets**, after the campaign level is backfilled for the
-   same range (`docs/52` §10 step 4). **Use the SAME `--from` as the campaign
-   backfill** (the owner ran it with `--from 2025-01-01`). All-time ad-set
-   detail counts from each account's first verified CAMPAIGN day (§7), so a
-   later ad-set `--from` leaves all-time ad-set detail withheld
-   (`meta_adset_coverage_incomplete`) for good:
+3. **Backfill the ad sets** (corrected by PR-ADS-171D). **Use the SAME
+   `--from` as the campaign backfill** (the owner ran it with
+   `--from 2025-01-01`). All-time ad-set detail counts from each account's
+   first verified CAMPAIGN day (§7), so a later ad-set `--from` leaves
+   all-time ad-set detail withheld (`meta_adset_coverage_incomplete`) for
+   good. **Do not pass `--to`**, and it does not matter whether the morning
+   sync has run yet:
 
    ```
    python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset --dry-run
-   python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset
+   python -m scripts.backfill_meta_ads_spend --from 2025-01-01 --level adset --resume
    ```
 
+   `--resume` keeps the months already verified on 2026-11-23 (Jan 2025 –
+   Oct 2026) and loads the rest. Each month re-reads its campaign level
+   first, so the campaign backfill does not have to run first, and the end is
+   each account's local yesterday — the last day the campaign level can be
+   verified. (If a `--to` later than that is ever given, the run stops there
+   and prints `stopped_at` with the reason; that is not a failure.)
+
    Exit 0 = every month of both accounts verified at ad-set level. Re-run
-   with `--resume` after an interruption. A month that fails with
-   `meta_adset_campaign_base_unverified` needs the campaign backfill first; a
-   month that fails with `meta_adset_reconciliation_mismatch` names the day
-   and campaign id — report it (VERIFY 3 or 4).
-4. **Once the lead action type is confirmed**, set
-   `meta_ads.native_lead_action_type` in `config/thresholds.yaml` to that one
-   type. Until then `meta_reported_leads` stays unavailable and the raw types
-   are stored, so nothing has to be re-read when it is set.
+   with `--resume` after an interruption.
+
+   **A recent-day mismatch can no longer come from the script's timing.**
+   The 2026-11-23 failures (a month ending on a day the campaign level did
+   not yet hold; a campaign row stored the previous morning that Meta had
+   since restated by $0.02) cannot recur: the campaign level of every month
+   is read again seconds before its ad sets. A month still fails, and names
+   the day and campaign id, only when:
+
+   * Meta restates that day in the **seconds between** the month's campaign
+     re-read and its ad-set read — rerun with `--resume`;
+   * the ad-set rows really do not add up to the campaign rows — an ad set
+     `level=adset` leaves out (VERIFY 3) or per-row rounding (VERIFY 4):
+     `meta_adset_reconciliation_mismatch` on every rerun. Report it;
+   * the campaign re-read itself fails — the month fails with the campaign
+     level's reason (`meta_reconciliation_mismatch`,
+     `meta_restatement_implausible`, a Meta error). Report it; for
+     `meta_restatement_implausible` check in Meta first, then (only if the
+     day really has no spend) run the CAMPAIGN level with
+     `--accept-zero-restatement` for that range — the ad-set level never
+     overrides it.
+4. **Lead action type — done in PR-ADS-171D.** `meta_ads.native_lead_action_type`
+   in `config/thresholds.yaml` is `onsite_conversion.lead_grouped` (§4).
+   Nothing has to be re-read: the raw types were stored all along, and the
+   read function now publishes that one type's count for an account whose
+   stored rows carry it.
 
 ---
 
@@ -498,7 +627,13 @@ the ad-set backfill does, and fails that month loudly with
 
 * **`meta_reported_leads` is unavailable until one action type is confirmed.**
   Meta's documentation does not name it; guessing would publish a number
-  under a name it may not deserve.
+  under a name it may not deserve. *PR-ADS-171D: confirmed by production
+  observation — `onsite_conversion.lead_grouped` (§4).*
+* **The ad-set backfill re-reads the campaign level of each month** (PR-ADS-171D)
+  instead of trusting a campaign row from an earlier run, and stops at the
+  last verifiable day instead of failing the month. It therefore writes the
+  campaign tables — only through the campaign chunk sync, never with the
+  zero-restatement override.
 * **A row with no `actions` key is unknown, and one such row withholds the
   range's lead figures** (VERIFY 2).
 * **Lead-related means "the action type contains `lead`".** Whether a custom
@@ -511,9 +646,11 @@ the ad-set backfill does, and fails that month loudly with
   campaign dataset's status or proven-through date.
 * **One account short at ad-set level withholds the breakdown for every
   account.**
-* **Ad-set rows are reconciled to the stored campaign rows, and re-checked at
-  read time.** A morning on which Meta restates between the two reads leaves
-  the ad-set detail withheld for the affected range until the next run.
+* **Ad-set rows are reconciled to the stored campaign rows — read seconds
+  earlier in the same run, by the daily step and the backfill alike — and
+  re-checked at read time.** A morning on which Meta restates between the two
+  reads leaves the ad-set detail withheld for the affected range until the
+  next run.
 * **`clicks`, not `inline_link_clicks`** — the same figure the campaign rows
   hold.
 * **No name history** (§8).

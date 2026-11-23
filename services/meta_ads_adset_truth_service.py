@@ -143,6 +143,40 @@ def lead_metrics(row: dict, lead_type: str | None, *,
     return {"meta_reported_leads": leads, "meta_reported_lead_actions": raw}
 
 
+#: PR-ADS-171D. Whether the attribution setting the lead counts were
+#: computed under is on record for the published rows.
+ATTRIBUTION_STORED = "stored"
+ATTRIBUTION_PARTLY_STORED = "partly_stored"
+ATTRIBUTION_NOT_STORED = "not_stored"
+ATTRIBUTION_NO_ROWS = "no_rows"
+
+
+def attribution_summary(rows: list) -> dict:
+    """Pure. The attribution setting(s) behind ``meta_reported_leads``, read
+    from the stored rows only — never assumed, never a default.
+
+    ``settings``: the distinct stored values over ``rows``;
+    ``rows_without_setting``: stored day-rows that carry none; ``status``:
+    ``stored`` (every day-row carried one), ``partly_stored``, ``not_stored``
+    (none did — the setting is not on record) or ``no_rows``.
+    """
+    settings = sorted({s for r in rows or [] for s in r.get("attribution_settings") or []})
+    missing = sum(int(r.get("attribution_setting_missing_rows") or 0) for r in rows or [])
+    if not rows:
+        status = ATTRIBUTION_NO_ROWS
+    elif not settings:
+        status = ATTRIBUTION_NOT_STORED
+    elif missing:
+        status = ATTRIBUTION_PARTLY_STORED
+    else:
+        status = ATTRIBUTION_STORED
+    return {"settings": settings, "rows_without_setting": missing,
+            "status": status,
+            "detail": ("not stored: no stored ad-set row of this range carries "
+                       "an attribution setting" if status == ATTRIBUTION_NOT_STORED
+                       else None)}
+
+
 def _frame(start_date, end_date, settled, base) -> dict:
     return {
         "start_date": start_date.isoformat() if start_date else None,
@@ -168,7 +202,8 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
     """Meta ad-set figures over inclusive account-local days (``start_date``
     None for all time: each account from its first verified CAMPAIGN day).
 
-    ``{status, reason, detail, rows, accounts, native_lead_action_type, …}``.
+    ``{status, reason, detail, rows, accounts, native_lead_action_type,
+    meta_reported_leads_attribution, …}``.
     ``rows`` is empty unless ``status`` is ``published``; then it holds one
     entry per account, campaign and ad set with ``spend``, ``spend_usd``,
     ``impressions``, ``clicks``, ``meta_reported_leads`` and
@@ -196,8 +231,11 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                  "detail": LEAD_TYPE_NOT_STORED_DETAIL}]}
 
     def withheld(status, reason, detail=None, accounts=()):
+        # Withheld means absent: no attribution is reported for rows that are
+        # not published.
         return {**frame, "status": status, "reason": reason, "detail": detail,
-                "rows": [], "accounts": list(accounts)}
+                "rows": [], "accounts": list(accounts),
+                "meta_reported_leads_attribution": None}
 
     if base.get("state") not in campaign.PUBLISHING_STATES:
         unreadable = base.get("state") in (campaign.STATE_NOT_CONNECTED,
@@ -306,6 +344,8 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
                 "clicks": _metric(r.get("clicks"), REASON_COUNT_MISSING),
                 **lead_metrics(r, lead_type, type_observed=observed),
                 "attribution_settings": r.get("attribution_settings") or [],
+                "attribution_setting_missing_rows":
+                    int(r.get("attribution_setting_missing_rows") or 0),
             })
 
     if blocked is not None:
@@ -313,4 +353,7 @@ def build_meta_adset_breakdown_for_days(start_date, end_date, *,
         # an account out does not add up to the published campaign spend.
         return withheld(*blocked, accounts=accounts)
     return {**frame, "status": STATUS_PUBLISHED, "reason": None, "detail": None,
-            "rows": rows, "accounts": accounts}
+            "rows": rows, "accounts": accounts,
+            # PR-ADS-171D: the setting the published lead counts are under,
+            # from the stored rows ("not stored" when none carries one).
+            "meta_reported_leads_attribution": attribution_summary(rows)}

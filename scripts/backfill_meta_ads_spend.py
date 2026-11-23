@@ -26,17 +26,22 @@ no ads in a month is recorded as a verified zero in seconds.
                changes nothing. Pass this ONLY after checking in Meta that the
                day really has no spend. The daily sync has no such switch.
 
-``--level adset``  (PR-ADS-171C) Backfill the AD-SET detail instead: one row
-               per ad set per day — spend, impressions, clicks and Meta's own
-               lead-related action counts — reconciled per day and campaign to
-               the campaign rows ALREADY stored. Run the campaign level (the
-               default) for the same range first: a month whose campaign level
-               is not verified fails ``meta_adset_campaign_base_unverified``
-               and stores nothing. It writes only the two ad-set tables and
-               cannot change the campaign rows, their ledger or an account's
-               sync state. ``--dry-run``, ``--resume``, ``--account`` and
-               ``--to`` mean the same. Without ``--level`` this command does
-               exactly what it did before.
+``--level adset``  (PR-ADS-171C; PR-ADS-171D) Backfill the AD-SET detail
+               instead: one row per ad set per day — spend, impressions,
+               clicks and Meta's own lead-related action counts. Each month
+               first RE-READS the campaign level of the same days (the same
+               reconciliation, atomic replace and zero-restatement refusal as
+               the default level — never with ``--accept-zero-restatement``),
+               then reads the ad sets and reconciles them per day and campaign
+               to that live read. A month whose campaign re-read fails stops
+               with ITS reason and stores no ad-set row. ``--to`` is not
+               needed: the end is the account's local yesterday, the last day
+               the campaign level can be verified; a later ``--to`` stops
+               there and is reported (``stopped_at``), not failed. At this
+               level ``--accept-zero-restatement`` lifts the refusal for
+               ad-set rows only. ``--dry-run``, ``--resume`` and ``--account``
+               mean the same. Without ``--level`` this command does exactly
+               what it did before.
 
 An account stops at its first failed month; the others still run.
 

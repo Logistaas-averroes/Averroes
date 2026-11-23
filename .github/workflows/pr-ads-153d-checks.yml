@@ -130,6 +130,7 @@ jobs:
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
+            tests/test_pr_ads_171d_meta_adset_backfill_pg_integration.py \
             tests/test_pr_ads_171b_meta_on_channels_pg_integration.py \
             tests/test_pr_ads_169a_certification_memory.py \
             tests/test_pr_ads_172a_campaign_evidence_memory.py \
@@ -271,6 +272,13 @@ jobs:
                            # withholding ad-set rows that no longer sum to the
                            # campaign rows.
                            "tests.test_pr_ads_171c_meta_adsets_pg_integration",
+                           # PR-ADS-171D. The ad-set backfill on a live account:
+                           # each month re-reads its campaign level first and
+                           # reconciles live to live (the 2-cent restatement of
+                           # 2026-11-23), stops at the last verifiable day, a
+                           # failed or zeroing re-read stores nothing, and the
+                           # configured lead type publishes where observed.
+                           "tests.test_pr_ads_171d_meta_adset_backfill_pg_integration",
                            # PR-ADS-171B. The Meta Ads (spend) line over the
                            # real sync, store and truth: published, withheld
                            # with no figure left in it, not connected; and the

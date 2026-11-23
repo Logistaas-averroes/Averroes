@@ -393,6 +393,7 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
       rows carried none (unknown, not zero). The types overlap and are never
       added to each other;
     * ``attribution_settings`` — the distinct settings Meta returned;
+      ``attribution_setting_missing_rows`` — how many rows stored none;
     * ``adset_name`` / ``campaign_name`` — the newest stored label for the id
       (over the whole table, not only the range). Labels, never keys.
 
@@ -435,7 +436,8 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
                            MIN(s.spend_date), MAX(s.spend_date),
                            COUNT(DISTINCT s.currency_code),
                            MIN(s.currency_code),
-                           COUNT(*) FILTER (WHERE s.currency_code IS NULL)
+                           COUNT(*) FILTER (WHERE s.currency_code IS NULL),
+                           COUNT(*) FILTER (WHERE s.attribution_setting IS NULL)
                     FROM meta_ads_adset_daily_spend s {_FX_JOIN}
                     WHERE s.account_id = %s AND s.spend_date BETWEEN %s AND %s
                     GROUP BY s.campaign_id, s.adset_id
@@ -460,6 +462,9 @@ def fetch_meta_adset_spend(start: date, end: date, account_id: str, *,
                         "rows_without_actions": int(r[9] or 0),
                         "day_rows": total,
                         "attribution_settings": sorted(r[11] or []),
+                        # PR-ADS-171D: rows that stored no setting. A setting
+                        # is never inferred for them.
+                        "attribution_setting_missing_rows": int(r[17] or 0),
                         "first_day": _iso(r[12]), "last_day": _iso(r[13]),
                         "currency_code": r[15] if one_currency else None,
                         "meta_reported_lead_action_counts": {},

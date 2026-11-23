@@ -13,6 +13,11 @@ The campaign level stays the published base
   one minor unit (:func:`reconcile_adsets_to_campaigns`), and every day of the
   range is inside a ``verified`` campaign chunk. Otherwise the chunk fails and
   stores nothing.
+* Both callers make that stored row a LIVE one: the daily step runs right
+  after the campaign step re-read the same window, and the backfill
+  (PR-ADS-171D, ``meta_ads_spend_service._backfill_adset_chunk``) re-reads the
+  campaign level of the same days immediately before calling
+  :func:`sync_adset_chunk`. This module itself still writes no campaign table.
 * Nothing here writes a campaign table, the campaign ledger
   (``meta_ads_spend_coverage``) or ``meta_ads_account_sync_state``. A failed
   ad-set read leaves campaign truth exactly as it was and records a ``failed``
@@ -289,10 +294,10 @@ def native_lead_action_type() -> str | None:
     """``meta_ads.native_lead_action_type`` (config/thresholds.yaml), or None.
 
     The ONE Insights ``action_type`` that counts native lead-form submissions
-    for these accounts. It is null: Meta's reference does not name it, so no
-    type is published as "leads" until the owner's
-    ``meta_ads_smoke_test --adsets`` output shows which types these accounts
-    emit and the choice is confirmed (docs/53 §4). No default is assumed.
+    for these accounts. PR-ADS-171D set it to ``onsite_conversion.lead_grouped``
+    on the production evidence of 2026-11-23 (docs/53 §4). No default is
+    assumed here: a missing or empty value is None, and a configured type is
+    published only for an account whose stored rows have carried it.
     """
     from services import meta_ads_spend_service as meta  # noqa: PLC0415
     value = (meta._config().get("meta_ads") or {}).get("native_lead_action_type")

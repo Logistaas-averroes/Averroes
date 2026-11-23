@@ -533,10 +533,11 @@ META_AD_ACCOUNT_ID_2    = 944370805110952
    Re-run with `--resume` after an interruption. Exit 0 = every month of both
    accounts verified. (The backfill does not change the dataset's freshness;
    the next daily sync does.)
-4a. **Ad sets** (PR-ADS-171C), after the campaign backfill above:
+4a. **Ad sets** (PR-ADS-171C; corrected by PR-ADS-171D):
    `python -m scripts.meta_ads_smoke_test --adsets`, then
-   `python -m scripts.backfill_meta_ads_spend --from <day> --level adset`.
-   See `docs/53` §10 for the expected output and what to send back.
+   `python -m scripts.backfill_meta_ads_spend --from <the same day> --level adset`
+   (no `--to`; each month re-reads its campaign level first). See `docs/53`
+   §10 for the expected output and what to send back.
 5. **Check** the System page: the "Meta Ads spend" line should read
    `Complete through <date>` with one line per account, each on its own date.
    The 06:00 UTC sync keeps it current.
