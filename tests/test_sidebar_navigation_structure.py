@@ -48,11 +48,15 @@ NEW_VISIBLE_LABELS = [
 # Center", "Platform Evidence" and "CRM & Revenue" became "Overview",
 # "Google Ads" and "Sales Results" (the exact membership and order are pinned
 # in tests/test_pr_ads_162f_sidebar_groups.py).
+# PR-ADS-174A: the four groups were replaced by the six-item menu (pinned in
+# tests/test_pr_ads_174a_six_item_menu.py). These are its item labels.
 SIDEBAR_GROUPS = [
     "Overview",
-    "Google Ads",
-    "Sales Results",
-    "Admin",
+    "Channels",
+    "Campaigns",
+    "Countries",
+    "Pipeline",
+    "System",
 ]
 
 REQUIRED_ADMIN_IDS = [
@@ -83,9 +87,10 @@ def test_no_duplicate_route_keys():
 
 
 def test_sidebar_groups_exist():
-    """Section group labels must exist in the sidebar."""
-    for label in SIDEBAR_GROUPS:
-        assert label in HTML, f"Missing sidebar group label: {label}"
+    """The menu item labels must exist in the sidebar, in order."""
+    sidebar = re.search(r'<nav id="sidebar".*?</nav>', HTML, re.DOTALL).group(0)
+    labels = re.findall(r'<span class="nav-item__label">([^<]+)</span>', sidebar)
+    assert labels[:len(SIDEBAR_GROUPS)] == SIDEBAR_GROUPS, labels
 
 
 def test_new_visible_labels_exist():
@@ -124,9 +129,12 @@ def test_old_duplicate_menu_items_removed():
 
 
 def test_revenue_attribution_section_exists():
-    """The revenue section must exist in the sidebar (PR-ADS-162F: it is
-    labelled "Sales Results"; it was "CRM & Revenue")."""
-    assert ">Sales Results</li>" in HTML
+    """The revenue pages must be reachable from the menu. PR-ADS-162F labelled
+    the group "Sales Results" (it was "CRM & Revenue"); PR-ADS-174A put each
+    Revenue & Spend page in the strip of the item it is about."""
+    assert 'data-section="campaigns"' in HTML and 'data-section="countries"' in HTML
+    assert 'data-page="roas-campaigns"' in HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
+    assert 'data-page="roas-countries"' in HTML.split('data-section="countries"')[1].split("</nav>")[0]
 
 
 def test_roas_pages_exist():
@@ -203,10 +211,13 @@ def test_country_roas_estimate_warning_removed():
 
 
 def test_section_labels_are_non_clickable():
-    """Section labels should use the sidebar__section-label class."""
+    """PR-ADS-174A: the six-item menu has no section labels (it had four,
+    using the sidebar__section-label class); every sidebar entry is a link."""
     sidebar_match = re.search(
         r'<nav id="sidebar".*?</nav>', HTML, re.DOTALL
     )
     assert sidebar_match
     sidebar = sidebar_match.group(0)
-    assert 'class="sidebar__section-label"' in sidebar
+    assert 'class="sidebar__section-label"' not in sidebar
+    items = sidebar[sidebar.index('<ul class="sidebar__nav"'):sidebar.index("</ul>")]
+    assert items.count("<li>") == 6 == items.count('<a class="nav-item"')

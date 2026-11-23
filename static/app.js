@@ -42,6 +42,30 @@ const RETIRED_PAGE_REDIRECTS = {
   "revenue-by-source": { page: "channels" },
 };
 
+// PR-ADS-174A: the six-item menu. Every page id in PAGES belongs to exactly one
+// item (a retired key through its redirect); an item opens its first page the
+// viewer may see, and an item with more than one page shows them as the tab
+// strip at the top of the page (#section-tabs-bar). Admin gating is NOT decided
+// here: showApp() hides the admin-only tabs exactly as it hid their sidebar
+// entries, and applyNavGating() reads those tabs back.
+const NAV_ITEMS = [
+  { id: "overview", label: "Overview", pages: ["dashboard"] },
+  { id: "channels", label: "Channels", pages: ["channels"] },
+  { id: "campaigns", label: "Campaigns", pages: ["campaigns", "roas-campaigns", "keywords", "search-terms"] },
+  { id: "countries", label: "Countries", pages: ["geo", "roas-countries"] },
+  { id: "pipeline", label: "Pipeline", pages: ["leads", "deals"] },
+  { id: "system", label: "System", pages: ["system", "scheduler", "health", "revenue-health", "backfill", "gclid-attribution"] },
+];
+
+// The menu item a page belongs to. A retired key or a hash alias is resolved
+// to the page it lands on first, so the highlighted item is the destination's.
+function navItemForPage(page) {
+  const retired = RETIRED_PAGE_REDIRECTS[page];
+  const canonical = retired ? retired.page : (HASH_ROUTE_ALIASES[page] || page);
+  const item = NAV_ITEMS.find((it) => it.pages.includes(canonical));
+  return item ? item.id : null;
+}
+
 // PR-ADS-110/113: Revenue & Attribution pages. These use business-revenue
 // windows (not ad-style 7d/14d/30d/60d) and a clean readiness model — the global
 // ad-window bar, monitoring warning, help/explanation blocks, and any
@@ -1151,6 +1175,9 @@ function showApp(user) {
   // Show/hide Revenue Health nav item (admin-only — PR-ADS-113)
   const revenueHealthNav = document.getElementById("nav-revenue-health-item");
   if (revenueHealthNav) revenueHealthNav.hidden = user.role !== "admin";
+  // PR-ADS-174A: each menu item opens the first page this viewer may see, and
+  // an item with no such page is not shown.
+  applyNavGating();
   // PR-ADS-124: apply chrome immediately from the URL so revenue pages never
   // flash the ad-window bar / monitoring banner before the first navigate().
   applyPageChrome(hashToPage(window.location.hash));
@@ -1428,19 +1455,15 @@ function navigate(page, options) {
     helpBtn.dataset.page = page;
   }
 
-  // Update active nav item
-  document.querySelectorAll(".nav-item").forEach((el) => {
-    el.classList.toggle("active", el.dataset.page === page);
-  });
+  // Update active nav item: the menu item for any of its pages (PR-ADS-174A),
+  // and the page's own tab in that item's strip.
+  renderNavActive(page);
 
   _currentPage = page;
 
   // PR-ADS-124: re-assert chrome after _currentPage is set so any loader that
   // keys off _currentPage (e.g. loadMonitoringStatus) lands on the right state.
   applyPageChrome(page);
-
-  // PR-ADS-162C: never highlight an item inside a collapsed Advanced group.
-  if (ADVANCED_ADMIN_PAGES.includes(page)) setAdvancedNavOpen(true);
 
   // Update URL hash
   if (updateHash) {
@@ -9788,18 +9811,57 @@ async function loadChannels() {
 // one the daily job stored; a verdict that is missing or old is "not checked",
 // never a pass. Every unknown state renders as a warning, never as healthy.
 
-const ADVANCED_ADMIN_PAGES = ["scheduler", "gclid-attribution", "health", "revenue-health", "backfill"];
-
 // The System page is admin-only: navigate() sends anyone else to the Dashboard.
 function adminOnlyDenied(page) {
   return page === "system" && !(_currentUser && _currentUser.role === "admin");
 }
 
-function setAdvancedNavOpen(open) {
-  const nav = document.querySelector(".sidebar__nav");
-  const btn = document.getElementById("nav-advanced-toggle");
-  if (nav) nav.classList.toggle("sidebar__nav--advanced-open", !!open);
-  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+// ── Menu (PR-ADS-174A) ──────────────────────────────────────────────────────
+
+// The pages of a menu item this viewer may open, in menu order. A page's tab
+// hidden by showApp() (the admin-only pages) is not one of them.
+function navVisiblePages(item) {
+  return item.pages.filter((p) => {
+    const tab = document.querySelector(`.section-tab[data-page="${p}"]`);
+    return !(tab && tab.hidden);
+  });
+}
+
+function applyNavGating() {
+  NAV_ITEMS.forEach((item) => {
+    const link = document.querySelector(`.nav-item[data-nav-item="${item.id}"]`);
+    if (!link) return;
+    const visible = navVisiblePages(item);
+    link.dataset.page = visible.length ? visible[0] : item.pages[0];
+    const li = link.closest("li");
+    if (li) li.hidden = visible.length === 0;
+  });
+  if (_currentPage) renderNavActive(_currentPage);
+}
+
+function renderNavActive(page) {
+  const itemId = navItemForPage(page);
+  document.querySelectorAll(".nav-item[data-nav-item]").forEach((el) => {
+    const on = el.dataset.navItem === itemId;
+    el.classList.toggle("active", on);
+    if (on) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  });
+  let stripShown = false;
+  document.querySelectorAll(".section-tabs[data-section]").forEach((strip) => {
+    const item = NAV_ITEMS.find((it) => it.id === strip.dataset.section);
+    const show = !!item && item.id === itemId && navVisiblePages(item).length > 1;
+    strip.hidden = !show;
+    if (show) stripShown = true;
+  });
+  document.querySelectorAll(".section-tab[data-page]").forEach((tab) => {
+    const on = tab.dataset.page === page;
+    tab.classList.toggle("is-active", on);
+    if (on) tab.setAttribute("aria-current", "page");
+    else tab.removeAttribute("aria-current");
+  });
+  const bar = document.getElementById("section-tabs-bar");
+  if (bar) bar.hidden = !stripShown;
 }
 
 // What each daily check proves, in plain words — and no more than it proves.
@@ -16420,6 +16482,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
+  // Wire up the section tab strips (PR-ADS-174A). They are links, so Enter
+  // activates them natively; the click is routed through navigate().
+  document.querySelectorAll(".section-tab[data-page]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      navigate(el.dataset.page, { updateHash: true });
+    });
+  });
+
   // Hash routing: listen for back/forward navigation
   window.addEventListener("hashchange", () => {
     const page = hashToPage(window.location.hash);
@@ -16606,7 +16677,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     revHealthWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-  // Wire up the System page and the Advanced tools group (PR-ADS-162C)
+  // Wire up the System page (PR-ADS-162C)
   const systemRefresh = document.getElementById("system-refresh-btn");
   if (systemRefresh) systemRefresh.addEventListener("click", loadSystem);
   const systemBody = document.getElementById("system-body");
@@ -16615,11 +16686,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!el) return;
     e.preventDefault();
     navigate(el.dataset.systemGoto, { updateHash: true });
-  });
-  const advancedToggle = document.getElementById("nav-advanced-toggle");
-  if (advancedToggle) advancedToggle.addEventListener("click", () => {
-    const nav = document.querySelector(".sidebar__nav");
-    setAdvancedNavOpen(!(nav && nav.classList.contains("sidebar__nav--advanced-open")));
   });
 
   // Wire up Channels controls (PR-ADS-162A acquisition windows; PR-ADS-162I

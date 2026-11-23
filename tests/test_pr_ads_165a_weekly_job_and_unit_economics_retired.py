@@ -1155,12 +1155,17 @@ def test_19_every_sidebar_page_is_still_routable():
     # Every page section still present has a route (no orphaned markup).
     sections = set(re.findall(r'<section id="page-([a-z0-9-]+)"', HTML))
     assert sections <= pages, sorted(sections - pages)
-    # The group it left keeps its other entries, in order.
-    sidebar = HTML[HTML.index('<ul class="sidebar__nav" role="list">'):]
-    sales = sidebar.split(">Sales Results</li>")[1].split(
-        'class="sidebar__section-label"')[0]
-    assert re.findall(r'data-page="([a-z0-9-]+)"', sales) == [
-        "leads", "deals", "roas-campaigns", "roas-countries"]  # PR-ADS-168B
+    # The group it left keeps its other entries. PR-ADS-174A split the Sales
+    # Results group ([leads, deals, roas-campaigns, roas-countries]) across the
+    # six-item menu: Pipeline holds leads and deals, and each Revenue & Spend
+    # page sits with its evidence page.
+    def strip(item):
+        body = HTML.split(f'data-section="{item}"')[1].split("</nav>")[0]
+        return re.findall(r'data-page="([a-z0-9-]+)"', body)
+    assert strip("pipeline") == ["leads", "deals"]
+    assert "roas-campaigns" in strip("campaigns")
+    assert "roas-countries" in strip("countries")
+    assert "unit-economics" not in HTML
     # The loader switch lost exactly one case: every page it loaded before
     # this slice, bar Unit Economics, is still loaded by it.
     switch = JS.split("function loadPage(")[1].split("\n}\n")[0]

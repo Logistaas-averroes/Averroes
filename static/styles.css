@@ -317,14 +317,6 @@ a {
   margin-top: var(--space-2) !important;
 }
 
-.nav-item.nav-item--admin {
-  color: rgba(236, 244, 255, 0.5);
-}
-
-.nav-item.nav-item--admin:hover {
-  color: rgba(236, 244, 255, 0.8);
-}
-
 .nav-item {
   display: flex;
   align-items: center;
@@ -5575,6 +5567,47 @@ body.is-revenue-page #monitoring-banner {
   opacity: 0.55;
 }
 
+/* ── Section tab strip (PR-ADS-174A) ─────────────────────────────────────
+   The pages of a menu item with more than one page, at the top of the page,
+   in the Dashboard tab style above. They wrap rather than scroll, so a phone
+   reaches every page without horizontal scrolling. */
+.section-tabs-bar {
+  padding: var(--space-6) var(--space-8) 0;
+  max-width: 1200px;
+}
+.section-tabs-bar:not([hidden]) ~ .page {
+  padding-top: var(--space-5);
+}
+.section-tabs {
+  flex-wrap: wrap;
+  overflow-x: visible;
+  margin: 0;
+}
+.section-tabs[hidden] {
+  display: none;
+}
+.section-tab {
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.section-tab[hidden] {
+  display: none;
+}
+.section-tab:hover:not(.is-active) {
+  border-color: var(--brand-sky-accent);
+  color: var(--text-primary);
+}
+.section-tab:focus-visible {
+  outline: 2px solid var(--brand-sky-accent);
+  outline-offset: 2px;
+}
+@media (max-width: 768px) {
+  .section-tabs-bar {
+    padding: var(--space-5) var(--space-4) 0;
+  }
+}
+
 /* ── Command bar: truth chips + business window controls ────────────────── */
 .dash-command-bar {
   display: flex;
@@ -7322,13 +7355,7 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 }
 .channel-funnel-note { color: var(--text-muted); padding: var(--space-4) var(--space-5); margin: 0; font-size: 0.9em; }
 
-/* ── System page + Advanced tools group (PR-ADS-162C) ──────────────────── */
-.sidebar__nav .nav-advanced { display: none; }
-.sidebar__nav.sidebar__nav--advanced-open .nav-advanced { display: list-item; }
-.sidebar__nav.sidebar__nav--advanced-open .nav-advanced[hidden] { display: none; }
-.nav-advanced-toggle { width: 100%; background: none; border-top: 0; border-right: 0; border-bottom: 0; font: inherit; text-align: left; cursor: pointer; }
-.nav-advanced-toggle .nav-item__icon svg { transition: transform 0.15s; }
-.nav-advanced-toggle[aria-expanded="true"] .nav-item__icon svg { transform: rotate(90deg); }
+/* ── System page (PR-ADS-162C) ─────────────────────────────────────────── */
 .system-card { margin-bottom: var(--space-4); }
 .system-card__body { padding: var(--space-4) var(--space-5); }
 .system-card__body p { margin: 0 0 var(--space-3) 0; }
