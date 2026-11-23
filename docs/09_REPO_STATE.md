@@ -6328,3 +6328,121 @@ built from `index.html`. Eleven existing cases that pinned the old menu shape
 were updated; each is listed with its old and new expectation in `docs/57` §7.
 
 **Not verified.** Browser rendering.
+
+## PR-ADS-175A — a row HubSpot returns out of its sort position moves nothing (November 2026)
+
+**Found in production (2026-11-23 06:00 UTC).** `runs` 342 (`partial`),
+`sync_batches` 2744 `hubspot/contact_funnel` `failed` in 8 s: "contact scan
+ended after 813 unique contacts but HubSpot counted 965 at its start". The
+PR-ADS-161I `total` guard was right; the paging was wrong.
+
+**Cause.** HubSpot's search filters and sorts on its search index, then
+returns each record's CURRENT properties. Contact 935470478561 was modified at
+2026-11-23T05:57:02.287Z (an email event; property history), 2 min 58 s
+before the scan. At 06:00:07 the index still held its previous value,
+2026-11-22T21:42:49.482Z, so the ninth query (`lastmodifieddate >=
+2026-11-22T21:17:12.511Z`) returned it as row 16 of 100 carrying
+`05:57:02.287`. `_keyset_scan` moved the watermark to that value on that one
+row, treated rows 17–100 as already read (their timestamps were now below the
+watermark) and sent `>= 05:57:02.287`: four rows, a short page, the end. The
+stored rows of batch 2744 show it page by page: page 9 holds 15 contacts from
+21:18–21:28 and then 935470478561; page 10 holds four from 05:58–05:59. 152
+contacts modified between 22 Nov 21:42 and 23 Nov 05:57 were never read. Not
+a tie group: the 22 Nov bulk update (~600 contacts, 08:06–08:16) is spread
+over distinct milliseconds and was read in full. Not `total` counting
+something filtered out: the same filter, read now, places the contact at its
+05:57 position.
+
+**What happened next.** The contact service returned `failed` (the `runs` row
+is `partial`, the scheduler's roll-up of its jobs). The rewind worked:
+`last_modified_watermark` went back to the run's `since`
+(2026-11-22T05:41:08.617Z), `last_incremental_status = failed`, so cohort
+freshness reports `sync_failed` and Campaign Evidence
+withholds cohort SQLs/CPQL until a run succeeds. The next run starts 15 min
+earlier again (overlap re-applied). It is not deterministic: it fails whenever
+a contact modified in the minutes before 06:00 (or during the scan) lands in
+the middle of a page before the index catches up.
+
+**Fix.** `connectors/hubspot_pull.py::_keyset_scan` (shared with the deal
+ledger):
+
+* every returned row is read unless this scan already read that id at that
+  timestamp (`read_at: id -> timestamp`), replacing the set keyed to the
+  current watermark that discarded every row below it;
+* after a range page the watermark becomes the OLDER of the page's last two
+  parseable timestamps (never lower than before) — one out-of-place row
+  cannot carry it past the unread rows behind it;
+* a tie walk never moves the watermark;
+* `meta["watermark_ms"]` is that position. `services/hubspot_contact_funnel_sync_service.py::_page_watermark`
+  now checkpoints it instead of the newest `last_modified_at` on the page —
+  which, for a killed worker or a capped run, would have resumed past unread
+  contacts with a `total` (counted from the later start) unable to see it.
+
+`_assert_scan_complete` is unchanged. **Remaining gap:** if BOTH of a page's
+last two rows are out of place, the scan can still skip. The guard refuses
+that (`failed`, rewind, retry — `test_05`) only when the shortfall exceeds
+its slack and nothing masks it: the contact scan (`tolerant=True`) completes
+with up to max(2, 1%) records unread, and any record that enters the result
+set mid-scan counts toward the unique total and can hide a skipped one, for
+deals too. Excluding rows stamped at or after the scan's start from that
+count was considered and not done: a record counted in `total` and modified
+before it was read looks identical, so a deal edited mid-scan would turn a
+clean read into a false `gap_proven`, and it would compare HubSpot's clock
+with ours.
+When the read STOPS EARLY (429, timeout, unreadable page, cap, stall) the
+guard never runs: two out-of-place rows ending an earlier page can then put
+the stored keyset position past unread records, and the next run's own
+`total` cannot see them (review round 2: 300 deals, 5098/5099 lagged at the
+end of page 1, a 429 from request 3 → run 2 `success` with 51 deals never
+written). It needs two adjacent lagged rows and a later stop in the same
+read; at c903091 one lagged row and a stop were enough.
+
+**Tests.** `tests/test_pr_ads_175a_contact_scan_index_lag.py` (6). Its fake
+keeps the index value (filters, sort, `total`) apart from the returned value,
+honours the filter and `total`, reshuffles ties, and modifies contacts during
+the scan with a lagging index. On origin/main `test_01` (the production
+replay: bulk update, a 250-row one-millisecond group, one contact modified
+three minutes before the scan) fails with "contact scan ended after 990
+unique contacts but HubSpot counted 1019"; `test_02` (a lagged row ending a
+page), `test_03` (a lagged member inside a tie walk), `test_04` (mid-scan
+modifications, index two requests behind) and `test_06` (the checkpoint
+landed at 05:57:02 past unread contacts) fail too; `test_05` (the residual
+fails closed) passes on both.
+
+**Existing test changed** — one assertion, still an equality:
+`tests/test_pr_ads_166b_deal_keyset_paging.py::test_6_a` pinned the kept
+bootstrap checkpoint to page 1's newest row; it is now page 1's keyset
+position (the older of its last two timestamps), which is the rule this PR
+changes.
+
+**Review round 1 — blocker: the deal ledger's partial checkpoint.** The fixed
+scan completes deal reads that used to end short and be `gap_proven`, and
+those reached `sync_deals`' checkpoint, which assumed the read was
+ascending: the newest `hs_lastmodifieddate` of the clean prefix. One
+out-of-place deal in a capped run's first 50 moved the checkpoint 30 hours
+ahead; the next run was `success`/`complete` with 250 deals never written,
+and a backfill pass completed the bootstrap over them. Now
+`services/hubspot_deal_sync_service.py::_resume_checkpoint` stores the
+smallest of the clean prefix's newest timestamp, every returned deal from
+the first unclean or unprocessed one onward, and — when the read stopped
+early — the scan's keyset position, which `pull_deals_for_ledger` now
+returns as `scan_watermark_ms` (unknown position → no checkpoint).
+Timestamps are compared as instants. Docstrings that claimed the read was
+ascending (`pull_deals_for_ledger`, `record_sync_state`, `sync_deals`) are
+corrected. New tests in the same module: `test_07` (cap 50, out-of-place
+deal inside it: checkpoint at or before deal 5050, run 2 writes all 300),
+`test_08` (out-of-place deal on page 1, a 429 from page 3: checkpoint at or
+before the first unread deal), `test_09` (the backfill CLI never completes
+the bootstrap with a deal unwritten). On bf48b04 all three fail:
+"checkpoint 2026-11-23T04:26:40.000Z is past deal 5050", "… past unread
+deals", "the bootstrap was completed with 250 deals never written".
+`test_05` now drives the service and asserts the rewind. One more existing
+assertion moves, still an equality:
+`tests/test_pr_ads_166b_sdk_exception_classes.py::test_3_c_a` (a 429 after
+one full page) pinned the checkpoint to that page's newest deal
+(`00:01:39Z`); it is now the read's keyset position after the page, the
+older of its last two timestamps (`00:01:38Z`, deal 1098) — the bound this
+round adds for a read that stopped early. The audit label
+`latest modification held` (`scripts/audit_crm_funnel_truth.py`) reads
+`MAX(last_modified_at)` from the contact table, not the sync state, so it is
+unchanged.

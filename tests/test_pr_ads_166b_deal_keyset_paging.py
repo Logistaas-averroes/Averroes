@@ -582,5 +582,8 @@ def test_6_a_an_unreadable_contact_page_keeps_the_bootstrap_checkpoint_not_a_rew
     assert "results" in (writers.state.get("last_error") or "")
     kept = writers.state["last_modified_watermark"]
     assert kept is not None, "the bootstrap was rewound to the epoch"
-    first_page_max = BASE_MS + 7 * 99
-    assert int(kept.timestamp() * 1000) == first_page_max
+    # PR-ADS-175A: the checkpoint is the scan's keyset position after page 1
+    # — the OLDER of its last two timestamps — not the page's newest row,
+    # which HubSpot can return out of its sort position.
+    first_page_position = BASE_MS + 7 * 98
+    assert int(kept.timestamp() * 1000) == first_page_position
