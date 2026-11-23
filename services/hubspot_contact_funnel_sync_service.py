@@ -482,19 +482,27 @@ def _failed_result(mode, error, since, watermark, *, contacts_seen=0,
 
 
 def _page_watermark(rows: list[dict], meta: dict | None):
-    """Newest modification timestamp proven by this page.
+    """The resume point this page proves: the scan's own keyset position.
 
-    Prefers the rows themselves; falls back to the iterator's reported watermark.
-    Never advances past evidence actually persisted.
+    PR-ADS-175A: prefers the iterator's ``watermark_ms`` — the position the
+    next query starts from, which is never past an unread contact. It used to
+    prefer the newest ``last_modified_at`` on the page; HubSpot returns a
+    contact modified just before the scan at its OLD sort position carrying
+    its NEW timestamp, so that maximum could sit hours past contacts not yet
+    read, and a run resumed from it (a killed worker, a capped run) skipped
+    them with a ``total`` that could not see the gap. The rows are the
+    fallback only for an iterator that reports no position. Never advances
+    past evidence actually persisted: the position is at or below the page's
+    last two timestamps.
     """
+    if meta and meta.get("watermark_ms"):
+        return datetime.fromtimestamp(
+            int(meta["watermark_ms"]) / 1000.0, tz=timezone.utc)
     stamps = [r.get("last_modified_at") for r in rows if r.get("last_modified_at")]
     stamps = [_as_datetime(s) for s in stamps]
     stamps = [s for s in stamps if s is not None]
     if stamps:
         return max(stamps)
-    if meta and meta.get("watermark_ms"):
-        return datetime.fromtimestamp(
-            int(meta["watermark_ms"]) / 1000.0, tz=timezone.utc)
     return None
 
 

@@ -573,6 +573,19 @@ disclosure. A re-read never takes a day with verified spend to zero
   must honour the filter, report `total` and change its data during the scan,
   or it cannot see this class of bug.
 
+  **A returned timestamp is not the row's sort position** (PR-ADS-175A).
+  HubSpot filters and sorts on its search index but returns CURRENT
+  properties; a contact modified minutes before (or during) the scan comes
+  back at its OLD place carrying its NEW time. On 2026-11-23 one such row
+  moved the watermark 8 hours ahead, the loop dropped the 84 rows after it as
+  "already read", and 152 contacts were skipped (the `total` guard caught
+  it). Never let one row move the watermark, never discard a returned row
+  because another row's timestamp is higher (de-duplicate by id + timestamp),
+  advance to the OLDER of a page's last two timestamps, never move it inside
+  a tie walk, and checkpoint only the scan's `meta["watermark_ms"]`, never the
+  newest row on a page. A test fake must keep the index value and the
+  returned value apart (`tests/test_pr_ads_175a_contact_scan_index_lag.py`).
+
 - **A modified-since sync never sees a deletion or a merge** (PR-ADS-163C).
   A contact deleted in HubSpot, or merged into another, is not "modified": it
   stops being returned and its row stays in `hubspot_contact_funnel`, counted

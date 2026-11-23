@@ -1696,6 +1696,18 @@ def _keyset_scan(search, *, modified_prop: str, since_ms: int,
     * A response with no ``results`` list is an error, never an empty page.
     * The scan ends on a short range page, and only after
       ``_assert_scan_complete`` against the FIRST query's ``total``.
+    * PR-ADS-175A: HubSpot filters and sorts on its search INDEX but returns
+      each record's CURRENT properties. A record modified shortly before (or
+      during) the scan is returned at its OLD sort position carrying its NEW,
+      later timestamp. So no single row may move the watermark, and no row
+      is discarded because its timestamp is below a watermark another row
+      set: every returned row is read unless this scan already read that id
+      at that timestamp. After a range page the next watermark is the OLDER
+      of the page's last two parseable timestamps — one out-of-place row
+      cannot carry it past the unread rows behind it; two at the very end of
+      one page can, and ``_assert_scan_complete`` then refuses the scan. A
+      tie walk never moves the watermark. ``meta["watermark_ms"]`` is that
+      position, the only value a caller may checkpoint.
 
     Yields ``(fresh_records, meta)``; the last yield is the completion
     sentinel ``([], {"complete": True, …})``. A ``max_pages`` cap ends with no
@@ -1706,9 +1718,11 @@ def _keyset_scan(search, *, modified_prop: str, since_ms: int,
     total_yielded = 0
     page_index = 0
     reanchored = 0          # queries after the first
-    # Ids already emitted at the CURRENT watermark timestamp; reset whenever
-    # the watermark advances.
-    seen_at_watermark: set[str] = set()
+    # PR-ADS-175A: id -> the timestamp this scan last read it at. A row is
+    # re-read only when it comes back carrying a different timestamp (a newer
+    # version). Replaces a set keyed to the current watermark, which treated
+    # every row below the watermark as already read.
+    read_at: dict[str, int] = {}
     # HubSpot's ``total`` for the scan's FIRST query: the bar the scan must meet.
     source_total = None
     unique_ids: set[str] = set()
@@ -1759,24 +1773,35 @@ def _keyset_scan(search, *, modified_prop: str, since_ms: int,
                    for r in raw_results]
         fresh = []
         page_ids = []
+        stamps = []             # parseable timestamps, in result order
         for record in results:
             rid = str(record.get("id") or "").strip()
             page_ids.append(_object_id_number(rid))
             modified = _epoch_ms(
                 (record.get("properties") or {}).get(modified_prop))
-            if modified <= 0:
-                # Unparseable timestamp: still read (it is in HubSpot's
-                # total), but it can never move the watermark.
-                if rid and rid not in unique_ids:
+            if modified > 0:
+                stamps.append(modified)
+            if not rid:
+                # No identity to de-duplicate on: read once, when first past
+                # the query's bound (it is rejected downstream regardless).
+                if modified > query_from_ms:
                     fresh.append(record)
-            elif modified > watermark_ms:
-                watermark_ms = modified
-                seen_at_watermark = {rid} if rid else set()
-                fresh.append(record)
-            elif (modified == watermark_ms and rid
-                  and rid not in seen_at_watermark):
-                seen_at_watermark.add(rid)
-                fresh.append(record)
+                continue
+            # Unparseable timestamps (<= 0) are still read once: the record
+            # is in HubSpot's total. They never move the watermark.
+            stamp = modified if modified > 0 else 0
+            if rid in read_at and (read_at[rid] == stamp or stamp == 0):
+                continue
+            read_at[rid] = stamp
+            fresh.append(record)
+
+        if tie_last_id is None and stamps:
+            # PR-ADS-175A: the next query starts from the OLDER of the page's
+            # last two timestamps, never from the newest row. A row returned
+            # at a stale index position carries a later timestamp than its
+            # place in the sort; trusting it skipped every row between
+            # (production 2026-11-23: 152 contacts). Never moves backwards.
+            watermark_ms = max(watermark_ms, min(stamps[-2:]))
 
         page_index += 1
         if fresh:
@@ -1830,7 +1855,8 @@ def _keyset_scan(search, *, modified_prop: str, since_ms: int,
                 f"nor read a new {noun}. The scan is INCOMPLETE.")
         strictly_after = False
         if watermark_ms == query_from_ms:
-            # Every row of a full page shares its starting timestamp.
+            # The page ended at its starting timestamp: walk that timestamp
+            # by id, then resume after it.
             tie_last_id = -1
 
 
