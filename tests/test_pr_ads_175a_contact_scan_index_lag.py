@@ -148,7 +148,10 @@ def test_01_a_contact_modified_minutes_before_the_scan_skips_no_one():
     """The production failure, replayed. One contact in the night block was
     modified three minutes before the scan; the index still sorts it at its
     old time, the response carries the new one. Every contact HubSpot counted
-    must be read, and the scan must complete."""
+    must be read, and the scan must complete. The lagged row sits mid-page
+    with unread contacts on later pages, as in production: this pins "never
+    move the watermark to the newest row" and "never discard a returned row".
+    The older-of-the-last-two rule is pinned by `test_02`."""
     stamps = _production_day()
     search = _LaggingIndexSearch(stamps)
     lagged = f"c{15 + 600 + 250 + 120}"           # deep in the night block
@@ -162,7 +165,9 @@ def test_01_a_contact_modified_minutes_before_the_scan_skips_no_one():
 
 def test_02_a_lagged_row_at_the_end_of_a_page_moves_nothing():
     """The last row of a page is the one the next query starts from. One
-    lagged row there must not carry the watermark past the unread rows."""
+    lagged row there must not carry the watermark past the unread rows. This
+    is the test that pins the older-of-the-last-two rule: a "last row"
+    rule passes `test_01` and fails here."""
     stamps = [S + 1_000 * i for i in range(450)]
     search = _LaggingIndexSearch(stamps)
     search.modify("c99", NOW, lag=None)            # row 100 of page 1
@@ -220,18 +225,41 @@ def test_04_contacts_modified_during_the_scan_with_a_lagging_index():
     assert complete
 
 
-def test_05_two_lagged_rows_ending_one_page_fail_closed_never_complete():
+def test_05_two_lagged_rows_ending_one_page_fail_closed_and_rewind(
+        monkeypatch):
     """The residual case: if BOTH rows the next query starts from are lagged,
-    nothing in the response says where the page really ended. The scan may
-    then miss contacts — and `_assert_scan_complete` must still refuse to call
-    it complete. The run is `partial`, the watermark rewinds, the next run
-    retries once the index has caught up."""
+    nothing in the response says where the page really ended, and the scan
+    skips contacts. When the shortfall exceeds the contact slack (1% or 2),
+    `_assert_scan_complete` refuses it: the service run is `failed`, the
+    watermark rewinds to where the run began, and the next run retries once
+    the index has caught up. (Within the slack it can still complete — the
+    documented remaining gap, docs/09 PR-ADS-175A.)"""
     stamps = [S + 1_000 * i for i in range(450)]
     search = _LaggingIndexSearch(stamps)
     search.modify("c98", NOW - 1, lag=None)
     search.modify("c99", NOW, lag=None)
     with pytest.raises(hp.HubSpotSearchIncompleteError):
         _scan(search)
+
+    from services import hubspot_contact_funnel_sync_service as sync
+    from tests.test_pr_ads_153b_canonical_funnel import _FakeWriters
+    writers = _FakeWriters()
+    monkeypatch.setattr(sync, "db_writers", writers)
+    start = datetime.fromtimestamp((S - 1) / 1000, tz=timezone.utc)
+    writers.state.update(bootstrap_status=sync.BOOTSTRAP_COMPLETE,
+                         last_modified_watermark=start)
+
+    def iterator(since, max_pages=None):
+        return hp.iter_contacts_modified_since(
+            since, max_pages=max_pages, client=_client(search))
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_INCREMENTAL, page_iterator=iterator, overlap_minutes=0,
+        now=datetime(2026, 11, 23, 6, tzinfo=timezone.utc))
+    assert result["status"] == "failed"
+    assert "INCOMPLETE" in (writers.state.get("last_error") or "")
+    assert writers.state["last_modified_watermark"] == start
+    assert writers.state["last_incremental_status"] == "failed"
 
 
 def test_06_a_checkpoint_never_passes_a_contact_the_scan_has_not_read(
@@ -272,3 +300,175 @@ def test_06_a_checkpoint_never_passes_a_contact_the_scan_has_not_read(
     written = {r["contact_id"] for page in writers.upserts for r in page}
     assert written >= set(search.current), (
         f"{len(set(search.current) - written)} contacts never written")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The deal ledger reads through the same `_keyset_scan`. With the scan fixed,
+# a read containing an out-of-place deal COMPLETES (before, it ended short of
+# `total` and was `gap_proven`), and a capped or cut-short run then reached a
+# checkpoint that assumed the read was ascending: the newest timestamp of its
+# clean prefix — the out-of-place deal's.
+# ─────────────────────────────────────────────────────────────────────────────
+from tests.test_pr_ads_166b_deal_keyset_paging import ledger  # noqa: E402,F401
+
+DEAL_BASE = 1_795_300_000_000          # 2026-11-21T22:26:40Z
+MIN = 60_000
+
+
+def _deal_iso(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(
+        timespec="milliseconds").replace("+00:00", "Z")
+
+
+class _LaggingDealSearch(_LaggingIndexSearch):
+    """`_LaggingIndexSearch` for deals: filters on ``hs_lastmodifieddate``,
+    returns ISO text and the ledger's properties. ``fail_from`` raises the
+    given exception on that request and every later one."""
+
+    def __init__(self, n, *, fail_from=None):
+        self.current = {str(5000 + i): DEAL_BASE + i * MIN for i in range(n)}
+        self.indexed = dict(self.current)
+        self.mutate = None
+        self.pending = []
+        self.calls = []
+        self.fail_from = fail_from
+        self._rng = __import__("random").Random(175)
+
+    def do_search(self, public_object_search_request=None, **_kw):
+        req = public_object_search_request
+        if self.fail_from and len(self.calls) + 1 >= self.fail_from[0]:
+            self.calls.append(None)
+            raise self.fail_from[1]
+        assert not req.get("after"), "keyset paging never sends an offset"
+        rows = list(self.indexed.items())
+        for f in req["filterGroups"][0]["filters"]:
+            prop, op = f["propertyName"], f["operator"]
+            if prop == "hs_lastmodifieddate":
+                val = int(f["value"])
+                keep = {"GTE": lambda ms: ms >= val, "GT": lambda ms: ms > val,
+                        "EQ": lambda ms: ms == val}[op]
+                rows = [r for r in rows if keep(r[1])]
+            elif prop == "hs_object_id":
+                rows = [r for r in rows if int(r[0]) > int(f["value"])]
+            else:
+                raise AssertionError(f"unexpected filter {prop}")
+        if req["sorts"][0]["propertyName"] == "hs_object_id":
+            rows.sort(key=lambda r: int(r[0]))
+        else:
+            self._rng.shuffle(rows)
+            rows.sort(key=lambda r: r[1])
+        self.calls.append(req["filterGroups"][0]["filters"])
+        page = rows[:int(req["limit"])]
+        return _Resp([_Obj({"id": did, "properties": {
+            "hs_lastmodifieddate": _deal_iso(self.current[did]),
+            "dealname": f"deal {did}", "dealstage": "326093516",
+            "hs_is_closed_won": "true", "hs_is_closed": "true",
+            "amount": "100", "deal_currency_code": "USD"}})
+            for did, _ms in page], len(rows))
+
+
+def _install_deals(monkeypatch, fake):
+    client = type("C", (), {})()
+    client.crm = type("R", (), {})()
+    client.crm.deals = type("K", (), {})()
+    client.crm.deals.search_api = fake
+    monkeypatch.setattr(hp, "get_client", lambda: client)
+    monkeypatch.setattr(hp.time, "sleep", lambda *_: None)
+
+
+def _ckpt_ms(text):
+    return int(datetime.fromisoformat(
+        str(text).replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def test_07_a_capped_deal_run_never_checkpoints_past_an_unprocessed_deal(
+        monkeypatch, ledger):  # noqa: F811
+    """Deal 5010 was modified minutes before the read; the index still sorts
+    it at 22:36:40 and the response carries 04:26:40 next day. With the cap
+    at 50 the clean prefix is deals 5000-5049 and its newest timestamp is
+    5010's — 250 deals behind it. Before the fix the checkpoint landed there
+    and run 2 (a `success`, `complete`) read none of them."""
+    fake = _LaggingDealSearch(300)
+    fake.current["5010"] = DEAL_BASE + 30 * 60 * MIN
+    _install_deals(monkeypatch, fake)
+    svc = ledger["svc"]
+
+    first = svc.sync_deals(batch_id=1, max_association_lookups=50)
+    assert first["status"] == "partial"
+    assert first["watermark_is_checkpoint"] is True
+    first_unprocessed_ms = DEAL_BASE + 50 * MIN          # deal 5050
+    assert _ckpt_ms(ledger["stored"]["watermark"]) <= first_unprocessed_ms, (
+        f"checkpoint {ledger['stored']['watermark']} is past deal 5050")
+
+    second = svc.sync_deals(batch_id=2, max_association_lookups=10_000)
+    assert second["status"] == "success" and second["complete"] is True
+    written = {r["deal_id"] for r in ledger["written"]}
+    assert written == set(fake.current), (
+        f"{len(set(fake.current) - written)} deals never written")
+
+
+def test_08_a_deal_read_cut_short_checkpoints_at_its_keyset_position(
+        monkeypatch, ledger):  # noqa: F811
+    """The out-of-place deal is on page 1; a 429 that never clears stops the
+    read on page 3. Every deal it processed was clean, so the old checkpoint
+    was the prefix's newest timestamp — the out-of-place deal's, past every
+    deal on pages 3+. The read's keyset position bounds it now."""
+    fake = _LaggingDealSearch(
+        300, fail_from=(3, hp.HUBSPOT_API_EXCEPTIONS[0](
+            status=429, reason="Too Many Requests")))
+    fake.current["5010"] = DEAL_BASE + 30 * 60 * MIN
+    _install_deals(monkeypatch, fake)
+    svc = ledger["svc"]
+
+    first = svc.sync_deals(batch_id=1)
+    assert first["status"] == "partial" and first["complete"] is False
+    written = {r["deal_id"] for r in ledger["written"]}
+    unread = set(fake.current) - written
+    assert unread, "the read was meant to stop early"
+    first_unread_ms = min(fake.indexed[d] for d in unread)
+    assert first["watermark_is_checkpoint"] is True
+    assert _ckpt_ms(ledger["stored"]["watermark"]) <= first_unread_ms, (
+        f"checkpoint {ledger['stored']['watermark']} is past unread deals")
+
+    fake.fail_from = None
+    second = svc.sync_deals(batch_id=2)
+    assert second["status"] == "success"
+    written = {r["deal_id"] for r in ledger["written"]}
+    assert written == set(fake.current), (
+        f"{len(set(fake.current) - written)} deals never written")
+
+
+def test_09_the_backfill_never_proves_a_bootstrap_complete_over_a_gap(
+        monkeypatch, ledger):  # noqa: F811
+    """`scripts/backfill_canonical_deal_ledger.py` drives capped passes, each
+    resuming from the last checkpoint, until one proves completion — and that
+    pass completes the bootstrap. A checkpoint past unprocessed deals made the
+    next pass `success`/`complete` over a window that held none of them:
+    `completes_bootstrap` fired with 250 deals never written."""
+    import db.connection as connection
+    import db.deal_ledger_repository as repo
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    fake = _LaggingDealSearch(300)
+    fake.current["5010"] = DEAL_BASE + 30 * 60 * MIN
+    _install_deals(monkeypatch, fake)
+    monkeypatch.setattr(connection, "init_pool", lambda: None)
+
+    completions = []
+    real_record = repo.record_sync_state
+
+    def recording(**kw):
+        out = real_record(**kw)
+        if ledger["state"] and ledger["state"][-1].get("completes"):
+            completions.append({r["deal_id"] for r in ledger["written"]})
+        return out
+    monkeypatch.setattr(repo, "record_sync_state", recording)
+
+    out = cli.run(max_passes=40, max_association_lookups=50, restart=False)
+
+    assert out["pass_proved_complete"] is True, out["reason"]
+    assert completions, "no pass completed the bootstrap"
+    for written in completions:
+        assert written == set(fake.current), (
+            f"the bootstrap was completed with "
+            f"{len(set(fake.current) - written)} deals never written")

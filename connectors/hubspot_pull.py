@@ -1704,10 +1704,13 @@ def _keyset_scan(search, *, modified_prop: str, since_ms: int,
       set: every returned row is read unless this scan already read that id
       at that timestamp. After a range page the next watermark is the OLDER
       of the page's last two parseable timestamps — one out-of-place row
-      cannot carry it past the unread rows behind it; two at the very end of
-      one page can, and ``_assert_scan_complete`` then refuses the scan. A
-      tie walk never moves the watermark. ``meta["watermark_ms"]`` is that
-      position, the only value a caller may checkpoint.
+      cannot carry it past the unread rows behind it. Two at the very end of
+      one page can; ``_assert_scan_complete`` refuses that only when the
+      shortfall exceeds its slack (``tolerant``: 1% or 2 records) and is not
+      masked by records that entered the result set mid-scan, which count
+      toward the unique total too. A tie walk never moves the watermark.
+      ``meta["watermark_ms"]`` is that position, the only value a caller may
+      checkpoint.
 
     Yields ``(fresh_records, meta)``; the last yield is the completion
     sentinel ``([], {"complete": True, …})``. A ``max_pages`` cap ends with no
@@ -3151,9 +3154,14 @@ def pull_deals_for_ledger(
     Incremental sync is driven by ``hs_lastmodifieddate``, NOT by creation
     recency: a deal created two years ago and closed today must be re-read today.
 
-    Returns ``{available, complete, deals, pages, error}``: ``deals`` holds one
-    record per deal id — its newest version — in ascending
-    ``hs_lastmodifieddate`` order; ``pages`` counts the search responses read.
+    Returns ``{available, complete, deals, pages, error, gap_proven,
+    scan_watermark_ms}``: ``deals`` holds one record per deal id — its newest
+    version — in the order HubSpot's index sorted them (NOT necessarily
+    ascending by the returned ``hs_lastmodifieddate``: PR-ADS-175A, a deal
+    modified just before the read comes back at its old position carrying its
+    new time); ``pages`` counts the search responses read;
+    ``scan_watermark_ms`` is the keyset position the read last reached
+    (``meta["watermark_ms"]``), None when no page was read.
 
     KEYSET PAGING (PR-ADS-166B). This used to page by HubSpot's ``after``
     offset over ``hs_lastmodifieddate >= since``, end on the first response
@@ -3184,15 +3192,17 @@ def pull_deals_for_ledger(
       PR-ADS-166B this caught the CONTACTS ``ApiException``, which the deals
       package never raises.
 
-    WHY A PARTIAL READ'S PREFIX IS SAFE TO CHECKPOINT — except when
-    ``gap_proven``. Each query asks for
-    ``hs_lastmodifieddate >= watermark``, where the watermark is the newest
-    timestamp read so far, and results are read in ascending order. So when a
-    read stops, every deal it has not read has a timestamp at or after the
-    newest one it did read (a deal edited mid-scan only moves later). The sync
-    checkpoints at the end of its clean, committed prefix — at or before that
-    timestamp — and resumes from the checkpoint minus an overlap with ``>=``,
-    so no unread deal lies behind it. With offset paging that was not true.
+    WHERE A PARTIAL READ MAY CHECKPOINT — never when ``gap_proven``. Each
+    query asks for ``hs_lastmodifieddate >= scan_watermark_ms``, the keyset
+    position, so every deal the read did not reach sits at or after that
+    position in HubSpot's index. The newest timestamp READ is not such a
+    bound (PR-ADS-175A): HubSpot returns current properties at the index's
+    (possibly stale) sort position, so one deal can carry a timestamp hours
+    past unread deals. ``sync_deals`` therefore checkpoints at the smallest
+    of its clean prefix's newest timestamp, every returned-but-unprocessed
+    deal's timestamp, and — when this read stopped early —
+    ``scan_watermark_ms``; it resumes from there minus an overlap with
+    ``>=``. With offset paging no checkpoint was safe.
     That argument assumes HubSpot honoured every query. A shortfall against
     ``total`` is evidence it did not (e.g. a tie walk whose id sort was
     ignored, PR-ADS-166B review S4), or that an unread deal was deleted; the
@@ -3232,14 +3242,17 @@ def pull_deals_for_ledger(
         return response
 
     # One entry per deal id. A deal read again (edited mid-scan) is re-inserted
-    # at its new, later position, so the newest version is kept and the list
-    # stays in ascending modification order.
+    # at its new, later position, so the newest version is kept. The list is
+    # in index order, which is NOT always ascending by the returned timestamp
+    # (PR-ADS-175A); no caller may treat its newest entry as a resume point.
     by_id: dict = {}
+    scan_position = {"ms": None}
 
     def _result(available, complete, error, gap_proven=False):
         deals = list(by_id.values()) if available else []
         return {"available": available, "complete": complete, "deals": deals,
-                "pages": pages, "error": error, "gap_proven": gap_proven}
+                "pages": pages, "error": error, "gap_proven": gap_proven,
+                "scan_watermark_ms": scan_position["ms"]}
 
     complete = False
     try:
@@ -3248,6 +3261,8 @@ def pull_deals_for_ledger(
                 since_ms=int(modified_since_ms or 0), base_filters=base_filters,
                 page_size=100, max_pages=page_limit, noun="deal",
                 tolerant=False):
+            if meta.get("watermark_ms") is not None:
+                scan_position["ms"] = int(meta["watermark_ms"])
             if meta.get("complete"):
                 complete = True
                 continue

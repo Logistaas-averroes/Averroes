@@ -583,8 +583,13 @@ disclosure. A re-read never takes a day with verified spend to zero
   because another row's timestamp is higher (de-duplicate by id + timestamp),
   advance to the OLDER of a page's last two timestamps, never move it inside
   a tie walk, and checkpoint only the scan's `meta["watermark_ms"]`, never the
-  newest row on a page. A test fake must keep the index value and the
-  returned value apart (`tests/test_pr_ads_175a_contact_scan_index_lag.py`).
+  newest row on a page — the deal ledger's partial-run checkpoint is the
+  smallest of its clean prefix's newest timestamp, every unprocessed deal's
+  and the read's keyset position (`_resume_checkpoint`). Two out-of-place
+  rows ending one page can still skip; the `total` guard catches that only
+  beyond the contact slack and when no mid-scan addition masks it. A test
+  fake must keep the index value and the returned value apart
+  (`tests/test_pr_ads_175a_contact_scan_index_lag.py`).
 
 - **A modified-since sync never sees a deletion or a merge** (PR-ADS-163C).
   A contact deleted in HubSpot, or merged into another, is not "modified": it

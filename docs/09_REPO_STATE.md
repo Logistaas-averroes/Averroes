@@ -6353,9 +6353,11 @@ over distinct milliseconds and was read in full. Not `total` counting
 something filtered out: the same filter, read now, places the contact at its
 05:57 position.
 
-**What happened next.** The rewind worked: `last_modified_watermark` went back
-to the run's `since` (2026-11-22T05:41:08.617Z), `last_incremental_status =
-failed`, so cohort freshness reports `sync_failed` and Campaign Evidence
+**What happened next.** The contact service returned `failed` (the `runs` row
+is `partial`, the scheduler's roll-up of its jobs). The rewind worked:
+`last_modified_watermark` went back to the run's `since`
+(2026-11-22T05:41:08.617Z), `last_incremental_status = failed`, so cohort
+freshness reports `sync_failed` and Campaign Evidence
 withholds cohort SQLs/CPQL until a run succeeds. The next run starts 15 min
 earlier again (overlap re-applied). It is not deterministic: it fails whenever
 a contact modified in the minutes before 06:00 (or during the scan) lands in
@@ -6376,10 +6378,17 @@ ledger):
   which, for a killed worker or a capped run, would have resumed past unread
   contacts with a `total` (counted from the later start) unable to see it.
 
-`_assert_scan_complete` is unchanged. **Residual:** if BOTH of a page's last
-two rows are out of place, the scan can still skip; the guard then refuses
-it (`partial`, rewind, retry) — fail closed, never a silent gap
-(`test_05`).
+`_assert_scan_complete` is unchanged. **Remaining gap:** if BOTH of a page's
+last two rows are out of place, the scan can still skip. The guard refuses
+that (`failed`, rewind, retry — `test_05`) only when the shortfall exceeds
+its slack and nothing masks it: the contact scan (`tolerant=True`) completes
+with up to max(2, 1%) records unread, and any record that enters the result
+set mid-scan counts toward the unique total and can hide a skipped one, for
+deals too. Excluding rows stamped at or after the scan's start from that
+count was considered and not done: a record counted in `total` and modified
+before it was read looks identical, so a deal edited mid-scan would turn a
+clean read into a false `gap_proven`, and it would compare HubSpot's clock
+with ours.
 
 **Tests.** `tests/test_pr_ads_175a_contact_scan_index_lag.py` (6). Its fake
 keeps the index value (filters, sort, `total`) apart from the returned value,
@@ -6399,8 +6408,34 @@ bootstrap checkpoint to page 1's newest row; it is now page 1's keyset
 position (the older of its last two timestamps), which is the rule this PR
 changes.
 
-**Known gap (not fixed here).** `services/hubspot_deal_sync_service.py`
-checkpoints a PARTIAL deal read at the newest `hs_lastmodifieddate` of its
-clean prefix — the same newest-row rule. A deal returned out of position in
-that prefix can move the checkpoint past unread deals. The scan itself no
-longer skips them; only the partial-run checkpoint does.
+**Review round 1 — blocker: the deal ledger's partial checkpoint.** The fixed
+scan completes deal reads that used to end short and be `gap_proven`, and
+those reached `sync_deals`' checkpoint, which assumed the read was
+ascending: the newest `hs_lastmodifieddate` of the clean prefix. One
+out-of-place deal in a capped run's first 50 moved the checkpoint 30 hours
+ahead; the next run was `success`/`complete` with 250 deals never written,
+and a backfill pass completed the bootstrap over them. Now
+`services/hubspot_deal_sync_service.py::_resume_checkpoint` stores the
+smallest of the clean prefix's newest timestamp, every returned deal from
+the first unclean or unprocessed one onward, and — when the read stopped
+early — the scan's keyset position, which `pull_deals_for_ledger` now
+returns as `scan_watermark_ms` (unknown position → no checkpoint).
+Timestamps are compared as instants. Docstrings that claimed the read was
+ascending (`pull_deals_for_ledger`, `record_sync_state`, `sync_deals`) are
+corrected. New tests in the same module: `test_07` (cap 50, out-of-place
+deal inside it: checkpoint at or before deal 5050, run 2 writes all 300),
+`test_08` (out-of-place deal on page 1, a 429 from page 3: checkpoint at or
+before the first unread deal), `test_09` (the backfill CLI never completes
+the bootstrap with a deal unwritten). On bf48b04 all three fail:
+"checkpoint 2026-11-23T04:26:40.000Z is past deal 5050", "… past unread
+deals", "the bootstrap was completed with 250 deals never written".
+`test_05` now drives the service and asserts the rewind. One more existing
+assertion moves, still an equality:
+`tests/test_pr_ads_166b_sdk_exception_classes.py::test_3_c_a` (a 429 after
+one full page) pinned the checkpoint to that page's newest deal
+(`00:01:39Z`); it is now the read's keyset position after the page, the
+older of its last two timestamps (`00:01:38Z`, deal 1098) — the bound this
+round adds for a read that stopped early. The audit label
+`latest modification held` (`scripts/audit_crm_funnel_truth.py`) reads
+`MAX(last_modified_at)` from the contact table, not the sync state, so it is
+unchanged.

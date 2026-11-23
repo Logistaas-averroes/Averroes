@@ -57,9 +57,11 @@ WATERMARK_OVERLAP_MINUTES = 15
 
 # Cap the association lookups a single run performs, so one enormous backfill
 # page cannot hold the scheduler indefinitely. Reaching the cap yields a PARTIAL
-# sync (disclosed), never a silently truncated success — and it CHECKPOINTS at
-# the last fully committed deal so the next run resumes there. Deals arrive in
-# ascending hs_lastmodifieddate order, which is what makes that prefix safe.
+# sync (disclosed), never a silently truncated success — and it CHECKPOINTS so
+# the next run resumes there. Deals arrive in HubSpot's INDEX order, which is
+# not always ascending by the returned hs_lastmodifieddate (PR-ADS-175A), so
+# the checkpoint is bounded by every deal not yet processed and by the read's
+# keyset position, never by the newest deal processed alone.
 DEFAULT_MAX_ASSOCIATION_LOOKUPS = 5000
 
 
@@ -67,6 +69,73 @@ def _iso_or_none(value):
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _modified_ms(value):
+    """A deal's ``hubspot_lastmodified_at`` as epoch ms, or None.
+
+    HubSpot sends ISO text; epoch-ms digits are accepted too. Compared as
+    instants, never as strings.
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def _resume_checkpoint(normalized, first_open, prefix_end, pull):
+    """PR-ADS-175A — where a PARTIAL run may resume, or None.
+
+    ``prefix_end`` is the newest timestamp of the clean, committed prefix
+    (``normalized[:first_open]``); None when there is no clean prefix. The
+    checkpoint is the SMALLEST of:
+
+    * ``prefix_end``;
+    * every returned deal from the first unclean or unprocessed one onward
+      (``normalized[first_open:]``) — each of them must be re-read, and the
+      read's order is HubSpot's index order, so the newest PROCESSED deal can
+      carry a timestamp past unprocessed ones (one modified just before the
+      read comes back at its old position with its new time);
+    * when the read itself stopped early, its keyset position
+      (``pull["scan_watermark_ms"]``): every deal it never returned sits at or
+      after it. Unknown position → no checkpoint.
+
+    Returns the checkpoint text (a deal's own value when one is the minimum,
+    else ISO-8601 UTC), or None.
+    """
+    if prefix_end is None:
+        return None
+    candidates = [(_modified_ms(prefix_end), prefix_end)]
+    for deal in normalized[first_open:]:
+        value = deal.get("hubspot_lastmodified_at")
+        ms = _modified_ms(value)
+        if ms is not None:
+            candidates.append((ms, value))
+    if not pull.get("complete"):
+        scan_ms = pull.get("scan_watermark_ms")
+        if scan_ms is None:
+            return None
+        scan_ms = int(scan_ms)
+        # The keyset position is always some returned deal's timestamp; use
+        # that deal's own text so the stored value reads like every other.
+        text = next((d.get("hubspot_lastmodified_at") for d in normalized
+                     if _modified_ms(d.get("hubspot_lastmodified_at"))
+                     == scan_ms), None)
+        candidates.append((scan_ms, text or datetime.fromtimestamp(
+            scan_ms / 1000.0, tz=timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")))
+    candidates = [c for c in candidates if c[0] is not None]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: c[0])[1]
 
 
 def _close_date_iso(value) -> str | None:
@@ -285,15 +354,17 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
     written = 0
     skipped_stale = 0
     watermark = None
-    # The end of the contiguous prefix of deals that were fully resolved AND
-    # committed. Safe to resume from precisely because the read is sorted
-    # ascending by hs_lastmodifieddate.
+    # The newest timestamp of the contiguous prefix of deals that were fully
+    # resolved AND committed. NOT a resume point on its own (PR-ADS-175A): the
+    # read is in index order, so `_resume_checkpoint` bounds it by every deal
+    # from `first_open` on and by the read's keyset position.
     checkpoint = None
     prefix_clean = True
+    first_open = len(normalized)    # first deal not cleanly processed
     truncated = False
     first_write_error = None
 
-    for deal in normalized:
+    for position, deal in enumerate(normalized):
         deal_id = deal["deal_id"]
 
         # The cap ends this run; it does not turn the remaining deals into
@@ -301,6 +372,7 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         # attempted would manufacture evidence of a failure that never happened.
         if lookups >= max_association_lookups:
             truncated = True
+            first_open = min(first_open, position)
             break
 
         # ── Associations ────────────────────────────────────────────────────
@@ -420,6 +492,7 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
                 checkpoint = modified
         elif not (write_ok and not lookup_failed):
             prefix_clean = False
+            first_open = min(first_open, position)
 
     complete = bool(pull.get("complete")) and not truncated
     status = "success" if (complete and association_failures == 0
@@ -449,7 +522,8 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         # next run re-reads the whole window.
         state_watermark, is_checkpoint = None, False
     elif status == "partial" and checkpoint is not None:
-        state_watermark, is_checkpoint = checkpoint, True
+        resume = _resume_checkpoint(normalized, first_open, checkpoint, pull)
+        state_watermark, is_checkpoint = resume, resume is not None
     else:
         state_watermark, is_checkpoint = None, False
 

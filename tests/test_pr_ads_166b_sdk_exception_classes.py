@@ -81,7 +81,8 @@ def _full_page() -> dict:
     return {"total": 150, "results": deals}
 
 
-LAST_OF_FULL_PAGE = "2026-11-01T00:01:39Z"
+# PR-ADS-175A: the keyset position after that page (deal 1098).
+KEYSET_AFTER_FULL_PAGE = "2026-11-01T00:01:38Z"
 
 
 def _timeout(url: str) -> urllib3.exceptions.ReadTimeoutError:
@@ -360,9 +361,11 @@ def test_3_c_a_429_after_one_good_page_checkpoints_only_the_clean_prefix_and_nev
     assert len(ledger["upserts"]) == 100
     (params,) = ledger["state"]
     assert params["status"] == "partial"
-    # The documented checkpoint: the clean, committed, ascending prefix only.
+    # The documented checkpoint: no later than the clean, committed prefix
+    # AND (PR-ADS-175A) no later than the read's keyset position after page 1
+    # — the older of its last two timestamps — since the read stopped there.
     assert result["watermark_is_checkpoint"] is True
-    assert params["watermark"] == LAST_OF_FULL_PAGE
+    assert params["watermark"] == KEYSET_AFTER_FULL_PAGE
     # A partial run is never the successful incremental the freshness gate reads.
     block = freshness_block(
         {"last_sync_mode": "incremental", "last_status": params["status"],
