@@ -1,6 +1,14 @@
 """PR-ADS-165A — the Google Ads → Countries page publishes spend only for a
-window that was actually synced. Real PostgreSQL, the real route handlers, and
-the real ``loadGeo`` in node.
+window that was actually synced. Real PostgreSQL and the real route handlers.
+
+PR-ADS-176B deleted that page (``#/geo``) and its ``loadGeo``; ``/api/geo``
+stays until PR-ADS-176C. Every case keeps its payload assertions, and the
+cases whose page assertions carried a payload fact now assert it on the rows.
+The page-only properties that still apply — spend Unavailable with its reason,
+never a number under a failed gate, "<$1" below a dollar, the owner note —
+are guarded on the one Countries page in ``tests/test_pr_ads_176b_*``. The
+lead-quality columns and KPIs (junk, in progress, top campaign / keyword) were
+dropped by owner decision and are not ported.
 
 The defect, as the first version of this slice would have shipped it. The page
 (`#/geo`) read the legacy ``geo`` snapshot through ``/api/geo``:
@@ -60,8 +68,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -71,7 +77,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tests.test_pr_ads_161b_marketing_outcome_cohorts import _VM_HARNESS  # noqa: E402
 
 APP_JS = ROOT / "static" / "app.js"
 USER = {"username": "tester", "role": "admin"}
@@ -219,107 +224,20 @@ def _api(window: str) -> dict:
     return json.loads(json.dumps({"geo": geo, "leads": leads}, default=str))
 
 
-_ASYNC_HARNESS = _VM_HARNESS.replace(
-    "process.stdout.write(JSON.stringify(out === undefined ? null : out));",
-    "Promise.resolve(out).then((v) => "
-    "process.stdout.write(JSON.stringify(v === undefined ? null : v)));")
-assert _ASYNC_HARNESS != _VM_HARNESS, "the 161B harness tail changed"
-
-_PROBE = """
-const P = %(payloads)s;
-_currentUser = {"username": "tester", "role": "admin"};
-const __asked = [];
-fetchJSON = async (url) => {
-  __asked.push(url);
-  if (url.startsWith("/api/geo?")) { if (P.geo === null) throw new Error("HTTP 500"); return P.geo; }
-  // The page used to fetch the lead summary itself and join it in the
-  // browser. Served here so that older code still renders — and is judged on
-  // what it shows.
-  if (url.startsWith("/api/leads/country-summary?")) return P.leads || { rows: [] };
-  throw new Error("unexpected fetch: " + url);
-};
-const __mapCalls = [];
-Plotly = { react: (el, data) => { __mapCalls.push(data[0]); } };
-(async () => {
-  await loadGeo();
-  const out = { asked: __asked,
-    table: __els["geo-table-body"].innerHTML,
-    // A page that never touched the notice element has no notice: that is a
-    // finding for the assertions to make, not a crash in this probe.
-    notice: (__els["geo-spend-notice"] || { textContent: "" }).textContent,
-    notice_hidden: (__els["geo-spend-notice"] || { hidden: true }).hidden === true,
-    range: (__els["geo-spend-range"] || { textContent: "" }).textContent,
-    kpi_countries: __els["geo-kpi-countries"].textContent,
-    kpi_spend: __els["geo-kpi-spend"].textContent,
-    kpi_sqls: __els["geo-kpi-sqls"].textContent,
-    kpi_junk: __els["geo-kpi-junk"].textContent };
-  renderGeoMap(geoMergedRows, "spend_usd");
-  const trace = __mapCalls[__mapCalls.length - 1] || null;
-  out.map_spend = trace ? trace.z : null;
-  out.map_hover = trace ? trace.customdata.map((c) => c[1]) : null;
-  return out;
-})()
-"""
+# PR-ADS-176B: the node probe that rendered these payloads with the real
+# ``loadGeo`` (``_PROBE`` / ``_render``) and its table readers went with the
+# #/geo page. ``/api/geo`` stays until PR-ADS-176C and is checked below.
 
 
-def _render(payloads: dict, tmp_path, *, js: str | None = None,
-            probe: str | None = None) -> dict:
-    """Run the real ``loadGeo`` (or a mutation of app.js) over ``payloads``."""
-    node = shutil.which("node")
-    assert node, "node is required: CI runs `node --check static/app.js`"
-    (tmp_path / "harness.js").write_text(_ASYNC_HARNESS, encoding="utf-8")
-    (tmp_path / "app.js").write_text(
-        js if js is not None else APP_JS.read_text(encoding="utf-8"),
-        encoding="utf-8")
-    (tmp_path / "probe.js").write_text(
-        (probe or _PROBE) % {"payloads": json.dumps(payloads, default=str)},
-        encoding="utf-8")
-    out = subprocess.run(
-        [node, str(tmp_path / "harness.js"), str(tmp_path / "app.js"),
-         str(tmp_path / "probe.js")], capture_output=True, text=True, timeout=120)
-    assert out.returncode == 0, out.stderr[-3000:]
-    assert out.stdout, "loadGeo never finished"
-    return json.loads(out.stdout)
+def _assert_no_spend_figure_in_the_payload(api: dict):
+    """The unavailable state of ``/api/geo``: no ``$0``, no partial sum.
 
-
-def _text(html: str) -> str:
-    """What a reader sees: the markup's text, whitespace collapsed."""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
-
-
-def _table(html: str) -> dict:
-    """{country: [cell text, …]} for every body row of the country table."""
-    out = {}
-    for row in re.findall(r"<tr data-country=.*?</tr>", html, re.S):
-        cells = [_text(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
-        out[cells[0]] = cells
-    return out
-
-
-def _headers(html: str) -> list:
-    return [_text(h) for h in re.findall(r"<th[^>]*>(.*?)</th>", html, re.S)]
-
-
-def _visible(page: dict) -> str:
-    """Every word the page shows: KPI cards, the notice and the table."""
-    return " | ".join([
-        f"Countries Active {page['kpi_countries']}",
-        f"Total Geo Spend {page['kpi_spend']}",
-        f"Countries with SQLs {page['kpi_sqls']}",
-        f"High Junk Countries {page['kpi_junk']}",
-        f"notice: {page['notice'] if not page['notice_hidden'] else '(none)'}",
-        f"range: {page.get('range') or '(none)'}",
-        _text(page["table"])])
-
-
-def _assert_no_spend_figure_anywhere(api: dict, page: dict):
-    """The unavailable state: not $0, not a partial sum, not on the map.
-
-    The page is checked FIRST, so that against code without the coverage
-    verdict this fails on what a reader would have seen (`$0`), not on a
-    missing key."""
-    assert page["kpi_spend"] == "Unavailable"
-    assert page["kpi_countries"] == "Unavailable"
+    PR-ADS-176B: this was ``_assert_no_spend_figure_anywhere(api, page)`` and
+    checked the deleted ``#/geo`` page first (KPI cards, notice, table, map).
+    The page is gone; the endpoint stays until PR-ADS-176C and is checked
+    here unchanged. The one Countries page's unavailable state — the strict
+    gate's card, never a number — is guarded in
+    ``tests/test_pr_ads_176b_countries_one_page.py`` (case 06)."""
     geo = api["geo"]
     # Rows still list the countries that have leads; none carries a spend.
     for row in geo["rows"]:
@@ -329,18 +247,6 @@ def _assert_no_spend_figure_anywhere(api: dict, page: dict):
     assert geo["total_spend_usd"] is None
     assert geo["spend_status"] == "unavailable"
     assert geo["coverage"]["status"] != "covered"
-    assert page["notice_hidden"] is False
-    assert page["notice"].startswith("Unavailable — ")
-    assert "$" not in page["notice"]
-    table = _table(page["table"])
-    for country, cells in table.items():
-        assert cells[1].startswith("Unavailable"), (country, cells)
-    assert "$" not in _text(page["table"]), _text(page["table"])
-    assert not page.get("range"), "a date range is printed beside no figure"
-    assert "$" not in page["kpi_spend"]
-    if page["map_spend"] is not None:
-        assert all(v is None for v in page["map_spend"]), page["map_spend"]
-        assert set(page["map_hover"]) <= {"Unavailable"}, page["map_hover"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -408,21 +314,6 @@ def test_01_a_covered_window_publishes_exact_per_country_spend_with_no_double_co
                                    "through": end.isoformat(),
                                    "ends_on": "yesterday_account_local"}
 
-    page = _render(api, tmp_path)
-    # The page asked ONE endpoint; it joins nothing itself.
-    assert [u.split("?")[0] for u in page["asked"]] == ["/api/geo"]
-    table = _table(page["table"])
-    assert table["United Kingdom"][1] == "$913"      # fmtDollar rounds to $1
-    assert table["United Arab Emirates"][1] == "$350"
-    assert table["United Kingdom"][2] == "2"         # leads, from HubSpot
-    assert page["kpi_spend"] == "$1.3k"
-    assert page["kpi_countries"] == "2"
-    assert page["notice_hidden"] is True
-    assert "Unavailable" not in _visible(page)
-    assert _headers(page["table"]) == [
-        "Country", "Spend", "Leads", "SQLs", "In Progress", "Junk",
-        "Junk Rate", "Top Campaign", "Top Keyword", "Leads as of"]
-    assert sorted(v for v in page["map_spend"]) == [350.0, 912.5]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -471,8 +362,7 @@ def test_02_an_uncovered_window_says_so_and_shows_no_zero_and_no_partial_sum(
                           ("h2", "Jordan", "junk")])
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    _assert_no_spend_figure_anywhere(api, page)
+    _assert_no_spend_figure_in_the_payload(api)
 
     cov = api["geo"]["coverage"]
     assert cov["status"] == "not_covered"
@@ -483,24 +373,10 @@ def test_02_an_uncovered_window_says_so_and_shows_no_zero_and_no_partial_sum(
     assert cov["covered_through"] == expect["covered_through"].isoformat()
     assert cov["missing_days"] == expect["missing"]
     assert cov["missing_ranges"], "the missing days are named"
-    table = _table(page["table"])
-    # The lead half of the page is unaffected: both countries are listed.
-    assert set(table) == {"United Kingdom", "Jordan"}
-    assert table["United Kingdom"][2] == "1" and table["Jordan"][2] == "1"
-    assert page["kpi_sqls"] == "1"
     # The reader is told which days ARE synced, in words, and why that is not
     # enough — and is not told to run anything.
     def words(d):
         return f"{d.day} {d.strftime('%b %Y')}"
-    assert words(expect["covered_from"]) in page["notice"]
-    assert words(expect["covered_through"]) in page["notice"]
-    assert words(start) in page["notice"] and words(end) in page["notice"]
-    assert "not for the whole window" in page["notice"]
-    assert "not every day of the window has been synced" in page["notice"]
-    visible = _visible(page).lower()
-    for gone in ("run the monthly", "run the weekly", "has been synced yet. run",
-                 "500", "$0"):
-        assert gone not in visible, gone
 
 
 def test_02b_a_window_with_no_synced_day_and_an_unreadable_ledger_are_unavailable(
@@ -510,13 +386,11 @@ def test_02b_a_window_with_no_synced_day_and_an_unreadable_ledger_are_unavailabl
 
     # Nothing synced at all for this account.
     api = _api("14d")
-    page = _render(api, tmp_path)
-    _assert_no_spend_figure_anywhere(api, page)
+    _assert_no_spend_figure_in_the_payload(api)
     cov = api["geo"]["coverage"]
     assert (cov["status"], cov["covered_from"], cov["covered_through"]) == (
         "not_covered", None, None)
     assert cov["missing_days"] == 14
-    assert "no day of this window" in page["notice"]
 
     # Another account's verified history does not cover this account's window.
     _verify(start, end, customer=OTHER_CUSTOMER)
@@ -527,15 +401,8 @@ def test_02b_a_window_with_no_synced_day_and_an_unreadable_ledger_are_unavailabl
     api = _api("14d")
     assert api["geo"]["coverage"]["status"] == "unavailable"
     assert api["geo"]["coverage"]["reason"] == "google_ads_customer_id_not_configured"
-    page = _render(api, tmp_path)
-    _assert_no_spend_figure_anywhere(api, page)
-    assert "no Google Ads account is configured" in page["notice"]
+    _assert_no_spend_figure_in_the_payload(api)
 
-    # The endpoint failing outright is unknown too — never $0.
-    page = _render({"geo": None}, tmp_path)
-    assert "Could not load geo intelligence" in _text(page["table"])
-    assert page["kpi_spend"] == "—"
-    assert "$" not in _visible(page)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -552,9 +419,6 @@ def test_03_in_a_covered_window_a_country_with_leads_and_no_spend_is_a_published
                           ("h2", "Jordan", "junk"), ("h3", "Jordan", "junk")])
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["United Kingdom"][1] == "$175"
     assert api["geo"]["coverage"]["status"] == "covered"
     # Jordan's row is a published zero BECAUSE it is a known country (JO), the
     # window is covered, and the canonical table holds no row for it.
@@ -565,16 +429,6 @@ def test_03_in_a_covered_window_a_country_with_leads_and_no_spend_is_a_published
     assert by["code:JO"]["country_resolved"] is True
     assert api["geo"]["total_spend_usd"] == 7 * 20.0 * RATE == 175.0
 
-    # …and the page prints its measured zero as a zero, not a dash and not
-    # "Unavailable": every day of the window was fetched and Jordan had none.
-    assert table["Jordan"][1] == "$0"
-    assert table["Jordan"][2] == "2"
-    assert table["United Kingdom"][1] == "$175"
-    assert page["kpi_spend"] == "$175"
-    assert page["kpi_countries"] == "2"
-    assert page["notice_hidden"] is True
-    assert "Unavailable" not in _visible(page)
-
     # Control — the SAME leads, the same spend rows, with the last day of the
     # window not fetched: the zero is no longer measured, and is not printed.
     with live_db.connect() as conn, conn.cursor() as cur:
@@ -582,9 +436,7 @@ def test_03_in_a_covered_window_a_country_with_leads_and_no_spend_is_a_published
         conn.commit()
     _verify(start, end - timedelta(days=1))
     api = _api("7d")
-    page = _render(api, tmp_path)
-    _assert_no_spend_figure_anywhere(api, page)
-    assert _table(page["table"])["Jordan"][1] == "Unavailable"
+    _assert_no_spend_figure_in_the_payload(api)
 
 
 def test_03b_a_covered_window_with_no_spend_at_all_is_a_published_zero_total(
@@ -594,10 +446,6 @@ def test_03b_a_covered_window_with_no_spend_at_all_is_a_published_zero_total(
     api = _api("7d")
     assert api["geo"]["coverage"]["status"] == "covered"
     assert api["geo"]["rows"] == [] and api["geo"]["total_spend_usd"] == 0.0
-    page = _render(api, tmp_path)
-    assert page["kpi_spend"] == "$0"
-    assert "No Google Ads country spend and no leads in the selected window." \
-        in _text(page["table"])
 
 
 def test_03c_a_missing_fx_rate_withholds_that_country_and_the_total(
@@ -621,12 +469,6 @@ def test_03c_a_missing_fx_rate_withholds_that_country_and_the_total(
     assert by["United Kingdom"]["spend_reason"] == "fx_rate_missing"
     assert geo["total_spend_usd"] is None
 
-    page = _render({"geo": geo}, tmp_path)
-    table = _table(page["table"])
-    assert table["United Kingdom"][1] == "Unavailable — FX rate missing"
-    assert table["United Arab Emirates"][1] == "$38"
-    assert page["kpi_spend"] == "Unavailable"
-    assert page["kpi_countries"] == "Unavailable"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -642,13 +484,8 @@ def test_04_only_a_legacy_monthly_snapshot_is_unavailable_not_the_snapshot(
         blob = json.dumps(api["geo"])
         assert "7777" not in blob and str(LEGACY_CLICKS) not in blob, window
         assert "legacy-only-campaign" not in blob, window
-        page = _render(api, tmp_path)
-        _assert_no_spend_figure_anywhere(api, page)
+        _assert_no_spend_figure_in_the_payload(api)
         assert api["geo"]["coverage"]["status"] == "not_covered", window
-        visible = _visible(page)
-        assert "7.8k" not in visible and "7777" not in visible, window
-        assert str(LEGACY_CLICKS) not in visible, window
-        assert "Clicks" not in visible and "Conv." not in visible, window
 
     # And beside a COVERED canonical window the snapshot still adds nothing:
     # the published figure is the canonical one, to the cent.
@@ -659,7 +496,6 @@ def test_04_only_a_legacy_monthly_snapshot_is_unavailable_not_the_snapshot(
     api = _api("7d")
     assert api["geo"]["total_spend_usd"] == 10.0
     assert "7777" not in json.dumps(api["geo"])
-    assert _table(_render(api, tmp_path)["table"])["United Kingdom"][1] == "$10"
 
 
 def test_05_the_route_reads_the_canonical_table_and_never_the_legacy_one():
@@ -688,29 +524,30 @@ def test_05_the_route_reads_the_canonical_table_and_never_the_legacy_one():
 
     js = APP_JS.read_text(encoding="utf-8")
     html = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    # PR-ADS-176B: the #/geo page is deleted; the one Countries page
+    # (roas-countries) keys its freshness on the same canonical dataset, and
+    # the Dataset Freshness link for it opens Countries. Its loader half
+    # (`loadGeo` joined nothing, invented no zero) went with the page; the
+    # Countries page's own no-zero rules are in tests/test_pr_ads_176b_*.
+    block = js.split("const PAGE_DEPENDENCIES = {")[1].split("\n};")[0]
+    line = next(ln for ln in block.splitlines() if '"roas-countries":' in ln)
+    assert '"google_ads_api/canonical_geo"' in line, line
     for const in ("const PAGE_DATASET_MAP = {", "const PAGE_DEPENDENCIES = {"):
         block = js.split(const)[1].split("\n};")[0]
-        line = next(ln for ln in block.splitlines()
-                    if ln.strip().startswith("geo:"))
-        assert '"google_ads_api/canonical_geo"' in line, line
         assert '"google_ads_api/geo"' not in block, const
-    assert '"google_ads_api/canonical_geo": { page: "geo"' in js
-    load = js.split("async function loadGeo()")[1].split("\nfunction ")[0]
-    # The page fetches one endpoint and joins nothing: no second fetch, no
-    # country key of its own, and no zero invented for a missing row.
+    assert '"google_ads_api/canonical_geo": { page: "roas-countries"' in js
+    # The page fetched one endpoint and joined nothing in the browser.
     assert "/api/leads/country-summary" not in js
     assert "normalizeCountryKey" not in js
-    assert "spendUsd = 0" not in load and "? 0 :" not in load
     assert "country_identity.resolve_iso_country_text" in code
     # …and never the supported-market registry the revenue pages group on.
     assert "country_identity.resolve(" not in code
     assert "SUPPORTED_COUNTRIES" not in code
     # No surface tells an operator to run the memory-heavy job mid-month.
-    section = html.split('id="page-geo"')[1].split("</section>")[0]
+    section = html.split('id="page-roas-countries"')[1].split("</section>")[0]
     for text in (js, section):
         assert "Run the monthly scheduler" not in text
         assert "has been synced yet. Run" not in text
-    assert "never $0" in section
 
     from services import freshness_service as fresh
     from services import system_status_service as status
@@ -724,10 +561,13 @@ def test_05_the_route_reads_the_canonical_table_and_never_the_legacy_one():
 
 
 def test_06_the_guard_is_the_coverage_verdict(live_db, tmp_path, monkeypatch):
-    """Mutation, on both sides of the wire. Tell the service every window is
-    covered and the partial sum is published as the window's figure; make the
-    page trust any response and it prints a figure for a window the server
-    withheld. So tests 02–04 pass because of the gates, not by accident."""
+    """Mutation. Tell the service every window is covered and the partial sum
+    is published as the window's figure. So tests 02–04 pass because of the
+    gate, not by accident.
+
+    PR-ADS-176B: the second half mutated the deleted #/geo page's own window
+    check. The one Countries page's gate is mutated the same way in
+    tests/test_pr_ads_176b_countries_one_page.py (case 06)."""
     start, end = _window(7)
     _write_fx(start, end)
     _write_spend([_spend_rows(UK, start + timedelta(days=i), 100.0)
@@ -735,10 +575,8 @@ def test_06_the_guard_is_the_coverage_verdict(live_db, tmp_path, monkeypatch):
     _verify(start, end - timedelta(days=3))
     _seed_leads(live_db, [("h1", "Jordan", "junk")])
     api = _api("7d")
-    healthy = _render(api, tmp_path)
-    assert healthy["kpi_spend"] == "Unavailable"
-    assert _table(healthy["table"])["Jordan"][1] == "Unavailable"
     assert api["geo"]["coverage"]["status"] == "not_covered"
+    _assert_no_spend_figure_in_the_payload(api)
 
     # Server gate removed: four days of spend become "the 7-day figure", and
     # Jordan's unknown becomes a zero.
@@ -749,24 +587,11 @@ def test_06_the_guard_is_the_coverage_verdict(live_db, tmp_path, monkeypatch):
         out = real(s, e, chunks)
         return {**out, "complete": True, "missing_days": 0, "missing_ranges": []}
     monkeypatch.setattr(spend_service, "analyze_coverage", always_complete)
-    broken = _render(_api("7d"), tmp_path)
-    assert broken["kpi_spend"] == "$500"
-    assert _table(broken["table"])["Jordan"][1] == "$0"
+    broken = _api("7d")["geo"]
+    assert broken["total_spend_usd"] == 4 * 100.0 * RATE == 500.0
+    jordan = next(r for r in broken["rows"] if r["country"] == "Jordan")
+    assert (jordan["spend_usd"], jordan["spend_status"]) == (0.0, "published")
     monkeypatch.setattr(spend_service, "analyze_coverage", real)
-
-    # Page gate removed: a row the server marked unavailable but (wrongly)
-    # sent a number for must still not be printed by the real page…
-    leaky = json.loads(json.dumps(api))
-    for row in leaky["geo"]["rows"]:
-        row["spend_usd"], row["spend_status"] = 123.0, "published"
-    assert "$" not in _text(_render(leaky, tmp_path)["table"])
-    # …and is printed once the page stops checking the window verdict.
-    js = APP_JS.read_text(encoding="utf-8")
-    gate = ('if (cov.status === "covered" && perfData.spend_status === '
-            '"published" && Array.isArray(perfData.rows)) {')
-    assert js.count(gate) == 1
-    mutated = js.replace(gate, "if (Array.isArray(perfData.rows)) {")
-    assert "$123" in _text(_render(leaky, tmp_path, js=mutated)["table"])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -796,21 +621,6 @@ def test_07_lead_spellings_join_the_country_that_spent_and_never_read_zero(
     ])
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    # One row per geography — not one per spelling.
-    assert sorted(table) == ["Jordan", "United Arab Emirates", "United Kingdom"]
-    # Spend, total leads, SQLs, in progress, junk — joined.
-    assert table["United Kingdom"][1:6] == ["$875", "4", "2", "1", "1"]
-    assert table["United Arab Emirates"][1:6] == ["$350", "2", "1", "0", "1"]
-    # The one zero on the page is a measured one: Jordan is a known country,
-    # the window is covered, and it has no spend row.
-    assert table["Jordan"][1:3] == ["$0", "1"]
-    assert [c[1] for c in table.values()].count("$0") == 1
-    assert page["kpi_countries"] == "3"
-    assert page["kpi_spend"] == "$1.2k"
-    assert page["kpi_sqls"] == "2"
-    assert "Unavailable" not in _visible(page)
 
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
@@ -844,22 +654,6 @@ def test_07b_an_unmatched_lead_country_is_unavailable_and_is_not_a_geography(
     ])
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert sorted(table) == ["Narnia", "No country recorded", "United Kingdom",
-                             "Untied Kingdom"]
-    assert table["United Kingdom"][1:3] == ["$875", "1"]
-    for unmatched in ("Untied Kingdom", "Narnia"):
-        # In a COVERED window: still not a zero. It may be a spelling of a
-        # country that did spend — here one of them is.
-        assert table[unmatched][1] == "Unavailable — country not matched", unmatched
-    assert table["No country recorded"][1:3] == [
-        "Unavailable — no country recorded", "6"]
-    assert "$0" not in _text(page["table"])
-    # Countries Active counts geographies, and says what it could not match —
-    # which does not include the leads that simply have no country.
-    assert page["kpi_countries"] == "1 (+2 not matched)"
-    assert page["kpi_spend"] == "$875"         # the total is unaffected
 
     geo = api["geo"]
     assert (geo["countries_active"], geo["unmatched_lead_countries"]) == (1, 2)
@@ -947,22 +741,14 @@ def test_08_yesterday_is_published_only_after_it_was_re_read(
     _backdate_ledger(live_db, "(CURRENT_DATE - 1) + interval '6 hours 5 minutes'")
 
     morning_api = _api("7d")
-    morning = _render(morning_api, tmp_path)
-    # Not $775 — six full days and a part of the seventh — under any wording.
-    assert morning["kpi_spend"] == "Unavailable"
-    _assert_no_spend_figure_anywhere(morning_api, morning)
+    _assert_no_spend_figure_in_the_payload(morning_api)
     cov = morning_api["geo"]["coverage"]
     assert (cov["status"], cov["reason"]) == (
         "not_covered", "spend_not_reread_since_day_ended")
     assert cov["covered_through"] == (end - timedelta(days=1)).isoformat()
     assert cov["missing_ranges"] == [{"start": end.isoformat(),
                                       "end": end.isoformat()}]
-    assert ("yesterday's spend has not been re-read since the day ended"
-            in morning["notice"])
-    assert "The morning sync re-reads it; this page is available after that" \
-        in morning["notice"]
     assert "775" not in json.dumps(morning_api["geo"])
-    assert "775" not in _visible(morning)
 
     # This morning's sync: its rolling window re-reads yesterday, now complete
     # at £100, and fetches the first hours of today.
@@ -971,21 +757,11 @@ def test_08_yesterday_is_published_only_after_it_was_re_read(
     _run_real_sync(monkeypatch, google, today - timedelta(days=6), today)
 
     after_api = _api("7d")
-    after = _render(after_api, tmp_path)
-    assert after["kpi_spend"] == "$875"
-    assert _table(after["table"])["United Kingdom"][1] == "$875"
-    assert after["notice_hidden"] is True
     assert after_api["geo"]["coverage"]["status"] == "covered"
     assert after_api["geo"]["total_spend_usd"] == 875.0   # today's £37 is not in it
 
     def words(d):
         return f"{d.day} {d.strftime('%b %Y')}"
-    assert after["range"].startswith(
-        f"Spend is for {words(start)} through {words(end)}, re-read after that "
-        "day ended. Today is not included.")
-    # The different lead period is said in the same line, and no ratio invited.
-    assert "Lead counts cover a different period" in after["range"]
-    assert "do not divide one by the other" in after["range"]
 
     from services.country_evidence_service import window_bounds
     assert window_bounds(7) == (start, end)
@@ -1070,9 +846,6 @@ def test_09_all_time_publishes_only_rows_inside_the_certified_range(
     _verify(certified_from, end + timedelta(days=1))   # today's sync has run
 
     api = _api("all_time")
-    page = _render(api, tmp_path)
-    assert page["kpi_spend"] == "$125"                     # 10 × £10 × 1.25
-    assert sorted(_table(page["table"])) == ["United Kingdom"]
     geo = api["geo"]
     assert geo["coverage"]["status"] == "covered"
     assert geo["coverage"]["requested_from"] is None
@@ -1084,8 +857,6 @@ def test_09_all_time_publishes_only_rows_inside_the_certified_range(
 
     def words(d):
         return f"{d.day} {d.strftime('%b %Y')}"
-    assert page["range"].startswith(
-        f"Spend is for {words(certified_from)} through {words(end)},")
 
     # A gap inside the certified span makes all_time not covered, as before.
     with live_db.connect() as conn, conn.cursor() as cur:
@@ -1095,7 +866,7 @@ def test_09_all_time_publishes_only_rows_inside_the_certified_range(
     _verify(certified_from + timedelta(days=5), end)
     gapped = _api("all_time")
     assert gapped["geo"]["coverage"]["status"] == "not_covered"
-    _assert_no_spend_figure_anywhere(gapped, _render(gapped, tmp_path))
+    _assert_no_spend_figure_in_the_payload(gapped)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1146,7 +917,6 @@ def test_10_every_production_spend_code_is_its_own_row_and_leads_join_it(
                           for i, text in enumerate(sorted(PRODUCTION_LEAD_COUNTRIES))])
 
     api = _api("7d")
-    page = _render(api, tmp_path)
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
 
@@ -1193,31 +963,6 @@ def test_10_every_production_spend_code_is_its_own_row_and_leads_join_it(
     assert round(sum(r["spend_usd"] or 0 for r in geo["rows"]), 2) == total
     assert sum(r["total_leads"] for r in geo["rows"]) == 40
 
-    table = _table(page["table"])
-    assert len(table) == 164
-    assert page["kpi_countries"] == "163"
-    assert page["kpi_spend"] == "$16.5k"
-    assert "not matched" not in _visible(page)
-    assert _text(page["table"]).count("(unresolved location)") == 1
-    assert table["Kazakhstan"][2] == "1" and table["Nigeria"][2] == "1"
-    assert table["Libya"][2] == "1"            # stored "libyan arab jamahiriya"
-    assert [c for c, cells in table.items() if cells[1] == "$0"] == []
-    assert table["Pakistan"][1] == (
-        "Unavailable — some spend in this window has no country")
-    assert [c for c, cells in table.items()
-            if cells[1].startswith("Unavailable")] == ["Pakistan"]
-    # The page says what that spend is, and that the figures shown stand.
-    assert page["notice_hidden"] is False
-    assert page["notice"].startswith(
-        "$9 of this window's spend was reported by Google Ads against one "
-        "location with no country on record.")
-    # PR-ADS-167A: the notice names the countries it affects — Pakistan, the
-    # one lead country never seen in Google Ads spend.
-    assert page["notice"].endswith(
-        "It cannot be the spend of a country Google Ads reports under a location "
-        "of its own, so those countries' figures, zeros included, stand. It "
-        "could be the spend of a country never seen in Google Ads spend: "
-        "Pakistan reads \"Unavailable\" rather than zero.")
 
 
 def test_11_named_spend_is_never_relabelled_and_no_text_is_joined_by_guess(
@@ -1247,25 +992,6 @@ def test_11_named_spend_is_never_relabelled_and_no_text_is_joined_by_guess(
     _seed_leads(live_db, leads)
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    # Spend, leads, SQLs: Kazakhstan and Georgia under their own names.
-    assert table["Kazakhstan"][1:4] == ["$63", "2", "1"]
-    assert table["Georgia"][1:3] == ["$38", "1"]
-    assert table["United Kingdom"][1:3] == ["$125", "1"]       # England joined
-    assert table["(unresolved location)"][1:3] == ["$9", "0"]  # only the no-code spend
-    for text in ("Congo", "California", "Dubai", "IN", "CA"):
-        assert table[text][1] == "Unavailable — country not matched", text
-        assert table[text][2] == "1", text
-    assert table["No country recorded"][1:3] == [
-        "Unavailable — no country recorded", "3"]
-    # Resolved countries with no spend row. This window holds £7 with no
-    # country, which may be any of theirs — so none of them is a zero.
-    assert [c for c, cells in table.items() if cells[1] == "$0"] == []
-    for country in ("Jordan", "North Korea", "Turkey", "United States"):
-        assert table[country][1] == (
-            "Unavailable — some spend in this window has no country"), country
-    assert page["kpi_countries"] == "7 (+5 not matched)"
 
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
@@ -1329,13 +1055,9 @@ def test_12_a_merged_countrys_top_campaign_is_shown_only_when_it_is_known(
     assert (by["code:GB"]["top_campaign"], by["code:GB"]["top_keyword"]) == (None, None)
     assert (by["code:AE"]["top_campaign"], by["code:AE"]["top_keyword"]) == (
         "camp-C", "kwC")
-    table = _table(_render(api, tmp_path)["table"])
     assert (by["code:GB"]["top_campaign_several"],
             by["code:GB"]["top_keyword_several"]) == (True, True)
     assert by["code:AE"]["top_campaign_several"] is False
-    # Not a dash, which reads as "none": the spellings name different ones.
-    assert table["United Kingdom"][7:9] == ["Several", "Several"]
-    assert table["United Arab Emirates"][7:9] == ["camp-C", "kwC"]
     assert "camp-A" not in json.dumps(api["geo"])
 
 
@@ -1359,21 +1081,6 @@ def test_13_unreadable_leads_are_unknown_on_the_table_and_on_the_map(
     for field in ("total_leads", "confirmed_sqls", "confirmed_junk", "junk_rate_pct"):
         assert row[field] is None, field
 
-    probe = _PROBE.replace('renderGeoMap(geoMergedRows, "spend_usd");',
-                           'renderGeoMap(geoMergedRows, "total_leads");').replace(
-        "out.map_hover = trace ? trace.customdata.map((c) => c[1]) : null;",
-        "out.map_hover = trace ? trace.customdata[0] : null;")
-    assert probe != _PROBE
-    page = _render({"geo": geo}, tmp_path, probe=probe)
-    table = _table(page["table"])
-    # Every lead column is unknown and says so — no dash anywhere in the row.
-    assert table["United Kingdom"][1:] == ["$125"] + ["Unavailable"] * 8
-    assert page["kpi_sqls"] == "Unavailable" and page["kpi_junk"] == "Unavailable"
-    assert page["kpi_countries"] == "Unavailable"
-    # The map: no value drawn for the leads metric, and no "0" in the hover.
-    assert page["map_spend"] == [None]
-    assert page["map_hover"][2:] == ["Unavailable"] * 6
-    assert 0 not in page["map_hover"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1455,15 +1162,6 @@ def test_14_a_failed_country_lookup_does_not_turn_a_countrys_spend_into_zero(
         assert cur.fetchone()[0] == 0
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    # Checked on the page first: what a reader saw.
-    assert table["United Arab Emirates"][1:4] == ["$63", "2", "1"]
-    assert table["United Kingdom"][1] == "$875"
-    assert "(unresolved location)" not in table
-    assert "$0" not in _visible(page)
-    assert page["kpi_spend"] == "$938"
-    assert page["notice_hidden"] is True
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
     assert set(by) == {"code:GB", "code:AE"}
@@ -1506,18 +1204,6 @@ def test_14b_when_no_stored_row_names_the_location_the_country_is_not_zero(
         "partial", "country_lookup_failed"), result
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["United Arab Emirates"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["United Arab Emirates"][2:4] == ["2", "1"]
-    assert "$0" not in _visible(page)
-    # The UK is named by its day-one row, which the re-read did not touch.
-    assert table["United Kingdom"][1] == "$875"
-    assert table["(unresolved location)"][1] == "$63"
-    assert page["kpi_spend"] == "$938"                 # the total is right
-    assert page["notice"].startswith(
-        "$63 of this window's spend was reported by Google Ads against one "
-        "location with no country on record.")
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
     assert (by["code:AE"]["spend_usd"], by["code:AE"]["spend_status"],
@@ -1548,11 +1234,6 @@ def test_15_a_location_nothing_names_blocks_a_zero_only_in_a_window_that_holds_i
 
     # 7 days: none of the unnamed location's spend is in the window.
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["Pakistan"][1] == "$0"
-    assert page["notice_hidden"] is True
-    assert "(unresolved location)" not in table
     assert api["geo"]["unresolved_spend"]["blocks_zero"] is False
     pk = {r["country_key"]: r for r in api["geo"]["rows"]}["code:PK"]
     assert (pk["spend_usd"], pk["spend_status"], pk["spend_reason"]) == (
@@ -1562,13 +1243,6 @@ def test_15_a_location_nothing_names_blocks_a_zero_only_in_a_window_that_holds_i
     _write_fx(end - timedelta(days=40), end)
     _verify(end - timedelta(days=40), older - timedelta(days=1))
     api = _api("30d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["Pakistan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["United Kingdom"][1] == "$125"            # unchanged, published
-    assert table["United Arab Emirates"][1] == "$50"
-    assert table["(unresolved location)"][1] == "<$1"
-    assert "$0" not in _visible(page)
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
     assert (by["code:PK"]["spend_usd"], by["code:PK"]["spend_reason"]) == (
@@ -1579,7 +1253,6 @@ def test_15_a_location_nothing_names_blocks_a_zero_only_in_a_window_that_holds_i
                                        "spend_usd": 0.56, "blocks_zero": True,
                                        "zero_withheld_countries": ["Pakistan"]}
     assert geo["total_spend_usd"] == round((100 + 40 + 0.45) * RATE, 2)
-    assert page["notice"].startswith("<$1 of this window's spend was reported")
 
 
 def test_16_a_criterion_stored_under_two_codes_is_not_given_either(
@@ -1600,12 +1273,6 @@ def test_16_a_criterion_stored_under_two_codes_is_not_given_either(
     _seed_leads(live_db, [("g1", "Germany", "qualified"), ("g2", "France", "junk")])
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["(unresolved location)"][1] == "$50"          # £30 + £10
-    assert table["Germany"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["France"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["United Kingdom"][1] == "$125"
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
     assert by["code:DE"]["spend_usd"] is None and by["code:FR"]["spend_usd"] is None
@@ -1640,8 +1307,7 @@ def test_16b_an_unreadable_identity_lookup_is_unavailable_not_a_guess(
     monkeypatch.setattr(repo, "fetch_geo_criterion_identities",
                         lambda ids: {"available": False, "identities": {}})
     api = _api("7d")
-    page = _render(api, tmp_path)
-    _assert_no_spend_figure_anywhere(api, page)
+    _assert_no_spend_figure_in_the_payload(api)
     assert api["geo"]["coverage"]["reason"] == "geo_rows_unreadable"
 
 
@@ -1656,23 +1322,22 @@ def test_17_spend_under_a_dollar_never_reads_as_zero(live_db, tmp_path):
     _verify(start, end)
     _seed_leads(live_db, [("f1", "Pakistan", "junk")])
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["Fiji"][1] == "<$1"                   # $0.49
-    assert table["United Kingdom"][1] == "<$1"         # $0.99
-    assert table["United Arab Emirates"][1] == "$1"    # $1.00
-    assert table["Pakistan"][1] == "$0"                # the one measured zero
-    assert [c for c, cells in table.items() if cells[1] == "$0"] == ["Pakistan"]
-    hover = dict(zip([r["country"] for r in api["geo"]["rows"]], page["map_hover"]))
-    assert (hover["Fiji"], hover["Pakistan"]) == ("<$1", "$0")
-    assert page["kpi_spend"] == "$2"
+    # PR-ADS-176B: the payload half (the "<$1" display rule moved with the
+    # page to the one Countries page: tests/test_pr_ads_176b_* case 11).
+    by = {r["country"]: r for r in api["geo"]["rows"]}
+    assert by["Fiji"]["spend_usd"] == 0.49                  # 39p, rounded to the cent
+    assert by["United Kingdom"]["spend_usd"] == 0.99
+    assert by["United Arab Emirates"]["spend_usd"] == 1.0
+    assert (by["Pakistan"]["spend_usd"], by["Pakistan"]["spend_status"]) == (
+        0.0, "published")                              # the one measured zero
+    assert [c for c, r in by.items() if r["spend_usd"] == 0] == ["Pakistan"]
 
-    # A window whose whole spend is under a dollar: the total is not "$0".
+    # A window whose whole spend is under a dollar: the total is not 0.
     with live_db.connect() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM google_ads_geo_daily_spend "
                     "WHERE country_code <> 'FJ'")
         conn.commit()
-    assert _render(_api("7d"), tmp_path)["kpi_spend"] == "<$1"
+    assert _api("7d")["geo"]["total_spend_usd"] == 0.49
 
 
 def test_18_unreadable_leads_are_not_reported_as_no_leads(
@@ -1685,26 +1350,19 @@ def test_18_unreadable_leads_are_not_reported_as_no_leads(
         server, "api_leads_country_summary",
         lambda **k: {"days": 7, "rows": [], "db_unavailable": True})
     api = _api_geo_only("7d")
-    page = _render(api, tmp_path)
     assert api["geo"]["rows"] == [] and api["geo"]["leads_status"] == "unavailable"
-    assert "Lead figures could not be read." in _text(page["table"])
-    assert "No leads" not in _text(page["table"])
-    assert page["kpi_sqls"] == "Unavailable"
 
     # The route's own fallback, when the lead read raises.
     def raising(**k):
         raise RuntimeError("boom")
     monkeypatch.setattr(server, "api_leads_country_summary", raising)
     api = _api_geo_only("7d")
-    page = _render(api, tmp_path)
     assert api["geo"]["leads_status"] == "unavailable"
-    assert "Lead figures could not be read." in _text(page["table"])
-    assert "No leads" not in _text(page["table"])
 
     # Readable leads, and none: that IS "no leads".
     monkeypatch.setattr(server, "api_leads_country_summary", real_summary)
-    page = _render(_api("7d"), tmp_path)
-    assert "No leads in the selected window." in _text(page["table"])
+    api = _api("7d")
+    assert api["geo"]["leads_status"] == "published" and api["geo"]["rows"] == []
 
 
 def _api_geo_only(window: str) -> dict:
@@ -1738,12 +1396,7 @@ def test_19_a_failed_re_read_is_not_described_as_waiting_for_the_morning_sync(
     assert result["status"] != "success"
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    assert "morning sync" not in page["notice"]
-    assert ("the sync that should have re-read yesterday's spend failed"
-            in page["notice"])
-    assert "This page stays unavailable until a sync succeeds" in page["notice"]
-    _assert_no_spend_figure_anywhere(api, page)
+    _assert_no_spend_figure_in_the_payload(api)
     cov = api["geo"]["coverage"]
     assert (cov["status"], cov["reason"]) == ("not_covered", "spend_reread_failed")
 
@@ -1761,14 +1414,16 @@ def test_20_the_country_counts_count_countries(live_db, tmp_path):
         ("s5", "Other", "qualified"), ("s6", None, "junk"), ("s7", "N/A", "junk"),
         ("s8", "Jordan", "junk"),
     ])
-    page = _render(_api("7d"), tmp_path)
-    table = _table(page["table"])
-    assert table["Dubai"][3] == "1" and table["No country recorded"][3] == "1"
-    assert page["kpi_sqls"] == "1"              # the UK. Not Dubai, not "none".
-    assert page["kpi_junk"] == "1"              # Jordan. Not Dubai, not "none".
-    # A known zero is the number 0, not a dash.
-    assert table["Jordan"][3:5] == ["0", "0"]
-    assert table["United Kingdom"][5] == "0"
+    # PR-ADS-176B: the page's two KPI counts ("Countries with SQLs", "High
+    # Junk Countries") are lead-quality figures, dropped with the page (owner
+    # decision 3). What the payload says about each row stays checked.
+    by = {r["country"]: r for r in _api("7d")["geo"]["rows"]}
+    assert by["Dubai"]["confirmed_sqls"] == 1 and by["Dubai"]["country_resolved"] is False
+    assert by["No country recorded"]["confirmed_sqls"] == 1
+    assert by["No country recorded"]["country_resolved"] is False
+    # A known zero is the number 0, not None.
+    assert (by["Jordan"]["confirmed_sqls"], by["Jordan"]["in_progress"]) == (0, 0)
+    assert by["United Kingdom"]["confirmed_junk"] == 0
 
 
 def test_21_kosovo_leads_join_kosovos_spend(live_db, tmp_path):
@@ -1781,9 +1436,10 @@ def test_21_kosovo_leads_join_kosovos_spend(live_db, tmp_path):
     _verify(start, end)
     _seed_leads(live_db, [("x1", "Kosovo", "qualified"), ("x2", "kosovo", "junk")])
     api = _api("7d")
-    table = _table(_render(api, tmp_path)["table"])
-    assert list(table) == ["Kosovo"]
-    assert table["Kosovo"][1:4] == ["$15", "2", "1"]
+    rows = api["geo"]["rows"]
+    assert [r["country"] for r in rows] == ["Kosovo"]
+    assert (rows[0]["spend_usd"], rows[0]["total_leads"], rows[0]["confirmed_sqls"]) == (
+        15.0, 2, 1)
     assert api["geo"]["unmatched_lead_countries"] == 0
 
 
@@ -1802,11 +1458,9 @@ def test_22_the_account_time_zone_is_read_where_the_sync_reads_it(
 
     _seed_account_zone(live_db, None)
     api = _api("7d")
-    page = _render(api, tmp_path)
-    _assert_no_spend_figure_anywhere(api, page)
+    _assert_no_spend_figure_in_the_payload(api)
     cov = api["geo"]["coverage"]
     assert (cov["status"], cov["reason"]) == ("unavailable", "account_time_zone_unknown")
-    assert "time zone is not on record" in page["notice"]
 
     _seed_account_zone(live_db, "Not/AZone")
     assert _api("7d")["geo"]["coverage"]["reason"] == "account_time_zone_unknown"

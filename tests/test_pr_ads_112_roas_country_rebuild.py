@@ -96,11 +96,13 @@ def test_load_retains_country_specific_source_health():
 def test_blocked_state_returns_before_summary_and_table():
     # PR-ADS-126: readiness is the MART's verdict (data.readiness.revenue_decision_ready),
     # and the blocked guard still returns before any summary strip or table render.
-    body = _fn("function renderRoasCountriesPage", span=3400)
+    # PR-ADS-176B: the summary is the Dashboard KPI cards
+    # (renderRoasCountrySummary over the mart's country_totals).
+    body = _fn("function renderRoasCountriesPage", span=4200)
     i_ready = body.find("revenue_decision_ready")
     i_block = body.find("renderCountryRevenueBlockedState")
     i_return = body.find("return", i_block)
-    i_summary = body.find("renderMartSummaryStrip")
+    i_summary = body.find("renderRoasCountrySummary(data)")
     i_table = body.find("renderRoasCountryTable")
     assert i_ready != -1 and i_block != -1 and i_return != -1
     assert i_ready < i_block < i_return
@@ -128,9 +130,17 @@ def test_summary_is_canonical_mart_summary():
     # PR-ADS-126: the country summary is the canonical mart summary (the SAME
     # truth every revenue page shares), not a page-local recomputation or a stale
     # global account summary.
-    body = _fn("function renderRoasCountriesPage", span=3400)
-    assert "renderMartSummaryStrip(data)" in body
+    # PR-ADS-176B: the canonical mart summary (`summary`) is the account's
+    # CAMPAIGN-attributable figures — not what the country rows count — so
+    # the one Countries page shows the mart's own country totals instead
+    # (`country_totals`, summed by the mart over the listed markets). Still
+    # never a page-local recomputation: the client-side sum is gone.
+    body = _fn("function renderRoasCountriesPage", span=4200)
+    assert "renderRoasCountrySummary(data)" in body
     assert "roasRevenueSummary" not in body
+    summary = _fn("function renderRoasCountrySummary", span=900)
+    assert "data.country_totals" in summary
+    assert "function summarizeRoasCountryRows" not in JS
 
 
 # ── 6. Summary and table use the multiple period-ratio formatter ─────────────
@@ -140,7 +150,8 @@ def test_country_period_ratio_uses_multiple_notation():
     # PR-ADS-161E: the close-date ratio is the period ratio, never ROAS. The
     # totals strip goes through the canonical adapter (no verdict → dashValue:
     # null → Unavailable; a withheld verdict names its reason); rows likewise.
-    summary = _fn("function renderRoasCountrySummary", span=900)
+    # PR-ADS-176B: the summary is six KPI cards, so the ratio card is further in.
+    summary = _fn("function renderRoasCountrySummary", span=3000)
     assert 'rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio' in summary
     assert "s.roas" not in summary
     assert "fmtRoas(s.roas)" not in summary
@@ -182,7 +193,8 @@ def test_unknown_or_blank_country_renders_unmapped():
     assert '"Unmapped"' in fn
     assert 'toLowerCase() === "unknown"' in fn
     # The table uses the display-name mapping (not a raw country value).
-    table = _fn("function renderRoasCountryTable", span=1600)
+    # PR-ADS-176B: the residual branch (with its sub-rows) comes first.
+    table = _fn("function renderRoasCountryTable", span=4500)
     assert "countryDisplayName(r.country)" in table
 
 
@@ -213,8 +225,9 @@ def test_business_window_selector_unchanged():
     m = re.search(r'id="page-roas-countries".*?</section>', HTML, re.DOTALL)
     assert m
     section = m.group(0)
-    # PR-ADS-161E: renamed from "ROAS by Country".
-    assert "Country Revenue &amp; Spend" in section
+    # PR-ADS-161E: renamed from "ROAS by Country". PR-ADS-176B: merged with
+    # the Countries evidence page into the one page titled "Countries".
+    assert '<h1 class="page-title">Countries</h1>' in section
     assert "ROAS by Country" not in section
     for win in ("current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"):
         assert f'value="{win}"' in section

@@ -15,7 +15,9 @@ REQUIRED_ROUTE_KEYS = [
     # endpoints); see tests/test_pr_ads_162g_action_queue_reports_retired.py.
     "campaigns",
     "search-terms",
-    "geo",
+    # PR-ADS-176B: "geo" (the Countries evidence page) was deleted; #/geo
+    # redirects to "roas-countries", the one Countries page. See
+    # tests/test_pr_ads_176b_countries_one_page.py.
     "keywords",
     "leads",
     "deals",
@@ -41,7 +43,8 @@ NEW_VISIBLE_LABELS = [
     # PR-ADS-161E: renamed from "ROAS by Campaign" / "ROAS by Country" — a
     # close-date ratio is never called ROAS.
     "Campaign Revenue &amp; Spend",
-    "Country Revenue &amp; Spend",
+    # PR-ADS-176B: "Country Revenue &amp; Spend" is merged into the one page
+    # titled "Countries" (already listed above).
 ]
 
 # PR-ADS-162F: the groups were renamed to say what they hold. "Command
@@ -131,10 +134,12 @@ def test_old_duplicate_menu_items_removed():
 def test_revenue_attribution_section_exists():
     """The revenue pages must be reachable from the menu. PR-ADS-162F labelled
     the group "Sales Results" (it was "CRM & Revenue"); PR-ADS-174A put each
-    Revenue & Spend page in the strip of the item it is about."""
-    assert 'data-section="campaigns"' in HTML and 'data-section="countries"' in HTML
+    Revenue & Spend page in the strip of the item it is about. PR-ADS-176B:
+    the country one IS the Countries item — one page, no strip."""
+    assert 'data-section="campaigns"' in HTML
     assert 'data-page="roas-campaigns"' in HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
-    assert 'data-page="roas-countries"' in HTML.split('data-section="countries"')[1].split("</nav>")[0]
+    assert 'data-section="countries"' not in HTML
+    assert 'data-page="roas-countries" data-nav-item="countries"' in HTML
 
 
 def test_roas_pages_exist():

@@ -108,66 +108,15 @@ RESIDUAL_LABEL = country_identity.RESIDUAL_LABEL
 
 
 # ── Region mapping (presentation grouping only) ──────────────────────────────
-# There is NO existing country_code -> region contract in the codebase, so this
-# introduces one purely for presentation grouping — it adds no business math and
-# nothing is mislabelled (an unresolved / unknown code lands in a clearly named
-# "Unknown / Needs Review" lane, never guessed). Mexico is grouped with LATAM
-# (commercial grouping); North-African markets are grouped with Africa.
-REGION_NORTH_AMERICA = "North America"
-REGION_EUROPE = "Europe"
-REGION_MIDDLE_EAST = "Middle East"
-REGION_LATAM = "LATAM"
-REGION_AFRICA = "Africa"
-REGION_APAC = "APAC"
-REGION_UNKNOWN = "Unknown / Needs Review"
-
-REGION_ORDER = [
-    REGION_NORTH_AMERICA, REGION_EUROPE, REGION_MIDDLE_EAST,
-    REGION_LATAM, REGION_AFRICA, REGION_APAC, REGION_UNKNOWN,
-]
-
-_COUNTRY_REGION = {
-    # North America
-    "US": REGION_NORTH_AMERICA, "CA": REGION_NORTH_AMERICA,
-    # LATAM (Mexico grouped commercially with Latin America)
-    "MX": REGION_LATAM, "BR": REGION_LATAM, "AR": REGION_LATAM, "CL": REGION_LATAM,
-    "CO": REGION_LATAM, "PE": REGION_LATAM, "EC": REGION_LATAM, "VE": REGION_LATAM,
-    "UY": REGION_LATAM, "PY": REGION_LATAM, "BO": REGION_LATAM, "PA": REGION_LATAM,
-    "CR": REGION_LATAM, "GT": REGION_LATAM, "DO": REGION_LATAM,
-    # Europe
-    "GB": REGION_EUROPE, "IE": REGION_EUROPE, "FR": REGION_EUROPE, "DE": REGION_EUROPE,
-    "ES": REGION_EUROPE, "PT": REGION_EUROPE, "IT": REGION_EUROPE, "NL": REGION_EUROPE,
-    "BE": REGION_EUROPE, "LU": REGION_EUROPE, "CH": REGION_EUROPE, "AT": REGION_EUROPE,
-    "PL": REGION_EUROPE, "CZ": REGION_EUROPE, "SK": REGION_EUROPE, "HU": REGION_EUROPE,
-    "RO": REGION_EUROPE, "BG": REGION_EUROPE, "GR": REGION_EUROPE, "CY": REGION_EUROPE,
-    "MT": REGION_EUROPE, "SE": REGION_EUROPE, "NO": REGION_EUROPE, "DK": REGION_EUROPE,
-    "FI": REGION_EUROPE, "IS": REGION_EUROPE, "EE": REGION_EUROPE, "LV": REGION_EUROPE,
-    "LT": REGION_EUROPE, "UA": REGION_EUROPE, "RU": REGION_EUROPE, "HR": REGION_EUROPE,
-    "SI": REGION_EUROPE, "RS": REGION_EUROPE,
-    # Middle East (Levant + Gulf + Turkey / Iran / Israel)
-    "SA": REGION_MIDDLE_EAST, "AE": REGION_MIDDLE_EAST, "QA": REGION_MIDDLE_EAST,
-    "KW": REGION_MIDDLE_EAST, "BH": REGION_MIDDLE_EAST, "OM": REGION_MIDDLE_EAST,
-    "JO": REGION_MIDDLE_EAST, "LB": REGION_MIDDLE_EAST, "IQ": REGION_MIDDLE_EAST,
-    "YE": REGION_MIDDLE_EAST, "SY": REGION_MIDDLE_EAST, "PS": REGION_MIDDLE_EAST,
-    "IL": REGION_MIDDLE_EAST, "IR": REGION_MIDDLE_EAST, "TR": REGION_MIDDLE_EAST,
-    # Africa (incl. North Africa)
-    "EG": REGION_AFRICA, "MA": REGION_AFRICA, "DZ": REGION_AFRICA, "TN": REGION_AFRICA,
-    "LY": REGION_AFRICA, "SD": REGION_AFRICA, "ZA": REGION_AFRICA, "NG": REGION_AFRICA,
-    "KE": REGION_AFRICA, "GH": REGION_AFRICA, "ET": REGION_AFRICA, "TZ": REGION_AFRICA,
-    "UG": REGION_AFRICA,
-    # APAC
-    "CN": REGION_APAC, "HK": REGION_APAC, "TW": REGION_APAC, "JP": REGION_APAC,
-    "KR": REGION_APAC, "IN": REGION_APAC, "PK": REGION_APAC, "BD": REGION_APAC,
-    "LK": REGION_APAC, "SG": REGION_APAC, "MY": REGION_APAC, "ID": REGION_APAC,
-    "TH": REGION_APAC, "VN": REGION_APAC, "PH": REGION_APAC, "AU": REGION_APAC,
-    "NZ": REGION_APAC,
-}
-
-
-def _region_for_code(code) -> str:
-    if not code:
-        return REGION_UNKNOWN
-    return _COUNTRY_REGION.get(str(code).strip().upper(), REGION_UNKNOWN)
+# PR-ADS-176B: the table moved, unchanged, to `analysis/country_regions.py` so
+# the Countries page (the mart country view) groups by the same regions. These
+# names stay as aliases for this module's callers.
+from analysis.country_regions import (  # noqa: E402
+    COUNTRY_REGION as _COUNTRY_REGION,
+    REGION_AFRICA, REGION_APAC, REGION_EUROPE, REGION_LATAM, REGION_MIDDLE_EAST,
+    REGION_NORTH_AMERICA, REGION_ORDER, REGION_UNKNOWN,
+    region_for_code as _region_for_code,
+)
 
 
 def _norm(label) -> str:
@@ -988,7 +937,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "body": (f"Closed-won deals are withheld for {len(withheld)} "
                      f"market{'s' if len(withheld) != 1 else ''} in this window, so "
                      "no market is judged on revenue here."),
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
     elif proven:
         top = max(proven, key=lambda r: (r.get("won_revenue_usd") or 0.0,
@@ -1000,7 +949,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
                      f"{'s' if top['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(top['won_revenue_usd'])} closed-won revenue this "
                      "window."),
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
     else:
         cards.append({
@@ -1008,7 +957,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "headline": "No country has revenue proof yet",
             "body": "No market has both closed-won deals and proven revenue in "
                     "this window.",
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
 
     # Watch — spend without a won deal.
@@ -1022,7 +971,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "body": (f"{len(no_proof)} countr{'ies' if len(no_proof) != 1 else 'y'} spent "
                      "Google Ads budget but won no deals in this window. Review "
                      "before scaling."),
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
     elif withheld:
         cards.append({
@@ -1031,7 +980,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "body": (f"Closed-won deals are withheld for {len(withheld)} "
                      f"market{'s' if len(withheld) != 1 else ''}, so spend without "
                      "proof is not claimed."),
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
     else:
         cards.append({
@@ -1039,7 +988,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "headline": "No unproven market spend",
             "body": "Every spending market won at least one deal, or has no "
                     "spend to judge.",
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
 
     # Investigate — geo attribution review, or revenue that maps to no country.
@@ -1080,7 +1029,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
             "headline": "No geo attribution flags",
             "body": "Geo spend reconciles and all closed-won revenue maps to a country "
                     "this window.",
-            "target_page": "roas-countries", "target_label": "Open Country Revenue & Spend",
+            "target_page": "roas-countries", "target_label": "Open Countries",
         })
 
     # Unavailable — explain WHY geo period ratio / USD spend is withheld, ACCURATELY.
@@ -1373,7 +1322,10 @@ def _assemble(window: str, now: datetime | None) -> dict:
                 "closed_won_deals": None, "revenue_proven_deals": None,
                 "revenue_unavailable_deals": None}),
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
-        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        # PR-ADS-176B: the scope the rows, the residual and the drawers count —
+        # `google_ads_source` (the mart's country rows; `deal_rows` above).
+        # It said `all_source`, a population no row here holds (docs/58 §5).
+        "revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
         "revenue_unavailable_reason": (None if deal_proof_available
                                        else canonical.get("reason")),
         "revenue_violation_codes": canonical.get("violation_codes") or [],
@@ -1386,7 +1338,7 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "country_truth": geo_gate.build_country_truth_disclosure(
             spend_truth, window_block,
             revenue_source=canonical_revenue.CANONICAL_SOURCE,
-            revenue_scope=revenue_scope.SCOPE_ALL_SOURCE,
+            revenue_scope=revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
             revenue_available=deal_proof_available,
             revenue_reason=canonical.get("reason"),
             revenue_violation_codes=canonical.get("violation_codes"),

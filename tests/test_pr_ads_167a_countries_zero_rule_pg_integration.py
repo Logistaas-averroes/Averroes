@@ -16,8 +16,16 @@ else) is a measured ``$0`` in a covered window even while code-less spend is in
 it. A country never seen in geo spend (Pakistan: leads, no Google spend ever)
 could be the loose location, and stays "Unavailable" while there is any.
 
-Real PostgreSQL, the real writers, the real ``api_geo`` handler and the real
-``loadGeo`` in node — the harness of ``test_pr_ads_165a_countries_pg_integration``.
+Real PostgreSQL, the real writers and the real ``api_geo`` handler — the
+harness of ``test_pr_ads_165a_countries_pg_integration``.
+
+PR-ADS-176B deleted the ``#/geo`` page these cases also rendered through
+``loadGeo``. Each page assertion is now the same assertion on the row the page
+printed (``"$0"`` → ``spend_usd == 0.0`` published; ``"Unavailable — some
+spend in this window has no country"`` → ``None`` with
+``spend_location_unresolved``). The endpoint stays until PR-ADS-176C. The rule
+itself is shared (``services/country_spend_zero_rule.py``) and is proved on
+the one Countries page in ``tests/test_pr_ads_176a_*`` and ``176b_*``.
 """
 from __future__ import annotations
 
@@ -31,8 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tests.test_pr_ads_165a_countries_pg_integration import (  # noqa: E402,F401
-    RATE, UK, _api, _render, _seed_leads, _spend_rows, _table, _verify,
-    _visible, _window, _write_fx, _write_spend, live_db,
+    RATE, UK, _api, _seed_leads, _spend_rows, _verify,
+    _window, _write_fx, _write_spend, live_db,
 )
 
 #: Two criteria that carry no code on any row and that nothing names — the
@@ -45,7 +53,17 @@ LOOSE_A = ("2997", None, None)
 LOOSE_B = ("2998", None, None)
 #: A country Google has reported under its own criterion — but not lately.
 JORDAN = ("2400", "JO", "Jordan")
-UNAVAILABLE_NO_COUNTRY = "Unavailable — some spend in this window has no country"
+#: What the page printed as "Unavailable — some spend in this window has no
+#: country", as the row says it.
+UNAVAILABLE_NO_COUNTRY = (None, "unavailable", "spend_location_unresolved")
+ZERO = (0.0, "published", None)
+
+
+def _spend(api) -> dict:
+    """{country: (spend_usd, spend_status, spend_reason)} — each row's spend
+    as served."""
+    return {r["country"]: (r["spend_usd"], r["spend_status"], r["spend_reason"])
+            for r in api["geo"]["rows"]}
 
 
 def _production_shape(cluster, *, loose_in_window: bool):
@@ -71,23 +89,11 @@ def test_01_a_country_whose_code_another_criterion_carries_is_a_measured_zero(
         live_db, tmp_path):
     _production_shape(live_db, loose_in_window=True)
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    # The page first — what a reader sees.
-    assert table["Jordan"][1:3] == ["$0", "2"]
-    assert table["Pakistan"][1:3] == [UNAVAILABLE_NO_COUNTRY, "1"]
-    assert table["United Kingdom"][1] == "$175"
-    assert table["(unresolved location)"][1] == "$4"
-    assert page["kpi_spend"] == "$179"
-    assert page["notice_hidden"] is False
-    assert page["notice"] == (
-        "$4 of this window's spend was reported by Google Ads against one "
-        "location with no country on record. It is in the total and in the "
-        "\"(unresolved location)\" row. It cannot be the spend of a country "
-        "Google Ads reports under a location of its own, so those countries' "
-        "figures, zeros included, stand. It could be the spend of a country "
-        "never seen in Google Ads spend: Pakistan reads \"Unavailable\" rather "
-        "than zero.")
+    spend = _spend(api)
+    assert spend["Jordan"] == ZERO
+    assert spend["Pakistan"] == UNAVAILABLE_NO_COUNTRY
+    assert spend["United Kingdom"] == (7 * 20.0 * RATE, "published", None)
+    assert spend["(unresolved location)"][:2] == (3.0 * RATE, "published")
 
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
@@ -106,13 +112,11 @@ def test_02_with_no_code_less_spend_in_the_window_pakistan_too_is_a_zero(
         live_db, tmp_path):
     _production_shape(live_db, loose_in_window=False)
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["Pakistan"][1] == "$0"
-    assert table["Jordan"][1] == "$0"
-    assert "(unresolved location)" not in table
-    assert page["notice_hidden"] is True
-    assert "Unavailable" not in _visible(page)
+    spend = _spend(api)
+    assert spend["Pakistan"] == ZERO
+    assert spend["Jordan"] == ZERO
+    assert "(unresolved location)" not in spend
+    assert all(s[1] == "published" for s in spend.values()), spend
     assert api["geo"]["unresolved_spend"] == {
         "criteria": 0, "conflicting_criteria": 0, "spend_usd": None,
         "blocks_zero": False, "zero_withheld_countries": []}
@@ -127,19 +131,13 @@ def test_03_a_criterion_in_the_window_with_two_codes_withholds_every_spendless_z
     _write_spend([_spend_rows((twice, "FR", "France"), start - timedelta(days=15), 9.0),
                   _spend_rows((twice, "DE", "Germany"), end, 30.0)])
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["Jordan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["Pakistan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["United Kingdom"][1] == "$175"
+    spend = _spend(api)
+    assert spend["Jordan"] == UNAVAILABLE_NO_COUNTRY
+    assert spend["Pakistan"] == UNAVAILABLE_NO_COUNTRY
+    assert spend["United Kingdom"] == (7 * 20.0 * RATE, "published", None)
     loose = api["geo"]["unresolved_spend"]
     assert (loose["conflicting_criteria"], loose["blocks_zero"],
             loose["zero_withheld_countries"]) == (1, True, ["Jordan", "Pakistan"])
-    assert page["notice"].endswith(
-        "A location on record under two different countries is among them, so "
-        "a country with no spend of its own cannot be called zero: Jordan, "
-        "Pakistan read \"Unavailable\". Countries that show a figure are not "
-        "affected.")
 
 
 def test_04_a_code_under_two_criteria_is_not_evidence_and_the_zero_is_withheld(
@@ -151,8 +149,7 @@ def test_04_a_code_under_two_criteria_is_not_evidence_and_the_zero_is_withheld(
     start, _end = _production_shape(live_db, loose_in_window=True)
     _write_spend([_spend_rows(("20401", "JO", "Jordan"), start - timedelta(days=18), 1.0)])
     api = _api("7d")
-    table = _table(_render(api, tmp_path)["table"])
-    assert table["Jordan"][1] == UNAVAILABLE_NO_COUNTRY
+    assert _spend(api)["Jordan"] == UNAVAILABLE_NO_COUNTRY
     assert api["geo"]["unresolved_spend"]["zero_withheld_countries"] == [
         "Jordan", "Pakistan"]
 
@@ -164,10 +161,10 @@ def test_05_the_carrier_evidence_unreadable_is_carried_by_nothing(
     monkeypatch.setattr(repo, "fetch_geo_code_carriers",
                         lambda codes: {"available": False, "carriers": {}})
     api = _api("7d")
-    table = _table(_render(api, tmp_path)["table"])
-    assert table["Jordan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["Pakistan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["United Kingdom"][1] == "$175"
+    spend = _spend(api)
+    assert spend["Jordan"] == UNAVAILABLE_NO_COUNTRY
+    assert spend["Pakistan"] == UNAVAILABLE_NO_COUNTRY
+    assert spend["United Kingdom"] == (7 * 20.0 * RATE, "published", None)
 
 
 def test_06_an_uncovered_window_publishes_no_zero_whatever_is_carried(
@@ -180,11 +177,11 @@ def test_06_an_uncovered_window_publishes_no_zero_whatever_is_carried(
         conn.commit()
     _verify(start - timedelta(days=20), end - timedelta(days=1))
     api = _api("7d")
-    page = _render(api, tmp_path)
     assert api["geo"]["coverage"]["status"] == "not_covered"
-    table = _table(page["table"])
-    assert table["Jordan"][1].startswith("Unavailable")
-    assert "$0" not in _visible(page)
+    spend = _spend(api)
+    assert spend["Jordan"][:2] == (None, "unavailable")
+    assert all(s[0] is None for s in spend.values()), spend
+    assert api["geo"]["total_spend_usd"] is None
 
 
 def test_07_the_carrier_read_is_one_statement_of_the_shared_identity_rule():

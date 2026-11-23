@@ -230,9 +230,11 @@ def test_evidence_pages_list_and_helper():
     # PR-ADS-153D: "waste" is retired into Search Terms → Flagged, which is
     # served by the Search Terms page's own evidence window — the retired page
     # must not leave a second window implementation behind (§21).
-    for route in ("campaigns", "search-terms", "ngrams", "keywords", "geo"):
+    # PR-ADS-176B: "geo" left with the Countries evidence page; the one
+    # Countries page (roas-countries) is on business windows (owner decision).
+    for route in ("campaigns", "search-terms", "ngrams", "keywords"):
         assert f'"{route}"' in block, f"EVIDENCE_PAGES missing {route}"
-    for retired in ("leads", "opportunities", "waste"):
+    for retired in ("leads", "opportunities", "waste", "geo", "roas-countries"):
         assert f'"{retired}"' not in block, (
             f"EVIDENCE_PAGES must not contain the retired route {retired}")
     assert "function isEvidencePage(" in APP_JS
@@ -304,8 +306,12 @@ def test_evidence_loaders_use_window_param():
     # text. The server joins them now (on the canonical country identity), so
     # the page sends its evidence window to ONE endpoint; the lead summary
     # endpoint still exists and still takes the window (EVIDENCE_ENDPOINTS).
-    assert "/api/geo?${evidenceWindowQuery()}" in APP_JS
+    # PR-ADS-176B: that page is deleted. Countries reads the mart's country
+    # view on a BUSINESS window, and nothing in the UI reads /api/geo (its
+    # endpoint stays until PR-ADS-176C).
+    assert "/api/geo" not in APP_JS
     assert "/api/leads/country-summary" not in APP_JS
+    assert 'fetchRevenuePerformance("country", window_)' in APP_JS
     # Search-terms family sends window= in its param builders.
     assert 'params.set("window", getEvidenceWindow())' in APP_JS
     # evidenceWindowQuery serializes to a window= param.

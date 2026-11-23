@@ -34,7 +34,9 @@ SERVER_PY = (ROOT / "api" / "server.py").read_text(encoding="utf-8")
 
 # ── Platform Evidence route keys (must remain stable) ───────────────────────
 
-PLATFORM_EVIDENCE_ROUTES = ["campaigns", "search-terms", "keywords", "geo"]
+# PR-ADS-176B: "geo" (the Countries evidence page) was deleted; Countries is
+# the business-window page "roas-countries" and #/geo redirects there.
+PLATFORM_EVIDENCE_ROUTES = ["campaigns", "search-terms", "keywords"]
 
 # Google Ads API datasets that back the Platform Evidence pages.
 #
@@ -238,9 +240,14 @@ class TestDatasetSourceMapping:
         # which only the monthly job writes. The Countries page reads the
         # daily canonical country spend now, so that is the google_ads_api
         # key asserted for it (and the legacy key must not be a page's).
-        page_datasets = ["canonical_spend", "search_terms", "keyword_facts",
-                         "canonical_geo"]
+        # PR-ADS-176B: that page is deleted; the one Countries page declares
+        # the same daily canonical dataset in PAGE_DEPENDENCIES.
+        page_datasets = ["canonical_spend", "search_terms", "keyword_facts"]
         assert '"google_ads_api/geo"' not in block
+        deps = extract_js_object_block(APP_JS, "PAGE_DEPENDENCIES")
+        countries = next(l for l in deps.splitlines() if '"roas-countries":' in l)
+        assert '"google_ads_api/canonical_geo"' in countries
+        assert '"google_ads_api/geo"' not in deps
         for ds in page_datasets:
             assert f"google_ads_api/{ds}" in block, (
                 f"PAGE_DATASET_MAP must map to google_ads_api/{ds}"
@@ -297,8 +304,9 @@ class TestSearchTermsTabModel:
         assert '"ngrams": "search-terms"' in block, (
             "ngrams hash alias must resolve to search-terms"
         )
-        assert '"countries": "geo"' in block, (
-            "countries hash alias must resolve to geo"
+        # PR-ADS-176B: Countries is one page, roas-countries.
+        assert '"countries": "roas-countries"' in block, (
+            "countries hash alias must resolve to roas-countries"
         )
 
     def test_ngrams_navigation_activates_patterns_tab(self):
@@ -337,15 +345,19 @@ class TestWindsorIsLegacyOnly:
         # the Google Ads API, not Windsor. (Keyword Evidence, PR-ADS-146, is now
         # a full evidence page like Search Terms — its empty state is rendered in
         # the shell and its Google-Ads-API source is asserted via help content.)
-        for marker in ("geo-empty-subtext",):
+        # PR-ADS-176B: the geo page's empty state went with the page. The
+        # one Countries page's blocked / empty states hold the same rule.
+        for marker in ("function renderCountrySpendUnreconciledState(",
+                       "function renderCountryRevenueBlockedState(",
+                       "function renderRoasCountrySafeEmptyState("):
             idx = APP_JS.find(marker)
             assert idx != -1, f"empty-state marker '{marker}' not found"
-            snippet = APP_JS[idx : idx + 240]
+            snippet = APP_JS[idx: APP_JS.find("\n}\n", idx)]
             assert "Windsor" not in snippet, (
                 f"Empty state '{marker}' must not blame Windsor"
             )
-            assert "Google Ads API" in snippet, (
-                f"Empty state '{marker}' must mention Google Ads API"
+            assert "Google Ads" in snippet or "geo sync" in snippet.lower(), (
+                f"Empty state '{marker}' must name the Google Ads source"
             )
 
     def test_index_html_platform_evidence_copy_uses_google_ads_api(self):
@@ -356,9 +368,11 @@ class TestWindsorIsLegacyOnly:
         # weekly or monthly run writes Google Ads API country performance…",
         # which described the legacy snapshot the page no longer reads. The
         # note still names the Google Ads API as the source.
-        assert "Google Ads API country spend" in INDEX_HTML
-        assert "Windsor" not in INDEX_HTML.split('id="page-geo"')[1].split(
-            "</section>")[0]
+        # PR-ADS-176B: that note went with the #/geo page; the one Countries
+        # page names the same source in its command bar.
+        countries = INDEX_HTML.split('id="page-roas-countries"')[1].split("</section>")[0]
+        assert "Google Ads country spend" in countries
+        assert "Windsor" not in countries
 
 
 # ───────────────────────────────────────────────────────────────────────────

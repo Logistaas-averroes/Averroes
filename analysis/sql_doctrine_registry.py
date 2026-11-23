@@ -306,7 +306,7 @@ CONSUMERS: list[dict] = [
        truth_status="unavailable rows render '—'; flagged truth_state partial when attribution unavailable",
        headline=True, row=True, filters=True, sorting=True, drawer=True, export=True,
        decision=True, operational=True),
-    _c("Geo Intelligence country summary (Countries page)",
+    _c("Geo Intelligence country summary (GET /api/geo; no page since PR-ADS-176B)",
        "confirmed_sqls per country from raw leads snapshots on run_date.",
        endpoint="GET /api/leads/country-summary; republished per country by GET /api/geo",
        service_function="api.server.api_leads_country_summary",
@@ -322,7 +322,9 @@ CONSUMERS: list[dict] = [
                        "sql_reconciliation. PR-ADS-165A: /api/geo "
                        "(services/country_evidence_service) sums these rows per "
                        "canonical country identity and joins them to spend; the "
-                       "SQL definition is unchanged and is not recomputed there.",
+                       "SQL definition is unchanged and is not recomputed there. "
+                       "PR-ADS-176B deleted the Countries evidence page that "
+                       "rendered it; the endpoint stays until PR-ADS-176C.",
        truth_status="none — no reconciliation block; counts are summed across "
                     "spellings of one country, never redefined",
        headline=True, row=True, filters=True, sorting=True, decision=True, operational=True),
@@ -681,7 +683,7 @@ _CE = "Campaign Evidence table + KPI strip"
 _CD = "Campaign drawer (headline, lead quality, countries, recent leads)"
 _KW = "Keyword Evidence table / drawer / CSV export"
 _ST = "Search Terms table / flagged tab / drawer / CSV export"
-_GEO = "Geo Intelligence country summary (Countries page)"
+_GEO = "Geo Intelligence country summary (GET /api/geo; no page since PR-ADS-176B)"
 _OVW = "Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)"
 _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
@@ -871,7 +873,11 @@ RULES: list[dict] = [
     _r("mart", "services/revenue_decision_mart.py", CLS_LEGACY, _MART,
        symbol=["_summary_block", "build_revenue_decision_mart", "_canonical_core",
                # PR-ADS-167A: withholds the country rows' SQL split with the gate.
-               "_withhold_country_rows_when_geo_not_ready"]),
+               "_withhold_country_rows_when_geo_not_ready",
+               # PR-ADS-176B: the Countries page's totals and regional mix —
+               # sums of the country rows' SQLs over the listed markets, from
+               # the rows above; no SQL is recounted.
+               "_sum_rows", "_country_page_blocks"]),
     _m("ras.module", "services/revenue_attribution_service.py", CLS_MIXED, _RAS, ["sqls_field_ref"]),
     _r("ras.json", "services/revenue_attribution_service.py", CLS_INACTIVE, _JSONFALLBACK,
        symbol=["_build_from_json", "_build_campaign_rows", "_build_country_rows", "_build_summary"]),
@@ -1285,7 +1291,6 @@ RULES: list[dict] = [
        symbol=["renderCampaignDrawer"]),
     _r("ui.campaign.drawer.legacy", "static/app.js", CLS_LEGACY, _CD,
        symbol=["_appendDrawerEvidenceSections", "openCampaignDrawer"]),
-    _r("ui.geo", "static/app.js", CLS_LEGACY, _GEO, symbol=["loadGeo", "renderGeoMap", "renderGeoTable"]),
     _r("ui.overview", "static/app.js", CLS_MIXED, _OVW, symbol=["renderDashKpiRow", "dashSignalBody"]),
     # DASH_DELTA_VALENCE — the Dashboard delta-chip valence map, keyed `sqls` —
     # is a top-level literal, so the scanner attributes it to the function
@@ -1324,7 +1329,10 @@ RULES: list[dict] = [
     _r("ui.roas", "static/app.js", CLS_MIXED, _RAS,
        symbol=["renderRoasCampaignSummary", "renderRoasCampaignTable", "sortRoasCampaignRows",
                "renderRoasCountrySummary", "renderRoasCountryTable", "sortRoasCountryRows",
-               "summarizeRoasCountryRows"]),
+               # PR-ADS-176B: the one Countries page republishes the mart's
+               # country rows, `country_totals` and `regional_mix` SQLs.
+               "renderCountriesRegionalMix", "renderCountriesResidualPanel",
+               "renderCountryDrawer"]),
     _r("ui.keywords", "static/app.js", CLS_LEGACY, _KW,
        symbol=["kwSqlCoverageNote", "renderKeywordFilters", "renderKeywordTable", "kwDrawerSqlSection"]),
     _r("ui.search_terms", "static/app.js", CLS_LEGACY, _ST,
@@ -1548,10 +1556,6 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
     {"id": "ui.channels_sums_none_as_zero",
      "summary": "Dashboard Channels total_sqls sums withheld channels as 0.",
      "code_location": "services/dashboard_channels_service.py:_build_kpis"},
-    {"id": "ui.geo_none_to_zero",
-     "summary": "Geo page renders a country absent from the lead summary as 0 SQLs and labels "
-                "Google Ads conversions 'Conv.' beside 'SQLs' with no qualifier.",
-     "code_location": "static/app.js:loadGeo"},
     {"id": "ui.campaign_drawer_tdz",
      "summary": "renderCampaignDrawer reads drawerSqlPub before its const declaration "
                 "(temporal dead zone) — the drawer's SQL gate cannot execute as written.",

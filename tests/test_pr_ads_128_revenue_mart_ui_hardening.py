@@ -103,12 +103,16 @@ def test_shared_clean_spend_truth_card():
     # ALL-SOURCE won deals, and a Google Ads spend card above them read as the
     # spend behind those deals.
     # PR-ADS-168B: renderRevenueBySourcePage is deleted with its page.
-    for page in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage"):
+    # PR-ADS-176B: removed from the one Countries page for the same reason —
+    # the card is the account's CAMPAIGN spend, and beside the country KPI
+    # cards (listed markets' spend + the residual) it read as a third country
+    # figure. The page's footer states the same statuses from spend_truth.
+    for page in ("function renderRoasCampaignsPage",):
         body = _slice(page, span=3000)
         assert "renderMartSpendTruth(" in body, f"{page} must use the shared spend card"
-    deals = JS[JS.find("function renderRevenueDealsPage"):
-               JS.find("\n}\n", JS.find("function renderRevenueDealsPage")) + 3]
-    assert "renderMartSpendTruth(" not in deals
+    for page in ("function renderRevenueDealsPage", "function renderRoasCountriesPage"):
+        own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
+        assert "renderMartSpendTruth(" not in own, page
 
 
 # ── Test 5 — No native-as-USD; Unavailable, never $0 ────────────────────────

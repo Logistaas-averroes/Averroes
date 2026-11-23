@@ -58,7 +58,8 @@ EXPECTED_PAGES: set[str] = {
     "campaigns",
     "search_terms",
     "ngrams",
-    "geo",
+    # PR-ADS-176B: "geo" was deleted with the Countries evidence page. The one
+    # Countries page (roas-countries) is a clean revenue page with no strip.
     "keywords",
     "deals",
     "gclid_attribution",

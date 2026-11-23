@@ -17,7 +17,7 @@ REQUIRED_ROUTES = [
     "campaigns",
     "search-terms",
     "ngrams",
-    "geo",
+    # PR-ADS-176B: "geo" was deleted; #/geo redirects to roas-countries.
     "keywords",
     "leads",
     "deals",
@@ -365,7 +365,7 @@ class TestPageExplanationContainers:
         # "action-queue" and "reports" were deleted outright in PR-ADS-162G.
         key_pages = [
             "dashboard", "campaigns",
-            "geo", "keywords",
+            "keywords",   # PR-ADS-176B: "geo" deleted (roas-countries is clean)
             "gclid-attribution",
             "scheduler", "health", "backfill",
         ]

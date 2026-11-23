@@ -6644,3 +6644,47 @@ closed. Every truth-audit case fails on `98e0b5e`, except the guards 15 and
 Details are in `docs/58` §6.
 
 **Next.** 176B merges the two pages. 176C retires `/api/geo`.
+
+## PR-ADS-176B — one Countries page (November 2026)
+
+**What.** The owner decisions of 2026-11-23 (`docs/58` §3, §7). Countries is
+one page, `roas-countries`, reading the mart's country view on business
+windows, in the Dashboard's visual language.
+
+* **Navigation.** `NAV_ITEMS.countries = ["roas-countries"]`; the Countries tab
+  strip is deleted (a single-page item has none). `#/geo` is a retired key
+  (`RETIRED_PAGE_REDIRECTS.geo → roas-countries`, the PR-ADS-168B pattern), and
+  `#/countries` aliases to `roas-countries`.
+* **Deleted.** The Countries evidence page: its section, KPI strip, notices,
+  Plotly map, search box, table, lead-quality columns (decision 3), loader and
+  renderers, CSS, and its registry keys. The UI no longer reads `/api/geo`.
+* **The page.** Dashboard command bar with the five business windows (Current
+  Quarter default); the 176A gap-driven blocked card for every non-ready gate
+  status, FX-only included (decision 2: never a number with a warning); KPI
+  cards over the mart's `country_totals`; the Dashboard country table with the
+  residual pinned and its outside-market countries as "In residual" sub-rows;
+  the Dashboard drawer (row click / Enter / Space) with the row's deal list;
+  Regional Mix and the residual panel; a truth footer. The campaign-scope spend
+  card, summary strip and diagnostics are no longer on it.
+* **Mart.** The country view gains row `region` (`analysis/country_regions.py`,
+  the Dashboard's table moved unchanged), `country_totals` and `regional_mix`
+  (`_country_page_blocks`): listed markets only, an unknown row makes its total
+  unknown with its reason, no total under an unready gate or an empty window,
+  the window's withheld deal / revenue verdict wins, no customer total.
+* **Scope declaration.** The mart's country `country_truth.revenue_scope` and the
+  Dashboard's `revenue_scope` / `country_truth.revenue_scope` say
+  `google_ads_source` — what the rows count (`docs/58` §5).
+* **Wording.** Leads / SQLs cells read "Unavailable", not "—"; sub-dollar spend
+  reads "<$1"; country reason codes get words (`countryReasonLabel`). Links that
+  named "Country Revenue & Spend" say "Open Countries".
+
+**Tests.** `tests/test_pr_ads_176b_countries_one_page.py` (13) and
+`tests/test_pr_ads_176b_countries_pg_integration.py` (5, registered in CI). All
+18 fail on `2eda9ac`; case 06's gate half is proved by mutation. 22 existing
+test files changed, each because a page, key or layout it pinned was deleted or
+merged; the table, with reasons, is in `docs/58` §7.9. The `#/geo` PG suites
+(165A, 167A, 170A) keep every `/api/geo` payload assertion; their page
+assertions are restated on the rows, and the page rules that still apply are
+guarded on the one Countries page.
+
+**Next.** 176C retires `/api/geo` and `services/country_evidence_service.py`.

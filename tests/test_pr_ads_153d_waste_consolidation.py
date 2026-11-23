@@ -191,12 +191,13 @@ def test_search_terms_stays_under_platform_evidence():
     # "CRM & Revenue" to "Sales Results". The rule is unchanged: the four
     # ad-platform evidence pages sit together, and the retired page is absent.
     # PR-ADS-174A: the group is the Campaigns item's strip; Countries (geo)
-    # is a menu item of its own.
+    # is a menu item of its own. PR-ADS-176B: that item is the one Countries
+    # page, roas-countries (#/geo redirects to it).
     section = _INDEX_HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
     assert 'data-page="search-terms"' in section
     assert 'data-page="campaigns"' in section
     assert 'data-page="keywords"' in section
-    assert 'data-page="geo" data-nav-item="countries"' in _INDEX_HTML
+    assert 'data-page="roas-countries" data-nav-item="countries"' in _INDEX_HTML
     # And the retired page is not there.
     assert 'data-page="waste"' not in section
 

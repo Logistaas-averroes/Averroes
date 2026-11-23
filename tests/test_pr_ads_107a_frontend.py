@@ -132,7 +132,9 @@ def test_clean_subtitles_on_roas_pages():
     camp = _section("page-roas-campaigns")
     assert "Campaign-level Google Ads spend compared with HubSpot closed-won revenue." in camp
     country = _section("page-roas-countries")
-    assert "Country-level Google Ads spend compared with HubSpot closed-won revenue." in country
+    # PR-ADS-176B: the one Countries page; still one short subtitle.
+    assert ("Google Ads spend, SQLs, closed-won deals and revenue for the listed "
+            "markets, plus one residual for everything no market owns.") in country
     # The repeated exact doctrine phrase is demolished from the pages.
     for page_id in ("page-roas-campaigns", "page-roas-countries"):
         assert "Google Ads API = spend/platform evidence" not in _section(page_id)

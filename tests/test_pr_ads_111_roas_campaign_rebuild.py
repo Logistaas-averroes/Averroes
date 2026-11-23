@@ -33,8 +33,10 @@ def _campaign_region():
     assert start != -1, "roasCampaignFilter state not found"
     # PR-ADS-161E: the country page is "Country Revenue & Spend" (a close-date
     # ratio is never called ROAS).
-    end = JS.find("// ── Country Revenue & Spend", start)
-    assert end != -1, "Country Revenue & Spend marker not found"
+    # PR-ADS-176B: that page is merged into the one Countries page; its block
+    # opens with the "── Countries" banner.
+    end = JS.find("// ── Countries — the one country page", start)
+    assert end != -1, "Countries marker not found"
     return JS[start:end]
 
 

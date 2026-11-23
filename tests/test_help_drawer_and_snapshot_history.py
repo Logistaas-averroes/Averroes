@@ -51,7 +51,8 @@ REQUIRED_HELP_PAGES = [
     "campaigns",
     "search-terms",
     "keywords",
-    "geo",
+    # PR-ADS-176B: "geo" was deleted with its help entry; Countries is
+    # "roas-countries" (below).
     "leads",
     "opportunities",
     "deals",

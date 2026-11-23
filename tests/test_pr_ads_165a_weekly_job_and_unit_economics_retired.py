@@ -918,14 +918,21 @@ def test_13c_the_countries_page_is_not_fed_by_a_monthly_table():
     handler = SERVER.split('@app.get("/api/geo")')[1].split("\n@app.")[0]
     assert "FROM geo" not in handler
     assert "build_country_evidence" in handler
+    # PR-ADS-176B: the Countries page is `roas-countries` (the #/geo page is
+    # deleted and redirects there). The same property, on the page that is
+    # left: its copy does not point at the monthly snapshot, and its freshness
+    # keys are the daily canonical country spend, never the legacy `geo`.
     for text in (JS.split("const PAGE_EXPLANATIONS = {")[1].split("\n};")[0]
-                 .split("\n  geo: {")[1].split("\n  },")[0],
+                 .split('\n  "roas-countries": {')[1].split("\n  }")[0],
                  JS.split("const PAGE_HELP_CONTENT = {")[1].split("\n};")[0]
-                 .split("\n  geo: {")[1].split("\n  },")[0],
-                 HTML.split('id="page-geo"')[1].split("</section>")[0]):
+                 .split('\n  "roas-countries": {')[1].split("\n  },")[0],
+                 HTML.split('id="page-roas-countries"')[1].split("</section>")[0]):
         assert "once a month" not in text and "monthly" not in text.lower()
         assert "weekly" not in text.lower()
-        assert "daily" in text
+    deps = JS.split("const PAGE_DEPENDENCIES = {")[1].split("\n};")[0]
+    line = next(l for l in deps.splitlines() if '"roas-countries":' in l)
+    assert '"google_ads_api/canonical_geo"' in line and '"google_ads_api/geo"' not in line
+    assert "\n  geo:" not in deps
     # The legacy snapshot stays registered (three non-page readers remain) and
     # is named for what it is.
     from services import system_status_service as status
@@ -1164,17 +1171,19 @@ def test_19_every_sidebar_page_is_still_routable():
         return re.findall(r'data-page="([a-z0-9-]+)"', body)
     assert strip("pipeline") == ["leads", "deals"]
     assert "roas-campaigns" in strip("campaigns")
-    assert "roas-countries" in strip("countries")
+    # PR-ADS-176B: Countries is one page, the item itself (no strip).
+    assert 'data-page="roas-countries" data-nav-item="countries"' in HTML
     assert "unit-economics" not in HTML
     # The loader switch lost exactly one case: every page it loaded before
     # this slice, bar Unit Economics, is still loaded by it.
     switch = JS.split("function loadPage(")[1].split("\n}\n")[0]
     loaded = set(re.findall(r'case "([a-z0-9-]+)":', switch))
     assert loaded == {
-        "dashboard", "campaigns", "search-terms", "geo", "keywords", "leads",
+        "dashboard", "campaigns", "search-terms", "keywords", "leads",
         "deals", "gclid-attribution", "scheduler", "health", "backfill",
         "roas-campaigns", "roas-countries", "revenue-health",
-        "channels", "system"}  # PR-ADS-168B: revenue-by-source deleted
+        "channels", "system"}  # PR-ADS-168B: revenue-by-source deleted;
+    #                              PR-ADS-176B: geo deleted (#/geo redirects)
     assert loaded <= pages
 
 

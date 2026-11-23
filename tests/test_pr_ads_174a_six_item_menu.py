@@ -36,7 +36,9 @@ EXPECTED_ITEMS = [
     ("overview", "Overview", ["dashboard"]),
     ("channels", "Channels", ["channels"]),
     ("campaigns", "Campaigns", ["campaigns", "roas-campaigns", "keywords", "search-terms"]),
-    ("countries", "Countries", ["geo", "roas-countries"]),
+    # PR-ADS-176B: Countries is one page (#/geo is retired into it), so it is
+    # a single-page item with no strip.
+    ("countries", "Countries", ["roas-countries"]),
     ("pipeline", "Pipeline", ["leads", "deals"]),
     ("system", "System", ["system", "scheduler", "health", "revenue-health",
                           "backfill", "gclid-attribution"]),
@@ -49,6 +51,7 @@ EXPECTED_ITEM_FOR_PAGE = {
     "channels": "channels",
     "campaigns": "campaigns", "roas-campaigns": "campaigns",
     "keywords": "campaigns", "search-terms": "campaigns",
+    # PR-ADS-176B: "geo" is a retired key now (RETIRED_PAGE_REDIRECTS).
     "geo": "countries", "roas-countries": "countries",
     "leads": "pipeline", "deals": "pipeline",
     "system": "system", "scheduler": "system", "health": "system",
@@ -277,7 +280,6 @@ def test_06_the_strip_labels_are_the_old_sidebar_labels():
     assert labels == {
         "campaigns": "Campaigns", "roas-campaigns": "Campaign Revenue & Spend",
         "keywords": "Keyword Evidence", "search-terms": "Search Terms",
-        "geo": "Countries", "roas-countries": "Country Revenue & Spend",
         "leads": "Leads", "deals": "Deals",
         "system": "System", "scheduler": "Data Runs", "health": "System Status",
         "revenue-health": "Revenue Health", "backfill": "Admin Backfill",
@@ -350,7 +352,7 @@ process.stdout.write(JSON.stringify(out));
         assert active == [item], (page, active)
         assert [x["current"] for x in state["items"] if x["active"]] == ["page"]
         assert all(x["current"] is None for x in state["items"] if not x["active"])
-        if item in ("overview", "channels"):
+        if item in ("overview", "channels", "countries"):   # single-page items (176B)
             assert state["strips"] == [] and state["bar"] is False
             assert state["activeTabs"] == []
         else:
@@ -400,7 +402,7 @@ process.stdout.write(JSON.stringify(out));
     admin, viewer = out["admin"], out["viewer"]
     assert [(x["item"], x["opens"], x["shown"]) for x in admin["items"]] == [
         ("overview", "dashboard", True), ("channels", "channels", True),
-        ("campaigns", "campaigns", True), ("countries", "geo", True),
+        ("campaigns", "campaigns", True), ("countries", "roas-countries", True),
         ("pipeline", "leads", True), ("system", "system", True)]
     assert admin["strips"] == ["system"]
     assert [t for t in admin["tabs"] if t in EXPECTED_ITEMS[-1][2]] == EXPECTED_ITEMS[-1][2]
