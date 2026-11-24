@@ -58,7 +58,9 @@ def _deals_region():
 def _health_region():
     start = JS.find("// ── Revenue Attribution Health")
     assert start != -1
-    end = JS.find("function junkRateBadge", start)
+    # PR-ADS-176B: junkRateBadge (the next function) went with the Countries
+    # evidence page; the shared country reason tables follow this block now.
+    end = JS.find("// ── Country spend reasons", start)
     assert end != -1
     return JS[start:end]
 

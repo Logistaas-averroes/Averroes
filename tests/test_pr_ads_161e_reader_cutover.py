@@ -180,11 +180,22 @@ def test_05_a_missing_amount_withholds_revenue_but_not_customers(
           revenue_usd=None, currency_status="unavailable",
           currency_reason="no_amount")
     _scan(monkeypatch, {"1": [901], "2": [902]})
-    _, row = _reader("ytd", now)
+    base, row = _reader("ytd", now)
     assert row["won_revenue"] is None
     assert row["metrics"]["revenue_usd"]["status"] == cwt.WITHHELD
     assert row["customers"] == 2
     assert row["metrics"]["customers"]["status"] == cwt.PUBLISHED
+    # PR-ADS-176B-F2: a CAMPAIGN row (the shared `_finalize_row`, no country
+    # grouping) over these two deals — won deals, revenue withheld — is not
+    # judged on that unknown revenue (176B-F1 M1): Campaign Revenue & Spend
+    # reads "Not judged — revenue unknown". It read "watch".
+    from services.revenue_attribution_service import _finalize_row, _new_bucket
+    bucket = {**_new_bucket("brand - uk"), "spend": 100.0, "closed_won_deals": 2,
+              "deal_rows": list(base["deals"])}
+    with crs.one_snapshot():
+        camp = _finalize_row(bucket, canonical_base=base)
+    assert (camp["closed_won_deals"], camp["won_revenue"], camp["verdict"],
+            camp["verdict_reason"]) == (2, None, "revenue_unknown", cwt.R_REVENUE_UNPROVEN)
 
 
 @_needs_pg

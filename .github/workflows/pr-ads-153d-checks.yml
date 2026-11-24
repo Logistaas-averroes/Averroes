@@ -128,6 +128,7 @@ jobs:
             tests/test_pr_ads_167a_settled_coverage_consumers_pg_integration.py \
             tests/test_pr_ads_170a_owner_labelled_geo_pg_integration.py \
             tests/test_pr_ads_176a_country_builder_pg_integration.py \
+            tests/test_pr_ads_176b_countries_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -260,6 +261,13 @@ jobs:
                            # population, the scoped Dashboard geo read, and
                            # the settle-gap blocked card from the real mart.
                            "tests.test_pr_ads_176a_country_builder_pg_integration",
+                           # PR-ADS-176B. The one Countries page: the
+                           # country scope declaration says google_ads_source,
+                           # the mart's country_totals / regional_mix over the
+                           # listed markets (never the residual), unknown rows
+                           # and an unready gate publish no total, and the real
+                           # payload on the real page.
+                           "tests.test_pr_ads_176b_countries_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

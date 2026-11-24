@@ -313,8 +313,15 @@ def test_db_unavailable_is_reported(monkeypatch):
 # ══════════════ Test 7 — frontend has an expandable country row ══════════════
 
 def test_frontend_has_expandable_country_row():
-    assert "data-country-expand" in JS
-    assert "country-drilldown-row" in JS
+    # PR-ADS-176B: the one Countries page uses the Dashboard's drawer: a market
+    # row (click / Enter / Space) opens `.ctry-drawer` under the table, and the
+    # drawer lazily loads the same country-detail deal list. The inline ▸
+    # button and drill row are gone.
+    assert "data-country-row" in JS
+    assert "function openCountryDrawer" in JS and "function renderCountryDrawer" in JS
+    opener = _slice(JS, "function openCountryDrawer", span=900)
+    assert "loadCountryDrilldown(" in opener and 'className = "ctry-drawer"' in opener
+    assert "data-country-expand" not in JS and "country-drilldown-row" not in JS
     assert "function loadCountryDrilldown" in JS
     assert "/api/revenue-performance/country-detail?window=" in JS
     # The country key + lazy-load helpers named in the spec exist.
@@ -330,13 +337,14 @@ def test_residual_row_has_no_drawer():
     # expand control + emits the drilldown row.
     assert "r.is_residual" in table
     resid = table.find("r.is_residual")
-    ctrl = table.find("countryExpandControl(r, i)")
-    assert ctrl > resid > -1, "expand control must be on the real-country branch"
-    # The residual branch (is_residual → the real-row expand control) never emits
-    # an expand button or a drilldown drawer row.
+    # PR-ADS-176B: the drawer opener is the market row's `data-country-row`.
+    ctrl = table.find('data-country-row="${i}"')
+    assert ctrl > resid > -1, "the drawer opener must be on the real-country branch"
+    # The residual branch (and its "In residual" sub-rows) never carries it.
     residual_branch = table[resid:ctrl]
-    assert "country-expand" not in residual_branch
-    assert "country-drilldown-row" not in residual_branch
+    assert "data-country-row" not in residual_branch
+    item_row = _slice(JS, "function renderCountryResidualItemRow", span=1600)
+    assert "data-country-row" not in item_row
 
 
 # ══════════════ Test 9 — the drawer renders the validation columns ══════════════
@@ -367,8 +375,9 @@ def test_no_undefined_or_null_text():
 
 
 def test_css_classes_present():
-    for cls in (".country-expand-button", ".country-drilldown-row",
-                ".country-drilldown-panel", ".country-drilldown-table",
+    # PR-ADS-176B: .country-expand-button / .country-drilldown-row went with
+    # the inline drill row; the drawer is the Dashboard's .ctry-drawer.
+    for cls in (".ctry-drawer", ".country-drilldown-panel", ".country-drilldown-table",
                 ".country-drilldown-empty", ".country-drilldown-muted"):
         assert cls in CSS, f"missing style {cls}"
 

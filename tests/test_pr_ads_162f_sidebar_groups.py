@@ -38,7 +38,8 @@ EXPECTED = [
     ("Overview", ["dashboard"]),
     ("Channels", ["channels"]),
     ("Campaigns", ["campaigns", "roas-campaigns", "keywords", "search-terms"]),
-    ("Countries", ["geo", "roas-countries"]),
+    # PR-ADS-176B: one Countries page (#/geo retired into it), no strip.
+    ("Countries", ["roas-countries"]),
     ("Pipeline", ["leads", "deals"]),
     ("System", ["system", "scheduler", "health", "revenue-health", "backfill",
                 "gclid-attribution"]),
@@ -81,7 +82,8 @@ def test_03_no_page_was_added_or_lost_and_every_one_still_routes():
     # PR-ADS-165A: 18 until the Unit Economics page was deleted.
     # PR-ADS-168B: 17 until the Revenue by Source page was deleted.
     # PR-ADS-174A: still 16 pages, now under six items.
-    assert len(nav) == len(set(nav)) == 16
+    # PR-ADS-176B: 15 — the Countries evidence page (#/geo) was deleted.
+    assert len(nav) == len(set(nav)) == 15
     assert set(nav) <= pages
     for page in nav:
         assert f'id="page-{page}"' in HTML, page

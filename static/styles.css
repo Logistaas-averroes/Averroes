@@ -2288,134 +2288,9 @@ body.is-revenue-page #monitoring-banner {
   }
 }
 
-/* ── Geo Intelligence page ────────────────────────────────────────────────── */
-.geo-map-panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.geo-metric-select {
-  padding: 5px 28px 5px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  font-family: var(--font-sans);
-  font-size: 12px;
-  background: var(--surface-card);
-  color: var(--text-primary);
-  cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  transition: border-color 0.15s;
-}
-
-.geo-metric-select:focus {
-  outline: none;
-  border-color: var(--brand-sky-accent);
-  box-shadow: 0 0 0 3px rgba(18, 158, 245, 0.12);
-}
-
-.geo-map {
-  min-height: 420px;
-  width: 100%;
-}
-
-.geo-map-fallback {
-  padding: var(--space-5);
-  font-size: 13px;
-  color: var(--text-muted);
-  text-align: center;
-}
-
-.geo-search-input {
-  padding: 7px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  background: var(--surface-card);
-  color: var(--text-primary);
-  min-width: 220px;
-  transition: border-color 0.15s;
-}
-
-.geo-search-input:focus {
-  outline: none;
-  border-color: var(--brand-sky-accent);
-  box-shadow: 0 0 0 3px rgba(18, 158, 245, 0.12);
-}
-
-.geo-search-input::placeholder {
-  color: var(--text-muted);
-}
-
-/* Junk rate badges */
-.junk-rate-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-}
-
-.junk-rate-badge--none {
-  background: var(--c-neutral-bg);
-  color: var(--text-muted);
-  border: 1px solid var(--c-neutral-border);
-}
-
-.junk-rate-badge--low {
-  background: var(--c-success-bg);
-  color: var(--c-success);
-  border: 1px solid var(--c-success-border);
-}
-
-.junk-rate-badge--medium {
-  background: var(--c-warning-bg);
-  color: var(--c-warning);
-  border: 1px solid var(--c-warning-border);
-}
-
-.junk-rate-badge--high {
-  background: var(--c-danger-bg);
-  color: var(--c-danger);
-  border: 1px solid var(--c-danger-border);
-}
-
-.geo-empty-state {
-  padding: var(--space-6) var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.geo-empty-subtext {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.6;
-}
-
-@media (max-width: 768px) {
-  .geo-map {
-    min-height: 300px;
-  }
-
-  .geo-map-panel__header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .geo-search-input {
-    min-width: 0;
-    width: 100%;
-  }
-}
+/* PR-ADS-176B: the Geo Intelligence page (#/geo) and its map, search box,
+   junk-rate badges and empty state are deleted; Countries is one page in the
+   Dashboard's classes (see "Countries page" below). */
 
 /* ── Keywords page ────────────────────────────────────────────────────────── */
 
@@ -4380,20 +4255,8 @@ body.is-revenue-page #monitoring-banner {
    drilldown drawer so both pages read as one system. Full-width row, compact
    table, horizontal scroll only if the columns overflow — never breaks the
    country table width. Residual rows never render this. */
-.country-expand-button {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 0 6px 0 0;
-  color: #475569;
-}
-.country-expand-button:hover { color: #0f172a; }
-.country-drilldown-row > td {
-  background: #f8fafc;
-  padding: 0;
-}
+/* PR-ADS-176B: the expand button and the inline drill row are gone — a market
+   row opens the Dashboard's .ctry-drawer; its deal list keeps these classes. */
 .country-drilldown-panel {
   padding: 12px 16px;
 }
@@ -7012,6 +6875,24 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .ctry-deal-td--company { font-weight: 600; color: var(--text-primary); }
 .ctry-drawer__actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
 .ctry-drawer__link { font-size: 12px; color: var(--c-primary, #129ef5); text-decoration: none; font-weight: 600; }
+
+/* PR-ADS-176B: the one Countries page (#/roas-countries) reuses every class
+   above. These few rules are its only additions: the residual's itemised
+   outside-market countries ("In residual" sub-rows) and the residual panel's
+   spend parts. */
+.countries-page { display: flex; flex-direction: column; gap: var(--space-4); }
+.countries-page .revenue-filter-chips { margin: 0 0 var(--space-3); }
+.ctry-row--residual-item .ctry-td--name { font-weight: 500; padding-left: var(--space-5); }
+.ctry-residual-item__arrow { color: var(--text-muted); margin-right: 6px; }
+.ctry-in-residual { font-size: 11px; color: var(--text-muted); font-style: italic; white-space: nowrap; }
+/* A withheld cell keeps its reason, wrapped under the word instead of
+   widening the column; the long window-range chip wraps on this page. */
+.countries-page .ctry-table td { vertical-align: top; white-space: normal; }
+.countries-page .ctry-table td.ctry-td--name { min-width: 150px; }
+.countries-page .ctry-table .metric-reason { white-space: normal; min-width: 96px; max-width: 150px; color: var(--text-muted); }
+.countries-page .ctry-table .metric-blockers-link { display: inline-block; font-size: 11px; }
+#page-roas-countries .roas-window-range { white-space: normal; }
+.ctry-residual-parts { list-style: none; margin: 0 0 var(--space-3); padding: 0; font-size: 12px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 1100px) {
   .ctry-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

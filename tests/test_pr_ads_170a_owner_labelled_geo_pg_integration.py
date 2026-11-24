@@ -13,9 +13,15 @@ only a listed id is labelled; a stored Google code always wins; a stored code
 that differs from the label is surfaced, never merged; and the label is applied
 when the data is READ — the stored rows stay what Google sent.
 
-Real PostgreSQL, the real writers and sync, the real ``api_geo`` handler, the
-real mart / Dashboard Countries builders, and the real ``loadGeo`` in node —
-the harness of ``test_pr_ads_165a_countries_pg_integration``.
+Real PostgreSQL, the real writers and sync, the real ``api_geo`` handler and
+the real mart / Dashboard Countries builders — the harness of
+``test_pr_ads_165a_countries_pg_integration``.
+
+PR-ADS-176B deleted the ``#/geo`` page these cases also rendered through
+``loadGeo``. Each case keeps its payload assertions; what the page printed is
+asserted on the row it printed. The one Countries page's owner note (market
+rows, the drawer, the residual's "In residual" items) is checked in case 18
+and in ``tests/test_pr_ads_176b_*``.
 """
 from __future__ import annotations
 
@@ -34,9 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tests.test_pr_ads_165a_countries_pg_integration import (  # noqa: E402,F401
-    CUSTOMER, RATE, UK, _GoogleAds, _PROBE, _api, _render, _seed_leads, _spend_rows,
-    _table, _today, _verify, _visible, _window, _write_fx, _write_spend,
-    live_db,
+    CUSTOMER, RATE, UK, _GoogleAds, _api, _seed_leads, _spend_rows,
+    _today, _verify, _window, _write_fx, _write_spend, live_db,
 )
 
 APP_JS = ROOT / "static" / "app.js"
@@ -175,17 +180,6 @@ def test_05_an_unreadable_or_empty_config_means_no_labels(monkeypatch, tmp_path,
 
 
 # ── the Countries page ──────────────────────────────────────────────────────
-#: The 165A probe, also reporting the owner-label notice and the map's hover
-#: NAMES (the 165A probe reports only the hover's spend).
-_OWNER_PROBE = _PROBE.replace(
-    "  out.map_hover = trace ? trace.customdata.map((c) => c[1]) : null;",
-    "  out.map_hover = trace ? trace.customdata.map((c) => c[1]) : null;\n"
-    "  out.map_names = trace ? trace.customdata.map((c) => c[0]) : null;\n"
-    "  out.map_locations = trace ? trace.locations : null;\n"
-    "  const __own = __els[\"geo-owner-label-notice\"] || { textContent: \"\", hidden: true };\n"
-    "  out.owner_notice = __own.textContent;\n"
-    "  out.owner_notice_hidden = __own.hidden === true;")
-assert _OWNER_PROBE != _PROBE, "the 165A probe's hover line changed"
 
 
 def _production_shape(cluster, *, extra_rows=(), leads=None):
@@ -219,32 +213,6 @@ def test_10_production_shape_reads_cuba_and_iran_with_provenance_and_nothing_unr
         live_db, tmp_path):
     _production_shape(live_db)
     api = _api("30d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-
-    # The page first — what a reader sees. 17 × £0.45 = £7.65 → $9.56;
-    # 8 × £0.42 = £3.36 → $4.20; the lead spelt "cuba" joined Cuba's spend.
-    assert table["Cuba set by owner"][1:4] == ["$10", "2", "1"]
-    assert table["Iran set by owner"][1:3] == ["$4", "1"]
-    assert table["United Kingdom"][1] == "$750"
-    # 167A: now a measured zero — and one that stands only on the owner's
-    # labels (without them that spend has no country), so it says so.
-    assert table["Pakistan"][1:3] == ["$0 owner label", "1"]
-    assert re.search(
-        r'\$0 <span class="owner-label-note" title="This \$0 rests on the owner\'s '
-        r'country label for Google Ads locations 2192, 2364\. Google Ads reports those '
-        r'locations without a country; without the label that spend could be this '
-        r'country\'s and the figure would read &quot;Unavailable&quot;\.">owner label</span>',
-        page["table"])
-    assert "(unresolved location)" not in page["table"]
-    assert page["notice_hidden"] is True
-    assert "Unavailable" not in _visible(page)
-    # The note is on those two rows and on no other.
-    assert page["table"].count(f'title="{NOTE}"') == 2
-    for name in ("Cuba", "Iran"):
-        assert re.search(rf"<td class=\"td--name\">{name} <span class=\"owner-label-note\" "
-                         rf"title=\"{re.escape(NOTE)}\">set by owner</span></td>",
-                         page["table"]), name
 
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
@@ -283,7 +251,6 @@ def test_10_production_shape_reads_cuba_and_iran_with_provenance_and_nothing_unr
     expected = round((30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, 2)
     assert geo["total_spend_usd"] == expected
     assert round(sum(r["spend_usd"] or 0 for r in geo["rows"]), 2) == expected
-    assert page["kpi_spend"] == "$764"
 
     # The stored rows are what Google sent: no code, no name. Nothing was written.
     assert _stored_codes(live_db, "2192") == {(None, None)}
@@ -297,14 +264,14 @@ def test_11_an_unlisted_code_less_criterion_stays_unresolved_and_still_withholds
     start, end = _window(30)
     _production_shape(live_db, extra_rows=[_spend_rows(UNLISTED, end, 3.0)])
     api = _api("30d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["(unresolved location)"][1] == "$4"
-    assert table["Pakistan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert table["Cuba set by owner"][1] == "$10"
-    assert "Iraq" not in page["table"]
-    assert page["notice_hidden"] is False
     geo = api["geo"]
+    # PR-ADS-176B: what the deleted #/geo table printed, as the rows say it.
+    by = {r["country"]: r for r in geo["rows"]}
+    assert by["Pakistan"]["spend_usd"] is None
+    assert by["Pakistan"]["spend_reason"] == "spend_location_unresolved"
+    assert (by["Cuba"]["spend_usd"], by["Cuba"]["country_provenance"]) == (
+        round(17 * 0.45 * RATE, 2), "owner_labelled")          # printed "$10"
+    assert "Iraq" not in by
     assert geo["unresolved_spend"] == {
         "criteria": 1, "conflicting_criteria": 0, "spend_usd": 3.0 * RATE,
         "blocks_zero": True, "zero_withheld_countries": ["Pakistan"]}
@@ -334,12 +301,6 @@ def test_12_an_owner_labelled_criterion_is_the_carrier_of_its_code(live_db, tmp_
         "GB": [{"criterion_id": UK[0], "codes": ["GB"], "provenance": "google_ads"}]}}
 
     api = _api("7d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    assert table["Cuba set by owner"][1] == "$0 owner label"
-    assert table["Pakistan"][1] == UNAVAILABLE_NO_COUNTRY
-    # Iran: labelled, but 2364 has no row on record at all — carried by nothing.
-    assert table["Iran"][1] == UNAVAILABLE_NO_COUNTRY
     by = {r["country_key"]: r for r in api["geo"]["rows"]}
     assert (by["code:CU"]["spend_usd"], by["code:CU"]["spend_status"],
             by["code:CU"]["country_provenance"],
@@ -348,6 +309,85 @@ def test_12_an_owner_labelled_criterion_is_the_carrier_of_its_code(live_db, tmp_
     assert by["code:CU"]["zero_rests_on_owner_labels"] == ["2192"]
     assert api["geo"]["unresolved_spend"]["zero_withheld_countries"] == [
         "Iran", "Pakistan"]
+
+
+# ── the one Countries page (PR-ADS-176B-F1, truth audit M2) ────────────────
+# Cases 10 and 12 asserted on the deleted #/geo page that a $0 resting on the
+# owner's labels says so ("$0 owner label"). PR-ADS-176B dropped that half
+# with the page; these restore it on the page that is left — the mart's
+# country view rendered by the real renderRoasCountriesPage — with the 176A
+# fixtures (the mart's business window, reconciled campaign spend).
+def _countries_page(mart) -> str:
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app(
+        '_currentUser = {"username": "u", "role": "admin"}; '
+        "roasCountryMart = %s; roasCountriesData = roasCountryMart.rows || []; "
+        'renderRoasCountriesPage(); __els["roas-countries-table-body"].innerHTML'
+        % json.dumps(json.loads(json.dumps(mart, default=str))))
+
+
+def _countries_row_html(html: str, name: str) -> str:
+    i = html.index(f'aria-label="Open {name} detail"')
+    return html[html.rfind("<tr", 0, i):html.index("</tr>", i)]
+
+
+def test_10_b_on_countries_a_zero_resting_on_both_labels_says_so(live_db, monkeypatch):
+    """Case 10's page half. Cuba (2192) and Iran (2364) spend in the window;
+    Pakistan won a deal and has no geo row. Without the labels that spend has
+    no country and Pakistan reads Unavailable; with them its $0 stands — on
+    the labels, which the cell says."""
+    from tests.test_pr_ads_176a_country_builder_pg_integration import (
+        _deal, _mart, _seed, _sync)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed(live_db, yesterday_geo=[(C2192, 2.0), (C2364, 1.0)])
+    _sync(live_db)
+    _deal(live_db, "d-pk", "Pakistan")
+    mart = _mart()
+    assert mart["spend_truth"]["country_spend_status"] == "verified"
+    rows = {r.get("country_code"): r for r in mart["rows"]}
+    assert (rows["PK"]["spend"], rows["PK"]["spend_reason"]) == (0.0, None)
+    assert rows["PK"]["zero_rests_on_owner_labels"] == ["2192", "2364"]
+    assert rows["GB"]["zero_rests_on_owner_labels"] == []
+    html = _countries_page(mart)
+    pk = _countries_row_html(html, "Pakistan")
+    assert re.search(
+        r'\$0 <span class="owner-label-note" title="This \$0 rests on the owner\'s '
+        r'country label for Google Ads locations 2192, 2364\. Google Ads reports those '
+        r'locations without a country; without the label that spend could be this '
+        r'country\'s and the figure would read &quot;Unavailable&quot;\.">owner label</span>',
+        pk), pk
+    # The owner note on the labelled countries themselves: Iran is a listed
+    # market, Cuba is in the residual's "In residual" items.
+    assert "set by owner" in _countries_row_html(html, "Iran")
+    cuba = html[html.index("</span>Cuba"):]
+    assert "set by owner" in cuba[:cuba.index("</td>")]
+    assert html.count(">owner label</span>") == 1
+
+
+def test_12_b_on_countries_a_zero_carried_by_a_labelled_criterion_says_so(
+        live_db, monkeypatch):
+    """Case 12's page half. Iran's only carrier is 2364, on the owner's word,
+    and it is outside the window; an unlisted code-less criterion has spend
+    inside it. Iran (a deal, no geo row) is $0 and says why; Pakistan,
+    carried by nothing, reads Unavailable."""
+    from tests.test_pr_ads_176a_country_builder_pg_integration import (
+        LOOSE, _deal, _mart, _seed, _sync, _window_dates, _write_spend as _ws)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    start, _today_ = _window_dates("last_6_months")
+    _seed(live_db, yesterday_geo=[(LOOSE, 3.0)])
+    _ws([_spend_rows(C2364, start - timedelta(days=20), 0.42, campaign="111")])
+    _sync(live_db)
+    _deal(live_db, "d-ir", "Iran")
+    _deal(live_db, "d-pk", "Pakistan")
+    mart = _mart()
+    rows = {r.get("country_code"): r for r in mart["rows"]}
+    assert (rows["IR"]["spend"], rows["IR"]["zero_rests_on_owner_labels"]) == (0.0, ["2364"])
+    assert rows["PK"]["spend"] is None
+    assert rows["PK"]["spend_reason"] == "spend_location_unresolved"
+    html = _countries_page(mart)
+    assert ("$0 <span class=\"owner-label-note\" title=\"This $0 rests on the owner's "
+            "country label for Google Ads location 2364." in _countries_row_html(html, "Iran"))
+    assert UNAVAILABLE_NO_COUNTRY in _countries_row_html(html, "Pakistan")
 
 
 def test_13_a_stored_google_code_beats_the_label_and_the_mismatch_is_surfaced(
@@ -362,20 +402,6 @@ def test_13_a_stored_google_code_beats_the_label_and_the_mismatch_is_surfaced(
         _spend_rows(("2192", "MX", "Mexico"), start - timedelta(days=5), 1.0)])
     with caplog.at_level(logging.WARNING, logger="db.geo_identity_sql"):
         api = _api("30d")
-    page = _render(api, tmp_path, probe=_OWNER_PROBE)
-    table = _table(page["table"])
-    assert table["Mexico"][1] == "$10"                    # 2192's spend in window
-    # Cuba's zero stands because 2364's label took Iran's spend out of "no
-    # country" — CU is carried by nothing — so it is marked.
-    assert table["Cuba"][1] == "$0 owner label"
-    # The mismatch is on the page, in words, in its own notice.
-    assert page["owner_notice_hidden"] is False
-    assert page["owner_notice"] == (
-        "Owner country label not applied — Google Ads now reports a country for a "
-        "location the owner labelled differently (location 2192: the owner set CU, "
-        "Google Ads reports MX — MX is used). Google's code always wins. Review "
-        "the entry in config/geo_owner_labels.yaml.")
-    assert "Cuba set by owner" not in table
     geo = api["geo"]
     by = {r["country_key"]: r for r in geo["rows"]}
     assert (by["code:MX"]["spend_usd"], by["code:MX"]["country_provenance"]) == (
@@ -410,12 +436,11 @@ def test_14_a_malformed_config_does_not_crash_the_page_and_labels_nothing(
                '  "2192": {code: Cuba, approved: "2026-11-22", by: owner}\n'
                '  "2364": {code: IR}\n')
     api = _api("30d")
-    page = _render(api, tmp_path)
-    table = _table(page["table"])
-    # Exactly the pre-170A page: both criteria in the unresolved row.
-    assert table["(unresolved location)"][1] == "$14"
-    assert table["Pakistan"][1] == UNAVAILABLE_NO_COUNTRY
-    assert "set by owner" not in page["table"]
+    # Exactly the pre-170A payload: no row rests on an owner label.
+    by = {r["country"]: r for r in api["geo"]["rows"]}
+    assert by["Pakistan"]["spend_reason"] == "spend_location_unresolved"
+    assert not any(r.get("country_provenance") == "owner_labelled"
+                   for r in api["geo"]["rows"])
     assert api["geo"]["unresolved_spend"]["criteria"] == 2
     assert api["geo"]["owner_labelled_geo"] == {"criteria": [], "mismatches": [],
                                                 "note": NOTE}
@@ -653,18 +678,27 @@ def test_18_all_three_country_pages_render_the_same_owner_note(tmp_path):
     def body(name):
         a = src.index(f"function {name}(")
         return src[a:src.index("\nfunction ", a + 10)]
-    assert ("${escapeHtml(r.country)}${ownerLabelledCountryNote(r.country_provenance)}"
-            in body("renderGeoTable"))
-    assert ("${escapeHtml(countryDisplayName(r.country))}${spendOwnerNote(r)}</td>"
-            in body("renderRoasCountryTable"))
+    # PR-ADS-176B: the #/geo page (renderGeoTable) is deleted. The one
+    # Countries page's market row and drawer, and its "In residual" items —
+    # countries outside the listed markets, e.g. owner-labelled Cuba — carry
+    # the same note.
+    table = body("renderRoasCountryTable")
+    assert "const name = countryDisplayName(r.country);" in table
+    assert "${escapeHtml(name)}${spendOwnerNote(r)}</td>" in table
+    assert "${ownerLabelledCountryNote(item.provenance)}" in body(
+        "renderCountryResidualItemRow")
+    assert "<strong>${escapeHtml(name)}</strong>${spendOwnerNote(r)}" in body(
+        "renderCountryDrawer")
     dash = src[src.index('<tr class="ctry-row" data-ctry-row='):]
     assert ('${escapeHtml(r.country_name || "—")}${spendOwnerNote(r)}'
             in dash[:dash.index("</tr>")])
-    # The residual rows are not countries and carry no note: the helpers are
-    # called from those three row templates and nowhere else.
-    assert src.count("ownerLabelledCountryNote(") == 3   # definition, Countries, spendOwnerNote
-    # definition + the two revenue pages' rows + the Dashboard Countries drawer
-    assert src.count("spendOwnerNote(") == 4
+    # The residual row itself is not a country and carries no note: the
+    # helpers are called from those row templates and nowhere else.
+    # definition, spendOwnerNote, the Countries page's "In residual" items
+    assert src.count("ownerLabelledCountryNote(") == 3
+    # definition + the Countries page's row and drawer + the Dashboard
+    # Countries row and drawer
+    assert src.count("spendOwnerNote(") == 5
     drawer = body("wireCtryDrawers")
     assert ('<strong>${escapeHtml(r.country_name || "Country")}</strong>${spendOwnerNote(r)}'
             in drawer)
@@ -831,16 +865,17 @@ def test_24_the_map_hover_and_the_revenue_pages_carry_the_marker_and_the_mismatc
         live_db, tmp_path):
     """Provenance wherever a labelled country's spend is shown, not only in
     the table: the Countries map hover, the Dashboard Countries bubble tooltip
-    and row drawer; and the mismatch notice on the two revenue pages."""
+    and row drawer; and the mismatch notice on the two revenue pages.
+
+    PR-ADS-176B: the Countries map (#/geo) is deleted with its page. What it
+    drew from is still served: the payload marks both labelled countries, and
+    in production's shape names no mismatch (so no notice)."""
     _production_shape(live_db)
-    page = _render(_api("30d"), tmp_path, probe=_OWNER_PROBE)
-    # The map still LOCATES by the country name; the hover names it with the marker.
-    assert "Cuba" in page["map_locations"] and "Iran" in page["map_locations"]
-    assert "Cuba (country set by owner)" in page["map_names"]
-    assert "Iran (country set by owner)" in page["map_names"]
-    assert "United Kingdom" in page["map_names"] and "Pakistan" in page["map_names"]
-    # No mismatch in production's shape: no notice.
-    assert (page["owner_notice"], page["owner_notice_hidden"]) == ("", True)
+    geo = _api("30d")["geo"]
+    prov = {r["country"]: r.get("country_provenance") for r in geo["rows"]}
+    assert (prov["Cuba"], prov["Iran"]) == ("owner_labelled", "owner_labelled")
+    assert prov["United Kingdom"] != "owner_labelled"
+    assert (geo.get("owner_labelled_geo") or {}).get("mismatches") == []
 
     src = APP_JS.read_text(encoding="utf-8")
 
@@ -857,8 +892,11 @@ def test_24_the_map_hover_and_the_revenue_pages_carry_the_marker_and_the_mismatc
         "const fmtMoney = (v) => '$' + Number(v).toFixed(2);\n"
         "const fmtCompactCurrency = (v, c) => (c === 'GBP' ? '£' : c + ' ') + Number(v).toFixed(2);\n"
         + "".join(source_of(n) for n in (
+            # PR-ADS-176B-F1 (m5): residualSpendCell prints cents through
+            # fmtCountrySpendCents.
             "ownerLabelledCountryText", "ownerLabelMismatchText",
-            "ownerLabelMismatchNotice", "residualSpendCell", "ctryOutsideMarketsText"))
+            "ownerLabelMismatchNotice", "fmtCountrySpendCents", "residualSpendCell",
+            "ctryOutsideMarketsText"))
         + "console.log(JSON.stringify(["
         "ownerLabelledCountryText('owner_labelled'), ownerLabelledCountryText('google_ads'),"
         "ownerLabelMismatchNotice({mismatches: []}), ownerLabelMismatchNotice(undefined),"
@@ -895,18 +933,20 @@ def test_24_the_map_hover_and_the_revenue_pages_carry_the_marker_and_the_mismatc
     assert (outside_zero, outside_null, outside_absent) == ("", "", "")
 
     # Each helper is wired where the figure is shown.
-    assert ("r.country + ownerLabelledCountryText(r.country_provenance)"
-            in body("renderGeoMap"))
     assert ('${r.country_name || "—"}${ownerLabelledCountryText(r.spend_country_provenance)}'
             in body("wireCtryBubbleHover"))
     assert "${ownerLabelMismatchNotice(d.owner_labelled_geo)}" in body("renderDashboardCountries")
     assert ("${ownerLabelMismatchNotice(st.owner_labelled_geo)}"
             in body("renderRoasCountriesPage"))
-    assert "<td>${residualSpendCell(r)}</td>" in body("renderRoasCountryTable")
+    # PR-ADS-176B: the residual's spend cell, unless the gate withheld it.
+    assert ("? roasCountrySpendCell(r) : residualSpendCell(r)}</td>"
+            in body("renderRoasCountryTable"))
     kpi = body("renderCtryKpiRow")
     assert "sub: usdSub + ctryOutsideMarketsText(k)," in kpi
     assert "country-attributed · listed markets only" in kpi
-    assert 'id="geo-owner-label-notice"' in (ROOT / "static" / "index.html").read_text(
+    # PR-ADS-176B: the #/geo page's own notice element went with it; the one
+    # Countries page renders the notice in its body (asserted above).
+    assert 'id="geo-owner-label-notice"' not in (ROOT / "static" / "index.html").read_text(
         encoding="utf-8")
 
 

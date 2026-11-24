@@ -24,7 +24,7 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "revenue-health", "channels", "system"];
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "revenue-health", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -40,6 +40,11 @@ const RETIRED_PAGE_REDIRECTS = {
   // PAGES — this entry is the only place it survives, so an old bookmark
   // lands on Channels instead of the Dashboard fallback.
   "revenue-by-source": { page: "channels" },
+  // PR-ADS-176B: the Countries evidence page is deleted; Countries is one page
+  // (the mart's country view, business windows, strict spend gate). Same rule
+  // as the Revenue by Source key: it is NOT in PAGES and survives only here, so
+  // an old #/geo bookmark lands on Countries instead of the Dashboard.
+  geo: { page: "roas-countries" },
 };
 
 // PR-ADS-174A: the six-item menu. Every page id in PAGES belongs to exactly one
@@ -52,7 +57,8 @@ const NAV_ITEMS = [
   { id: "overview", label: "Overview", pages: ["dashboard"] },
   { id: "channels", label: "Channels", pages: ["channels"] },
   { id: "campaigns", label: "Campaigns", pages: ["campaigns", "roas-campaigns", "keywords", "search-terms"] },
-  { id: "countries", label: "Countries", pages: ["geo", "roas-countries"] },
+  // PR-ADS-176B: one page, so no tab strip.
+  { id: "countries", label: "Countries", pages: ["roas-countries"] },
   { id: "pipeline", label: "Pipeline", pages: ["leads", "deals"] },
   { id: "system", label: "System", pages: ["system", "scheduler", "health", "revenue-health", "backfill", "gclid-attribution"] },
 ];
@@ -180,9 +186,6 @@ const PAGE_DATASET_MAP = {
   campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"],
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
-  // PR-ADS-165A: the page reads canonical daily country spend, not the
-  // legacy `geo` snapshot (written monthly), so its strip keys on that.
-  geo:               ["google_ads_api/canonical_geo"],
   keywords:          ["google_ads_api/keyword_facts"],
   // PR-ADS-153C: the canonical Leads page reads the CRM funnel spine.
   leads:             ["hubspot/contact_funnel", "hubspot/lifecycle_events"],
@@ -232,14 +235,6 @@ const PAGE_EXPLANATIONS = {
     dependsOn: ["search_terms"],
     emptyMeans: "If Search Term Universe is empty or blocked, pattern analysis cannot run.",
     nextAction: "Fix Search Term Universe first."
-  },
-  geo: {
-    title: "Country Performance",
-    purpose: "Geographic intelligence — performance and quality by country.",
-    source: "Google Ads API country spend from the daily sync, in USD at each day's FX rate.",
-    dependsOn: ["canonical_geo"],
-    emptyMeans: "Spend reads Unavailable until every day of the selected window has been re-read after it ended — each morning before the daily sync, and all day if that sync fails; the page says which days are complete. An empty table means either no leads and no spend in the window, or that the lead figures could not be read; the table says which.",
-    nextAction: "Check System Status → Google Ads API / canonical geo. The daily incremental sync refreshes it."
   },
   keywords: {
     title: "Keyword Evidence",
@@ -306,7 +301,7 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check that HubSpot deals are synced and campaigns have Google Ads API spend data for the selected window."
   },
   "roas-countries": {
-    title: "Country Revenue & Spend",
+    title: "Countries",
     purpose: "Revenue attribution by country over business windows — where SQLs, customers, and closed-won revenue come from.",
     source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
     dependsOn: ["hubspot/deals", "google_ads_api/canonical_geo"],
@@ -350,13 +345,6 @@ const PAGE_HELP_CONTENT = {
     doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Attributed SQLs are HubSpot-confirmed qualified contacts on their created date, uniquely tied to one keyword criterion; a blank ('—') means the SQL could not be uniquely attributed (ambiguous keyword text or unresolved campaign), never zero, and a genuine 0 means uniquely attributable with no matching contact. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
     checkNext: "Search Terms to see which queries matched a keyword, or Campaign Evidence for canonical spend and lead outcomes."
   },
-  geo: {
-    what: "Country-level ad performance and HubSpot lead quality shown side by side. Identify which countries produce quality leads vs. waste.",
-    source: "Google Ads API daily country spend (USD, converted at each day's FX rate) merged with HubSpot lead quality by country. Spend is for the selected number of days through yesterday, and is shown only once every one of those days has been re-read after it ended — so it is available from the morning sync onward and reads Unavailable before it, with the days that are complete. Clicks and conversions by country are not shown — the daily country table holds spend only.",
-    howToUse: "Read spend and lead quality side by side, as two separate facts about each country. Look at where spend goes, and separately at which countries' leads are junk.",
-    doNotAssume: "Spend and leads cover different periods (spend through yesterday, leads through today by run date) and different things (where ads were shown, and the country on the HubSpot contact), so do not compute a cost per lead from them. Country attribution uses Google Ads geographic reporting, not IP geolocation or GCLID-level precision.",
-    checkNext: "Country Revenue & Spend for revenue attribution at the country level."
-  },
   leads: {
     what: "HubSpot lead-quality breakdown — lifecycle stages, junk rate, campaign attribution, and quality scoring.",
     source: "HubSpot CRM contacts synced via the HubSpot connector.",
@@ -383,7 +371,7 @@ const PAGE_HELP_CONTENT = {
     source: "HubSpot closed-won deal revenue + Google Ads API campaign spend. This does NOT use Google Ads conversion value.",
     howToUse: "Compare campaigns by won revenue, Period Revenue / Ad Spend, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
     doNotAssume: "This is HubSpot revenue truth, not Google Ads conversion tracking. Revenue comes from actual closed-won deals, not estimated conversion values. INSUFFICIENT_DATA means not enough signal to judge.",
-    checkNext: "Country Revenue & Spend for geographic breakdown."
+    checkNext: "Countries for geographic breakdown."
   },
   "roas-countries": {
     what: "Country-level revenue and spend — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
@@ -397,7 +385,7 @@ const PAGE_HELP_CONTENT = {
     source: "GCLID match engine joining Windsor click data with HubSpot contact records.",
     howToUse: "Review match rates, coverage percentages, and confidence tiers. This page audits attribution readiness — it does not implement a GCLID-to-revenue bridge.",
     doNotAssume: "This is a readiness/confidence audit only. It does NOT implement actual GCLID bridge attribution, OCT upload, or offline conversion tracking. It measures how ready the data is for those future capabilities.",
-    checkNext: "Country Revenue & Spend to see how estimates will improve with better coverage, or System Status for GCLID pipeline health."
+    checkNext: "Countries to see how estimates will improve with better coverage, or System Status for GCLID pipeline health."
   },
   scheduler: {
     what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for the daily, monthly, incremental-sync and certification jobs.",
@@ -436,7 +424,6 @@ const PAGE_DEPENDENCIES = {
   campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
-  geo:                     ["google_ads_api/canonical_geo"],
   keywords:                ["google_ads_api/keyword_facts"],
   leads:                   ["hubspot/contacts"],
   deals:                   ["hubspot/deals"],
@@ -478,8 +465,10 @@ const DEFAULT_EVIDENCE_WINDOW = "30d";
 // PR-ADS-153D: Flagged Waste Terms retired into Search Terms → Flagged, which
 // is served by the Search Terms page's own evidence window — the old page must
 // not leave a second window implementation behind.
+// PR-ADS-176B: Countries left this list with the #/geo page — it is on
+// business windows now; the 7/14/30/60/180-day evidence windows are gone from it.
 const EVIDENCE_PAGES = [
-  "campaigns", "search-terms", "ngrams", "keywords", "geo",
+  "campaigns", "search-terms", "ngrams", "keywords",
 ];
 
 function isEvidencePage(page) {
@@ -495,9 +484,6 @@ let _selectedDays  = (() => {
     return 30;
   }
 })();  // time range selector — tab-scoped via sessionStorage
-
-// Geo page state
-let geoMergedRows = [];
 
 // Keywords page state
 let keywordRows = [];
@@ -1283,7 +1269,7 @@ async function handleLogout() {
 
 const HASH_ROUTE_ALIASES = {
   "ngrams": "search-terms",
-  "countries": "geo",
+  "countries": "roas-countries",
   "data-runs": "scheduler",
   "system-status": "health",
 };
@@ -1478,7 +1464,6 @@ function loadPage(page) {
     case "dashboard":     loadDashboardTab();                       break;
     case "campaigns":     loadCampaigns();                          break;
     case "search-terms":  loadSearchTermsEvidence();                break;
-    case "geo":           loadGeo();                                break;
     case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
@@ -2231,7 +2216,8 @@ const CANONICAL_BASIS_LABELS = {
 
 function canonicalReasonLabel(reason) {
   if (!reason) return "";
-  return CANONICAL_REASON_LABELS[reason] || String(reason).replace(/_/g, " ");
+  return CANONICAL_REASON_LABELS[reason] || countryReasonLabel(reason)
+    || String(reason).replace(/_/g, " ");
 }
 
 // The CRM Truth Exceptions family a withholding reason points at. Only CRM
@@ -5485,7 +5471,7 @@ function ctryStatusColor(status) {
 }
 
 const CTRY_NEXT_ACTION = {
-  "Revenue proven": "Scale — open Country Revenue & Spend",
+  "Revenue proven": "Scale — open Countries",
   "Won deal, revenue not proven": "Confirm revenue attribution",
   "SQL producer": "Review SQL quality",
   "Spend without a won deal": "Review — spend without a won deal",
@@ -5593,11 +5579,13 @@ function ctrySpendCell(row) {
     // PR-ADS-176A truth audit MINOR 6: Unavailable WITH the reason the row carries.
     return countrySpendUnavailableHtml(row.spend_reason, "dash-unavailable");
   }
+  // PR-ADS-176B-F2: a published $0 resting on owner labels says so.
+  const zeroNote = row.spend_native === 0 ? ownerZeroNote(row) : "";
   const native = escapeHtml(fmtCompactCurrency(row.spend_native, row.native_currency || "GBP"));
   if (row.spend_usd !== null && row.spend_usd !== undefined) {
-    return `${native} <span class="ctry-usd">· ${escapeHtml(fmtMoney(row.spend_usd))}</span>`;
+    return `${native} <span class="ctry-usd">· ${escapeHtml(fmtMoney(row.spend_usd))}</span>${zeroNote}`;
   }
-  return native;
+  return native + zeroNote;
 }
 
 function ctryRoasCell(row) {
@@ -5903,7 +5891,7 @@ function renderCtryLeaderboard(d) {
       <td class="ctry-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="ctry-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td>${ctryRoasCell(r)}</td>
-      <td class="ctry-next">${escapeHtml(CTRY_NEXT_ACTION[r.status] || "Open Country Revenue & Spend")}</td>
+      <td class="ctry-next">${escapeHtml(CTRY_NEXT_ACTION[r.status] || "Open Countries")}</td>
     </tr>`).join("");
 
   // Residual row — pinned to the bottom, NOT clickable, never a ROAS. It is the
@@ -6035,7 +6023,7 @@ function wireCtryDrawers(root, d) {
     const dealBody = ctryDealBody(r, d);
 
     const links = [
-      ["roas-countries", "Open Country Revenue & Spend"],
+      ["roas-countries", "Open Countries"],
       ["deals", "Open Deals"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
@@ -10798,50 +10786,34 @@ document.addEventListener("change", (e) => {
   preview.innerHTML = mappingSpendPreview(opt.dataset.native, opt.dataset.usd, nativeCur);
 });
 
-function junkRateBadge(junkPct) {
-  if (junkPct === null || junkPct === undefined) {
-    return `<span class="junk-rate-badge junk-rate-badge--none">—</span>`;
-  }
-  if (junkPct < uiThresholds.junk_rate.low_pct) {
-    return `<span class="junk-rate-badge junk-rate-badge--low">${junkPct.toFixed(1)}%</span>`;
-  }
-  if (junkPct <= uiThresholds.junk_rate.high_pct) {
-    return `<span class="junk-rate-badge junk-rate-badge--medium">${junkPct.toFixed(1)}%</span>`;
-  }
-  return `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
-}
+// ── Country spend reasons (shared by the Countries page and Dashboard) ──────
+//
+// PR-ADS-176B: the Countries evidence page (#/geo, and its read of the geo
+// evidence endpoint) is deleted —
+// with its map, its summary strip and its lead-quality columns (the Leads page
+// owns lead quality). Its truth rules live on in the one Countries page and in
+// Dashboard → Countries: spend is Unavailable WITH its reason, never $0 and
+// never "—"; a sub-dollar spend reads "<$1". These reason tables are theirs.
 
-// ── Geo Intelligence page ──────────────────────────────────────────────────
-//
-// PR-ADS-165A: `/api/geo` returns ONE row per country with Google Ads spend
-// and HubSpot lead figures already joined on the canonical country identity.
-// This page joins nothing: joining on display text made "UK" leads and
-// "United Kingdom" spend two rows, and printed $0 beside the leads.
-//
-// Spend is the canonical DAILY country spend for N days through yesterday,
-// published only when every one of those days has a verified fetch made AFTER
-// that day ended (a day fetched while in progress is a part-day). So it is
-// available from the morning sync onward and Unavailable before it. The page
-// used to read the legacy `geo` snapshot, which only
-// the monthly job writes: mid-month the 7-day window held no rows and every
-// country rendered Spend $0 under "Fresh with data".
-//
-// The server decides; this page prints the verdict:
-//   published   — the figure. $0 only for a known country, in a covered
-//                 window, with no spend row, when the window also holds no
-//                 spend against a location nothing on record names.
-//   unavailable — "Unavailable", with the reason: the window is not fully
-//                 covered, an FX rate is missing, the lead country could not
-//                 be matched to a known country, or some of the window's
-//                 spend has no country and might be this one's. Never $0,
-//                 never the sum of the days that happen to be synced.
-
-/** "2026-12-08" → "8 Dec 2026". Dates are account-local calendar days. */
-function geoDay(iso) {
-  if (!iso) return "";
-  const d = new Date(`${iso}T00:00:00Z`);
-  if (isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+// The words for a country reason code (a row's spend reason, a gate gap, a
+// withheld total), or null when the code is not a country one.
+const COUNTRY_TOTAL_REASONS = {
+  residual_not_a_market: "the residual is not a market: its spend and its deals are two unrelated populations",
+  country_geo_not_ready: "country spend does not reconcile with campaign spend for this window",
+  country_row_figure_unknown: "a country's figure is unknown",
+  // The mart's gate gaps (google_ads_geo_sync_service), as named on the card.
+  campaign_coverage_incomplete: "canonical campaign spend does not cover the whole window",
+  campaign_spend_unreadable: "canonical campaign spend could not be read",
+  fx_coverage_incomplete: "an FX rate is missing for part of the window",
+  missing_geo_dates: "some days have campaign spend but no country spend",
+  campaign_spend_without_geo: "some campaigns have spend but no country spend",
+  comparison_not_like_for_like: "the campaign and country totals span different accounts or currencies",
+  totals_differ: "country spend does not reconcile with campaign spend",
+};
+function countryReasonLabel(reason) {
+  if (!reason) return null;
+  return GEO_ROW_SPEND_REASONS[reason] || GEO_COVERAGE_REASONS[reason]
+    || COUNTRY_TOTAL_REASONS[reason] || null;
 }
 
 const GEO_COVERAGE_REASONS = {
@@ -10861,68 +10833,6 @@ const GEO_COVERAGE_REASONS = {
   // PR-ADS-176A truth audit MINOR 3: the zero rule withheld a market's $0.
   spend_location_unresolved: "some spend in this window has no country",
 };
-
-/**
- * The spend verdict for the whole window, from the /api/geo response.
- * Fail closed: anything that is not an explicit "covered" is unavailable.
- * Returns { published, message }.
- */
-function geoSpendVerdict(perfData) {
-  if (!perfData || perfData.db_unavailable) {
-    return { published: false, message: "Unavailable — country spend could not be loaded." };
-  }
-  const cov = perfData.coverage || {};
-  if (cov.status === "covered" && perfData.spend_status === "published" && Array.isArray(perfData.rows)) {
-    return { published: true, message: "" };
-  }
-  let why = GEO_COVERAGE_REASONS[cov.reason] || "coverage for this window is not proven";
-  if (cov.reason === "spend_not_reread_since_day_ended" || cov.reason === "spend_reread_failed") {
-    // "Yesterday" only when yesterday is the one day missing; otherwise say
-    // which days.
-    const failed = cov.reason === "spend_reread_failed";
-    const gaps = cov.missing_ranges || [];
-    const onlyYesterday = gaps.length === 1 && gaps[0].start === gaps[0].end && gaps[0].end === cov.requested_through;
-    if (!onlyYesterday && gaps.length) {
-      const first = gaps[0].start, last = gaps[gaps.length - 1].end;
-      why = failed
-        ? `the sync that should have re-read spend for ${geoDay(first)} to ${geoDay(last)} failed`
-        : `spend for ${geoDay(first)} to ${geoDay(last)} has not been re-read since those days ended`;
-    }
-    // A failed sync is not "wait for the morning sync": it already ran.
-    why += failed
-      ? " — what is stored for it is a part-day figure. This page stays unavailable until a sync succeeds"
-      : " — what is stored for it is a part-day figure. The morning sync re-reads it; this page is available after that";
-  }
-  const requested = cov.requested_through
-    ? (cov.requested_from
-        ? `${geoDay(cov.requested_from)} to ${geoDay(cov.requested_through)}`
-        : `all time to ${geoDay(cov.requested_through)}`)
-    : "the selected window";
-  if (cov.status === "not_covered" && cov.covered_from && cov.covered_through) {
-    return {
-      published: false,
-      message: `Unavailable — Google Ads country spend is complete for ${geoDay(cov.covered_from)} to ${geoDay(cov.covered_through)} only, not for the whole window (${requested}): ${why}. No spend is shown, because part of a window is not the window.`,
-    };
-  }
-  if (cov.status === "not_covered") {
-    return {
-      published: false,
-      message: `Unavailable — no day of this window (${requested}) has been synced for Google Ads country spend: ${why}.`,
-    };
-  }
-  return { published: false, message: `Unavailable — Google Ads country spend for ${requested} cannot be verified: ${why}.` };
-}
-
-/**
- * A spend figure on this page. `fmtDollar` rounds to whole dollars, so 39
- * cents would print "$0" — a zero that was not measured. Anything above zero
- * and below a dollar reads "<$1". (Not changed in fmtDollar: other pages.)
- */
-function geoFmtSpend(v) {
-  if (v === null || v === undefined) return "Unavailable";
-  if (v > 0 && v < 1) return "<$1";
-  return fmtDollar(v);
-}
 
 // PR-ADS-170A: Google Ads reports a few locations with no country at all. The
 // owner labelled them (config/geo_owner_labels.yaml); the server marks every
@@ -10972,9 +10882,11 @@ function ownerLabelMismatchNotice(block) {
   return text ? `<p class="mapping-notice mapping-notice--warn owner-label-mismatch" role="status">${escapeHtml(text)}</p>` : "";
 }
 
-/** PR-ADS-170A-F1: a published $0 that stands only on the owner's labels says
+/** PR-ADS-170A-F1, restored by PR-ADS-176B-F1 (truth audit M2) for the one
+ *  Countries page: a published $0 that stands only on the owner's labels says
  *  so — whether the country's own carrier is owner-labelled or labelled spend
- *  in the window would otherwise have no country. */
+ *  in the window would otherwise have no country. The row carries
+ *  `zero_rests_on_owner_labels` (the mart, the zero rule's evidence). */
 function ownerZeroNote(row) {
   const on = Array.isArray((row || {}).zero_rests_on_owner_labels) ? row.zero_rests_on_owner_labels : [];
   if (!on.length) return "";
@@ -10990,9 +10902,11 @@ function residualSpendCell(r) {
   const c = (r || {}).spend_components || {};
   const out = c.outside_listed_markets;
   const names = Array.isArray(r.outside_listed_market_countries) ? r.outside_listed_market_countries : [];
-  if (!(out > 0)) return fmtMoney(r.spend);
+  // PR-ADS-176B-F1 (m5): in cents — whole dollars printed "$0 is spend in
+  // Cuba" for 39 cents, and the parts did not add up to the row.
+  if (!(out > 0)) return escapeHtml(fmtCountrySpendCents(r.spend));
   const rest = (c.geo_unassigned || 0) + (c.country_unidentified || 0);
-  return `${fmtMoney(r.spend)}<br><small class="metric-reason">${escapeHtml(fmtMoney(out))} is spend in ${names.length ? escapeHtml(names.join(", ")) : "countries"} — known ${names.length === 1 ? "country" : "countries"}, not among the listed markets${rest > 0 ? `; ${escapeHtml(fmtMoney(rest))} has no country` : ""}</small>`;
+  return `${escapeHtml(fmtCountrySpendCents(r.spend))}<br><small class="metric-reason">${escapeHtml(fmtCountrySpendCents(out))} is spend in ${names.length ? escapeHtml(names.join(", ")) : "countries"} — known ${names.length === 1 ? "country" : "countries"}, not among the listed markets${rest > 0 ? `; ${escapeHtml(fmtCountrySpendCents(rest))} has no country` : ""}</small>`;
 }
 
 const GEO_ROW_SPEND_REASONS = {
@@ -11001,353 +10915,6 @@ const GEO_ROW_SPEND_REASONS = {
   no_country_recorded: "no country recorded",
   fx_rate_missing: "FX rate missing",
 };
-
-/** One country's Spend cell. `spend_usd === null` is unknown, never 0. */
-function geoSpendCell(row) {
-  if (row.spend_status !== "published" || row.spend_usd === null || row.spend_usd === undefined) {
-    const why = GEO_ROW_SPEND_REASONS[row.spend_reason];
-    const title = row.spend_reason === "spend_location_unresolved"
-      ? "No spend is recorded against this country, and some of this window's spend was reported by Google Ads without a country (the unresolved location row). Nothing on record shows that spend belongs to another country — Google Ads has not reported this country under a location of its own — so it may be this country's, and this is not a zero."
-      : row.spend_reason === "country_not_matched"
-      ? "This lead country is not a country name the system recognises, so it cannot be matched to Google Ads spend. It may be a spelling of a country listed above."
-      : row.spend_reason === "no_country_recorded"
-        ? "These leads have no country recorded, so there is no country's spend to show beside them."
-      : row.spend_reason === "fx_rate_missing"
-        ? "An FX rate is missing for at least one day of this country's spend."
-        : "Country spend for this window is not published.";
-    return `<span class="td--na" title="${escapeHtml(title)}">Unavailable${why ? ` — ${escapeHtml(why)}` : ""}</span>`;
-  }
-  return geoFmtSpend(row.spend_usd) + (row.spend_usd === 0 ? ownerZeroNote(row) : "");
-}
-
-const GEO_NA = '<span class="td--na">Unavailable</span>';
-
-/** A lead count cell: unknown when the lead summary could not be read. A
- *  count the server sent is printed as the number it is — 0 for a zero. */
-function geoLeadCell(value) {
-  if (value === null || value === undefined) return GEO_NA;
-  return String(value);
-}
-
-/** Top Campaign / Top Keyword as plain text. "Several" when the spellings
- *  merged into this country name different ones: the most common across
- *  them cannot be told from what the lead summary carries. */
-function geoTopText(row, field, leadsAvailable) {
-  if (!leadsAvailable) return "Unavailable";
-  if (row[`${field}_several`]) return "Several";
-  return row[field] || "—";
-}
-
-let geoSpendState = { published: false, message: "" };
-// False when the lead summary could not be read: every lead column is then
-// unknown, and says so — never a dash, which reads as "none".
-let geoLeadsAvailable = true;
-
-async function loadGeo() {
-  renderPageDatasetFreshness("geo");
-  const tableEl = document.getElementById("geo-table-body");
-  const mapEl   = document.getElementById("geo-map");
-  const noticeEl = document.getElementById("geo-spend-notice");
-  const rangeEl  = document.getElementById("geo-spend-range");
-
-  if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading geo intelligence…</p>`;
-  if (mapEl)   mapEl.innerHTML   = "";
-  if (noticeEl) { noticeEl.hidden = true; noticeEl.textContent = ""; }
-  if (rangeEl)  { rangeEl.hidden = true;  rangeEl.textContent = ""; }
-
-  const setKpis = (values) => {
-    ["geo-kpi-countries", "geo-kpi-spend", "geo-kpi-sqls", "geo-kpi-junk"].forEach((id, i) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = values[i];
-    });
-  };
-
-  // One request: the server joins spend and leads on the country identity.
-  let data = null;
-  try {
-    data = await fetchJSON(`/api/geo?${evidenceWindowQuery()}`);
-  } catch (_) { /* country evidence unavailable */ }
-
-  if (!data || !Array.isArray(data.rows)) {
-    geoMergedRows = [];
-    geoSpendState = { published: false, message: "" };
-    setKpis(["—", "—", "—", "—"]);
-    if (tableEl) tableEl.innerHTML = `
-      <div class="geo-empty-state">
-        <p class="empty-state">Could not load geo intelligence. Check API health or run status.</p>
-      </div>`;
-    return;
-  }
-
-  const verdict = geoSpendVerdict(data);
-  geoSpendState = verdict;
-  if (noticeEl && !verdict.published) {
-    noticeEl.textContent = verdict.message;
-    noticeEl.hidden = false;
-  }
-  // Say which days the spend is for. The window ends yesterday, not today
-  // (today's spend is still arriving), and is published only once yesterday
-  // was re-read after it ended — which the server's verdict has checked.
-  const range = data.window_range || {};
-  if (rangeEl && verdict.published && range.through) {
-    rangeEl.textContent = (range.from
-      ? `Spend is for ${geoDay(range.from)} through ${geoDay(range.through)}`
-      : `Spend is for all synced days through ${geoDay(range.through)}`)
-      + ", re-read after that day ended. Today is not included."
-      + " Lead counts cover a different period — the same number of days counted through today, by lead run date — so do not divide one by the other.";
-    rangeEl.hidden = false;
-  }
-  // Spend Google reported against a location nothing on record names. The
-  // total includes it; a country with no spend of its own cannot be called
-  // zero while it is there.
-  // PR-ADS-167A: the notice names the countries it affects. Google keys one
-  // country under one location, so that spend cannot be a country another
-  // location already carries — only a country never seen in Google Ads spend
-  // (or every country, when a location is on record under two countries).
-  const loose = data.unresolved_spend || {};
-  const looseHasSpend = loose.criteria > 0
-    && (loose.spend_usd === null || loose.spend_usd === undefined || loose.spend_usd !== 0);
-  if (noticeEl && verdict.published && (loose.blocks_zero || looseHasSpend)) {
-    const amount = (loose.spend_usd !== null && loose.spend_usd !== undefined)
-      ? `${geoFmtSpend(loose.spend_usd)} of this window's spend`
-      : "Some of this window's spend";
-    const where = loose.criteria === 1 ? "one location" : `${loose.criteria} locations`;
-    const names = Array.isArray(loose.zero_withheld_countries) ? loose.zero_withheld_countries : [];
-    const shown = names.length > 8
-      ? `${names.slice(0, 8).join(", ")} and ${names.length - 8} more`
-      : names.join(", ");
-    let effect;
-    if (!loose.blocks_zero || !names.length) {
-      effect = "It cannot be the spend of any country listed here: each of them is reported by Google Ads under a location of its own. No country's figure is affected.";
-    } else if (loose.conflicting_criteria > 0) {
-      effect = `A location on record under two different countries is among them, so a country with no spend of its own cannot be called zero: ${shown} ${names.length === 1 ? "reads" : "read"} "Unavailable". Countries that show a figure are not affected.`;
-    } else {
-      effect = `It cannot be the spend of a country Google Ads reports under a location of its own, so those countries' figures, zeros included, stand. It could be the spend of a country never seen in Google Ads spend: ${shown} ${names.length === 1 ? "reads" : "read"} "Unavailable" rather than zero.`;
-    }
-    noticeEl.textContent = `${amount} was reported by Google Ads against ${where} with no country on record. It is in the total and in the "(unresolved location)" row. ${effect}`;
-    noticeEl.hidden = false;
-  }
-
-  // PR-ADS-170A-F1: Google Ads now reports a country for a location the owner
-  // labelled differently. Its own notice, whatever else is shown.
-  const ownerEl = document.getElementById("geo-owner-label-notice");
-  if (ownerEl) {
-    const mismatch = ownerLabelMismatchText(data.owner_labelled_geo);
-    ownerEl.textContent = mismatch;
-    ownerEl.hidden = !mismatch;
-  }
-
-  // The rows are printed as served. Fail closed on the window verdict: if the
-  // window is not published no row's spend is read, whatever the row says.
-  const leadsAvailable = data.leads_status === "published";
-  const merged = data.rows.map((r) => {
-    const rowPublished = verdict.published && r.spend_status === "published"
-      && r.spend_usd !== null && r.spend_usd !== undefined;
-    return {
-      ...r,
-      spend_usd:    rowPublished ? r.spend_usd : null,
-      spend_status: rowPublished ? "published" : "unavailable",
-      spend_reason: rowPublished ? null : (r.spend_reason || null),
-    };
-  });
-  geoMergedRows = merged;
-
-  // KPI cards, from the server's own totals. A figure that needs spend is
-  // Unavailable when spend is.
-  const totalSpend = (verdict.published && data.total_spend_usd !== null && data.total_spend_usd !== undefined)
-    ? data.total_spend_usd : null;
-  const unmatched = data.unmatched_lead_countries || 0;
-  const countriesActive = (verdict.published && data.countries_active !== null && data.countries_active !== undefined)
-    ? `${data.countries_active}${unmatched ? ` (+${unmatched} not matched)` : ""}`
-    : "Unavailable";
-  // Countries only: an unmatched lead text and "No country recorded" are not
-  // countries, and are not counted as one.
-  const countryRows   = merged.filter((r) => r.country_resolved === true);
-  const countriesSQLs = countryRows.filter((r) => r.confirmed_sqls > 0).length;
-  const highJunk      = countryRows.filter((r) => r.junk_rate_pct !== null && r.junk_rate_pct !== undefined && r.junk_rate_pct >= uiThresholds.junk_rate.high_pct).length;
-  geoLeadsAvailable = leadsAvailable;
-  setKpis([
-    countriesActive,
-    totalSpend === null ? "Unavailable" : geoFmtSpend(totalSpend),
-    leadsAvailable ? String(countriesSQLs) : "Unavailable",
-    leadsAvailable ? String(highJunk) : "Unavailable",
-  ]);
-
-  if (merged.length === 0) {
-    // Nothing to list. Say which of the two facts that is: a covered window
-    // with no spend and no leads, or a window whose spend is not known.
-    if (tableEl) tableEl.innerHTML = `
-      <div class="geo-empty-state">
-        <p class="empty-state">${!leadsAvailable
-          ? "Lead figures could not be read."
-          : verdict.published
-            ? "No Google Ads country spend and no leads in the selected window."
-            : "No leads in the selected window."}</p>
-        ${verdict.published ? "" : `<p class="geo-empty-subtext">Google Ads API country spend: ${escapeHtml(verdict.message)}</p>`}
-      </div>`;
-    return;
-  }
-
-  // Map
-  renderGeoMap(merged, "total_leads");
-
-  // Wire up metric selector
-  const metricSel = document.getElementById("geo-map-metric");
-  if (metricSel) {
-    metricSel.onchange = () => renderGeoMap(geoMergedRows, metricSel.value);
-  }
-
-  // Table
-  renderGeoTable(merged);
-  // Reapply any active search filter so table stays consistent after reload
-  applyGeoSearch();
-}
-
-function renderGeoMap(rows, metric) {
-  const mapEl         = document.getElementById("geo-map");
-  const fallbackEl    = document.getElementById("geo-map-fallback");
-  if (!mapEl) return;
-
-  if (!window.Plotly) {
-    mapEl.hidden     = true;
-    if (fallbackEl) fallbackEl.hidden = false;
-    return;
-  }
-  if (fallbackEl) fallbackEl.hidden = true;
-  mapEl.hidden = false;
-
-  const metricLabels = {
-    total_leads:    "Leads",
-    confirmed_sqls: "SQLs",
-    confirmed_junk: "Junk",
-    junk_rate_pct:  "Junk Rate %",
-    spend_usd:      "Spend (USD)",
-  };
-
-  const countries  = rows.map((r) => r.country);
-  // PR-ADS-165A: null is unknown and is drawn as NO value — never as 0. Spend
-  // is null when it is not published for the window; a lead count is null
-  // when the lead summary could not be read; junk_rate_pct is null with no
-  // verdicted leads. The server sends a real 0 where a 0 was measured.
-  const values = rows.map((r) => {
-    const value = r[metric];
-    return (value === null || value === undefined) ? null : value;
-  });
-  const known = (v) => (v === null || v === undefined) ? "Unavailable" : v;
-
-  const customdata = rows.map((r) => [
-    r.country + ownerLabelledCountryText(r.country_provenance),
-    geoFmtSpend(r.spend_usd),
-    known(r.total_leads),
-    known(r.confirmed_sqls),
-    known(r.confirmed_junk),
-    r.junk_rate_pct != null ? r.junk_rate_pct.toFixed(1) + "%" : (geoLeadsAvailable ? "—" : "Unavailable"),
-    geoTopText(r, "top_campaign", geoLeadsAvailable),
-    geoTopText(r, "top_keyword", geoLeadsAvailable),
-  ]);
-
-  const data = [{
-    type: "choropleth",
-    locationmode: "country names",
-    locations:  countries,
-    z:          values,
-    text:       countries,
-    customdata,
-    hovertemplate:
-      "<b>%{customdata[0]}</b><br>" +
-      "Spend: %{customdata[1]}<br>" +
-      "Leads: %{customdata[2]}<br>" +
-      "SQLs: %{customdata[3]}<br>" +
-      "Junk: %{customdata[4]}<br>" +
-      "Junk Rate: %{customdata[5]}<br>" +
-      "Top Campaign: %{customdata[6]}<br>" +
-      "Top Keyword: %{customdata[7]}<extra></extra>",
-    colorscale: "Blues",
-    showscale: true,
-    colorbar: { title: { text: metricLabels[metric] || metric, side: "right" } },
-  }];
-
-  const layout = {
-    margin: { l: 0, r: 0, t: 0, b: 0 },
-    geo: {
-      showframe: false,
-      showcoastlines: true,
-      projection: { type: "natural earth" },
-    },
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor:  "rgba(0,0,0,0)",
-  };
-
-  window.Plotly.react(mapEl, data, layout, { responsive: true, displayModeBar: false });
-}
-
-function renderGeoTable(rows) {
-  const tableEl = document.getElementById("geo-table-body");
-  if (!tableEl) return;
-
-  if (rows.length === 0) {
-    tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">No countries to display.</p>`;
-    return;
-  }
-
-  const thead = `
-    <thead>
-      <tr>
-        <th>Country</th>
-        <th class="td--num">Spend</th>
-        <th class="td--num">Leads</th>
-        <th class="td--num">SQLs</th>
-        <th class="td--num">In Progress</th>
-        <th class="td--num">Junk</th>
-        <th>Junk Rate</th>
-        <th>Top Campaign</th>
-        <th>Top Keyword</th>
-        <th title="The date of the newest lead run for this country.">Leads as of</th>
-      </tr>
-    </thead>`;
-
-  const tbody = rows.map((r) => {
-    const badge = geoLeadsAvailable ? junkRateBadge(r.junk_rate_pct) : GEO_NA;
-    const top = (field) => {
-      const text = geoTopText(r, field, geoLeadsAvailable);
-      return text === "Unavailable" ? GEO_NA : escapeHtml(text);
-    };
-
-    return `
-      <tr data-country="${escapeHtml(r.country)}"
-          data-campaign="${escapeHtml(r.top_campaign || "")}"
-          data-keyword="${escapeHtml(r.top_keyword || "")}">
-        <td class="td--name">${escapeHtml(r.country)}${ownerLabelledCountryNote(r.country_provenance)}</td>
-        <td class="td--num">${geoSpendCell(r)}</td>
-        <td class="td--num">${geoLeadCell(r.total_leads)}</td>
-        <td class="td--num">${geoLeadCell(r.confirmed_sqls)}</td>
-        <td class="td--num">${geoLeadCell(r.in_progress)}</td>
-        <td class="td--num">${geoLeadCell(r.confirmed_junk)}</td>
-        <td>${badge}</td>
-        <td>${top("top_campaign")}</td>
-        <td>${top("top_keyword")}</td>
-        <td>${geoLeadsAvailable ? escapeHtml(r.last_run_date || "—") : GEO_NA}</td>
-      </tr>`;
-  }).join("");
-
-  tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
-}
-
-function applyGeoSearch() {
-  const search = (document.getElementById("geo-search") || {}).value || "";
-  const term   = search.trim().toLowerCase();
-  const tableEl = document.getElementById("geo-table-body");
-  if (!tableEl) return;
-
-  const rows = tableEl.querySelectorAll("tr[data-country]");
-  rows.forEach((row) => {
-    const country  = (row.dataset.country  || "").toLowerCase();
-    const campaign = (row.dataset.campaign || "").toLowerCase();
-    const keyword  = (row.dataset.keyword  || "").toLowerCase();
-    const match    = !term || country.includes(term) || campaign.includes(term) || keyword.includes(term);
-    row.hidden = !match;
-  });
-}
 
 // ── Keywords page ──────────────────────────────────────────────────────────
 
@@ -14976,7 +14543,7 @@ function datasetRelatedPage(source, dataset) {
   const map = {
     "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
     "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
-    "google_ads_api/canonical_geo": { page: "geo",          label: "Country Performance" },
+    "google_ads_api/canonical_geo": { page: "roas-countries", label: "Countries" },
     "google_ads_api/canonical_spend": { page: "campaigns",  label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Leads" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },
@@ -16550,9 +16117,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (evidenceSelect) evidenceSelect.addEventListener("change", handleEvidenceWindowSelectChange);
 
   // Wire up waste filter controls
-  // Wire up geo search
-  const geoSearch = document.getElementById("geo-search");
-  if (geoSearch) geoSearch.addEventListener("input", applyGeoSearch);
 
   // Search Terms + Patterns (PR-ADS-144) controls are wired per-render
   // inside the page module — nothing to bind at startup.
@@ -17023,6 +16587,10 @@ function getBusinessVerdictBadge(verdict) {
     case "mapping_required": return '<span class="roas-verdict-badge roas-verdict-badge--mapping" title="Spend mapping required before this campaign can be judged">Mapping required</span>';
     // PR-ADS-161E: the row's closed-won outcome is withheld — it is not judged.
     case "outcome_withheld": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Closed-won deals for this row are withheld, so it is not judged">Outcome withheld</span>';
+    // PR-ADS-176B-F1 (truth audit M1): unknown spend or revenue is not judged —
+    // never "watch" / "learning" on a figure nobody measured.
+    case "spend_unknown": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="This row&#39;s spend is unknown, so it is not judged">Not judged — spend unknown</span>';
+    case "revenue_unknown": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="This row has won deals whose revenue is unknown, so it is not judged">Not judged — revenue unknown</span>';
     default:         return '<span class="roas-verdict-badge">' + escapeHtml(verdict || "—") + '</span>';
   }
 }
@@ -18099,50 +17667,29 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && _spendProofOpen) closeSpendProof();
 });
 
-// ── Country Revenue & Spend ───────────────────────────────────────────────────────
+// ── Countries — the one country page (PR-ADS-176B) ───────────────────────────
+//
+// The Countries evidence page (#/geo) and Country Revenue & Spend are one page
+// (`roas-countries`), built in the Dashboard's visual language: its KPI cards,
+// country table, Regional Mix, residual panel and drawer. It reads the mart's
+// country view (`/api/revenue-performance?view=country`) on business windows,
+// and decides nothing: the strict spend gate, every total (`country_totals`)
+// and the regional mix (`regional_mix`) come from the server. A figure that is
+// not published reads its withholding word with the reason — never "—", never 0.
 
 let roasCountriesData = [];
 let roasCountriesStatus = "idle";
 
-// PR-ADS-112: Country Revenue & Spend is its own decision page. Its readiness needs the
-// shared revenue truth layer to be safe AND country-level Google Ads geo spend
-// to be available — Campaign ROAS being ready does not imply Country is ready.
+// PR-ADS-112: the page's readiness needs the shared revenue truth layer to be
+// safe AND country-level Google Ads geo spend to be available.
 let roasCountrySourceHealth = null;
 
 // Frontend-only decision-bucket filter (independent of the Campaign page).
 let roasCountryFilter = "all";
 
-function countryNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
-}
-
-// Country totals are derived from the actual loaded country rows — NOT from the
-// global account summary, which may include spend not represented as country
-// rows (e.g. unmapped geo). Honesty over a prettier number.
-// PR-ADS-161E: won DEALS add up across countries; customers (distinct
-// companies) do not, so no customer total is summed here. A country whose
-// revenue is withheld (null) makes the total unknown — never a partial sum
-// that reads as complete — and the period ratio goes with it.
-function summarizeRoasCountryRows(rows) {
-  const real = rows.filter((row) => !(row && row.is_residual));
-  const totals = rows.reduce((sum, row) => ({
-    spend: sum.spend + countryNumber(row.spend),
-    leads: sum.leads + countryNumber(row.leads),
-    sqls: sum.sqls + countryNumber(row.sqls),
-  }), { spend: 0, leads: 0, sqls: 0 });
-  const nullIn = (key) => real.some((row) => row[key] === null || row[key] === undefined);
-  const closedWonDeals = nullIn("closed_won_deals") ? null
-    : real.reduce((n, row) => n + countryNumber(row.closed_won_deals), 0);
-  const wonRevenue = nullIn("won_revenue") ? null
-    : real.reduce((n, row) => n + countryNumber(row.won_revenue), 0);
-  return {
-    ...totals,
-    closed_won_deals: closedWonDeals,
-    won_revenue: wonRevenue,
-    period_revenue_per_ad_spend: (wonRevenue !== null && totals.spend > 0) ? wonRevenue / totals.spend : null,
-  };
-}
+// The market rows the table last rendered, in order: a row's drawer opens by
+// its index here (data-country-row).
+let roasCountryRenderedRows = [];
 
 function filterRoasCountryRows(rows, filter) {
   if (!filter || filter === "all") return rows;
@@ -18175,19 +17722,96 @@ function isCountryRevenueDecisionReady(sourceHealth) {
   );
 }
 
-function renderRoasCountrySummary(summary) {
-  const s = summary || {};
+// A country spend figure. fmtMoney rounds to whole dollars, so 39 cents would
+// print "$0" — a zero that was not measured. Above zero and below a dollar
+// reads "<$1" (the rule the deleted Countries evidence page had, PR-ADS-167A).
+function fmtCountrySpend(v) {
+  if (v === null || v === undefined) return "Unavailable";
+  if (v > 0 && v < 1) return "<$1";
+  return fmtMoney(v);
+}
+
+// PR-ADS-176B-F1 (m5): a country spend in cents, for the residual's parts and
+// its itemised countries — small figures where whole dollars would print "$0"
+// (or "$3" for $2.50). Below a cent reads "<$0.01"; never "$0" for spend.
+function fmtCountrySpendCents(v) {
+  if (v === null || v === undefined) return "Unavailable";
+  if (v > 0 && v < 0.01) return "<$0.01";
+  return "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// m4: a total withheld because ONE market's figure is unknown names that
+// market beside the reason ("Pakistan: some spend in this window has no
+// country"). `html` is the canonical rendering of `metrics[key]`.
+function withBlockedCountry(html, s, key) {
+  const m = (((s || {}).metrics) || {})[ROW_METRIC_KEYS[key] || key] || {};
+  if (m.status === "published" || !m.blocked_by_country) return html;
+  return html.replace('<small class="metric-reason">',
+    `<small class="metric-reason">${escapeHtml(m.blocked_by_country)}: `);
+}
+
+// The Dashboard KPI cards, over the server's `country_totals`: the listed
+// markets' figures summed by the mart (never here), each {value, status,
+// reason}. Customers have no card: a row's customers are distinct companies
+// and are never summed across countries (docs/48).
+function renderRoasCountrySummary(data) {
+  const s = (data && data.country_totals) || {};
+  // m7: the blockers link names the window of THIS response.
+  const opts = campBlockerOpts(data);
+  const residual = (roasCountriesData || []).find((r) => r && r.is_residual) || null;
+  const known = (key) => s[key] !== null && s[key] !== undefined;
+  const markets = (s.markets === null || s.markets === undefined) ? null : s.markets;
+  const cards = [
+    { key: "spend", label: "Country Spend",
+      value: withBlockedCountry(rowMetricHtml(s, "spend", fmtCountrySpend, opts), s, "spend"),
+      sub: `USD · ${markets === null ? "listed markets" : `${fmtCount(markets)} listed ${markets === 1 ? "market" : "markets"} in this window`}`,
+      source: "Google Ads country spend · listed markets only", ok: known("spend") },
+    { key: "sqls", label: "SQLs",
+      value: withBlockedCountry(rowMetricHtml(s, "sqls", fmtCount, opts), s, "sqls"),
+      sub: `${countryLeadScopeLabel(s.lead_scope)} · listed markets`, source: "HubSpot leads", ok: known("sqls") },
+    { key: "deals", label: "Closed-Won Deals",
+      value: withBlockedCountry(rowMetricHtml(s, "closed_won_deals", fmtCount, opts), s, "closed_won_deals"),
+      sub: "Google Ads-source · listed markets", source: "HubSpot Closed-Won", ok: known("closed_won_deals") },
+    { key: "revenue", label: "Won Revenue",
+      value: withBlockedCountry(rowMetricHtml(s, "won_revenue", fmtMoney, opts), s, "won_revenue"),
+      sub: "USD · Google Ads-source · listed markets", source: "HubSpot Closed-Won", ok: known("won_revenue") },
+    { key: "period_revenue_per_ad_spend", label: PERIOD_RATIO_LABEL,
+      value: withBlockedCountry(rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, opts),
+        s, "period_revenue_per_ad_spend"),
+      sub: PERIOD_RATIO_DISCLOSURE, source: "Won revenue ÷ country spend, this window",
+      ok: known("period_revenue_per_ad_spend") },
+    { key: "residual", label: "Residual Spend",
+      value: residual ? countryResidualSpendValue(residual) : escapeHtml("None in this window"),
+      sub: "No listed market owns it · never distributed", source: "Outside the listed markets, or no country",
+      ok: !residual || (residual.spend !== null && residual.spend !== undefined) },
+  ];
   return `
-    <h3 class="revenue-summary-heading">Country-attributed totals</h3>
-    <div class="revenue-summary-strip">
-      <div><span>Spend</span><strong>${fmtMoney(s.spend)}</strong></div>
-      <div><span>Leads</span><strong>${fmtCount(s.leads)}</strong></div>
-      <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
-      <div><span>Closed-Won Deals</span><strong>${dashValue(s.closed_won_deals, fmtCount)}</strong></div>
-      <div><span>Won Revenue</span><strong>${dashValue(s.won_revenue, fmtMoney)}</strong></div>
-      <div><span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</span><strong>${rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</strong></div>
-    </div>
-  `;
+    <div class="dash-kpi-grid ctry-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>`;
+}
+
+// The residual row's spend, or its withholding with the reason.
+function countryResidualSpendValue(r) {
+  if (r.spend === null || r.spend === undefined) {
+    return countrySpendUnavailableHtml(r.spend_reason || r.withheld_reason, "dash-unavailable");
+  }
+  return escapeHtml(fmtCountrySpendCents(r.spend));
+}
+
+// m8: the lead population the lead and qualified-lead columns count (the mart declares
+// it as `lead_scope`; db.revenue_repository.fetch_lead_quality).
+const COUNTRY_LEAD_SCOPE_LABELS = {
+  paid_search_with_campaign: "Paid-search leads with a campaign · SQL = HubSpot qualified · by lead country",
+};
+function countryLeadScopeLabel(scope) {
+  return COUNTRY_LEAD_SCOPE_LABELS[scope] || "Leads · by lead country";
 }
 
 function renderRoasCountryFilters() {
@@ -18247,7 +17871,7 @@ function renderRoasCountrySafeEmptyState() {
     <div class="revenue-blocked-card revenue-empty-card">
       <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
       <h3>No country revenue found for this window</h3>
-      <p>Country spend and revenue sources are ready, but no HubSpot closed-won deals are attributed to countries in this business window.</p>
+      <p>Google Ads country spend and HubSpot are ready, but no listed market and no residual has spend, leads or closed-won deals in this business window.</p>
     </div>`;
 }
 
@@ -18264,13 +17888,16 @@ function renderRoasCountrySafeEmptyState() {
 // "Unavailable" with its reason (GEO_ROW_SPEND_REASONS, the Countries page's
 // own wording) — never "—", which reads as nothing to show.
 function countrySpendUnavailableHtml(reason, cls) {
-  const why = reason ? (GEO_ROW_SPEND_REASONS[reason] || reason) : null;
+  const why = reason ? (countryReasonLabel(reason) || reason) : null;
   return `<span class="${cls}"${why ? ` title="${escapeHtml(why)}"` : ""}>Unavailable${why ? ` — ${escapeHtml(why)}` : ""}</span>`;
 }
 
 function roasCountrySpendCell(r) {
+  // PR-ADS-176B: a row the gate withholds names the gate's gap.
+  // PR-ADS-176B-F1 (M2): a $0 that stands only on the owner's labels says so.
   return (r.spend === null || r.spend === undefined)
-    ? countrySpendUnavailableHtml(r.spend_reason, "td--na") : fmtMoney(r.spend);
+    ? countrySpendUnavailableHtml(r.spend_reason || r.withheld_reason, "dash-unavailable")
+    : escapeHtml(fmtCountrySpend(r.spend)) + (r.spend === 0 ? ownerZeroNote(r) : "");
 }
 
 function roasCountryCtaButtons(run) {
@@ -18296,6 +17923,7 @@ async function loadRoasCountries() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.countries;
   setWindowRangeLoading("roas-countries-range");
+  resetCountryDrilldowns();
 
   roasCountriesStatus = "loading";
   const body = document.getElementById("roas-countries-table-body");
@@ -18352,10 +17980,9 @@ function countryRoasUnavailable(sh) {
 }
 
 function renderRoasCountriesPage() {
-  const kpiGrid = document.getElementById("roas-countries-kpis");
   const tableBody = document.getElementById("roas-countries-table-body");
-  if (kpiGrid) kpiGrid.innerHTML = "";
   if (!tableBody) return;
+  roasCountryRenderedRows = [];
 
   const data = roasCountryMart;
   if (!data) { tableBody.innerHTML = renderMartUnavailable(); return; }
@@ -18373,16 +18000,11 @@ function renderRoasCountriesPage() {
     return;
   }
 
-  // Country ROAS readiness is the MART's verdict: spend_truth.country_spend_status.
-  // Anything other than "verified" (mismatch / unavailable) blocks the trusted
-  // table — the frontend never independently decides country ROAS readiness, and
-  // never renders a partial/geo/unreconciled denominator as ROAS.
-  // PR-ADS-131: "reconciled_with_residual" is a SAFE render state — the real
-  // country rows use country-attributed geo spend, and an explicit "Unattributed /
-  // No Country" residual bucket carries the shortfall geographic_view could not
-  // assign to a country. Only "verified" and "reconciled_with_residual" render the
-  // table; every other status stays blocked (mismatch / unavailable / FX or spend
-  // incomplete). The frontend never decides this — it obeys the mart's verdict.
+  // The strict spend gate (owner decision 2, PR-ADS-176B) is the MART's verdict,
+  // spend_truth.country_spend_status. Only "verified" and (PR-ADS-131)
+  // "reconciled_with_residual" render figures; every other status — mismatch,
+  // any gap, FX only — shows the gap-driven card (PR-ADS-176A) and no number,
+  // never the number with a warning.
   const st = data.spend_truth || {};
   const residualMode = st.country_spend_status === "reconciled_with_residual";
   if (st.country_spend_status !== "verified" && !residualMode) {
@@ -18404,16 +18026,142 @@ function renderRoasCountriesPage() {
   const sorted = sortRoasCountryRows(realRows);
   const filtered = filterRoasCountryRows(sorted, roasCountryFilter).concat(residualRows);
 
+  // PR-ADS-176B: the Dashboard's Countries layout — KPI cards, the country
+  // table, Regional Mix beside the residual, and the truth footer.
   tableBody.innerHTML = `
-    ${renderMartSpendTruth(data)}
     ${ownerLabelMismatchNotice(st.owner_labelled_geo)}
     ${residualMode ? renderCountryResidualWarning(st) : ""}
-    ${renderMartSummaryStrip(data)}
-    ${renderMartDiagnostics(data)}
-    ${renderRoasCountryFilters()}
-    ${renderRoasCountryTable(filtered)}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical geo spend provides country spend; HubSpot closed-won deals provide revenue.</p>
+    ${renderRoasCountrySummary(data)}
+    <section class="dash-panel dash-anim ctry-leaderboard-panel" aria-label="Countries">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Countries</h3>
+          <p class="dash-panel__sub">Every listed market with activity, then the residual · click a market for its closed-won deals · ${escapeHtml(PERIOD_RATIO_LABEL)}: ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
+        </div>
+      </div>
+      ${renderRoasCountryFilters()}
+      ${renderRoasCountryTable(filtered, campBlockerOpts(data))}
+    </section>
+    <div class="dash-main-grid ctry-lower-grid">
+      <section class="dash-panel dash-anim ctry-region-panel" aria-label="Regional mix">
+        ${renderCountriesRegionalMix(data)}
+      </section>
+      <aside class="dash-panel dash-anim ctry-residual-panel" aria-label="Residual">
+        ${renderCountriesResidualPanel(residualRows[0] || null, campBlockerOpts(data))}
+      </aside>
+    </div>
+    ${renderCountriesTruthFooter(data)}
   `;
+}
+
+// The Regional Mix panel (Dashboard → Countries' own), over the server's
+// `regional_mix`: each region's figures summed by the mart over its listed
+// markets, each {value, status, reason}. A region whose figure is not
+// published draws no bar and says why — never a 0 and never "—".
+function _countriesRegionalBarMetric(rows) {
+  const anyPositive = (key) => rows.some((r) => (r[key] || 0) > 0);
+  if (anyPositive("won_revenue")) return "won_revenue";
+  if (anyPositive("closed_won_deals")) return "closed_won_deals";
+  if (anyPositive("spend")) return "spend";
+  return null;
+}
+
+function renderCountriesRegionalMix(data) {
+  const rows = (data && data.regional_mix) || [];
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Regional Mix</h3>
+        <p class="dash-panel__sub">Where spend, closed-won deals and revenue concentrate · listed markets only</p>
+      </div>
+    </div>`;
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">No listed market has activity in this window.</p>`;
+  }
+  const opts = campBlockerOpts(data);
+  const metricKey = _countriesRegionalBarMetric(rows);
+  const fmt = { won_revenue: fmtMoney, closed_won_deals: fmtCount, spend: fmtCountrySpend }[metricKey];
+  const metricLabel = { won_revenue: "won revenue", closed_won_deals: "closed-won deals", spend: "spend" }[metricKey] || "activity";
+  const max = metricKey ? Math.max(1, ...rows.map((r) => (r[metricKey] === null || r[metricKey] === undefined) ? 0 : r[metricKey])) : 0;
+  const bars = rows.map((r) => {
+    const val = metricKey ? r[metricKey] : null;
+    const known = val !== null && val !== undefined;
+    const pct = (metricKey && known && max > 0) ? Math.max(2, (val / max) * 100) : 0;
+    const barVal = !metricKey ? escapeHtml(`${fmtCount(r.countries || 0)} ${r.countries === 1 ? "market" : "markets"}`)
+      : withBlockedCountry(rowMetricHtml(r, metricKey, fmt, opts), r, metricKey);
+    return `
+      <li class="ctry-region-row">
+        <div class="ctry-region-row__top">
+          <span class="ctry-region-row__name"><span class="ctry-dot ctry-dot--sql"></span>${escapeHtml(r.region || "Unknown / Needs Review")}</span>
+          <span class="ctry-region-row__val">${barVal}</span>
+        </div>
+        <div class="ctry-region-bar"><span class="ctry-region-bar__fill" style="width:${pct.toFixed(1)}%;background:#129ef5"></span></div>
+        <div class="ctry-region-row__meta">
+          <span>${escapeHtml(fmtCount(r.countries || 0))} ${r.countries === 1 ? "market" : "markets"}</span>
+          <span>Spend ${withBlockedCountry(rowMetricHtml(r, "spend", fmtCountrySpend, opts), r, "spend")}</span>
+          <span>SQLs ${rowMetricHtml(r, "sqls", fmtCount, opts)}</span>
+          <span>Won deals ${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</span>
+        </div>
+      </li>`;
+  }).join("");
+  return `${header}
+    <p class="ctry-region-note">Bars scaled by ${escapeHtml(metricLabel)}${metricKey ? "" : " — nothing to scale in this window"}.</p>
+    <ul class="ctry-region-list">${bars}</ul>`;
+}
+
+// The residual panel: the one bucket no listed market owns. Its spend parts
+// are named (outside the listed markets / no country / not assigned by
+// Google's geographic view) — never spread across real countries.
+function renderCountriesResidualPanel(res, opts) {
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Unknown / Unattributed country</h3>
+        <p class="dash-panel__sub">Isolated — never distributed across markets</p>
+      </div>
+    </div>`;
+  if (!res) {
+    return `${header}<p class="rev-breakdown-empty">No residual in this window.</p>`;
+  }
+  opts = opts || campBlockerOpts(roasCountryMart);
+  const c = res.spend_components || null;
+  // A part the server measured at zero adds nothing to the breakdown.
+  const part = (label, v) => (v === null || v === undefined || v === 0) ? ""
+    : `<li>${escapeHtml(label)}: ${escapeHtml(fmtCountrySpendCents(v))}</li>`;
+  const parts = c ? `
+    <ul class="ctry-residual-parts">
+      ${part("Countries outside the listed markets", c.outside_listed_markets)}
+      ${part("Spend with no country", c.country_unidentified)}
+      ${part("Not assigned to a location by Google Ads", c.geo_unassigned)}
+    </ul>` : "";
+  const notes = (Array.isArray(res.attribution_notes) ? res.attribution_notes : [])
+    .filter((n) => /never spread|not one of the listed markets/i.test(String(n)));
+  return `${header}
+    <dl class="ctry-residual-tiles">
+      <div><dt>Residual spend</dt><dd>${countryResidualSpendValue(res)}</dd></div>
+      <div><dt>Closed-won deals</dt><dd>${rowMetricHtml(res, "closed_won_deals", fmtCount, opts)}</dd></div>
+      <div><dt>Won revenue</dt><dd>${rowMetricHtml(res, "won_revenue", fmtMoney, opts)}</dd></div>
+      <div><dt>SQLs</dt><dd>${dashValue(res.sqls, fmtCount)}</dd></div>
+    </dl>
+    ${parts}
+    <p class="ctry-residual-note">${escapeHtml(notes[0] || "Spend, deals and leads no listed market owns are preserved separately — never spread across real countries.")}</p>`;
+}
+
+// The Dashboard truth footer, from the mart's own statuses.
+function renderCountriesTruthFooter(data) {
+  const st = (data && data.spend_truth) || {};
+  const ok = (v) => v === "verified" || v === "complete" || v === "reconciled_with_residual";
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${labelizeStatus(status).replace(/_/g, " ")}`)}">
+      <span class="dash-dot ${ok(status) ? "dash-dot--ok" : "dash-dot--warn"}"></span>${escapeHtml(label)} · ${escapeHtml(labelizeStatus(status).replace(/_/g, " "))}
+    </span>`;
+  return `
+    <footer class="dash-truth-footer">
+      ${chip("Campaign spend", st.campaign_spend_status)}
+      ${chip("FX", st.fx_status)}
+      ${chip("Geo ↔ campaign spend reconciliation", st.country_spend_status)}
+      <span class="dash-footer-chip">Revenue: HubSpot closed-won · Google Ads-source</span>
+    </footer>`;
 }
 
 // PR-ADS-131: compact warning shown above the country table when spend is
@@ -18425,7 +18173,7 @@ function renderCountryResidualWarning(spendTruth) {
   const st = spendTruth || {};
   const cur = st.native_currency || "GBP";
   const resNative = (st.country_residual_native == null)
-    ? "—" : fmtNativeMoney(st.country_residual_native, cur);
+    ? "some spend" : fmtNativeMoney(st.country_residual_native, cur);
   const pct = (st.country_residual_pct == null) ? "" : ` (${st.country_residual_pct}%)`;
   return `
     <div class="revenue-residual-warning">
@@ -18576,15 +18324,31 @@ function renderCountrySpendUnreconciledState(spendTruth) {
     </div>`;
 }
 
-// PR-ADS-132: expand control for a REAL country row — opens the per-country
-// clients/deals drawer (lazy-loaded). Carries the country name + ISO code so the
-// lazy loader can query the safer code identity. Residual rows never call this.
-function countryExpandControl(r, i) {
-  const label = `Show clients / deals behind ${countryDisplayName(r.country) || "this country"}`;
-  return `<button type="button" class="country-expand-button" data-country-expand data-country-idx="${i}" data-country-name="${encodeURIComponent(r.country || "")}" data-country-code="${encodeURIComponent(r.country_code || "")}" aria-expanded="false" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">▸</button>`;
+// PR-ADS-176B: an outside-market country itemised under the residual
+// (`outside_listed_market_items`, PR-ADS-176A). Its spend is a breakdown of the
+// residual's — never a market, never in any total. Its outcomes are not split
+// per country: they read "In residual", never 0.
+function countryInResidualCell() {
+  return '<span class="ctry-in-residual" title="Counted in the residual row above, not per country">In residual</span>';
 }
 
-function renderRoasCountryTable(rows) {
+function renderCountryResidualItemRow(item) {
+  return `
+    <tr class="ctry-row ctry-row--residual ctry-row--residual-item" aria-label="${escapeHtml(item.country || "Country")} — in the residual, not a listed market">
+      <td class="ctry-td ctry-td--name"><span class="ctry-residual-item__arrow" aria-hidden="true">↳</span>${escapeHtml(item.country || item.country_code || "Country")}${ownerLabelledCountryNote(item.provenance)} <span class="revenue-residual-badge">In residual</span></td>
+      <td class="ctry-td--region">Outside the listed markets</td>
+      <td class="ctry-num">${(item.spend === null || item.spend === undefined) ? countrySpendUnavailableHtml(null, "dash-unavailable") : escapeHtml(fmtCountrySpendCents(item.spend))}</td>
+      <td class="ctry-num">${countryInResidualCell()}</td>
+      <td class="ctry-num">${countryInResidualCell()}</td>
+      <td class="ctry-num">${countryInResidualCell()}</td>
+      <td class="ctry-num">${countryInResidualCell()}</td>
+      <td class="ctry-num">${countryInResidualCell()}</td>
+      <td>${countryInResidualCell()}</td>
+      <td><span class="ctry-status ctry-status--residual">Part of the residual</span></td>
+    </tr>`;
+}
+
+function renderRoasCountryTable(rows, opts) {
   if (!rows.length) {
     return `
       <div class="revenue-empty-inline">
@@ -18592,13 +18356,16 @@ function renderRoasCountryTable(rows) {
       </div>
     `;
   }
-
+  // m7: the blockers link names the window of the response on screen.
+  opts = opts || campBlockerOpts(roasCountryMart);
+  const leadsTitle = escapeHtml(countryLeadScopeLabel((rows.find((r) => r && r.lead_scope) || {}).lead_scope));
   const headerRow = `
     <tr>
       <th>Country</th>
+      <th>Region</th>
       <th>Spend</th>
-      <th>Leads</th>
-      <th>SQLs</th>
+      <th title="${leadsTitle}">Leads</th>
+      <th title="${leadsTitle}">SQLs</th>
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across countries">Customers</th>
       <th>Won Revenue</th>
@@ -18607,53 +18374,54 @@ function renderRoasCountryTable(rows) {
     </tr>
   `;
 
-  // PR-ADS-131: the residual row is NOT a real country — muted styling, a
-  // "Residual" badge, no flag, an "Unattributed" decision, and em-dashes for the
-  // metric columns (never fake zeros/ROAS). Only its spend is shown. PR-ADS-132:
-  // real country rows get an expand control (see countryExpandControl); the
-  // residual row never does.
-  const bodyRows = rows.map((r, i) => {
+  // PR-ADS-131 / 176B: the residual row is NOT a real country — muted, a
+  // "Residual" badge, no region, an "Unattributed" decision and no drawer. Its
+  // figures are its own (deals and leads whose country is no listed market);
+  // its period ratio is unavailable (truth audit M2). Its outside-market
+  // countries follow it as "In residual" sub-rows (PR-ADS-176A items).
+  // A real market row opens its drawer (the Dashboard's row pattern).
+  const market = [];
+  const bodyRows = rows.map((r) => {
     if (r && r.is_residual) {
+      const items = Array.isArray(r.outside_listed_market_items) ? r.outside_listed_market_items : [];
       return `
-    <tr class="revenue-residual-row">
-      <td><span class="revenue-residual-name">Unknown / Unattributed country</span> <span class="revenue-residual-badge">Residual</span></td>
-      <td>${residualSpendCell(r)}</td>
-      <td>—</td>
-      <td>—</td>
-      <td>—</td>
-      <td>—</td>
-      <td>—</td>
-      <td>—</td>
+    <tr class="ctry-row ctry-row--residual revenue-residual-row" aria-label="Unattributed residual (not a country)">
+      <td class="ctry-td ctry-td--name"><span class="ctry-dot ctry-dot--muted"></span><span class="revenue-residual-name">Unknown / Unattributed country</span> <span class="revenue-residual-badge">Residual</span></td>
+      <td class="ctry-td--region">Not a market</td>
+      <td class="ctry-num">${(r.spend === null || r.spend === undefined) ? roasCountrySpendCell(r) : residualSpendCell(r)}</td>
+      <td class="ctry-num">${dashValue(r.leads, fmtCount)}</td>
+      <td class="ctry-num">${dashValue(r.sqls, fmtCount)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "customers", fmtCount, opts)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</td>
+      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</td>
       <td><span class="decision-badge decision-badge--unattributed">Unattributed</span></td>
-    </tr>`;
+    </tr>${items.map(renderCountryResidualItemRow).join("")}`;
     }
+    const i = market.push(r) - 1;
+    const name = countryDisplayName(r.country);
     return `
-    <tr>
-      <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}${spendOwnerNote(r)}</td>
-      <td>${roasCountrySpendCell(r)}</td>
-      <td>${fmtCount(r.leads)}</td>
-      <td>${fmtCount(r.sqls)}</td>
-      <td>${rowMetricHtml(r, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "customers", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</td>
+    <tr class="ctry-row" data-country-row="${i}" tabindex="0" role="button" aria-label="${escapeHtml(`Open ${name || "country"} detail`)}">
+      <td class="ctry-td ctry-td--name">${escapeHtml(name)}${spendOwnerNote(r)}</td>
+      <td class="ctry-td--region">${escapeHtml(r.region || "Unknown / Needs Review")}</td>
+      <td class="ctry-num">${roasCountrySpendCell(r)}</td>
+      <td class="ctry-num">${dashValue(r.leads, fmtCount)}</td>
+      <td class="ctry-num">${dashValue(r.sqls, fmtCount)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "customers", fmtCount, opts)}</td>
+      <td class="ctry-num">${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</td>
+      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
-    </tr>
-    <tr class="country-drilldown-row" data-country-drilldown-idx="${i}" hidden>
-      <td colspan="9"><div class="country-drilldown-panel"></div></td>
     </tr>`;
   }).join("");
+  roasCountryRenderedRows = market;
 
-  // PR-ADS-123: same contained horizontal-scroll shell as Campaign Revenue & Spend so
-  // the Decision column stays fully visible on desktop.
   return `
-    <div class="revenue-table-shell">
-      <div class="revenue-table-scroll">
-        <table class="data-table roas-table revenue-decision-table">
-          ${headerRow}
-          <tbody>${bodyRows}</tbody>
-        </table>
-      </div>
+    <div class="ctry-scroll">
+      <table class="ctry-table">
+        <thead>${headerRow}</thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
     </div>
   `;
 }
@@ -18672,11 +18440,29 @@ let roasCountryExpandedKey = null;       // eslint-disable-line no-unused-vars
 let roasCountryDrilldownCache = {};
 let roasCountryDrilldownLoading = {};    // eslint-disable-line no-unused-vars
 let roasCountryDrilldownError = {};      // eslint-disable-line no-unused-vars
+// m7: bumped by every loadRoasCountries; a deal list read under an older
+// generation is not cached or shown.
+let roasCountryDrilldownGen = 0;
+
+// The business window of the country response on screen (m7), not the
+// selector's: a drawer lists the deals of the rows it sits under.
+function roasCountryWindowKey() {
+  return ((roasCountryMart || {}).window || {}).key || getRoasBusinessWindow();
+}
+
+// PR-ADS-176B-F1 (m7), called by loadRoasCountries: a reload (Refresh, a new
+// window, a settled-day rollover) discards every cached deal list, and a deal
+// list still in flight from before it is dropped on arrival — never shown
+// beside the new rows' counts.
+function resetCountryDrilldowns() {
+  roasCountryDrilldownCache = {};
+  roasCountryDrilldownGen += 1;
+}
 
 // Stable key: window + country identity (prefer the safer ISO code).
-function countryDrilldownKey(country, countryCode) {
+function countryDrilldownKey(country, countryCode, windowKey) {
   const id = (countryCode || country || "").toString();
-  return `${getRoasBusinessWindow()}:${id}`;
+  return `${windowKey || roasCountryWindowKey()}:${id}`;
 }
 
 // One detail <tr> inside the drawer table. Every cell routes through
@@ -18729,10 +18515,12 @@ function renderCountryDrilldown(data) {
     </div>`;
 }
 
-async function loadCountryDrilldown(country, countryCode, drawerRow) {
+async function loadCountryDrilldown(country, countryCode, drawerRow, windowKey) {
   const container = drawerRow.querySelector(".country-drilldown-panel");
   if (!container) return;
-  const key = countryDrilldownKey(country, countryCode);
+  const window_ = windowKey || roasCountryWindowKey();
+  const gen = roasCountryDrilldownGen;
+  const key = countryDrilldownKey(country, countryCode, window_);
   if (roasCountryDrilldownCache[key]) {
     container.innerHTML = renderCountryDrilldown(roasCountryDrilldownCache[key]);
     return;
@@ -18740,7 +18528,6 @@ async function loadCountryDrilldown(country, countryCode, drawerRow) {
   container.innerHTML = `<p class="country-drilldown-muted">Loading country client details…</p>`;
   roasCountryDrilldownLoading[key] = true;
   try {
-    const window_ = getRoasBusinessWindow();
     const codeParam = countryCode
       ? `&country_code=${encodeURIComponent(countryCode)}`
       : "";
@@ -18754,6 +18541,7 @@ async function loadCountryDrilldown(country, countryCode, drawerRow) {
       return;
     }
     const data = await res.json();
+    if (gen !== roasCountryDrilldownGen) return;   // the page reloaded meanwhile
     roasCountryDrilldownCache[key] = data;
     container.innerHTML = renderCountryDrilldown(data);
   } catch (err) {
@@ -18765,29 +18553,81 @@ async function loadCountryDrilldown(country, countryCode, drawerRow) {
   }
 }
 
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-country-expand]");
-  if (!btn) return;
-  const idx = btn.getAttribute("data-country-idx");
-  const country = decodeURIComponent(btn.getAttribute("data-country-name") || "");
-  const code = decodeURIComponent(btn.getAttribute("data-country-code") || "");
-  const drawer = document.querySelector(`.country-drilldown-row[data-country-drilldown-idx="${idx}"]`);
-  if (!drawer) return;
-  if (drawer.hasAttribute("hidden")) {
-    drawer.removeAttribute("hidden");
-    btn.setAttribute("aria-expanded", "true");
-    btn.textContent = "▾";
-    roasCountryExpandedKey = countryDrilldownKey(country, code);
-    // Lazy-load once; a loaded drawer keeps its content when re-opened.
-    if (!drawer.dataset.loaded) {
-      drawer.dataset.loaded = "1";
-      loadCountryDrilldown(country, code, drawer);
-    }
-  } else {
-    drawer.setAttribute("hidden", "");
-    btn.setAttribute("aria-expanded", "false");
-    btn.textContent = "▸";
+// PR-ADS-176B: a market row opens the Dashboard's drawer (`.ctry-drawer`) under
+// the country table — the row's own figures, then the closed-won deals behind
+// it, lazily read once from the country-detail endpoint (the row's own
+// population: same scope, same days, same exclusions — PR-ADS-176A). A row
+// whose deal count is withheld has no deal list to read: the drawer says
+// withheld, never "no deals". The residual never opens a drawer.
+function renderCountryDrawer(r, data) {
+  const opts = campBlockerOpts(data || roasCountryMart);
+  const name = countryDisplayName(r.country);
+  const links = [["deals", "Open Deals"], ["revenue-health", "Open Revenue Health"]]
+    .filter(([page]) => dashCanNavigate(page))
+    .map(([page, label]) => `<a class="ctry-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
+  const dealsWithheld = r.closed_won_deals === null || r.closed_won_deals === undefined;
+  return `
+    <div class="ctry-drawer__head">
+      <strong>${escapeHtml(name)}</strong>${spendOwnerNote(r)}
+      <span class="ctry-drawer__region">${escapeHtml(r.region || "")}</span>
+      ${getBusinessVerdictBadge(r.verdict)}
+      <button type="button" class="ctry-drawer__close" data-country-drawer-close aria-label="Close">×</button>
+    </div>
+    <dl class="ctry-drawer__summary">
+      <div><dt>Spend</dt><dd>${roasCountrySpendCell(r)}</dd></div>
+      <div><dt>Leads</dt><dd>${dashValue(r.leads, fmtCount)}</dd></div>
+      <div><dt>SQLs</dt><dd>${dashValue(r.sqls, fmtCount)}</dd></div>
+      <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</dd></div>
+      <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, opts)}</dd></div>
+      <div><dt>Won revenue</dt><dd>${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</dd></div>
+      <div><dt>${escapeHtml(PERIOD_RATIO_LABEL)}</dt><dd>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</dd></div>
+    </dl>
+    <div class="ctry-drawer__section">
+      <div class="country-drilldown-panel">${dealsWithheld
+        ? `<p class="dash-unavailable">Closed-won deals are withheld for this country in this window.</p>`
+        : ""}</div>
+    </div>
+    <div class="ctry-drawer__actions">${links}</div>`;
+}
+
+function openCountryDrawer(idx) {
+  const r = roasCountryRenderedRows[idx];
+  const panel = document.querySelector("#roas-countries-table-body .ctry-leaderboard-panel");
+  if (!r || !panel) return;
+  let drawer = panel.querySelector(".ctry-drawer");
+  if (!drawer) {
+    drawer = document.createElement("div");
+    drawer.className = "ctry-drawer";
+    panel.appendChild(drawer);
   }
+  const data = roasCountryMart;
+  const windowKey = ((data || {}).window || {}).key;
+  drawer.innerHTML = renderCountryDrawer(r, data);
+  roasCountryExpandedKey = countryDrilldownKey(r.country, r.country_code, windowKey);
+  if (r.closed_won_deals !== null && r.closed_won_deals !== undefined) {
+    loadCountryDrilldown(r.country || "", r.country_code || "", drawer, windowKey);
+  }
+  if (drawer.scrollIntoView) drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+document.addEventListener("click", (e) => {
+  const close = e.target.closest("[data-country-drawer-close]");
+  if (close) {
+    const drawer = close.closest(".ctry-drawer");
+    if (drawer) drawer.remove();
+    return;
+  }
+  const row = e.target.closest("#roas-countries-table-body [data-country-row]");
+  if (!row || e.target.closest("a")) return;
+  openCountryDrawer(Number(row.getAttribute("data-country-row")));
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const row = e.target.closest && e.target.closest("#roas-countries-table-body [data-country-row]");
+  if (!row) return;
+  e.preventDefault();
+  openCountryDrawer(Number(row.getAttribute("data-country-row")));
 });
 
 // Decision-bucket filter chips (country page only) — event delegation keyed off

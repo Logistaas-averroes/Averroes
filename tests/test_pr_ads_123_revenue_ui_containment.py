@@ -39,10 +39,13 @@ def test_campaign_table_uses_revenue_table_scroll():
 
 
 def test_country_table_uses_revenue_table_scroll():
-    fn = _fn("function renderRoasCountryTable", span=2600)
-    assert "revenue-table-shell" in fn
-    assert "revenue-table-scroll" in fn
-    assert "revenue-decision-table" in fn
+    # PR-ADS-176B: the one Countries page uses the Dashboard's country table
+    # (owner: the Dashboard is the design standard) — the same containment:
+    # a horizontal-scroll wrapper around the table, never a page overflow.
+    fn = _fn("function renderRoasCountryTable", span=6000)
+    assert '<div class="ctry-scroll">' in fn
+    assert '<table class="ctry-table">' in fn
+    assert "overflow-x: auto" in CSS.split(".ctry-scroll {")[1].split("}")[0]
 
 
 def test_scroll_wrapper_css_defines_overflow():

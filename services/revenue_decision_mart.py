@@ -706,6 +706,10 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
     for r in rows or []:
         row = {**r, **{k: None for k in figures if k in r}, "metrics": None,
                "withheld_reason": reason}
+        if not r.get("is_residual"):
+            # PR-ADS-176B-F1 (M1): a row whose figures are withheld is not
+            # judged on the figures it had before they were withheld.
+            row["verdict"], row["verdict_reason"] = "outcome_withheld", reason
         # PR-ADS-170A-F1: the residual row's spend parts are withheld with it.
         # PR-ADS-176A: so are its itemised outside-market countries, and every
         # row's deal ids (a population is a figure).
@@ -721,6 +725,155 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
             row["spend"] = r.get("spend_native")
         out.append(row)
     return out
+
+
+#: PR-ADS-176B-F1 (truth audit m8): the lead population behind every country
+#: row's leads / SQLs and their totals — ``db.revenue_repository.
+#: fetch_lead_quality``: paid-search leads with a real campaign (pseudo- and
+#: email campaigns excluded), on the contact's HubSpot creation date; a
+#: qualified lead is the latest status category 'qualified'. Declared beside
+#: ``revenue_scope``, never in it.
+COUNTRY_LEAD_SCOPE = "paid_search_with_campaign"
+
+#: PR-ADS-176B: why a Countries-page total is not published when the row it
+#: needs gives no reason of its own.
+R_COUNTRY_TOTAL_ROW_UNKNOWN = "country_row_figure_unknown"
+
+
+def _row_figure_metric(row: dict, key: str, metric_key: str | None) -> dict:
+    """One market row's figure as ``{value, status, reason}``: the row's own
+    canonical metric when it carries one, else published when the value is
+    known and unavailable (with the row's reason) when it is not."""
+    m = ((row.get("metrics") or {}).get(metric_key) if metric_key else None)
+    if isinstance(m, dict) and m.get("status"):
+        return m
+    value = row.get(key)
+    if value is not None:
+        return cwt.metric(value, cwt.PUBLISHED)
+    reason = (row.get("spend_reason") if key == "spend" else None) \
+        or row.get("withheld_reason") or R_COUNTRY_TOTAL_ROW_UNKNOWN
+    return cwt.metric(None, cwt.UNAVAILABLE, reason)
+
+
+def _sum_rows(rows: list, key: str, metric_key: str | None = None) -> dict:
+    """The sum of one figure over market rows, or the first row's refusal.
+
+    A sum over rows of which one is unknown is not a total: it is withheld
+    with that row's status and reason, never a partial that reads as complete
+    (PR-ADS-176A: one market's unknown spend makes the markets' spend
+    unknown). Pure."""
+    total = 0
+    for r in rows:
+        m = _row_figure_metric(r, key, metric_key)
+        if m.get("status") != cwt.PUBLISHED or m.get("value") is None:
+            status = m.get("status")
+            status = status if status in (cwt.WITHHELD, cwt.UNAVAILABLE) else cwt.UNAVAILABLE
+            return cwt.metric(None, status, m.get("reason") or R_COUNTRY_TOTAL_ROW_UNKNOWN,
+                              blocked_by_country=r.get("country"))
+        total += m["value"]
+    return cwt.metric(round(total, 2) if isinstance(total, float) else total,
+                      cwt.PUBLISHED)
+
+
+def _country_page_blocks(rows: list, spend_truth: dict, *,
+                         empty_window: bool = False,
+                         window_metrics: dict | None = None) -> tuple[list, dict, list]:
+    """PR-ADS-176B — what the one Countries page shows above and beside the
+    country table, computed HERE so the page republishes and decides nothing.
+
+    Returns ``(rows, country_totals, regional_mix)``:
+
+    * every market row gains ``region`` (``analysis.country_regions``, the
+      Dashboard's table); the residual gets ``None`` — it is not a market;
+    * ``country_totals``: the 96 listed markets' figures summed over the
+      market rows — the residual and its itemised outside-market countries
+      are never in them. Each figure is ``{value, status, reason}`` in
+      ``metrics``; an unknown row makes its total unknown. Spend is published
+      only while the country gate is ready (verified, or reconciled with an
+      accepted residual): otherwise it is unavailable with the gate's first
+      gap, even where a row still shows native spend for an FX-only gap.
+      With the gate not ready, EVERY total is unavailable with that gap, as
+      the rows' figures are (``_withhold_country_rows_when_geo_not_ready``):
+      a sum over no rows is not a measured zero. A window with no settled day
+      totals nothing either. The period ratio is the reader contract's own
+      derivation over those totals. When the WINDOW withholds the deal count
+      or the revenue (``summary.metrics``, the canonical verdict), that total
+      takes the window's status and reason whatever the rows say — a subset
+      of a withheld total is not published, even a sum over no rows;
+    * ``regional_mix``: the same rule per region, in ``REGION_ORDER``.
+    """
+    from analysis import country_regions  # noqa: PLC0415
+
+    # The market figures totalled (key on the row, metric key). Customers are
+    # absent on purpose: a row's customers are distinct companies, and one
+    # company can sit in two countries — they are never summed (docs/48).
+    figures = (("spend", None), ("leads", None), ("sqls", None),
+               ("closed_won_deals", "closed_won_deals"), ("won_revenue", "revenue_usd"))
+    out = []
+    for r in rows or []:
+        region = (None if r.get("is_residual")
+                  else country_regions.region_for_code(r.get("country_code")))
+        # PR-ADS-176B-F1 (m8): the lead population behind leads / SQLs.
+        out.append({**r, "region": region, "lead_scope": COUNTRY_LEAD_SCOPE})
+    markets = [r for r in out if not r.get("is_residual")]
+    geo_ready = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
+    gate_reason = next(iter(spend_truth.get("country_gap_codes") or []), None) \
+        or "country_geo_not_ready"
+
+    if empty_window:
+        gate_reason = canonical_contract.NO_SETTLED_DAY_IN_WINDOW
+
+    def _totals(group: list) -> dict:
+        if geo_ready and not empty_window:
+            metrics = {k: _sum_rows(group, k, mk) for k, mk in figures}
+        else:
+            metrics = {k: cwt.metric(None, cwt.UNAVAILABLE, gate_reason)
+                       for k, _mk in figures}
+        metrics["revenue_usd"] = metrics.pop("won_revenue")
+        for fam in ("closed_won_deals", "revenue_usd") if window_metrics is not None else ():
+            # Fail closed: a window verdict that is missing is not a publication.
+            w = window_metrics.get(fam) or {}
+            if w.get("status") != cwt.PUBLISHED and metrics[fam].get("status") == cwt.PUBLISHED:
+                st_ = w.get("status") if w.get("status") in (cwt.WITHHELD, cwt.UNAVAILABLE) \
+                    else cwt.UNAVAILABLE
+                metrics[fam] = cwt.metric(None, st_, w.get("reason") or cwt.R_SOURCE_UNREADABLE)
+        spend = metrics["spend"]
+        metrics[cwt.PERIOD_REVENUE_PER_AD_SPEND] = cwt.derive_period_revenue_per_ad_spend(
+            metrics["revenue_usd"], spend.get("value"),
+            spend_reason=spend.get("reason"))
+        ratio = metrics[cwt.PERIOD_REVENUE_PER_AD_SPEND]
+        if (spend.get("blocked_by_country") and ratio.get("status") != cwt.PUBLISHED
+                and ratio.get("reason") == spend.get("reason")):
+            # m4: the ratio is unknown because THAT market's spend is.
+            ratio["blocked_by_country"] = spend["blocked_by_country"]
+        return {
+            "spend": spend["value"],
+            "leads": metrics["leads"]["value"],
+            "sqls": metrics["sqls"]["value"],
+            "closed_won_deals": metrics["closed_won_deals"]["value"],
+            "won_revenue": metrics["revenue_usd"]["value"],
+            cwt.PERIOD_REVENUE_PER_AD_SPEND:
+                metrics[cwt.PERIOD_REVENUE_PER_AD_SPEND]["value"],
+            "metrics": metrics,
+        }
+
+    country_totals = {
+        **_totals(markets),
+        # m9: with no settled day nothing was measured — not "0 markets".
+        "markets": None if empty_window else len(markets),
+        "population": "listed_markets",
+        "revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+        "lead_scope": COUNTRY_LEAD_SCOPE,
+    }
+    by_region: dict = {}
+    for r in markets:
+        by_region.setdefault(r["region"], []).append(r)
+    regional_mix = [{"region": region, "countries": len(by_region[region]),
+                     **_totals(by_region[region])}
+                    for region in country_regions.REGION_ORDER if region in by_region]
+    if empty_window:
+        regional_mix = None             # m9: unknown, not an empty list
+    return out, country_totals, regional_mix
 
 
 #: PR-ADS-167A — the views whose window ends at yesterday when it includes
@@ -826,6 +979,12 @@ def build_revenue_decision_mart(
     elif view == "country":
         payload = {**payload, "rows": _withhold_country_rows_when_geo_not_ready(
             payload["rows"], spend_truth)}
+    country_totals = regional_mix = None
+    if view == "country":
+        rows_, country_totals, regional_mix = _country_page_blocks(
+            payload["rows"], spend_truth, empty_window=_empty,
+            window_metrics=(summary or {}).get("metrics"))
+        payload = {**payload, "rows": rows_}
 
     # PR-ADS-152: the mart top-line (and Campaign Revenue & Spend) is the
     # campaign-attributable SQL subset — campaign ROAS requires campaign identity.
@@ -878,7 +1037,10 @@ def build_revenue_decision_mart(
         "country_truth": (geo_gate.build_country_truth_disclosure(
             spend_truth, window_block,
             revenue_source=canonical_revenue.CANONICAL_SOURCE,
-            revenue_scope=revenue_scope.SCOPE_ALL_SOURCE,
+            # PR-ADS-176B: the scope the country ROWS count. They (and their
+            # drawers) are the google_ads_source deals; `all_source` here
+            # described a population no country row holds (docs/58 §5).
+            revenue_scope=revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
             revenue_available=core_health.get("revenue_available", True),
             revenue_reason=core_health.get("revenue_unavailable_reason"),
             revenue_violation_codes=core_health.get("revenue_violation_codes"),
@@ -891,6 +1053,11 @@ def build_revenue_decision_mart(
         "sql_reconciliation": sql_reconciliation,
         "readiness": readiness,
         "rows": payload["rows"],
+        # PR-ADS-176B (country view only, else None): the listed markets'
+        # totals and the regional mix the Countries page shows, from the rows
+        # above — the page sums nothing itself.
+        "country_totals": country_totals,
+        "regional_mix": regional_mix,
         # Deal view (PR-ADS-164A): the canonical verdict for the
         # won-deal population behind `rows`. An empty `rows` is "there are
         # none" only when this says published with value 0.
@@ -1114,7 +1281,7 @@ def build_revenue_performance_audit(
     tolerance = 0.02  # mirrors SPEND_VARIANCE_TOLERANCE for reconciliation
     pages_spec = [
         ("roas_by_campaign", "Campaign Revenue & Spend", "spend", campaign_page_spend, mart_spend),
-        ("roas_by_country", "Country Revenue & Spend", "spend", country_page_spend,
+        ("roas_by_country", "Countries", "spend", country_page_spend,
          country_mart_spend),
         ("deals", "Deals", "revenue", deals_revenue, mart_revenue),
     ]

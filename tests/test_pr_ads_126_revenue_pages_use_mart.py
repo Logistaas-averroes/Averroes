@@ -103,6 +103,19 @@ def test_all_revenue_pages_share_mart_renderers():
         "function renderRevenueDealsPage",
     ):
         body = _slice(page, span=3000)
+        if page == "function renderRoasCountriesPage":
+            # PR-ADS-176B: the one Countries page, in the Dashboard's language.
+            # The spend card and the summary strip are the account's
+            # CAMPAIGN-attributable figures, and the mart's diagnostics are
+            # campaign/legacy codes — none describes the country rows. Its
+            # truth footer reads the mart's own spend_truth statuses; its
+            # totals are the mart's country_totals. Still only mart fields.
+            own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
+            assert "renderCountriesTruthFooter(data)" in own
+            footer = _slice("function renderCountriesTruthFooter", span=900)
+            assert "data.spend_truth" in footer
+            assert "renderRoasCountrySummary(data)" in own
+            continue
         if page == "function renderRevenueDealsPage":
             # PR-ADS-164A: the Deals page lists ALL-SOURCE won deals, so it no
             # longer shows the Google Ads spend card above them (spend lives

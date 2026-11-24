@@ -1,8 +1,8 @@
 # 58 — Countries: one page, one rule per figure
 
-Series doc for the Countries merge. **PR-ADS-176A** (this PR) fixes the shared
-country builder so each figure has one rule, and changes nothing in navigation
-or page layout. **PR-ADS-176B** will merge the two pages into one.
+Series doc for the Countries merge. **PR-ADS-176A** fixes the shared country
+builder so each figure has one rule, and changes nothing in navigation or page
+layout (§1–§6). **PR-ADS-176B** merges the two pages into one (§7).
 **PR-ADS-176C** will retire `/api/geo`.
 
 ---
@@ -237,7 +237,9 @@ new owner call.
 * **176C**: retire `/api/geo` and `services/country_evidence_service.py`. The
   shared zero rule stays.
 
-## 5. Not changed here
+## 5. Not changed in 176A
+
+(Each item below is done by PR-ADS-176B, §7, except the last, which is 176C.)
 
 * Navigation, page layout and windows. Both pages keep their current windows.
 * The Dashboard payload still declares `revenue_scope: all_source`. Its row
@@ -340,3 +342,262 @@ Existing tests changed:
   failed in a full-suite run. The failures were in 153e_b, 154c, 161e, 164a,
   167a, 171b and `test_revenue_attribution_*`, and depended on test order.
   No assertion changed.
+
+## 7. One Countries page (PR-ADS-176B)
+
+The owner decisions of §3 are built. Countries is one page, `roas-countries`,
+under the Countries menu item. It reads the mart's country view
+(`GET /api/revenue-performance?view=country`, built by
+`revenue_decision_mart.build_revenue_decision_mart(view="country")` over the
+builder 176A unified) and decides nothing.
+
+### 7.1 Navigation
+
+* `NAV_ITEMS` → `countries: ["roas-countries"]`. A single-page item has no tab
+  strip (docs/57 §2), so the `data-section="countries"` strip is deleted and
+  the sidebar item opens `roas-countries`.
+* `#/geo` is retired the PR-ADS-168B way (docs/56 §3): `"geo"` is removed from
+  `PAGES` and survives only as `RETIRED_PAGE_REDIRECTS.geo = { page:
+  "roas-countries" }`, so an old bookmark lands on Countries, not on the
+  Dashboard fallback. `navItemForPage("geo")` is `countries`.
+  `HASH_ROUTE_ALIASES.countries` now points at `roas-countries`.
+* The Dataset Freshness link for `google_ads_api/canonical_geo` opens
+  Countries.
+
+### 7.2 What was deleted
+
+| Layer | Deleted |
+| --- | --- |
+| Markup | `<section id="page-geo">`: its KPI strip (Countries Active, Total Geo Spend, Countries with SQLs, High Junk Countries), spend / owner-label notices, the Plotly world map and its metric select, the country search box, the table and its footnote |
+| Router / registries | `"geo"` in `PAGES`, `EVIDENCE_PAGES`, `PAGE_DATASET_MAP`, `PAGE_EXPLANATIONS`, `PAGE_HELP_CONTENT`, `PAGE_DEPENDENCIES`, the `loadPage` case and the search wiring |
+| Renderers | `loadGeo`, `renderGeoMap`, `renderGeoTable`, `applyGeoSearch`, `geoSpendVerdict`, `geoSpendCell`, `geoFmtSpend`, `geoLeadCell`, `geoTopText`, `geoDay`, `ownerZeroNote`, `junkRateBadge`, `GEO_NA`, the page state (`geoMergedRows`, `geoSpendState`, `geoLeadsAvailable`) |
+| Columns (decision 3) | In Progress, Junk, Junk Rate, Top Campaign, Top Keyword, Leads as of. The Leads page owns lead quality. |
+| CSS | `.geo-map*`, `.geo-metric-select`, `.geo-search-input`, `.junk-rate-badge*`, `.geo-empty-*` |
+| Country Revenue & Spend chrome | the "Canonical Spend Truth" card and the mart summary strip (both are the account's campaign-attributable figures, not the countries'), the mart diagnostics stack, the inline expand button and drill row |
+
+**Kept for 176C:** `GET /api/geo`, `services/country_evidence_service.py`, and
+their tests. Nothing in `static/` calls them now.
+
+### 7.3 The page
+
+In the Dashboard's Countries visual language, with its classes:
+
+1. **Command bar** (`dash-command-bar`): Read-only / spend / revenue chips and
+   the business-window select — Current Quarter (default), Last Quarter, Last
+   6 Months, YTD, All Time — with the settled-day range chip.
+2. **Gate** — unchanged from 176A, and strict (decision 2). A window with no
+   settled day shows the PR-ADS-167A card; a mart that is not decision-ready
+   shows the readiness card; any `country_spend_status` other than `verified`
+   or `reconciled_with_residual` shows `renderCountrySpendUnreconciledState`,
+   whose cause, next step and run buttons come from `country_gap_primary` /
+   the gap codes. No KPI, no table, no number is drawn under it — including the
+   FX-only gap, where the mart still sends native spend on rows.
+3. **KPI cards** (`dash-kpi-card`): Country Spend, SQLs, Closed-Won Deals, Won
+   Revenue, Period Revenue / Ad Spend (with its disclosure) and Residual Spend.
+   They print the mart's `country_totals`; the page sums nothing (the old
+   client-side `summarizeRoasCountryRows` is deleted). There is no Customers
+   card: customers are distinct companies and are never summed across rows.
+4. **Countries table** (`ctry-table`): Country, Region, Spend, Leads, SQLs, Won
+   Deals, Customers, Won Revenue, Period Revenue / Ad Spend, Decision; the
+   decision-filter chips above it. The residual row is pinned last with its own
+   figures and an unavailable ratio (`residual_not_a_market`). Its itemised
+   outside-market countries (`outside_listed_market_items`) follow it as
+   sub-rows labelled **In residual**: their spend is a breakdown of the
+   residual's, their outcome cells read "In residual", they open no drawer and
+   are in no total.
+5. **Drawer** (`ctry-drawer`): a market row (click, Enter or Space) opens the
+   Dashboard's drawer under the table — the row's figures, then the closed-won
+   deals behind it from `/api/revenue-performance/country-detail` (the row's own
+   population, §2.4). A row whose deal count is withheld says "Closed-won deals
+   are withheld" and reads nothing.
+6. **Regional Mix** beside the **residual panel**, from the mart's
+   `regional_mix`; the residual panel names its spend parts.
+7. **Truth footer** (`dash-truth-footer`) with the mart's campaign / FX /
+   country statuses.
+
+Withheld wording: every figure that is not published prints "Unavailable" or
+"Withheld" with its reason (`canonicalMetricHtml` / `rowMetricHtml`,
+`countrySpendUnavailableHtml`), never "—" and never 0. Leads and SQLs cells use
+`dashValue`, which the old table did not (`fmtCount(null)` printed "—"). A spend
+above zero and below a dollar reads "<$1" (`fmtCountrySpend`), the deleted
+page's rule; `fmtMoney` alone printed "$0". Country reason codes (row spend
+reasons, gate gaps, `residual_not_a_market`) get words through
+`countryReasonLabel`, which `canonicalReasonLabel` now consults.
+
+### 7.4 The mart's country view gains three things
+
+`revenue_decision_mart._country_page_blocks`, country view only (`None` on the
+other views):
+
+* each market row gets `region` from `analysis/country_regions.py` — the
+  Dashboard's region table, moved unchanged out of
+  `dashboard_countries_service` (which keeps its old names as aliases); the
+  residual's region is `None`;
+* `country_totals`: the listed markets' spend, leads, SQLs, closed-won deals,
+  won revenue and the period ratio (via `derive_period_revenue_per_ad_spend`),
+  each `{value, status, reason}` in `metrics`. The residual and its items are in
+  none. A row whose figure is unknown makes its total unknown, with that row's
+  reason. With the gate not ready, or no settled day, every total is
+  unavailable with the gap — a sum over withheld rows is not a zero. When the
+  window's canonical verdict withholds deals or revenue, that total takes the
+  window's status and reason (a subset of a withheld total is not published,
+  even over no rows). No customer total;
+* `regional_mix`: the same rule per region, in `REGION_ORDER`.
+
+### 7.5 The scope declaration (docs/58 §5)
+
+The mart's country `country_truth.revenue_scope`, and the Dashboard's
+`revenue_scope` and `country_truth.revenue_scope`, said `all_source`. Every
+country row, the residual and both drawers count `google_ads_source` deals.
+They now say `google_ads_source`; `country_totals.revenue_scope` says it too.
+(The mart's top-level `revenue_scope` stays `campaign_attributable`: it
+describes `summary`, which the Countries page no longer shows.)
+
+### 7.6 Windows
+
+The page already used the business windows of PR-ADS-167A's settled-day mart
+view; no window math was added. "Previous quarters" is Last Quarter: the
+resolver (`analysis/business_windows.py`) has no earlier quarter, and adding
+one is new window math, so it is left out.
+
+### 7.7 Labels
+
+The page is titled "Countries". Links that named "Country Revenue & Spend" now
+say "Open Countries": the Dashboard Countries decision cards' `target_label`,
+its leaderboard next action and drawer link, and the Revenue Health parity
+panel's page label.
+
+### 7.8 Not done here (176C)
+
+* `GET /api/geo`, `services/country_evidence_service.py`, the
+  `GET /api/leads/country-summary` lead text join and their tests stay. Nothing
+  in `static/` reads them.
+* `services/system_status_service.PAGE_PIPELINE_IMPACT` keeps its `"geo"` key
+  (as it keeps the retired `"waste"` and `"opportunities"`), and
+  `analysis/sql_doctrine_registry`'s `api.geo` rules stay with the endpoint.
+* The Dashboard's region status and per-region ratio are its own; the Countries
+  page's Regional Mix shows no status or ratio.
+* Earlier quarters than Last Quarter (§7.6).
+
+### 7.9 Tests
+
+`tests/test_pr_ads_176b_countries_one_page.py` (13 cases, node harness and
+static files) and `tests/test_pr_ads_176b_countries_pg_integration.py` (5
+cases, PostgreSQL; registered in the PG step and the did-run list). All 18 fail
+on `2eda9ac`. Case 06's strict-gate half already held there; it is shown to be
+a guard by mutating the page's gate check away, which prints the withheld
+figure.
+
+* 01–05: the `#/geo` redirect and nav lookup; one page, no strip; the old page,
+  its renderers, map, CSS and registry keys gone; no lead-quality column; the
+  five business windows, Current Quarter default, no evidence window.
+* 06: every non-ready status — mismatch, a gap, the settle gap, FX only — draws
+  the card and no figure; verified draws the table.
+* 07–11: withheld totals, cells, the residual ratio and a region name their
+  reason, never "—" or 0; the "In residual" sub-rows; the page prints the
+  server's totals (no client sum, no customer total); the drawer, and
+  "withheld" for a withheld deal count; "<$1".
+* 12: a window that withholds a family publishes no country total of it, even
+  over no rows.
+* 13: ported from the `#/geo` cases — unknown leads read "Unavailable", the
+  owner note on a market row, the owner-label mismatch notice.
+* PG 01: the scope declarations say `google_ads_source`, and an organic UK deal
+  is in no row. PG 02–04: totals and regional mix over the listed markets, an
+  unknown row's reason, no total under an unready gate. PG 05: the real payload
+  on the real page, ready and blocked.
+
+Existing tests changed — each because a page, a route key or a layout it pinned
+was deleted or merged. 176B claimed every truth property they guarded was kept
+or ported. **That was wrong**: the 170A "$0 rests on an owner label" disclosure
+(cases 10 / 12's page half) was dropped with `#/geo` and not carried to the
+mart rows. PR-ADS-176B-F1 restores it (§7.10, M2).
+
+| Test | Change | Why |
+| --- | --- | --- |
+| `174a` (EXPECTED_ITEMS, 06, 11, 13) | Countries = `["roas-countries"]`, single-page item, no strip; `geo` a retired key | the menu change |
+| `162f::01, 03`; `162g::09` | Countries one page; 16 → 15 pages | `geo` deleted |
+| `sidebar_navigation_structure` (route keys, labels, revenue section) | `geo` and "Country Revenue & Spend" removed; the Countries item is `roas-countries` | same |
+| `153d::test_search_terms_stays_under_platform_evidence` | the Countries item opens `roas-countries` | same |
+| `165a_weekly::13c, 19` | the no-monthly-copy check moves to the Countries page and its `canonical_geo` dependency; loader set without `geo` | same |
+| `141` (evidence list, loaders) | `geo` leaves `EVIDENCE_PAGES`; `geo` / `roas-countries` must not be in it; no UI read of `/api/geo`; Countries reads the mart on a business window | decision 1 |
+| `dataset_freshness_ui_contract`, `empty_state_page_explanations`, `help_drawer_and_snapshot_history` | `geo` removed from the page lists | `geo` deleted |
+| `platform_evidence_google_ads_api_cutover` | `geo` out of the evidence routes; `canonical_geo` checked on the Countries dependency; `countries` alias → `roas-countries`; the no-Windsor check runs on the Countries cards and section | same |
+| `111` (region marker), `113` (region end marker) | the "── Countries" banner; the next block after Revenue Health | banner renamed / `junkRateBadge` deleted |
+| `107a::test_clean_subtitles_on_roas_pages`, `112::test_business_window_selector_unchanged` | the new title and subtitle | page renamed "Countries" |
+| `112` (blocked-before-summary, summary, ratio span, display-name span) | the summary is `renderRoasCountrySummary(data)` over `country_totals`; spans widened for the longer renderers | the mart summary strip is campaign scope |
+| `123::test_country_table_uses_revenue_table_scroll` | the Dashboard table's `ctry-scroll` containment | Dashboard table |
+| `126::test_all_revenue_pages_share_mart_renderers`, `128::test_shared_clean_spend_truth_card` | Countries renders the footer from `spend_truth` and `country_totals`, not the campaign spend card or diagnostics (as Deals since 164A) | those are campaign-scope figures |
+| `132::07, 08, css` | the row opens the Dashboard drawer; the residual and its items never do; `.ctry-drawer` replaces the expand button classes | drawer pattern |
+| `165a_countries_pg` | the `loadGeo` renders and their probe are removed; every payload assertion stays; 05, 06, 17, 18, 20, 21 assert on the rows what the page printed; `_assert_no_spend_figure_anywhere` → `_assert_no_spend_figure_in_the_payload` | page deleted, endpoint kept |
+| `167a_countries_zero_rule_pg` | each page cell assertion is the same assertion on the row | same |
+| `170a_owner_labelled_geo_pg` (11, 14, 18, 24) | row assertions for the deleted table; the owner note's call sites on the Countries page (row, drawer, "In residual" items); no `#/geo` notice element | same |
+
+### 7.10 Truth audit round 1 (PR-ADS-176B-F1)
+
+**M1 — a Decision badge on unmeasured figures.** `classify_verdict` reads
+`spend or 0`, so Pakistan (spend withheld by the zero rule, a $300 deal) read
+"Watch — SQLs exist but weak", and a row with won deals but unknown revenue
+read "Watch" too. `revenue_attribution_service._finalize_row` now gives such a
+row a not-judged verdict with `verdict_reason`, as `outcome_withheld` works:
+`spend_unknown` (the spend reason) or `revenue_unknown` (the revenue metric's
+reason). A row the gate withholds wholesale is `outcome_withheld` with the gap
+(`_withhold_country_rows_when_geo_not_ready`). `getBusinessVerdictBadge`
+prints "Not judged — spend unknown" / "— revenue unknown"; none of the four
+decision chips selects them. The one-page fixture that hard-coded Pakistan
+`watch` encoded the defect and now carries `spend_unknown`.
+`_finalize_row` is shared, so this also changes **Campaign Revenue & Spend**:
+a campaign with won deals and withheld revenue now reads "Not judged —
+revenue unknown" (it read "Watch"); pinned in `161e` case 05.
+
+**M2 — the owner-label zero disclosure, restored.** The rule moved from the
+deleted page into `country_spend_zero_rule.zero_rests_on_owner_labels`
+(carried by an owner-labelled criterion, or owner-labelled spend in the window
+and no Google carrier). The mart's country rows carry
+`zero_rests_on_owner_labels`; `roasCountrySpendCell` (the table and the drawer)
+prints "$0 owner label" with the criterion ids, through the restored
+`ownerZeroNote`. 170A cases 10b / 12b restore cases 10 / 12's page half on the
+Countries page. (`country_evidence_service` keeps its own copy until 176C.)
+
+**M3 — the totals' gate, tested.** Under an FX-only gap the rows keep native GBP
+on `spend`; without `if geo_ready and not empty_window` `country_totals`
+published it as USD. One-page case 15 runs the real withholding and the real
+totals and fails when that line is mutated to `if True:`.
+
+**Minor.** m4: the footer chip names the "Geo ↔ campaign spend reconciliation";
+a total withheld by one market names it ("Pakistan: some spend in this window
+has no country", `blocked_by_country`, also in Regional Mix). m5: the residual's
+spend, its parts and its itemised countries print cents (`fmtCountrySpendCents`,
+also in `residualSpendCell`), so "$0 is spend in Cuba" cannot print. m6: the Won
+Revenue card says "listed markets". m7: the blockers links, the drawer and its
+deal read use the response's `window.key` (`campBlockerOpts(data)`,
+`roasCountryWindowKey()`), and every reload clears the deal-list cache and
+drops a deal list still in flight (`roasCountryDrilldownGen`). m8: rows and
+`country_totals` declare `lead_scope: "paid_search_with_campaign"`
+(`fetch_lead_quality`), labelled on the SQLs card and the Leads / SQLs headers;
+`revenue_scope` is unchanged. m9: with no settled day, `regional_mix` and
+`country_totals.markets` are `None`.
+
+**Tests.** New: one-page 14–20, PG 06–07, 170A 10b / 12b — all fail on
+`4d0921e`; case 15's gate assertion held there and fails under the `if True:`
+mutation. Changed: one-page 03 (`ownerZeroNote` is back), 07 (the blocking
+market is named), 08 (cents: "$2.50" / "$8.75", not "$3" / "$9") and the
+fixture (Pakistan `spend_unknown`, `lead_scope`); 170A case 24's node harness
+loads `fmtCountrySpendCents`, which `residualSpendCell` now calls.
+
+### 7.11 Truth audit round 2 (PR-ADS-176B-F2)
+
+Verdict: merge; four small items.
+
+1. The `carried_by_google` exclusion in
+   `country_spend_zero_rule.zero_rests_on_owner_labels` is tested: Jordan
+   (carried by its own Google criterion) rests on no label while Pakistan rests
+   on `["2192"]` (176B PG case 08; fails when the condition is `if True:`).
+2. The in-flight deal-list drop is tested: a deal list requested before
+   `resetCountryDrilldowns()` and resolved after it is neither cached nor
+   written (one-page case 21; fails with the generation check deleted).
+3. Dashboard → Countries: a published `$0` carries
+   `zero_rests_on_owner_labels` from the same zero-rule evidence (the shared
+   function, no second rule), and `ctrySpendCell` appends `ownerZeroNote`
+   (176B PG case 09).
+4. The Campaign Revenue & Spend consequence of M1 is documented (§7.10) and
+   pinned; the unused `NOT_JUDGED_VERDICTS` set is deleted.
