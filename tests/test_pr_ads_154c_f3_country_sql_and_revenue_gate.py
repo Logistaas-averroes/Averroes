@@ -42,6 +42,7 @@ from tests.canonical_ledger_fixtures import (
     company_evidence,  # noqa: E402
     READY_SYNC_STATE, ledger_row, patch_canonical_ledger,
 )
+from datetime import datetime, timezone  # noqa: E402
 from tests.test_pr_ads_138_dashboard_countries import (  # noqa: E402
     NOW, _patch_durable,
 )
@@ -134,7 +135,7 @@ def test_f3_2_countries_is_out_of_the_full_campaign_attributable_comparison():
     a right answer to a different one, and comparing them made the page look
     broken while hiding what the difference actually was."""
     consumers = {c for c, _ in
-                 parity.METRIC_IDENTITIES["campaign_attributable_sqls"]["consumers"]}
+                 parity.METRIC_IDENTITIES["google_ads_cohort_sqls"]["consumers"]}
     assert "dashboard/countries" not in consumers
     assert consumers == {"dashboard/overview", "dashboard/revenue",
                          "dashboard/campaigns", "dashboard/deals",
@@ -175,10 +176,15 @@ def test_f3_4_country_sqls_plus_residual_equal_the_campaign_attributable_total(
                                       "missing_contact_created_at_count": 0,
                                       "excluded_non_paid_count": 0,
                                       "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the same contacts, from the canonical funnel (the mart's
+    # leads / SQLs are the acquisition cohort).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        rows, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW)
     patch_canonical_ledger(monkeypatch, [_deal(1)])
 
     out = parity.audit_window("current_quarter", now=NOW)
-    total = next(m for m in out["metrics"] if m["metric"] == "campaign_attributable_sqls")
+    total = next(m for m in out["metrics"] if m["metric"] == "google_ads_cohort_sqls")
     real = next(m for m in out["metrics"] if m["metric"] == "country_attributed_sqls")
     residual = next(m for m in out["metrics"]
                     if m["metric"] == "country_unattributed_residual_sqls")
@@ -189,7 +195,7 @@ def test_f3_4_country_sqls_plus_residual_equal_the_campaign_attributable_total(
     assert real["value"] + residual["value"] == total["value"]
 
     rule = next(c for c in out["conservation"]
-                if c["total"] == "campaign_attributable_sqls")
+                if c["total"] == "google_ads_cohort_sqls")
     assert rule["status"] == "conserved", rule
     assert parity.V_CONSERVATION_BROKEN not in out["violation_codes"]
 
@@ -215,7 +221,7 @@ def test_f3_5_a_broken_conservation_equation_fails_the_audit(monkeypatch):
     assert out["ok"] is False
     assert parity.V_CONSERVATION_BROKEN in out["violation_codes"]
     rule = next(c for c in out["conservation"]
-                if c["total"] == "campaign_attributable_sqls")
+                if c["total"] == "google_ads_cohort_sqls")
     assert rule["status"] == "broken"
 
 
@@ -233,7 +239,7 @@ def test_f3_6_a_withheld_component_is_not_a_conservation_failure(monkeypatch):
 
     out = parity.audit_window("current_quarter", now=NOW)
     rule = next(c for c in out["conservation"]
-                if c["total"] == "campaign_attributable_sqls")
+                if c["total"] == "google_ads_cohort_sqls")
     assert rule["status"] == "not_evaluable"
     assert parity.V_CONSERVATION_BROKEN not in out["violation_codes"]
 
@@ -245,7 +251,7 @@ def test_f3_7_country_sqls_are_never_compared_with_the_other_populations(other):
     assert frozenset(("country_attributed_sqls", other)) in pairs
 
     scopes = {k: parity.METRIC_IDENTITIES[k]["scope"] for k in
-              ("campaign_attributable_sqls", "country_attributed_sqls",
+              ("google_ads_cohort_sqls", "country_attributed_sqls",
                "country_unattributed_residual_sqls", "source_group_sqls",
                "lifecycle_sqls")}
     assert len(set(scopes.values())) == 5, scopes
@@ -266,6 +272,11 @@ def test_f3_8_no_sql_is_assigned_to_a_guessed_country(monkeypatch):
                                       "missing_contact_created_at_count": 0,
                                       "excluded_non_paid_count": 0,
                                       "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the same contacts, from the canonical funnel (the mart's
+    # leads / SQLs are the acquisition cohort).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        rows, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW)
     patch_canonical_ledger(monkeypatch, [_deal(1)])
 
     from services.dashboard_countries_service import build_dashboard_countries
@@ -690,6 +701,20 @@ def _cli_both_formats(monkeypatch, capsys, label, *, rows=None, sync_state=None,
                                           "missing_contact_created_at_count": 0,
                                           "excluded_non_paid_count": 0,
                                           "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort, whose
+    # read honours its window as the SQL does. The CLI audits the CURRENT
+    # quarter at the wall clock, so the scenario's contacts (the 138 fixture's,
+    # or `leads`) are created inside it — its first day, noon UTC — with a
+    # sync state proven now.
+    from datetime import date as _date
+    import tests.test_pr_ads_138_dashboard_countries as t138
+    from services.canonical_contract import resolve_canonical_window
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    _q = _date.fromisoformat(resolve_canonical_window("current_quarter")["start_date"])
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        leads if leads is not None else t138.LEAD_ROWS,
+        created=datetime(_q.year, _q.month, _q.day, 12, tzinfo=timezone.utc)),
+        as_of=datetime.now(timezone.utc))
     _rows = rows if rows is not None else [_deal(1)]
     # PR-ADS-161E: "fully healthy" includes proven, current company identity
     # for every won deal, so the canonical customer metric publishes.

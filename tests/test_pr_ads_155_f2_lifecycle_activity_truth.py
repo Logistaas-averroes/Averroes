@@ -722,8 +722,10 @@ def test_19_the_bounded_windows_gain_no_new_parity_violation():
     assert "customer_rate" not in audited_metrics
     # The identities the audit DOES compare are untouched by this patch, so a
     # bounded window cannot acquire a violation from it.
+    # PR-ADS-177A: the SQL identity is `google_ads_cohort_sqls` (the
+    # acquisition cohort; it was `campaign_attributable_sqls`).
     for untouched in ("closed_won_revenue_usd", "customers",
-                      "google_ads_spend_usd", "campaign_attributable_sqls"):
+                      "google_ads_spend_usd", "google_ads_cohort_sqls"):
         assert untouched in audited_metrics, untouched
 
 

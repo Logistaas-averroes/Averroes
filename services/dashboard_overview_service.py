@@ -829,7 +829,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
     if not readiness.get("canonical_revenue_available"):
         blockers.append("canonical closed-won population")
     if not readiness.get("lead_metrics_ready"):
-        blockers.append("lead event dates")
+        # PR-ADS-177A: the acquisition cohort's verdict withholds leads / SQLs.
+        blockers.append("lead and SQL counts (acquisition cohort withheld)")
     # Same unclassified test as truth_status.source_attribution — the footer
     # chips and this card must never disagree.
     unclassified = next((s for s in source_mix if s.get("key") == "unclassified"), None)
@@ -940,7 +941,10 @@ def _build_unavailable(summary: dict, spend_truth: dict, readiness: dict,
                                "complete FX, and published closed-won revenue.")})
     if summary.get("leads") is None or summary.get("sqls") is None:
         out.append({"metric": "leads_sqls",
-                    "reason": "Lead metrics withheld — business event dates unavailable."})
+                    "reason": (f"Leads and SQLs withheld ({summary.get('sqls_reason')}) — "
+                               "the acquisition cohort (contacts created in this window) "
+                               "is not proven complete as of the contact-funnel "
+                               "watermark.")})
     if not readiness.get("canonical_revenue_available"):
         out.append({"metric": "closed_won_revenue_usd",
                     "reason": "Revenue integration not connected for this window."})
@@ -1018,19 +1022,20 @@ def build_dashboard_overview(window: str = "current_quarter",
         ledger_status=(deals_contract.get("source_health") or {}).get("ledger_status"),
     )
 
-    # PR-ADS-152 §1: the Dashboard SQL headline is the canonical
-    # google_ads_source_sqls (deduplicated, exclusion-filtered, staleness-aware,
-    # real campaign identity) — NOT the mart's campaign-attributable ``sqls`` under
-    # a bare "SQLs" label. The campaign-attributable subset is a secondary
-    # disclosure. The page displays the canonical count verbatim, so consumer_count
-    # is None (never summary.sqls, which is a different, narrower scope).
-    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
-    sql_reconciliation = _canon.page_reconciliation(
-        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_GOOGLE_ADS_SOURCE, now=now)
-    _recon_status = sql_reconciliation.get("reconciliation_status")
-    # A mismatch is never rendered as a normal count — the headline is withheld.
-    _ga_source_display = (None if _recon_status == _canon.STATUS_MISMATCH
-                          else sql_reconciliation.get("google_ads_source_sqls"))
+    # PR-ADS-177A — ONE SQL COUNT. The headline is the window's Google Ads
+    # ACQUISITION COHORT (the mart's `summary.sqls`): the count Dashboard
+    # Campaigns, Dashboard Countries, the Countries page and Campaign Evidence
+    # publish for the same days. It replaced the PR-ADS-152 legacy
+    # `google_ads_source_sqls` (`leads.status_category = 'qualified'`), which
+    # was a second SQL count on the same strip. The secondary line is the part
+    # of it the campaign rows hold (the rest is the campaign residual).
+    _cohort = mart.get("cohort") or {}
+    _cohort_published = _cohort.get("sql_status") == "published"
+    _residual_sqls = (_cohort.get("campaign_residual") or {}).get("sqls")
+    _on_campaign_rows = (summary.get("sqls") - _residual_sqls
+                         if (_cohort_published and summary.get("sqls") is not None
+                             and _residual_sqls is not None) else None)
+    sql_reconciliation = mart.get("sql_reconciliation") or {}
 
     # PR-ADS-153C §21/§22: CRM lifecycle metrics now come from the canonical
     # HubSpot funnel (stage-entry events, each dated by its OWN
@@ -1059,17 +1064,21 @@ def build_dashboard_overview(window: str = "current_quarter",
         # window over the same window's spend. Attribution ROAS is unavailable.
         "google_ads_period_revenue_per_ad_spend": period_ratio,
         "google_ads_roas": None,
+        # PR-ADS-177A: the acquisition cohort — Google Ads contacts created in
+        # the window (leads) and those proven to have reached SQL (sqls). None
+        # with the cohort's reason when its verdict is not published.
         "leads": summary.get("leads"),
-        # PR-ADS-152 §1 — the SQL headline: canonical Google Ads-source SQLs.
-        "google_ads_source_sqls": _ga_source_display,
-        "google_ads_source_sqls_scope": _canon.SCOPE_GOOGLE_ADS_SOURCE,
-        "google_ads_source_sqls_status": _recon_status,
-        # Secondary disclosure — the campaign-attributable subset (the old mart
-        # count), now under an explicitly named field, never a bare "SQLs" KPI.
-        "campaign_attributable_sqls": sql_reconciliation.get("campaign_attributable_sqls"),
-        # Back-compat: the mart's campaign-attributable count, explicitly scoped.
+        # The SQL headline (key kept for the page): the cohort's Google Ads SQLs.
+        "google_ads_source_sqls": summary.get("sqls"),
+        "google_ads_source_sqls_scope": _cohort.get("sqls_scope"),
+        "google_ads_source_sqls_status": _cohort.get("sql_status"),
+        # The part of it the campaign rows hold (the rest has no campaign
+        # label, or a pseudo- / email- / conflicting one).
+        "campaign_attributable_sqls": _on_campaign_rows,
         "sqls": summary.get("sqls"),
-        "sqls_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "sqls_scope": _cohort.get("sqls_scope"),
+        "sqls_status": _cohort.get("sql_status"),
+        "sqls_reason": _cohort.get("sql_reason"),
         # PR-ADS-161E: two metrics. Closed-won DEALS, and customers — distinct
         # proven HubSpot companies, withheld with the canonical reason whenever
         # a member deal's company is unresolved, stale or unobserved.
@@ -1178,16 +1187,19 @@ def build_dashboard_overview(window: str = "current_quarter",
                           and _mart_summary.get("customers_status") == "published"
                           else canonical_contract.TRUTH_NOT_READY),
          "unavailable_reason": _mart_summary.get("customers_reason")},
-        {"metric": "campaign_attributable_sqls",
+        # PR-ADS-177A: the acquisition cohort's Google Ads SQLs and leads.
+        {"metric": "google_ads_cohort_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "campaign_attributable_sqls",
+         "scope": "google_ads_cohort_sqls",
          "truth_status": (canonical_contract.TRUTH_READY if _lead_ready
-                          else canonical_contract.TRUTH_NOT_READY)},
-        {"metric": "campaign_attributable_leads",
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": None if _lead_ready else kpis.get("sqls_reason")},
+        {"metric": "google_ads_cohort_leads",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "campaign_attributable_leads",
+         "scope": "google_ads_cohort_leads",
          "truth_status": (canonical_contract.TRUTH_READY if _lead_ready
-                          else canonical_contract.TRUTH_NOT_READY)},
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": None if _lead_ready else kpis.get("sqls_reason")},
         *[{"metric": f"lifecycle_{_stage}",
            "data_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
            "scope": f"lifecycle_{_stage}",
@@ -1264,10 +1276,12 @@ def build_dashboard_overview(window: str = "current_quarter",
         "revenue_available": bool((mart.get("summary") or {}).get("revenue_available")),
         "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
-        # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7). Its
-        # google_ads_source_sqls equals the Revenue by Source Google Ads SQL count
-        # (both read the one canonical population) — acceptance criterion #1.
+        # PR-ADS-177A: the acquisition cohort's reconciliation (the mart's),
+        # and the cohort itself — the page gates its SQL cells on THIS block.
         "sql_reconciliation": sql_reconciliation,
+        "cohort": _cohort,
+        "metric_family": _cohort.get("metric_family"),
+        "window_basis": _cohort.get("window_basis"),
         # PR-ADS-153C: canonical lifecycle funnel + cohort-safe conversions.
         # A conversion is published only when the canonical service proves it is
         # cohort-safe; unrelated period totals are never divided.

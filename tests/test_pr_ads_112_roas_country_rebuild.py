@@ -116,9 +116,13 @@ def test_country_blocked_copy():
     assert "Country revenue &amp; spend is not ready yet" in fn
     assert "ROAS" not in fn
     assert "Country spend" in fn
-    # PR-ADS-115: next action points at the real Lead Event-Date Reconciliation
-    # workflow and the geo sync — never the nonexistent "HubSpot lead re-sync".
-    assert "Lead Event-Date Reconciliation" in fn
+    # PR-ADS-115: next action points at a real workflow — never the
+    # nonexistent "HubSpot lead re-sync". PR-ADS-177A: the legacy remedy
+    # ("Lead Event-Date Reconciliation", which repaired the `leads` table no
+    # figure reads any more) is gone; a withheld cohort names the
+    # contact-funnel sync instead, and the geo sync stays.
+    assert "Lead Event-Date Reconciliation" not in fn
+    assert "COHORT_LEADS_WITHHELD_STEP" in fn
     assert "Google Ads geo sync" in fn
     assert "HubSpot lead re-sync" not in fn
 

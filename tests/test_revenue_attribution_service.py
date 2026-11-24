@@ -131,10 +131,17 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
           # NOW's morning sync, which settles every day through yesterday.
           "fetched_at": datetime(2026, 6, 20, 6, 2, tzinfo=timezone.utc)}]
         if geo_coverage is None else list(geo_coverage))}
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contacts, served from the canonical contact funnel (created inside
+    # the window; healthy sync state assessed by the real freshness rule).
+    from tests.cohort_fixture import cohort_patch, contacts_from_lead_rows
+    contacts = contacts_from_lead_rows(leads_obj["rows"],
+                                       created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc))
     with patch("db.revenue_repository.fetch_geo_coverage", return_value=geo_coverage_obj), \
          patch("db.revenue_repository.fetch_account_time_zone", return_value="Europe/London"), \
          patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
+         cohort_patch(contacts, as_of=now or NOW), \
          canonical_ledger_patch(from_legacy_deal_rows(revenue_obj.get("rows") or [])), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=canonical_obj), \
          patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage_obj), \
@@ -203,7 +210,9 @@ def test_db_path_used_when_database_available():
     assert result["spend_source"] == "google_ads_api"
     # PR-ADS-153E-B: revenue provenance names the canonical ledger.
     assert result["revenue_source"] == "hubspot_deal_ledger"
-    assert set(result["db_tables_used"]) == {"geo", "leads", "hubspot_deal_ledger"}
+    # PR-ADS-177A: leads / SQLs come from the canonical contact funnel.
+    assert set(result["db_tables_used"]) == {"geo", "hubspot_contact_funnel",
+                                             "hubspot_deal_ledger"}
 
 
 def test_local_json_missing_does_not_mean_empty_when_db_has_data():

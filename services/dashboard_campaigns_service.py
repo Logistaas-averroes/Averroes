@@ -85,6 +85,11 @@ STATUS_MAPPING_REVIEW = "Mapping needs review"
 # won deal on no campaign, an undated or conflicting won deal) or unreadable —
 # it is UNKNOWN, so the campaign is not judged on it.
 STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
+# PR-ADS-177A: the campaign's SQL count is withheld (the acquisition-cohort
+# verdict is not published) and nothing else decides its status — no won deal,
+# no revenue. "SQL producer" or "Spend without SQL proof" would each be a claim
+# about a count nobody published.
+STATUS_SQLS_WITHHELD = "SQLs withheld"
 
 UNATTRIBUTED_LABEL = "Unattributed / Needs Review"
 
@@ -210,8 +215,15 @@ def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, deals,
     if amount_unknown and (deals or 0) > 0:
         # Customers exist but their revenue can't be totalled → attribution review.
         return STATUS_ATTRIBUTION_MISSING
-    if (sqls or 0) > 0 or (deals or 0) > 0:
-        # Demand (SQLs) and/or won deals, but no proven closed-won revenue yet.
+    if (deals or 0) > 0:
+        # Won deals, but no proven closed-won revenue yet.
+        return STATUS_SQL_PRODUCER
+    if sqls is None:
+        # PR-ADS-177A: unknown is not zero — never "spend without SQL proof"
+        # (or "SQL producer") over a withheld SQL count.
+        return STATUS_SQLS_WITHHELD
+    if sqls > 0:
+        # Demand (SQLs), but no proven closed-won revenue yet.
         return STATUS_SQL_PRODUCER
     if has_spend:
         # Spend exists but no SQL/customer proof. If the USD spend is missing only
@@ -265,7 +277,13 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "native_currency": native_currency,
             "spend_usd": usd_spend,
             "fx_complete": fx_complete,
+            # PR-ADS-177A: the acquisition cohort — Google Ads contacts created
+            # in the window placed on this campaign (leads), and those proven
+            # to have reached SQL. None with the cohort's reason when withheld.
+            "leads": m.get("leads"),
             "sqls": m.get("sqls"),
+            "sqls_status": m.get("sqls_status"),
+            "sqls_reason": m.get("sqls_reason"),
             # PR-ADS-161E: closed-won DEALS, and this campaign's customers —
             # distinct proven HubSpot companies (not additive across rows).
             "closed_won_deals": m.get("closed_won_deals"),
@@ -300,7 +318,12 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "native_currency": native_currency,
             "spend_usd": None,
             "fx_complete": False,
+            # Deals that map to no campaign; contacts are not on this row (the
+            # cohort's campaign residual is `kpis.sqls_residual`).
+            "leads": None,
             "sqls": None,
+            "sqls_status": None,
+            "sqls_reason": "not_a_campaign_row",
             "closed_won_deals": deals,
             "customers": None,
             "won_revenue_usd": won,
@@ -336,9 +359,14 @@ def _build_kpis(campaign_rows: list, spend_truth: dict,
     campaigns_with_spend = sum(1 for r in google_rows
                                if (r.get("spend_native") or 0) > 0)
 
-    # SQLs: from the rows; Unavailable if any row withholds them (unsafe date grain).
-    sqls_incomplete = any(r.get("sqls") is None for r in google_rows)
-    total_sqls = None if sqls_incomplete else sum((r.get("sqls") or 0) for r in google_rows)
+    # PR-ADS-177A: leads / SQLs are the window's Google Ads ACQUISITION COHORT
+    # total — the campaign rows PLUS the contacts no campaign row holds
+    # (``cohort.campaign_residual``) — the same count every page publishes.
+    # It is the mart's, never re-summed here; None with the cohort's reason
+    # when the verdict is not published.
+    cohort = (summary or {}).get("_cohort") or {}
+    totals = cohort.get("totals") or {}
+    residual = cohort.get("campaign_residual") or {}
 
     # Won deals: Unavailable if any row withholds them — never a fabricated 0.
     # Deals add up across campaigns; customers (companies) do not, so the
@@ -359,7 +387,15 @@ def _build_kpis(campaign_rows: list, spend_truth: dict,
         "campaigns_with_spend": campaigns_with_spend,
         "verified_spend_native": {"amount": native, "currency": spend_truth.get("native_currency") or "GBP"},
         "verified_spend_usd": usd,
-        "sqls": total_sqls,
+        "leads": totals.get("leads"),
+        "sqls": totals.get("sqls"),
+        "sqls_scope": cohort.get("sqls_scope"),
+        "sqls_status": cohort.get("sql_status"),
+        "sqls_reason": cohort.get("sql_reason"),
+        # The part of `sqls` no campaign row holds (missing / pseudo / email /
+        # conflicting campaign label): Σ row sqls + sqls_residual = sqls.
+        "sqls_residual": residual.get("sqls"),
+        "leads_residual": residual.get("leads"),
         "closed_won_deals": total_deals,
         "customers": (summary or {}).get("attributed_customers"),
         "customers_metric": (((summary or {}).get("metrics") or {})
@@ -583,8 +619,10 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
         })
 
     # Watch — spend without customer proof.
+    # PR-ADS-177A: a row whose SQLs are withheld still spent and still won no
+    # deal — the claim here is about deals, which are known.
     no_proof = [r for r in google_rows if r["status"] in
-                (STATUS_SPEND_NO_PROOF, STATUS_SQL_PRODUCER)
+                (STATUS_SPEND_NO_PROOF, STATUS_SQL_PRODUCER, STATUS_SQLS_WITHHELD)
                 and (r.get("spend_native") or 0) > 0 and r.get("closed_won_deals") == 0]
     if no_proof:
         cards.append({
@@ -754,7 +792,9 @@ def _build_unavailable(kpis: dict, spend_truth: dict, keyword_themes: dict,
                               "not be read. Campaign revenue may still be canonical from the mart."})
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
-                    "reason": "SQLs withheld — lead business event dates are unavailable."})
+                    "reason": (f"Leads and SQLs withheld ({kpis.get('sqls_reason')}) — the "
+                               "acquisition cohort (contacts created in this window) is "
+                               "not proven complete as of the contact-funnel watermark.")})
     # Keyword themes carry no outcome attribution — structurally unavailable.
     out.append({"metric": "keyword_outcome_attribution",
                 "reason": "Keyword-level SQLs / customers / revenue / spend ratios have no durable attribution."})
@@ -898,8 +938,11 @@ def build_dashboard_campaigns(window: str = "current_quarter",
             c["period_revenue_per_ad_spend"] = None
             c["period_ratio_available"] = False
 
+    # PR-ADS-177A: the cohort travels with the summary so the SQL KPIs are
+    # the mart's cohort totals whether or not revenue is connected.
     kpis = _build_kpis(campaign_rows, spend_truth,
-                       summary=(mart.get("summary") or {}) if revenue_connected else {})
+                       summary={**((mart.get("summary") or {}) if revenue_connected else {}),
+                                "_cohort": mart.get("cohort") or {}})
     # PR-ADS-161E: a page total is a subset of the window — when the window
     # withholds a family, the sum of whatever rows exist (often none) is not a
     # total. Unknown, never 0.
@@ -971,12 +1014,15 @@ def build_dashboard_campaigns(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("customers") is not None
                           else canonical_contract.TRUTH_NOT_READY)},
-        {"metric": "campaign_attributable_sqls",
+        # PR-ADS-177A: the acquisition cohort's Google Ads SQLs.
+        {"metric": "google_ads_cohort_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "campaign_attributable_sqls",
+         "scope": "google_ads_cohort_sqls",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
-                          else canonical_contract.TRUTH_NOT_READY)},
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if kpis.get("sqls") is not None
+                                else kpis.get("sqls_reason"))},
     ])
 
     return {
@@ -988,7 +1034,12 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         # PR-ADS-153E-B: spend/campaign identity remain Google Ads; the closed-won
         # deals behind every campaign row are the canonical ledger.
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
-        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        # PR-ADS-177A (docs/58 §7.5 precedent): the campaign rows and the KPIs
+        # count CAMPAIGN-ATTRIBUTABLE deals (the mart's campaign view). Only
+        # the Unattributed / Needs Review row holds wider, all-source deals —
+        # it is declared separately. This said `all_source`.
+        "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "unattributed_row_revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
         "revenue_available": deal_proof_available,
         "revenue_unavailable_reason": (None if deal_proof_available
                                        else canonical.get("reason")),
@@ -1002,6 +1053,11 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         # a campaign has no deals.
         "deal_proof_available": deal_proof_available,
         "kpis": kpis,
+        # PR-ADS-177A: the acquisition cohort behind every leads / SQLs figure
+        # here (the mart's block). The page gates its SQL cells on THIS.
+        "cohort": mart.get("cohort"),
+        "metric_family": (mart.get("cohort") or {}).get("metric_family"),
+        "window_basis": (mart.get("cohort") or {}).get("window_basis"),
         "period_change": period_change,
         "campaigns": campaign_rows,
         "keyword_themes": keyword_themes,

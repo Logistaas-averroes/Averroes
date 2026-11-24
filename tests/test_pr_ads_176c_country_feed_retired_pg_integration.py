@@ -137,6 +137,12 @@ def _leads(cluster, rows):
                 "'brand - uk', 'tms', 'paid_search', %s)",
                 (run_id, contact_id, country, category, created))
         conn.commit()
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contacts in the canonical contact funnel (production writer), with a
+    # fresh contact-funnel sync state. The legacy rows above stay; nothing
+    # counts them any more.
+    from tests.cohort_fixture import seed_cohort_contacts
+    seed_cohort_contacts(rows, created=created)
 
 
 def _mart(window=WINDOW):
@@ -966,15 +972,21 @@ def test_13_unreadable_leads_are_unknown_and_spend_is_unaffected(live_db, monkey
     start, today, y = _bounds()
     _seed([_spend_rows(UK, y, 100.0)])
     _deal_sync(live_db)
-    # Readable, and none: that IS "no leads" — the number 0.
+    # Readable, and none: that IS "no leads" — the number 0. PR-ADS-177A: the
+    # leads are the acquisition cohort, so "readable" is the canonical contact
+    # funnel with a fresh sync state (production writer) and no contact in it.
+    from tests.cohort_fixture import seed_cohort_contacts
+    seed_cohort_contacts([], created=datetime.now(timezone.utc))
     rows = _by_code(_mart())
     assert (rows["GB"]["leads"], rows["GB"]["sqls"], rows["GB"]["spend"]) == (0, 0, 125.0)
 
     _leads(live_db, [("c1", "UK", "qualified")])
-    from db import revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_lead_quality",
+    # PR-ADS-177A: the cohort read is the one that fails now (it was the
+    # legacy `fetch_lead_quality`).
+    from db import crm_funnel_repository as funnel_repo
+    monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
                         lambda s, e: {"available": False, "rows": [],
-                                      "event_date_safe": False})
+                                      "missing_created_at": None})
     mart = _mart()
     rows = _by_code(mart)
     assert (rows["GB"]["leads"], rows["GB"]["sqls"]) == (None, None)

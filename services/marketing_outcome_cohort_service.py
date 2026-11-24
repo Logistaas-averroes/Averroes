@@ -269,6 +269,18 @@ def contact_identity(row: dict) -> tuple[str, bool]:
 
 
 LabelResolver = Callable[[Any], tuple[str, Any]]
+#: PR-ADS-177A: ``row -> group key`` for a second, per-contact grouping (the
+#: Revenue Decision Mart's country view). Production binds it to
+#: ``analysis.country_identity.country_key`` over :func:`contact_country`.
+GroupKey = Callable[[dict], str]
+
+
+def contact_country(row: dict):
+    """The contact's own country text, in the product's one precedence:
+    HubSpot ``ip_country``, then ``country`` (``db.writers``, the canonical
+    funnel's contact rows, the deal ledger). Never a campaign, a deal or a
+    spend row's country. ``None`` when HubSpot carries neither."""
+    return row.get("ip_country") or row.get("country") or None
 
 
 def contact_bucket(row: dict, resolve_label: LabelResolver) -> tuple[str, str | None, str | None]:
@@ -342,13 +354,22 @@ def _merge_duplicates(rows: list[dict], resolve_label: LabelResolver) -> tuple[d
 
 
 def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
-                 start_at: datetime | None, end_before: datetime) -> dict:
+                 start_at: datetime | None, end_before: datetime,
+                 group_key: GroupKey | None = None) -> dict:
     """Classify a window's acquired contacts into proven outcomes and buckets.
 
     ``rows`` are ``fetch_acquisition_cohort_contacts`` rows. Membership is
     re-tested here rather than trusted from the query, so a repository that
     ever widened its predicate would show up as ``rows_outside_window`` instead
     of silently enlarging the cohort.
+
+    ``group_key`` (PR-ADS-177A) additionally partitions every GOOGLE ADS
+    contact (``campaign`` + ``unattributed_google_ads``) by that key, into
+    ``by_group``. Every Google Ads contact lands in exactly one group, so
+    ``Σ by_group == google_ads`` by construction, re-checked by
+    :func:`reconcile_cohort`. A contact whose duplicate rows disagree on the
+    key is put under the key of an empty row (``group_key({})``) — never under
+    whichever row came first. ``by_group`` is None when no key is given.
     """
     grouped: dict[str, list[dict]] = {}
     fallback_identities = 0
@@ -375,6 +396,7 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
     excluded_sqls_with_gclid = 0
     proof_counts = {p: 0 for p in PROOF_ORDER}
     sql_identities: dict[str, dict] = {}
+    by_group: dict[str, dict] | None = {} if group_key is not None else None
 
     for ident in sorted(grouped):
         group = grouped[ident]
@@ -400,6 +422,10 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
             continue
 
         _bump(google_ads, proof)
+        if by_group is not None:
+            keys = {group_key(r) for r in group}
+            gkey = next(iter(keys)) if len(keys) == 1 else group_key({})
+            _bump(by_group.setdefault(gkey, _new_slot()), proof)
         if bucket == BUCKET_CAMPAIGN:
             _bump(by_campaign.setdefault(key, _new_slot()), proof)
         else:
@@ -429,6 +455,7 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
                   "fallback_key": f"{FALLBACK_KEY_PREFIX}<funnel_row_id>"},
         "rows_outside_window": rows_outside_window,
         "sql_identities": sql_identities,
+        "by_group": by_group,
     }
 
 
@@ -452,6 +479,13 @@ def reconcile_cohort(cohort: dict) -> list[str]:
                             f"+ excluded {ex[f]}")
         if un["without_label_row"][f] < 0:
             problems.append(f"unattributed label rows exceed the unattributed {f} total")
+    groups = cohort.get("by_group")
+    if groups is not None:
+        # PR-ADS-177A: the second partition conserves the Google Ads cohort too.
+        for f in ("contacts_acquired", "sqls", "sqls_missing_event_timestamp"):
+            grouped = sum(s[f] for s in groups.values())
+            if grouped != ga[f]:
+                problems.append(f"google_ads.{f} {ga[f]} != groups {grouped}")
     if sum(cohort["proof_counts"].values()) != al["sqls"]:
         problems.append("proof counts do not sum to all-source SQLs")
     if len(cohort["sql_identities"]) != al["sqls"]:
@@ -632,7 +666,9 @@ def sql_metric_metadata(*, cohort: dict | None, freshness: dict, attribution_sta
 
 def _jsonable_cohort(cohort: dict) -> dict:
     """The cohort without its per-identity working set (contact ids stay server-side)."""
-    return {k: v for k, v in cohort.items() if k != "sql_identities"}
+    # ``by_group`` is the caller's second partition (PR-ADS-177A, the mart's
+    # countries); Campaign Evidence's breakdown has never carried it.
+    return {k: v for k, v in cohort.items() if k not in ("sql_identities", "by_group")}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -653,7 +689,8 @@ def read_freshness(now: datetime | None = None) -> dict:
 
 def build_window_outcomes(start: date | None, end: date, *, resolve_label: LabelResolver,
                           freshness: dict | None = None,
-                          now: datetime | None = None) -> dict:
+                          now: datetime | None = None,
+                          group_key: GroupKey | None = None) -> dict:
     """Read and classify one window's acquisition cohort.
 
     Returns ``{"available", "cohort", "missing_created_at",
@@ -672,7 +709,8 @@ def build_window_outcomes(start: date | None, end: date, *, resolve_label: Label
     problems: list[str] = []
     if contacts.get("available"):
         cohort = build_cohort(contacts.get("rows") or [], resolve_label=resolve_label,
-                              start_at=start_at, end_before=end_before)
+                              start_at=start_at, end_before=end_before,
+                              group_key=group_key)
         problems = reconcile_cohort(cohort)
 
     return {

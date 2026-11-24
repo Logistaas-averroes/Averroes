@@ -112,7 +112,12 @@ def _spy_repo(monkeypatch):
 
     try:
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", cap("spend", empty))
-        monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", cap("leads", leads))
+        monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", cap("leads_legacy", leads))
+        # PR-ADS-177A: leads / SQLs are the acquisition cohort, read from the
+        # canonical contact funnel with the window's account-local instants.
+        monkeypatch.setattr("db.crm_funnel_repository.fetch_acquisition_cohort_contacts",
+                            cap("leads", {"available": True, "rows": [],
+                                          "missing_created_at": 0}))
         # PR-ADS-153E-B: revenue is read from the canonical deal ledger, so the
         # window bounds are captured THERE. The canonical read is the one that
         # must share the selected window with spend and leads now.
@@ -140,7 +145,10 @@ def test_all_sources_share_selected_window(monkeypatch):
     # Spend, leads, and revenue were all queried with that SAME window.
     expect = (date(2026, 1, 1), date(2026, 3, 31))
     assert seen["spend"] == expect
-    assert seen["leads"] == expect
+    # PR-ADS-177A: the cohort read takes the SAME days as account-local
+    # instants ([start midnight, the day after end's midnight)).
+    from services.marketing_outcome_cohort_service import window_instants
+    assert seen["leads"] == window_instants(*expect)
     # PR-ADS-153E-B: the canonical revenue read takes UTC datetimes with an
     # EXCLUSIVE upper bound (`analysis.business_windows.get_window_bounds`), so
     # 2026-01-01 .. 2026-03-31 inclusive is [2026-01-01, 2026-04-01). Same

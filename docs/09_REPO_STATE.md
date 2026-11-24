@@ -6849,3 +6849,59 @@ Details and mutation evidence: `docs/58` §8.9.
 Cases 01–03, 05 and 06 fail on `5a9b5e9`.
 
 **Next.** None from this slice.
+
+---
+
+## PR-ADS-177A — One SQL count: the acquisition cohort everywhere
+
+**Owner decision 2026-11-24.** Every page shows the same SQLs — the stricter
+acquisition cohort Campaign Evidence already publishes — accepting that they
+are withheld when the contact sync is incomplete. This PR switches the
+Revenue Decision Mart and every page that republishes it; PR-ADS-177B builds
+the one Campaigns page, PR-ADS-177C retires the old ones. Doc: `docs/59`.
+
+* **The mart** (`revenue_attribution_service._build_from_db`) no longer reads
+  `fetch_lead_quality` (`leads.status_category = 'qualified'`). It builds the
+  window's acquisition cohort once (`_read_cohort` →
+  `marketing_outcome_cohort_service.build_window_outcomes`, freshness from the
+  real `assess`) and places each Google Ads contact by the mart's OWN campaign
+  identity rule (`_mart_label_resolver`, the key its revenue rows use) and by
+  the contact's own HubSpot country (`contact_country` →
+  `country_identity.country_key`; `build_cohort(group_key=…)` partitions and
+  `reconcile_cohort` re-checks it). Every row and total's `leads` / `sqls`,
+  `metrics.leads` / `metrics.sqls`, `sqls_status` / `sqls_reason`, and a
+  `cohort` block (verdict, `metric_family`, `window_basis`, metadata, totals,
+  `campaign_residual`) on every view and every Dashboard payload.
+* **Conservation.** Campaign rows + `cohort.campaign_residual` = the total;
+  country rows + the residual row = the total; Dashboard Countries
+  `kpis.sqls` + `residual.sqls` = the total (the residual is the mart
+  residual row's, no longer a subtraction from a legacy campaign total).
+* **Withheld means absent.** A non-published verdict leaves no lead or SQL
+  count anywhere in the mart or Dashboard payloads; leads are withheld with the
+  SQLs. A withheld cohort blocks no page (`revenue_decision_ready` no longer
+  waits on the leads).
+* **Verdicts.** `sqls_unknown` (mart rows) when the verdict depends on a
+  withheld count; "SQLs withheld" on Dashboard Campaigns / Countries / Deals
+  and the regional mix. `sqls_for_verdict = 0` is gone.
+* **Labels.** "SQLs · contacts acquired in window" / "Leads · contacts
+  acquired in window"; every mart / Dashboard SQL cell goes through
+  `cohortCountHtml(value, cohort, row)` with the response's own cohort.
+  Dashboard Deals' legacy backlog and source breakdown are relabelled
+  "Qualified (lead status)". Dashboard Campaigns' `revenue_scope` now says
+  `campaign_attributable` (it said `all_source`).
+* **Audits.** `audit_marketing_outcome_cohorts` scans the mart's two views and
+  the five Dashboard payloads for every business window
+  (`mart_withheld_exposures`, `mart_conservation_problems`).
+  `cross_page_parity_service`: identities `google_ads_cohort_sqls` /
+  `google_ads_cohort_leads`, the conservation rule over the cohort, and
+  `cohort_sql_parity` (Countries page = Dashboard Countries = Campaign Evidence
+  over the same settled days; Campaign Evidence gains `bounds=`). SQL-doctrine
+  inventory: 10 canonical / 11 legacy / 9 mixed, 0 unknown.
+* **Tests.** `tests/test_pr_ads_177a_one_sql_count.py` (41) and
+  `tests/test_pr_ads_177a_one_sql_count_pg_integration.py` (13, PG step and
+  did-run list). Mock-based mart tests feed the same contacts through the
+  canonical funnel (`tests/cohort_fixture.py`); each changed test is listed
+  in `docs/59` §9.2.
+
+**Next.** PR-ADS-177B (the one Campaigns page). Remaining legacy SQL readers,
+all labelled and none mart-derived, are listed in `docs/59` §8.

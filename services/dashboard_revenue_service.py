@@ -350,6 +350,11 @@ def _build_customer_trend(bounds, deal_rows: list, lead_rows: list, *,
         "points": points,
         "deals_status": "ready" if revenue_ready else "unavailable",
         "sqls_status": "ready" if sqls_ready else "unavailable",
+        # PR-ADS-177A: this series is NOT the acquisition cohort `kpis.sqls`
+        # publishes — it is the legacy lead-status population per day
+        # (fetch_lead_daily_series). No page renders it; declared so an API
+        # reader never sums it into the cohort count.
+        "sqls_metric_family": "legacy_lead_status_category",
     }
 
 
@@ -910,15 +915,18 @@ def build_dashboard_revenue(window: str = "current_quarter",
                           and summary.get("customers_status") == "published"
                           else canonical_contract.TRUTH_NOT_READY),
          "unavailable_reason": summary.get("customers_reason")},
-        # The SQL headline is the mart's campaign-attributable population, NOT
-        # all-source business revenue — a separate identity with its own scope,
-        # so it carries its own contract rather than borrowing the revenue one.
-        {"metric": "campaign_attributable_sqls",
+        # The SQL headline is the mart's acquisition cohort, NOT all-source
+        # business revenue — a separate identity with its own scope, so it
+        # carries its own contract rather than borrowing the revenue one.
+        # PR-ADS-177A: the acquisition cohort's Google Ads SQLs (the mart's).
+        {"metric": "google_ads_cohort_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "campaign_attributable_sqls",
+         "scope": "google_ads_cohort_sqls",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
-                          else canonical_contract.TRUTH_NOT_READY)},
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if kpis.get("sqls") is not None
+                                else (mart.get("cohort") or {}).get("sql_reason"))},
     ])
 
     return {
@@ -928,6 +936,10 @@ def build_dashboard_revenue(window: str = "current_quarter",
         "truth_status": truth_status,
         canonical_contract.METRIC_TRUTH_KEY: _mt,
         "kpis": kpis,
+        # PR-ADS-177A: the acquisition cohort behind `kpis.sqls` (the mart's).
+        "cohort": mart.get("cohort"),
+        "metric_family": (mart.get("cohort") or {}).get("metric_family"),
+        "window_basis": (mart.get("cohort") or {}).get("window_basis"),
         "period_change": period_change,
         "revenue_trend": revenue_trend,
         "customer_trend": customer_trend,

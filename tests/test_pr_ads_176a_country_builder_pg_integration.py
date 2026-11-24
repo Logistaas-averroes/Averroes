@@ -464,6 +464,11 @@ def _lead(cluster, contact_id, country):
             "'brand - uk', 'tms', 'paid_search', %s)",
             (run_id, contact_id, country, created))
         conn.commit()
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contact in the canonical contact funnel (production writer), with a
+    # fresh contact-funnel sync state.
+    from tests.cohort_fixture import seed_cohort_contacts
+    seed_cohort_contacts([(contact_id, country, "junk")], created=created)
 
 
 def test_12_regional_mix_never_states_a_zero_over_an_unknown_spend(live_db, monkeypatch):

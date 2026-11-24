@@ -85,6 +85,9 @@ STATUS_SQL_PRODUCER = "SQL producer"
 STATUS_NO_ACTIVITY = "No activity in window"
 # PR-ADS-161E: the row's closed-won deal count is withheld or unreadable.
 STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
+# PR-ADS-177A: a row whose SQL count is withheld (the acquisition cohort's
+# verdict is not published) and that has no won deal is not judged on SQLs.
+STATUS_SQLS_WITHHELD = "SQLs withheld"
 
 # The single, precise reason every open-pipeline / lost / aging field carries.
 OPEN_PIPELINE_REASON = (
@@ -218,6 +221,11 @@ def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
         "sql_to_customer_rate_status": cwt.UNAVAILABLE,
         "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
         "sqls_not_closed_won": sqls_not_closed_won,
+        # PR-ADS-177A: `sqls` above is the acquisition cohort; this count is
+        # NOT — it is the legacy lead-status population (leads.status_category
+        # = 'qualified', fetch_sql_lead_details), declared as such so it is
+        # never read as a subset of `sqls`.
+        "sqls_not_closed_won_metric_family": "legacy_lead_status_category",
         # This tab never computes or exposes a spend ratio (period ratios
         # belong to the spend pages; ROAS / CAC are unavailable everywhere), so
         # the mart's metric block is republished without them.
@@ -311,7 +319,11 @@ def _source_status(sqls, deals, won) -> str:
         return STATUS_OUTCOME_WITHHELD
     if deals > 0:
         return STATUS_REVENUE_PROVEN
-    if (sqls or 0) > 0:
+    if sqls is None:
+        # PR-ADS-177A: unknown is not zero — never "no activity" over a
+        # withheld SQL count.
+        return STATUS_SQLS_WITHHELD
+    if sqls > 0:
         return STATUS_SQL_PRODUCER
     return STATUS_NO_ACTIVITY
 
@@ -371,12 +383,16 @@ def _build_campaign_breakdown(mart_campaign_rows: list, revenue_connected: bool,
             won = None
         else:
             won = _round2(m.get("won_revenue"))
-        # Skip pure-noise rows with no SQLs and no won deals.
-        if (sqls or 0) == 0 and (deals or 0) == 0 and (won or 0) == 0:
+        # Skip pure-noise rows with no SQLs and no won deals. PR-ADS-177A: a
+        # withheld SQL count is not "no SQLs" — the row stays, marked withheld.
+        if sqls is not None and sqls == 0 and (deals or 0) == 0 and (won or 0) == 0:
             continue
         out.append({
             "campaign_name": name,
+            # PR-ADS-177A: the mart campaign row's acquisition-cohort SQLs.
             "sqls": sqls,
+            "sqls_status": m.get("sqls_status"),
+            "sqls_reason": m.get("sqls_reason"),
             "opportunities": None,
             "open_pipeline_usd": None,
             "closed_won_deals": deals,
@@ -816,12 +832,15 @@ def build_dashboard_deals(window: str = "current_quarter",
                           and summary.get("customers_status") == "published"
                           else canonical_contract.TRUTH_NOT_READY),
          "unavailable_reason": summary.get("customers_reason")},
-        {"metric": "campaign_attributable_sqls",
+        # PR-ADS-177A: the acquisition cohort's Google Ads SQLs (the mart's).
+        {"metric": "google_ads_cohort_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "campaign_attributable_sqls",
+         "scope": "google_ads_cohort_sqls",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
-                          else canonical_contract.TRUTH_NOT_READY)},
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if kpis.get("sqls") is not None
+                                else (mart.get("cohort") or {}).get("sql_reason"))},
     ])
 
     return {
@@ -847,6 +866,11 @@ def build_dashboard_deals(window: str = "current_quarter",
         "canonical_totals": canonical_totals,
         "legacy_fallback_used": False,
         "kpis": kpis,
+        # PR-ADS-177A: the acquisition cohort behind `kpis.sqls` and the
+        # campaign breakdown's SQLs (the mart's block).
+        "cohort": mart.get("cohort"),
+        "metric_family": (mart.get("cohort") or {}).get("metric_family"),
+        "window_basis": (mart.get("cohort") or {}).get("window_basis"),
         "period_change": period_change,
         "funnel": funnel,
         "stage_mix": stage_mix,

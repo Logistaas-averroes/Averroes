@@ -130,6 +130,7 @@ jobs:
             tests/test_pr_ads_176a_country_builder_pg_integration.py \
             tests/test_pr_ads_176b_countries_pg_integration.py \
             tests/test_pr_ads_176c_country_feed_retired_pg_integration.py \
+            tests/test_pr_ads_177a_one_sql_count_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -274,6 +275,13 @@ jobs:
                            # 170A cases asserted on that payload, on the mart
                            # country view and Dashboard → Countries.
                            "tests.test_pr_ads_176c_country_feed_retired_pg_integration",
+                           # PR-ADS-177A. One SQL count: the mart, every
+                           # Dashboard tab and the Countries page publish the
+                           # acquisition cohort (not legacy lead status);
+                           # rows + residual conserve it; a withheld cohort
+                           # exposes no count and judges no verdict on it;
+                           # parity with Campaign Evidence over the same days.
+                           "tests.test_pr_ads_177a_one_sql_count_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

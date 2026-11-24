@@ -209,6 +209,12 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
                       "event_date_safe": True, "missing_contact_created_at_count": 0,
                       "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0},
     )
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contacts, served from the canonical contact funnel (created in the
+    # window; healthy sync state assessed by the real freshness rule).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        leads, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW)
     monkeypatch.setattr(
         repo, "fetch_won_revenue",
         lambda s, e: {"available": True, "rows": list(won),
@@ -655,15 +661,14 @@ def test_decision_cards_link_to_evidence_pages(monkeypatch):
 
 
 def test_withheld_lead_metrics_degrade_watch_and_waste_honestly(monkeypatch):
-    import db.revenue_repository as repo
+    # PR-ADS-177A: lead metrics are withheld by the ACQUISITION COHORT's verdict
+    # (here: the contact-funnel bootstrap is still running, assessed by the real
+    # freshness rule) — the legacy `event_date_safe` gate no longer exists.
     _patch_durable(monkeypatch)
-    monkeypatch.setattr(
-        repo, "fetch_lead_quality",
-        lambda s, e: {"available": True, "rows": [], "event_date_safe": False,
-                      "missing_contact_created_at_count": 7,
-                      "excluded_non_paid_count": 0,
-                      "excluded_pseudo_campaign_count": 0},
-    )
+    from tests.cohort_fixture import contacts_from_lead_rows, healthy_sync_row, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        LEAD_ROWS, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW,
+        sync_row={**healthy_sync_row(NOW), "bootstrap_status": "running"})
     from services.dashboard_overview_service import build_dashboard_overview
     out = build_dashboard_overview(WINDOW, now=NOW)
     assert out["kpis"]["sqls"] is None

@@ -175,6 +175,12 @@ def _patch_durable(monkeypatch, *, won_rows=None, deal_rows=None, canonical=None
                         lambda s, e: {"available": True, "rows": list(LEAD_ROWS),
                                       "event_date_safe": True, "missing_contact_created_at_count": 0,
                                       "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contacts, served from the canonical contact funnel (created in the
+    # window; healthy sync state assessed by the real freshness rule).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        LEAD_ROWS, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW)
     monkeypatch.setattr(repo, "fetch_won_revenue",
                         lambda s, e: {"available": True, "rows": list(won),
                                       "coverage_start": "2026-01-01", "coverage_end": "2026-06-22"})
@@ -326,6 +332,12 @@ def test_rates_unavailable_when_denominator_missing(monkeypatch):
                         lambda s, e: {"available": True, "rows": [], "event_date_safe": False,
                                       "missing_contact_created_at_count": 5,
                                       "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the SQL count is withheld by the acquisition cohort's own
+    # verdict (bootstrap still running, by the real freshness rule).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort, withheld_sync_row
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        LEAD_ROWS, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW,
+        sync_row=withheld_sync_row(NOW))
     from services.dashboard_revenue_service import build_dashboard_revenue
     out = build_dashboard_revenue(WINDOW, now=NOW)
     k = out["kpis"]

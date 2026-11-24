@@ -91,6 +91,10 @@ STATUS_NO_SPEND = "No spend in window"
 # PR-ADS-161E: the market's closed-won deal count is withheld or unreadable —
 # unknown, so the market is not judged on it.
 STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
+# PR-ADS-177A: the market's SQL count is withheld (the acquisition-cohort
+# verdict is not published) and no won deal decides its status — "SQL
+# producer" or "Spend without a won deal" would claim something about it.
+STATUS_SQLS_WITHHELD = "SQLs withheld"
 
 
 def _deal_proof_reason_text(reason) -> str:
@@ -466,7 +470,11 @@ def _country_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
         # Won deals exist but their revenue is not proven (unknown / zero
         # amount). Deals, not customers (PR-ADS-176A).
         return STATUS_WON_DEAL_REVENUE_UNPROVEN
-    if (sqls or 0) > 0:
+    if sqls is None:
+        # PR-ADS-177A: unknown is not zero. "Spend without a won deal" is a
+        # statement about deals, but in this ladder it means "no SQL either".
+        return STATUS_SQLS_WITHHELD
+    if sqls > 0:
         return STATUS_SQL_PRODUCER
     if has_spend:
         # Spend exists but no SQL and no won deal.
@@ -583,7 +591,12 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             # PR-ADS-176B-F2: the owner-labelled criteria a published $0
             # rests on ([] for any other spend).
             "zero_rests_on_owner_labels": zero_rests_on,
+            # PR-ADS-177A: the acquisition cohort's Google Ads contacts placed
+            # by their own HubSpot country, and those proven to reach SQL.
+            "leads": m.get("leads"),
             "sqls": m.get("sqls"),
+            "sqls_status": m.get("sqls_status"),
+            "sqls_reason": m.get("sqls_reason"),
             "closed_won_deals": customers,
             # PR-ADS-161E: this market's customers — distinct proven HubSpot
             # companies, not additive across markets.
@@ -628,7 +641,8 @@ def _residual_gap(total, real_rows: list, key: str):
 
 def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
                     mart_residual_row: dict | None, residual_amount_unknown: bool,
-                    revenue_connected: bool, geo_maps: dict | None = None) -> dict:
+                    revenue_connected: bool, geo_maps: dict | None = None,
+                    cohort: dict | None = None) -> dict:
     """The explicit 'Unknown / Unattributed country' bucket — the CANONICAL residual.
 
     Residual customers / revenue / SQLs are derived from the canonical Revenue
@@ -640,11 +654,22 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
     assign to a country) is carried from spend_truth (with the mart residual row as
     a fallback). It is never mapped, never given a spend ratio, never a drawer.
     """
+    # PR-ADS-177A: the residual's leads / SQLs are the mart residual ROW's —
+    # the acquisition cohort's Google Ads contacts whose own country is no
+    # listed market (or none) — never the window total minus the market rows
+    # (which subtracted a legacy campaign-attributable count from country
+    # rows). With no residual row the cohort placed nobody there: 0 under a
+    # published verdict, None otherwise. Independent of the revenue side.
+    _c_published = (cohort or {}).get("sql_status") == cwt.PUBLISHED
+    if mart_residual_row is not None:
+        sqls = mart_residual_row.get("sqls")
+        leads = mart_residual_row.get("leads")
+    else:
+        sqls = leads = (0 if _c_published else None)
     if not revenue_connected:
         # Customers AND revenue come from the revenue integration → unknown.
         customers = None
         won = None
-        sqls = None
     else:
         # PR-ADS-161E: the country rows partition the GOOGLE ADS-SOURCE deals,
         # so the residual subtracts them from that scope's canonical total —
@@ -653,8 +678,6 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
         gap = _residual_gap(summary.get("google_ads_source_closed_won_deals"),
                             real_rows, "closed_won_deals")
         customers = None if gap is None else int(round(gap))
-        gap_sqls = _residual_gap(summary.get("sqls"), real_rows, "sqls")
-        sqls = None if gap_sqls is None else int(round(gap_sqls))
         # Revenue: canonical mart residual, withheld if a residual deal has an
         # unknown amount (the mart total counts it as $0, so the derived residual
         # would be lowered) — never a fabricated / lowered $0.
@@ -684,7 +707,12 @@ def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
         "label": RESIDUAL_LABEL,
         "closed_won_deals": customers,
         "won_revenue_usd": won,
+        "leads": leads,
         "sqls": sqls,
+        "sqls_status": (mart_residual_row or {}).get("sqls_status")
+        or (cohort or {}).get("sql_status"),
+        "sqls_reason": (mart_residual_row or {}).get("sqls_reason")
+        if mart_residual_row is not None else (cohort or {}).get("sql_reason"),
         "spend_native": native,
         "spend_usd": usd,
         "native_currency": spend_truth.get("native_currency") or "GBP",
@@ -732,6 +760,9 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
 
     sqls_incomplete = any(r.get("sqls") is None for r in country_rows)
     total_sqls = None if sqls_incomplete else sum((r.get("sqls") or 0) for r in country_rows)
+    # PR-ADS-177A: leads beside SQLs, the same cohort and the same rule.
+    leads_incomplete = any(r.get("leads") is None for r in country_rows)
+    total_leads = None if leads_incomplete else sum((r.get("leads") or 0) for r in country_rows)
 
     # Customers / revenue are Unavailable when the revenue integration is
     # disconnected (covers the empty-rows case, where per-row blanking has nothing
@@ -780,14 +811,16 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
         "verified_spend_native": {"amount": verified_native,
                                   "currency": spend_truth.get("native_currency") or "GBP"},
         "verified_spend_usd": verified_usd,
+        "leads": total_leads,
         "sqls": total_sqls,
         # PR-ADS-154C-F3: name the population. This is the sum over REAL country
-        # rows; the SQLs that could not be assigned to a country are in
-        # `residual.sqls`, and the two together are the campaign-attributable
-        # total. Without this the KPI reads as "SQLs" and is quietly a subset —
-        # the same trap the Overview closed with `sqls_scope` in PR-ADS-152.
+        # rows; the SQLs no listed market holds are in `residual.sqls`, and the
+        # two together are the window's Google Ads acquisition-cohort total
+        # (PR-ADS-177A) — the count every page publishes. Without this the KPI
+        # reads as "SQLs" and is quietly a subset.
         "sqls_scope": "country_attributed_sqls",
         "sqls_residual": residual.get("sqls"),
+        "leads_residual": residual.get("leads"),
         "closed_won_deals": total_closed_won_deals,
         "won_revenue_usd": total_won,
         "geo_period_revenue_per_ad_spend": geo_ratio,
@@ -851,7 +884,10 @@ def _build_regional_mix(country_rows: list, country_roas_unblockable: bool) -> l
             status = STATUS_REVENUE_PROVEN
         elif customers > 0:
             status = STATUS_WON_DEAL_REVENUE_UNPROVEN
-        elif (sqls or 0) > 0:
+        elif sqls is None:
+            # PR-ADS-177A: the country rule — unknown SQLs are not zero.
+            status = STATUS_SQLS_WITHHELD
+        elif sqls > 0:
             status = STATUS_SQL_PRODUCER
         elif (native or 0) > 0:
             status = STATUS_SPEND_NO_WON_DEAL
@@ -970,8 +1006,11 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
         })
 
     # Watch — spend without a won deal.
+    # PR-ADS-177A: a market whose SQLs are withheld still spent and still won
+    # no deal — this card's claim is about deals, which are known.
     no_proof = [r for r in country_rows if r["status"] in
-                (STATUS_SPEND_NO_WON_DEAL, STATUS_SQL_PRODUCER, STATUS_FX_UNAVAILABLE)
+                (STATUS_SPEND_NO_WON_DEAL, STATUS_SQL_PRODUCER, STATUS_FX_UNAVAILABLE,
+                 STATUS_SQLS_WITHHELD)
                 and (r.get("spend_native") or 0) > 0 and r.get("closed_won_deals") == 0]
     if no_proof:
         cards.append({
@@ -1163,7 +1202,9 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
                                f"{_deal_proof_reason_text(deal_proof_reason)}.")})
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
-                    "reason": "SQLs withheld — lead business event dates are unavailable."})
+                    "reason": (f"Leads and SQLs withheld ({kpis.get('sqls_reason')}) — the "
+                               "acquisition cohort (contacts created in this window) is "
+                               "not proven complete as of the contact-funnel watermark.")})
     # Residual revenue: withheld either because the revenue integration is
     # disconnected (customers also unknown) or because a residual closed-won deal
     # has an unknown amount (customers still countable). Use the exact KPI field
@@ -1277,9 +1318,14 @@ def _assemble(window: str, now: datetime | None) -> dict:
 
     residual = _build_residual(summary, country_rows, spend_truth, mart_residual_row,
                                residual_amount_unknown, revenue_connected,
-                               geo_maps=geo_maps if geo_available else None)
+                               geo_maps=geo_maps if geo_available else None,
+                               cohort=mart.get("cohort") or {})
     kpis = _build_kpis(country_rows, residual, spend_truth, country_roas_unblockable,
                        geo_available, revenue_connected, geo_maps=geo_maps)
+    # PR-ADS-177A: the cohort's verdict on the SQL / lead KPIs.
+    _cohort = mart.get("cohort") or {}
+    kpis["sqls_status"] = _cohort.get("sql_status")
+    kpis["sqls_reason"] = _cohort.get("sql_reason")
     # PR-ADS-161E: the window's canonical verdicts — a country total is a
     # subset of the window, so when the window withholds it the card says why.
     # Only a NON-published verdict travels: a published one has nothing to add.
@@ -1305,6 +1351,8 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "window_block": window_block,
         "spend_truth": spend_truth,
         "readiness": readiness,
+        # PR-ADS-177A: the acquisition cohort behind every leads / SQLs figure.
+        "cohort": mart.get("cohort"),
         "country_rows": country_rows,
         "owner_labelled_geo": {
             "criteria": list(owner_labelled_geo.get("criteria") or []),
@@ -1380,14 +1428,16 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
     # geography: spend, revenue, the deal count and its proof, customers, and
     # the SQL split whose partition geo decides.
     row_geo_figures = ("spend_usd", "won_revenue_usd", "closed_won_deals",
-                       "customers", "sqls", "period_revenue_per_ad_spend")
+                       "customers", "leads", "sqls", "period_revenue_per_ad_spend")
     reason = next(iter(spend_truth.get("country_gap_codes") or []),
                   None) or "country_geo_not_ready"
     # PR-ADS-176C-F1 (finding F2): the mart's rule, not "coverage complete".
     keep_native = geo_gate.native_country_spend_publishable(
         spend_truth.get("country_gap_codes"))
     kpis = {**kpis, "verified_spend_usd": None, "won_revenue_usd": None,
-            "closed_won_deals": None, "sqls": None}
+            "closed_won_deals": None, "sqls": None, "leads": None,
+            "sqls_residual": None, "leads_residual": None,
+            "sqls_status": cwt.UNAVAILABLE, "sqls_reason": reason}
     if not keep_native and isinstance(kpis.get("verified_spend_native"), dict):
         kpis["verified_spend_native"] = {**kpis["verified_spend_native"],
                                          "amount": None}
@@ -1415,12 +1465,15 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
         row = {**r, **{k: None for k in row_geo_figures},
                "metrics": None, "deals": None, "period_ratio_available": False,
                "status": STATUS_COUNTRY_FIGURES_WITHHELD,
+               "sqls_status": cwt.UNAVAILABLE, "sqls_reason": reason,
                "withheld_reason": reason}
         if not keep_native:
             row["spend_native"] = None
         out_rows.append(row)
     residual = {**(residual or {}), "closed_won_deals": None,
-                "won_revenue_usd": None, "sqls": None, "spend_usd": None,
+                "won_revenue_usd": None, "sqls": None, "leads": None,
+                "sqls_status": cwt.UNAVAILABLE, "sqls_reason": reason,
+                "spend_usd": None,
                 # PR-ADS-176A: withheld with the spend it itemises.
                 "outside_listed_market_items": None,
                 "withheld_reason": reason}
@@ -1610,7 +1663,11 @@ def build_dashboard_countries(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
                           else canonical_contract.TRUTH_NOT_READY),
-         "unavailable_reason": (None if _geo_ready else _geo_gap_reason),
+         # PR-ADS-177A: a ready geo gate with a withheld cohort names the
+         # cohort's reason, not none.
+         "unavailable_reason": (None if kpis.get("sqls") is not None
+                                else _geo_gap_reason if not _geo_ready
+                                else kpis.get("sqls_reason")),
          "customer_id": spend_truth.get("customer_id")},
         {"metric": "country_unattributed_residual_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
@@ -1618,7 +1675,9 @@ def build_dashboard_countries(window: str = "current_quarter",
          "truth_status": (canonical_contract.TRUTH_READY
                           if residual.get("sqls") is not None
                           else canonical_contract.TRUTH_NOT_READY),
-         "unavailable_reason": (None if _geo_ready else _geo_gap_reason),
+         "unavailable_reason": (None if residual.get("sqls") is not None
+                                else _geo_gap_reason if not _geo_ready
+                                else residual.get("sqls_reason")),
          "customer_id": spend_truth.get("customer_id")},
     ])
 
@@ -1661,6 +1720,11 @@ def build_dashboard_countries(window: str = "current_quarter",
             "fallback_used": False,
         },
         "kpis": kpis,
+        # PR-ADS-177A: the acquisition cohort behind every leads / SQLs figure
+        # here (the mart's block). The page gates its SQL cells on THIS.
+        "cohort": core.get("cohort"),
+        "metric_family": (core.get("cohort") or {}).get("metric_family"),
+        "window_basis": (core.get("cohort") or {}).get("window_basis"),
         "period_change": period_change,
         "countries": country_rows,
         # PR-ADS-170A: the window's Google criteria whose country is the

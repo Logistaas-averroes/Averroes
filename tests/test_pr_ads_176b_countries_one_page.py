@@ -62,7 +62,7 @@ def _market(name, code, region, spend, *, leads=1, sqls=0, deals=1, revenue=1000
         "spend": spend, "spend_reason": spend_reason, "leads": leads, "sqls": sqls,
         "closed_won_deals": deals, "customers": None, "won_revenue": revenue,
         "period_revenue_per_ad_spend": ratio, "verdict": verdict,
-        "verdict_reason": verdict_reason, "lead_scope": "paid_search_with_campaign",
+        "verdict_reason": verdict_reason, "lead_scope": "google_ads_cohort_contacts_by_contact_country",
         "deal_ids": [f"d-{code}"] if deals is not None else None,
         "metrics": {
             "closed_won_deals": _metric(deals), "revenue_usd": _metric(revenue),
@@ -115,7 +115,7 @@ def _mart(status="verified", *, rows=None, totals=None, gaps=(), primary=None, m
     totals = totals if totals is not None else {
         "spend": None, "leads": 3, "sqls": 0, "closed_won_deals": 3, "won_revenue": 6900.0,
         "period_revenue_per_ad_spend": None, "markets": 2, "population": "listed_markets",
-        "revenue_scope": "google_ads_source", "lead_scope": "paid_search_with_campaign",
+        "revenue_scope": "google_ads_source", "lead_scope": "google_ads_cohort_contacts_by_contact_country",
         "metrics": {
             "spend": _metric(None, "unavailable", "spend_location_unresolved",
                              blocked_by_country="Pakistan"),
@@ -135,6 +135,11 @@ def _mart(status="verified", *, rows=None, totals=None, gaps=(), primary=None, m
                         "country_gap_codes": list(gaps), "country_gap_primary": primary,
                         "country_gap_message": message},
         "rows": rows, "country_totals": totals,
+        # PR-ADS-177A: the mart's own shape carries the acquisition cohort that
+        # every leads / SQLs cell gates on (published here).
+        "cohort": {"sql_status": "published", "sql_reason": None,
+                   "metric_family": "acquisition_cohort_outcomes",
+                   "window_basis": "contact_created_at"},
         "regional_mix": [
             {"region": "Europe", "countries": 1, "spend": 250.0, "sqls": 0,
              "closed_won_deals": 2, "won_revenue": 6000.0,
@@ -219,7 +224,9 @@ def test_04_no_lead_quality_column_on_the_page():
     html = _page(_mart())
     head = re.search(r"<thead>(.*?)</thead>", html, re.DOTALL).group(1)
     cols = [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<th[^>]*>(.*?)</th>", head)]
-    assert cols == ["Country", "Region", "Spend", "Leads", "SQLs", "Won Deals", "Customers",
+    # PR-ADS-177A: the Leads / SQLs headers say what they count.
+    assert cols == ["Country", "Region", "Spend", "Leads · contacts acquired in window",
+                    "SQLs · contacts acquired in window", "Won Deals", "Customers",
                     "Won Revenue", "Period Revenue / Ad Spend", "Decision"]
     for word in LEAD_QUALITY:
         assert f">{word}<" not in html, word
@@ -522,10 +529,13 @@ def test_20_the_lead_population_and_the_labels_say_what_is_counted():
     rows, totals, _ = _country_page_blocks(
         [{"country": "United Kingdom", "country_code": "GB", "is_residual": False,
           "spend": 1.0, "leads": 1, "sqls": 0, "closed_won_deals": 0, "won_revenue": 0.0}], st)
-    assert totals["lead_scope"] == rows[0]["lead_scope"] == "paid_search_with_campaign"
+    # PR-ADS-177A: the population is the acquisition cohort, by the contact's
+    # own country — declared and labelled.
+    assert totals["lead_scope"] == rows[0]["lead_scope"] == \
+        "google_ads_cohort_contacts_by_contact_country"
     assert totals["revenue_scope"] == "google_ads_source"
     html = _page(_mart())
-    assert "Paid-search leads with a campaign" in html
+    assert "Acquisition cohort · Google Ads contacts created in this window" in html
     assert "Geo ↔ campaign spend reconciliation · Verified" in html
     assert "Country spend · Verified" not in html
     rev = re.search(r'data-kpi="revenue".*?dash-kpi-card__source', html, re.S).group(0)

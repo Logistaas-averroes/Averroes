@@ -129,8 +129,13 @@ def test_blocked_state_helpers_exist():
 
 def test_blocked_decision_logic():
     fn = _fn("function isRevenueDecisionReady", span=400)
-    assert 'lead_date_grain_status === "event_date"' in fn
-    assert 'lead_metrics_status !== "withheld"' in fn
+    # PR-ADS-177A: leads / SQLs are the acquisition cohort, withheld figure by
+    # figure with the reason; a withheld cohort blocks no page (owner
+    # decision 2026-11-24). Readiness is the revenue fact alone, and the
+    # lead state is read separately for the blocked card's chip.
+    assert "lead_date_grain_status" not in fn.split("function cohortLeadsReady")[0]
+    helper_leads = _fn("function cohortLeadsReady", span=300)
+    assert 'st !== "withheld" && st !== "unavailable"' in helper_leads
     # PR-ADS-115: readiness keys off whether the revenue source is available,
     # so a connected-but-empty window is a safe empty state, not a block.
     # PR-ADS-161E: that fact is the CANONICAL closed-won verdict — the legacy

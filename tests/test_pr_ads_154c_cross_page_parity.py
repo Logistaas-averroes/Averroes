@@ -230,8 +230,8 @@ def _payloads(**overrides):
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
                 ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
-                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"),
-                ("campaign_attributable_leads", _MART, "campaign_attributable_leads"),
+                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"),
+                ("google_ads_cohort_leads", _MART, "google_ads_cohort_leads"),
                 *[(f"lifecycle_{s}", _FUNNEL, f"lifecycle_{s}")
                   for s in ("leads", "mqls", "sqls", "opportunities", "customers")])},
         "dashboard/revenue": {
@@ -243,7 +243,7 @@ def _payloads(**overrides):
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
                 ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
-                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
+                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
         "dashboard/channels": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_by_source_taxonomy",
@@ -274,7 +274,7 @@ def _payloads(**overrides):
                  "campaign_attributable_revenue"),
                 ("campaign_attributed_customers", _MART,
                  "campaign_attributable_revenue"),
-                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
+                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
         "dashboard/countries": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_decision_mart_country_view",
@@ -308,7 +308,7 @@ def _payloads(**overrides):
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
                 ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
-                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
+                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
         "revenue_decision_mart": {
             "window": dict(_WIN),
             # Coverage proof is per metric: campaign spend needs campaign AND FX
@@ -337,9 +337,9 @@ def _payloads(**overrides):
                  "campaign_attributable_revenue"),
                 ("campaign_attributed_customers", _MART,
                  "campaign_attributable_revenue"),
-                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"),
-                ("campaign_attributable_leads", _MART,
-                 "campaign_attributable_leads"))},
+                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"),
+                ("google_ads_cohort_leads", _MART,
+                 "google_ads_cohort_leads"))},
     }
     for name, patch in overrides.items():
         target = base[name.replace("__", "/")]
@@ -558,7 +558,9 @@ LEGACY_READ_REGISTRY = {
     ("services/revenue_attribution_service.py", "fetch_campaign_country_spend"): "diagnostic",
     ("services/revenue_attribution_service.py", "fetch_campaign_pollution_report"): "diagnostic",
     ("services/revenue_attribution_service.py", "fetch_lead_date_grain_health"): "diagnostic",
-    ("services/revenue_attribution_service.py", "fetch_lead_quality"): "detail_rows",
+    # PR-ADS-177A: ("services/revenue_attribution_service.py",
+    # "fetch_lead_quality") stood here. The mart's leads / SQLs are the
+    # acquisition cohort; it no longer reads the legacy `leads` table.
     # PR-ADS-168B: the Revenue by Source drawer read (fetch_source_contact_details)
     # is deleted with build_source_platform_detail.
 }
@@ -1167,12 +1169,12 @@ def test_f2_2b_the_three_sql_populations_are_never_compared():
     from services.cross_page_parity_service import DISTINCT_BY_DESIGN, METRIC_IDENTITIES
 
     scopes = {k: METRIC_IDENTITIES[k]["scope"] for k in
-              ("lifecycle_sqls", "campaign_attributable_sqls", "source_group_sqls")}
+              ("lifecycle_sqls", "google_ads_cohort_sqls", "source_group_sqls")}
     assert len(set(scopes.values())) == 3, scopes
 
     pairs = {frozenset((d["left"], d["right"])) for d in DISTINCT_BY_DESIGN}
-    assert frozenset(("campaign_attributable_sqls", "source_group_sqls")) in pairs
-    assert frozenset(("campaign_attributable_sqls", "lifecycle_sqls")) in pairs
+    assert frozenset(("google_ads_cohort_sqls", "source_group_sqls")) in pairs
+    assert frozenset(("google_ads_cohort_sqls", "lifecycle_sqls")) in pairs
     # And no identity puts two of them under one roof.
     for key, spec in METRIC_IDENTITIES.items():
         paths = {p for _, p in spec["consumers"]}
@@ -1244,7 +1246,7 @@ def test_f2_3b_a_contract_naming_a_different_window_key_fails(monkeypatch):
     together. The requested key is now checked too.
     """
     out = _audit_with(monkeypatch, _payloads(dashboard__campaigns={
-        f"{contract_mod.METRIC_TRUTH_KEY}.campaign_attributable_sqls.window": "ytd"}))
+        f"{contract_mod.METRIC_TRUTH_KEY}.google_ads_cohort_sqls.window": "ytd"}))
     assert out["ok"] is False
     assert parity.V_CONTRACT_INVALID in out["violation_codes"]
     detail = " ".join(v.get("detail", "") for v in out["violations"])
@@ -1395,7 +1397,7 @@ def test_f2_4d_an_empty_contacts_table_is_not_a_measured_zero(monkeypatch):
                       "readiness.lead_metrics_ready": False}):
         out = _audit_with(monkeypatch, _payloads(revenue_decision_mart=override))
         assert out["ok"] is False
-        for key in ("campaign_attributable_sqls", "campaign_attributable_leads",
+        for key in ("google_ads_cohort_sqls", "google_ads_cohort_leads",
                     "source_group_sqls"):
             entry = next(m for m in out["metrics"] if m["metric"] == key)
             assert entry["status"] == "unproven", (key, override)
@@ -1437,6 +1439,18 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
     import scripts.audit_cross_page_canonical_parity as cli
 
     t138._patch_durable(monkeypatch)
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort, whose
+    # read honours its window as the SQL does. The CLI audits the CURRENT
+    # quarter at the wall clock, so the fixture's same contacts are created
+    # inside it (its first day, noon UTC), with a sync state proven now.
+    from datetime import date as _date
+    from services.canonical_contract import resolve_canonical_window
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    _now = datetime.now(timezone.utc)
+    _q = _date.fromisoformat(resolve_canonical_window("current_quarter")["start_date"])
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        t138.LEAD_ROWS, created=datetime(_q.year, _q.month, _q.day, 12, tzinfo=timezone.utc)),
+        as_of=_now)
     monkeypatch.setattr("db.connection.init_pool", lambda: None)
     # The 138 fixture leaves the contact funnel unwired; supply the one signal
     # that makes the lifecycle strip a measurement rather than an empty schema.
@@ -1520,10 +1534,10 @@ def test_f2_8_one_sql_identity_is_compared_across_every_consumer(
     assert out["ok"] is False
     assert parity.V_VALUE_MISMATCH in out["violation_codes"]
     entry = next(m for m in out["metrics"]
-                 if m["metric"] == "campaign_attributable_sqls")
+                 if m["metric"] == "google_ads_cohort_sqls")
     assert entry["status"] == "mismatch"
     assert {r["consumer"] for r in entry["readings"]} == {
-        c for c, _ in parity.METRIC_IDENTITIES["campaign_attributable_sqls"]["consumers"]}
+        c for c, _ in parity.METRIC_IDENTITIES["google_ads_cohort_sqls"]["consumers"]}
 
 
 @pytest.mark.parametrize("consumer,path", [
