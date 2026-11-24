@@ -1081,3 +1081,23 @@ on the no-ledger run.
 **Existing test changed.** `118::test_audit_passes_window_bounds`: its fake
 `fetch_canonical_campaign_spend` accepts the account scope the spend audit now
 passes. The window bounds it asserts are unchanged.
+
+### 8.11 Truth audit round 3
+
+Verdict: merge. One guard added in this PR; two follow-ups recorded.
+
+* **Guarded:** the configured-account scope on
+  `build_campaign_spend_coverage_audit`. Case 26b puts account B's
+  unbounded day before A's certified range. A's coverage audit never reports
+  it, all-time or dated. With the scope removed, the case fails
+  (`'2026-11-11' != '2026-11-11'`, B's day).
+* **Follow-up (not reachable with one account):**
+  `build_google_ads_spend_audit` now reads campaign spend and coverage scoped
+  to the configured account. Its geo total, account-daily total and FX
+  coverage are still account-wide. With a second account in the data, the
+  account and geo reconciliations compare A with A+B and read `mismatch`.
+  That fails closed, but it is a false alarm. Scope those reads too.
+* **Follow-up (pre-existing):** the Overview "Paid spend without SQL proof"
+  card (`dashboard_overview_service.py:760`) still asserts waste over
+  unverified spend. Give it the same `campaign_spend_status == "verified"`
+  gate the fall-through card now has.

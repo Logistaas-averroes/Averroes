@@ -1267,6 +1267,30 @@ def test_26_a_second_account_with_no_ledger_leaks_nothing_into_the_configured_ac
     assert not _has_number(json.dumps(overview_6m["trend"]), "6943.75")    # 5555 × 1.25
 
 
+def test_26_b_the_coverage_audit_reads_the_configured_account_only(live_db, monkeypatch):
+    """Truth audit round 3, minor 1: ``build_campaign_spend_coverage_audit``
+    gained the configured-account scope in PR-ADS-176C-F3, but nothing proved
+    it. Account B (no ledger, so its rows are unbounded) spends on a day
+    BEFORE account A's certified range. A's coverage audit must not report
+    B's day as its first spend date, all-time or in a dated window — an
+    unscoped read would (certified_from - 3)."""
+    import db.writers as writers
+    from services.google_ads_spend_service import build_campaign_spend_coverage_audit
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    certified_from, _stray, _today = _stray_before_the_certified_range(live_db)
+    b_day = certified_from - timedelta(days=3)
+    assert writers.upsert_campaign_daily_spend([{
+        "customer_id": OTHER_CUSTOMER, "currency_code": "GBP", "campaign_id": "999",
+        "campaign_name": "other account", "spend_date": b_day,
+        "cost_micros": 5_555_000_000, "source_query_version": "t"}]) == 1
+    for window in ("all_time", WINDOW):
+        audit = build_campaign_spend_coverage_audit(window)
+        assert audit["first_spend_date"] != b_day.isoformat(), (window, audit)
+        assert audit["last_spend_date"] != b_day.isoformat(), (window, audit)
+    assert build_campaign_spend_coverage_audit("all_time")["first_spend_date"] == (
+        certified_from.isoformat())
+
+
 def test_28_with_no_ledger_at_all_no_surface_publishes_spend_zero_or_a_positive_verdict(
         live_db, monkeypatch):
     """PR-ADS-176C-F3 (R2-1), the auditor's round-2 probe. The configured
