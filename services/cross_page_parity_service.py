@@ -1327,6 +1327,11 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         violations.append({"code": V_COHORT_SQL_PARITY_BROKEN,
                            "metric": "google_ads_cohort_sqls",
                            "detail": cohort_sql_parity["detail"]})
+    # PR-ADS-177A-F1 (MINOR 1): the campaign view's days, like for like.
+    if (cohort_sql_parity.get("campaign_view") or {}).get("status") == "broken":
+        violations.append({"code": V_COHORT_SQL_PARITY_BROKEN,
+                           "metric": "google_ads_cohort_sqls",
+                           "detail": cohort_sql_parity["campaign_view"]["detail"]})
 
     # ── Certification: did every registered consumer actually answer? ────────
     # PR-ADS-154C-F2 §1. The audit built seven consumers and certified four
@@ -1466,6 +1471,59 @@ def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
         out["status"] = "broken"
         out["detail"] = ("the window's Google Ads acquisition-cohort SQLs differ across "
                          "surfaces over the same days: "
+                         + ", ".join(f"{k}={v}" for k, v in sorted(present.items())))
+    elif len(present) < len(readings):
+        out["status"] = "not_evaluable"
+        out["detail"] = ("withheld or unavailable on: "
+                         + ", ".join(sorted(set(readings) - set(present))))
+    else:
+        out["status"] = "identical"
+    out["campaign_view"] = _cohort_sql_parity_campaign_view(consumers, window, now)
+    return out
+
+
+def _cohort_sql_parity_campaign_view(consumers: dict, window: str, now) -> dict:
+    """PR-ADS-177A-F1 (truth audit MINOR 1) — the SAME rule over the CAMPAIGN
+    view's days (the window's start through today).
+
+    The campaign view and the country view end on different days (today vs
+    the settled yesterday), so they are two groups, each like for like —
+    never one comparison across both. Over the campaign view's days:
+
+    * the mart (campaign view): ``summary.sqls``;
+    * the Dashboard Overview's SQL headline: ``kpis.google_ads_cohort_sqls``;
+    * Campaign Evidence, built over exactly those days.
+
+    The other campaign-view Dashboard pages (Revenue, Campaigns, Deals) are
+    already one identity with the mart (``google_ads_cohort_sqls``)."""
+    from datetime import date as _date  # noqa: PLC0415
+    mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
+    overview = (consumers.get("dashboard/overview") or {}).get("payload") or {}
+    published = (mart.get("cohort") or {}).get("sql_status") == "published"
+    readings = {
+        "mart_campaign_view": (mart.get("summary") or {}).get("sqls") if published else None,
+        "dashboard_overview": (overview.get("kpis") or {}).get("google_ads_cohort_sqls"),
+        "campaign_evidence": None,
+    }
+    w = mart.get("window") or {}
+    ce_error = None
+    try:
+        start = _date.fromisoformat(w["start_date"]) if w.get("start_date") else None
+        end = _date.fromisoformat(w["end_date"]) if w.get("end_date") else None
+        if end is not None:
+            from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
+            ce = build_campaign_evidence(window, now=now, bounds=(start, end))
+            readings["campaign_evidence"] = (ce.get("summary") or {}).get(
+                "cohort_sqls_google_ads")
+    except Exception as exc:  # noqa: BLE001 - a finding, never a crash
+        ce_error = f"{type(exc).__name__}: {exc}"[:300]
+    present = {k: v for k, v in readings.items() if v is not None}
+    out = {"window": {"start_date": w.get("start_date"), "end_date": w.get("end_date")},
+           "readings": readings, "campaign_evidence_error": ce_error}
+    if len(set(present.values())) > 1:
+        out["status"] = "broken"
+        out["detail"] = ("the campaign view's Google Ads acquisition-cohort SQLs differ "
+                         "across surfaces over the same days: "
                          + ", ".join(f"{k}={v}" for k, v in sorted(present.items())))
     elif len(present) < len(readings):
         out["status"] = "not_evaluable"

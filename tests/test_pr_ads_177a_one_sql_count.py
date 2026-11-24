@@ -253,7 +253,7 @@ def _withheld_payload(**extra):
     ({"country_totals": {"sqls": 0}}, "country_totals.sqls"),
     ({"regional_mix": [{"region": "Europe", "sqls": 1}]}, "regional_mix[0].sqls"),
     ({"kpis": {"sqls_residual": 0}}, "kpis.sqls_residual"),
-    ({"kpis": {"google_ads_source_sqls": 9}}, "kpis.google_ads_source_sqls"),
+    ({"kpis": {"google_ads_cohort_sqls": 9}}, "kpis.google_ads_cohort_sqls"),
     ({"residual": {"sqls": 0}}, "residual.sqls"),
     ({"countries": [{"country_name": "UK", "sqls": 3}]}, "countries[UK].sqls"),
     ({"campaign_breakdown": [{"campaign_name": "b", "sqls": 1}]}, "campaign_breakdown[b].sqls"),

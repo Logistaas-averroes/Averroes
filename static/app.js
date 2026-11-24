@@ -2512,19 +2512,20 @@ function renderDashKpiRow(d) {
       // page and Campaign Evidence publish. Gated on THIS response's cohort:
       // withheld reads the word and the reason, never a number. (It replaced
       // the PR-ADS-152 legacy lead-status headline.)
-      key: "google_ads_source_sqls",
+      key: "google_ads_cohort_sqls",
       label: COHORT_SQLS_LABEL,
-      value: cohortCountHtml(k.google_ads_source_sqls, d.cohort, null),
-      sub: (!cohortCountPublication(d.cohort).publish
-            || k.campaign_attributable_sqls === null || k.campaign_attributable_sqls === undefined)
+      value: cohortCountHtml(k.google_ads_cohort_sqls, d.cohort, null),
+      sub: ((!cohortCountPublication(d.cohort).publish
+            || k.campaign_row_cohort_sqls === null || k.campaign_row_cohort_sqls === undefined)
         ? "Google Ads contacts created in this window"
-        : `${escapeHtml(fmtCount(k.campaign_attributable_sqls))} on a campaign row`,
+        : `${escapeHtml(fmtCount(k.campaign_row_cohort_sqls))} on a campaign row`)
+        + escapeHtml(cohortThroughSuffix(d.cohort)),
       // Both periods are the cohort (the mart's summary.sqls), like for like.
-      delta: cohortCountPublication(d.cohort).publish ? dashDeltaChip("sqls", pc) : "",
+      delta: cohortDeltaChip("sqls", pc, d),
       spark: "",
       source: "HubSpot acquisition cohort",
       ok: cohortCountPublication(d.cohort).publish
-        && k.google_ads_source_sqls !== null && k.google_ads_source_sqls !== undefined,
+        && k.google_ads_cohort_sqls !== null && k.google_ads_cohort_sqls !== undefined,
     },
     {
       key: "period_revenue_per_ad_spend",
@@ -3803,7 +3804,7 @@ function renderRevConversionStrip(d) {
       reason: k.sql_to_customer_rate_reason }, (v) => `${(v * 100).toFixed(1)}%`);
   const stages = [
     // PR-ADS-177A: the acquisition cohort, gated on THIS response's cohort.
-    { label: COHORT_SQLS_LABEL, value: cohortCountHtml(k.sqls, d.cohort, null), sub: "Google Ads contacts" },
+    { label: COHORT_SQLS_LABEL, value: cohortCountHtml(k.sqls, d.cohort, null), sub: `Google Ads contacts${escapeHtml(cohortThroughSuffix(d.cohort))}` },
     { label: "Closed-Won Deals", value: dashValue(k.closed_won_deals, fmtCount), sub: "By close date" },
     { label: "Closed-Won Revenue", value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }), sub: "USD · HubSpot" },
     { label: "Avg Deal Value", value: dashValue(k.average_deal_value_usd, fmtMoney), sub: "Per won deal" },
@@ -4152,7 +4153,7 @@ function renderDashboardChannels() {
   root.innerHTML = `
     <div class="dash-tab-intro dash-anim">
       <h2 class="dash-tab-intro__title">Channels &amp; Platforms</h2>
-      <p class="dash-tab-intro__sub">Which channels and platforms produce SQLs, closed-won deals and revenue — and which are revenue-only because spend is not connected. Only Google Ads spend is compared with revenue; Meta Ads spend is shown on its own line.</p>
+      <p class="dash-tab-intro__sub">Which channels and platforms produce qualified leads (HubSpot lead status), closed-won deals and revenue — and which are revenue-only because spend is not connected. Only Google Ads spend is compared with revenue; Meta Ads spend is shown on its own line.</p>
     </div>
     ${renderChanKpiRow(d)}
     <div class="dash-main-grid">
@@ -4232,11 +4233,15 @@ function renderChanKpiRow(d) {
       ok: k.customers_status === "published",
     },
     {
-      key: "sqls", label: "SQLs",
+      // PR-ADS-177A-F1 (truth audit MAJOR 2): this page's counts are the
+      // LEGACY lead-status population (the source groups), not the
+      // acquisition cohort the Dashboard's SQL cards count — so the word
+      // "SQLs" never sits over them.
+      key: "sqls", label: LEAD_STATUS_QUALIFIED_LABEL,
       value: dashValue(k.total_sqls, fmtCount),
-      sub: k.top_platform ? `Top platform: ${escapeHtml(k.top_platform)}` : "Qualified leads",
+      sub: k.top_platform ? `Top platform: ${escapeHtml(k.top_platform)}` : "HubSpot lead status · not the acquisition cohort",
       delta: dashDeltaChip("total_sqls", pc),
-      source: "HubSpot qualified leads",
+      source: "HubSpot lead status (qualified)",
       ok: k.total_sqls !== null && k.total_sqls !== undefined,
     },
   ];
@@ -4500,7 +4505,7 @@ function renderChanQualityPanel(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Quality vs Revenue</h3>
-        <p class="dash-panel__sub">SQLs (demand) × Closed-won deals · bubble size = closed-won revenue</p>
+        <p class="dash-panel__sub">Qualified leads (lead status) × Closed-won deals · bubble size = closed-won revenue</p>
       </div>
     </div>
     ${chanQualityBubbleSVG(pts)}`;
@@ -4544,12 +4549,12 @@ function chanQualityBubbleSVG(points) {
   return `
     <div class="dash-chart-wrap chan-bubble-wrap">
       <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
-        aria-label="Channel quality: SQLs on x, closed-won deals on y, revenue as bubble size">
+        aria-label="Channel quality: qualified leads (lead status) on x, closed-won deals on y, revenue as bubble size">
         ${gridY}
         <line x1="${padL}" x2="${W - padR}" y1="${(padT + plotH).toFixed(1)}" y2="${(padT + plotH).toFixed(1)}" stroke="#cbd5e1" stroke-width="1"/>
         <line x1="${padL}" x2="${padL}" y1="${padT}" y2="${(padT + plotH).toFixed(1)}" stroke="#cbd5e1" stroke-width="1"/>
         ${gridX}
-        <text x="${(padL + plotW / 2).toFixed(1)}" y="${H - 26}" text-anchor="middle" class="dash-chart-axis">SQLs →</text>
+        <text x="${(padL + plotW / 2).toFixed(1)}" y="${H - 26}" text-anchor="middle" class="dash-chart-axis">Qualified (lead status) →</text>
         ${bubbles}
       </svg>
       <div class="dash-chart-tooltip" hidden></div>
@@ -4578,7 +4583,7 @@ function wireChanQualityHover(root, d) {
     title.className = "dash-chart-tooltip__title";
     title.textContent = p.channel_label || p.channel || "";
     tooltip.appendChild(title);
-    [["SQLs", p.sqls === null || p.sqls === undefined ? "Unavailable" : String(p.sqls)],
+    [[LEAD_STATUS_QUALIFIED_LABEL, p.sqls === null || p.sqls === undefined ? "Unavailable" : String(p.sqls)],
      ["Won deals", p.closed_won_deals === null || p.closed_won_deals === undefined ? "Unavailable" : String(p.closed_won_deals)],
      ["Revenue", p.revenue_usd === null || p.revenue_usd === undefined ? "Unavailable" : fmtMoney(p.revenue_usd)],
      ["Spend", p.spend_connected ? "Connected (Google Ads)" : "Not connected"]].forEach(([label, val]) => {
@@ -4643,7 +4648,7 @@ function renderChanPlatformMatrix(d) {
       </div>
       <p class="rev-breakdown-empty">No platform activity in this window.</p>`;
   }
-  const head = ["Platform", "Channel", "Leads", "SQLs", "Won deals", "Revenue", "Spend", PERIOD_RATIO_LABEL, "Status"]
+  const head = ["Platform", "Channel", "Leads", LEAD_STATUS_QUALIFIED_LABEL, "Won deals", "Revenue", "Spend", PERIOD_RATIO_LABEL, "Status"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((p) => `
     <tr class="chan-platform-row">
@@ -4663,7 +4668,7 @@ function renderChanPlatformMatrix(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Platform Matrix</h3>
-        <p class="dash-panel__sub">Every platform's SQLs, closed-won deals and revenue · spend &amp; Period Revenue / Ad Spend only where a spend source is connected · ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
+        <p class="dash-panel__sub">Every platform's qualified leads (lead status), closed-won deals and revenue · spend &amp; Period Revenue / Ad Spend only where a spend source is connected · ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
       </div>
     </div>
     <div class="chan-platform-scroll">
@@ -4704,7 +4709,7 @@ function renderChanChannelList(d) {
     <li class="chan-channel-row" data-chan-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.channel_label || "channel")} detail">
       <span class="chan-channel-row__dot" style="background:${chanColor(r.channel)}"></span>
       <span class="chan-channel-row__name">${escapeHtml(r.channel_label || "—")}</span>
-      <span class="chan-channel-row__metric">${dashValue(r.sqls, fmtCount)} SQLs</span>
+      <span class="chan-channel-row__metric">${dashValue(r.sqls, fmtCount)} qualified (lead status)</span>
       <span class="chan-channel-row__metric">${dashValue(r.closed_won_deals, fmtCount)} won</span>
       <span class="chan-channel-row__metric">${dashValue(r.won_revenue_usd, fmtMoney)}</span>
       <span class="chan-channel-row__spend">${spendCell}</span>
@@ -4751,9 +4756,9 @@ function wireChanChannelDrawers(root, d) {
         <span class="chan-status ${r.spend_connected ? "chan-status--connected" : "chan-status--revenue"}">${escapeHtml(r.status || "")}</span>
         <button type="button" class="chan-channel-drawer__close" aria-label="Close">×</button>
       </div>
-      <p class="chan-channel-drawer__note">Platform-level SQLs, closed-won deals and revenue for this channel — not individual client/deal records.</p>
+      <p class="chan-channel-drawer__note">Platform-level qualified leads (lead status), closed-won deals and revenue for this channel — not individual client/deal records.</p>
       <table class="chan-drawer-table">
-        <thead><tr><th>Platform</th><th>SQLs</th><th>Won deals</th><th>Revenue</th><th>Spend</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th></tr></thead>
+        <thead><tr><th>Platform</th><th>${LEAD_STATUS_QUALIFIED_LABEL}</th><th>Won deals</th><th>Revenue</th><th>Spend</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th></tr></thead>
         <tbody>${pfBody}</tbody>
       </table>`;
     drawer.querySelector(".chan-channel-drawer__close").addEventListener("click", () => drawer.remove());
@@ -4993,9 +4998,9 @@ function renderCampKpiRow(d) {
       key: "sqls", label: COHORT_SQLS_LABEL,
       value: cohortCountHtml(k.sqls, d.cohort, null),
       sub: (k.sqls_residual === null || k.sqls_residual === undefined)
-        ? "Google Ads contacts · this window"
-        : `Google Ads contacts · ${fmtCount(k.sqls_residual)} on no campaign row`,
-      delta: cohortCountPublication(d.cohort).publish ? dashDeltaChip("sqls", pc) : "",
+        ? `Google Ads contacts · this window${cohortThroughSuffix(d.cohort)}`
+        : `Google Ads contacts · ${fmtCount(k.sqls_residual)} on no campaign row${cohortThroughSuffix(d.cohort)}`,
+      delta: cohortDeltaChip("sqls", pc, d),
       source: "HubSpot acquisition cohort",
       ok: cohortCountPublication(d.cohort).publish && k.sqls !== null && k.sqls !== undefined,
     },
@@ -5222,7 +5227,7 @@ function renderCampLeaderboard(d) {
       <div class="dash-panel__header"><div><h3 class="dash-panel__title">Campaign Leaderboard</h3></div></div>
       <p class="rev-breakdown-empty">No campaign activity in this window.</p>`;
   }
-  const head = ["Campaign", "Spend", COHORT_SQLS_LABEL, "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
+  const head = ["Campaign", "Spend", COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort), "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r, i) => {
     const isUnattributed = r.attribution_status === "unattributed";
@@ -5385,8 +5390,8 @@ function wireCampDrawers(root, d) {
       </div>
       <dl class="camp-drawer__summary">
         <div><dt>Spend (native)</dt><dd>${campSpendCell(r)}</dd></div>
-        <div><dt>${escapeHtml(COHORT_LEADS_LABEL)}</dt><dd>${cohortCountHtml(r.leads, d.cohort, r)}</dd></div>
-        <div><dt>${escapeHtml(COHORT_SQLS_LABEL)}</dt><dd>${cohortCountHtml(r.sqls, d.cohort, r)}</dd></div>
+        <div><dt>${escapeHtml(COHORT_LEADS_LABEL + cohortThroughSuffix(d.cohort))}</dt><dd>${cohortCountHtml(r.leads, d.cohort, r)}</dd></div>
+        <div><dt>${escapeHtml(COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort))}</dt><dd>${cohortCountHtml(r.sqls, d.cohort, r)}</dd></div>
         <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
@@ -5666,9 +5671,9 @@ function renderCtryKpiRow(d) {
       key: "sqls", label: COHORT_SQLS_LABEL,
       value: cohortCountHtml(k.sqls, d.cohort, { sqls_status: k.sqls_status, sqls_reason: k.sqls_reason }),
       sub: (k.sqls_residual === null || k.sqls_residual === undefined)
-        ? "Google Ads contacts · by the contact's country · listed markets"
-        : `Google Ads contacts · listed markets · ${fmtCount(k.sqls_residual)} in the residual`,
-      delta: cohortCountPublication(d.cohort).publish ? dashDeltaChip("sqls", pc) : "",
+        ? `Google Ads contacts · by the contact's country · listed markets${cohortThroughSuffix(d.cohort)}`
+        : `Google Ads contacts · listed markets · ${fmtCount(k.sqls_residual)} in the residual${cohortThroughSuffix(d.cohort)}`,
+      delta: cohortDeltaChip("sqls", pc, d),
       source: "HubSpot acquisition cohort",
       ok: cohortCountPublication(d.cohort).publish && k.sqls !== null && k.sqls !== undefined,
     },
@@ -5889,7 +5894,7 @@ function renderCtryLeaderboard(d) {
       <div class="dash-panel__header"><div><h3 class="dash-panel__title">Country Leaderboard</h3></div></div>
       <p class="rev-breakdown-empty">No country activity in this window.</p>`;
   }
-  const head = ["Country", "Region", "Spend", COHORT_SQLS_LABEL, "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
+  const head = ["Country", "Region", "Spend", COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort), "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = real.map((r, i) => `
     <tr class="ctry-row" data-ctry-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.country_name || "country")} detail">
@@ -6007,7 +6012,7 @@ function renderCtryResidualPanel(d) {
     <dl class="ctry-residual-tiles">
       <div><dt>Residual revenue</dt><dd>${dashValue(res.won_revenue_usd, fmtMoney)}</dd></div>
       <div><dt>Closed-won deals</dt><dd>${dashValue(res.closed_won_deals, fmtCount)}</dd></div>
-      <div><dt>${escapeHtml(COHORT_SQLS_LABEL)}</dt><dd>${cohortCountHtml(res.sqls, d.cohort, res)}</dd></div>
+      <div><dt>${escapeHtml(COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort))}</dt><dd>${cohortCountHtml(res.sqls, d.cohort, res)}</dd></div>
       <div><dt>Geo spend residual</dt><dd>${res.spend_native === null || res.spend_native === undefined ? '<span class="dash-unavailable">Unavailable</span>' : escapeHtml(fmtCompactCurrency(res.spend_native, res.native_currency || "GBP"))}</dd></div>
     </dl>
     <p class="ctry-residual-note">${escapeHtml(res.reason || "Revenue and spend with no country are preserved separately — never spread across real countries.")}</p>`;
@@ -6056,8 +6061,8 @@ function wireCtryDrawers(root, d) {
       </div>
       <dl class="ctry-drawer__summary">
         <div><dt>Spend (native)</dt><dd>${ctrySpendCell(r)}</dd></div>
-        <div><dt>${escapeHtml(COHORT_LEADS_LABEL)}</dt><dd>${cohortCountHtml(r.leads, d.cohort, r)}</dd></div>
-        <div><dt>${escapeHtml(COHORT_SQLS_LABEL)}</dt><dd>${cohortCountHtml(r.sqls, d.cohort, r)}</dd></div>
+        <div><dt>${escapeHtml(COHORT_LEADS_LABEL + cohortThroughSuffix(d.cohort))}</dt><dd>${cohortCountHtml(r.leads, d.cohort, r)}</dd></div>
+        <div><dt>${escapeHtml(COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort))}</dt><dd>${cohortCountHtml(r.sqls, d.cohort, r)}</dd></div>
         <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
@@ -6151,8 +6156,11 @@ let dashDealsStatus = "loading";
 const DEAL_STATUS_META = {
   "Revenue proven": { color: "#22b07d", dot: "deal-dot--proven" },
   "SQL producer": { color: "#129ef5", dot: "deal-dot--sql" },
-  "SQL — not yet a customer": { color: "#ff8a3d", dot: "deal-dot--pending" },
-  "Aging SQL — needs sales review": { color: "#e0564e", dot: "deal-dot--aging" },
+  // PR-ADS-177A-F1 (truth audit MAJOR 2): lead-status rows are never "SQL".
+  "Qualified-lead producer": { color: "#129ef5", dot: "deal-dot--sql" },
+  "Qualified-lead count withheld": { color: "#8896a6", dot: "deal-dot--muted" },
+  "Qualified (lead status) — no won deal yet": { color: "#ff8a3d", dot: "deal-dot--pending" },
+  "Aging qualified lead — needs sales review": { color: "#e0564e", dot: "deal-dot--aging" },
   "Amount unavailable": { color: "#8896a6", dot: "deal-dot--muted" },
   "Attribution needs review": { color: "#7c5cff", dot: "deal-dot--attr" },
   "Stage unavailable": { color: "#b6bfca", dot: "deal-dot--muted" },
@@ -6251,6 +6259,9 @@ function renderDashboardDeals() {
     <section class="dash-panel dash-anim deal-funnel-panel" aria-label="Pipeline funnel">
       ${renderDealFunnel(d)}
     </section>
+    <section class="dash-panel dash-anim deal-backlog-panel" aria-label="Qualified (lead status) backlog">
+      ${renderDealLeadStatusBacklog(d)}
+    </section>
     <div class="dash-main-grid deal-mid-grid">
       <section class="dash-panel dash-anim deal-source-panel" aria-label="Source to pipeline">
         ${renderDealSourcePipeline(d)}
@@ -6265,7 +6276,7 @@ function renderDashboardDeals() {
     <section class="dash-panel dash-anim deal-table-panel" aria-label="Closed-won deals">
       ${renderDealTable(d)}
     </section>
-    <section class="dash-panel dash-anim deal-sql-panel" aria-label="SQLs not yet closed-won">
+    <section class="dash-panel dash-anim deal-sql-panel" aria-label="Qualified (lead status) contacts not yet closed-won">
       ${renderDealSqlNoDeal(d)}
     </section>
     <section class="dash-decisions dash-anim" aria-label="Pipeline decision cards">
@@ -6282,8 +6293,8 @@ function renderDealKpiRow(d) {
   const cards = [
     // PR-ADS-177A: the acquisition cohort, gated on THIS response's cohort.
     { key: "sqls", label: COHORT_SQLS_LABEL, value: cohortCountHtml(k.sqls, d.cohort, null),
-      sub: "Google Ads contacts · this window",
-      delta: cohortCountPublication(d.cohort).publish ? dashDeltaChip("sqls", pc) : "",
+      sub: `Google Ads contacts · this window${cohortThroughSuffix(d.cohort)}`,
+      delta: cohortDeltaChip("sqls", pc, d),
       source: "HubSpot acquisition cohort",
       ok: cohortCountPublication(d.cohort).publish && k.sqls !== null && k.sqls !== undefined },
     { key: "opps", label: "Opportunities Created",
@@ -6321,9 +6332,9 @@ function renderDealKpiRow(d) {
       source: "HubSpot deal ledger", ok: false },
     // PR-ADS-177A: NOT a subset of the SQLs card — the legacy lead-status
     // population (leads.status_category = 'qualified'), labelled as such.
-    { key: "notwon", label: "Qualified (lead status) · no won deal", value: dashValue(k.sqls_not_closed_won, fmtCount),
-      sub: "Lead-status population · not the SQLs card's cohort", delta: '<span class="dash-delta dash-delta--none">Sales gap</span>',
-      source: "Open/lost pipeline not visible", ok: k.sqls_not_closed_won !== null && k.sqls_not_closed_won !== undefined },
+    { key: "notwon", label: "Qualified (lead status) · no won deal", value: dashValue(k.lead_status_qualified_no_won_deal, fmtCount),
+      sub: "Lead-status population · not the cohort card's count", delta: '<span class="dash-delta dash-delta--none">Sales gap</span>',
+      source: "Open/lost pipeline not visible", ok: k.lead_status_qualified_no_won_deal !== null && k.lead_status_qualified_no_won_deal !== undefined },
   ];
 
   const compareNote = pc.available
@@ -6350,17 +6361,27 @@ function renderDealFunnel(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Pipeline Funnel</h3>
-        <p class="dash-panel__sub">SQL → Opportunities → Open Pipeline → Closed Won → Closed Lost · open pipeline is not revenue</p>
+        <p class="dash-panel__sub">SQLs (acquisition cohort) → Opportunities → Open Pipeline → Closed Won → Closed Lost · open pipeline is not revenue</p>
       </div>
     </div>`;
   if (!stages.length) {
     return `${header}<p class="rev-breakdown-empty">No pipeline activity in this window.</p>`;
   }
   const cells = stages.map((s, i) => {
-    const unavailable = s.status === "Stage unavailable";
-    const countHtml = unavailable
-      ? '<span class="dash-unavailable">Unavailable</span>'
-      : dashValue(s.count, fmtCount);
+    // PR-ADS-177A-F1 (truth audit MAJOR 2): the SQL stage is the acquisition
+    // cohort and goes through the ONE gate with THIS response's cohort — a
+    // withheld cohort reads "Withheld" and the reason, never "Unavailable /
+    // Stage unavailable" (which says the pipeline has no such stage).
+    const isCohortStage = s.stage === "SQLs";
+    const unavailable = !isCohortStage && s.status === "Stage unavailable";
+    const countHtml = isCohortStage
+      ? cohortCountHtml(s.count, d.cohort, null)
+      : unavailable
+        ? '<span class="dash-unavailable">Unavailable</span>'
+        : dashValue(s.count, fmtCount);
+    const stageLabel = isCohortStage
+      ? COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort)
+      : s.stage;
     const amount = (s.amount_usd !== null && s.amount_usd !== undefined)
       ? `<div class="deal-funnel__amt">${escapeHtml(fmtMoney(s.amount_usd))}</div>` : "";
     const rate = (s.rate_from_previous !== null && s.rate_from_previous !== undefined)
@@ -6370,7 +6391,7 @@ function renderDealFunnel(d) {
     return `
       ${conv}
       <div class="deal-funnel__stage ${unavailable ? "deal-funnel__stage--unavailable" : ""}" style="--deal-accent:${dealStatusColor(s.status)}">
-        <div class="deal-funnel__label">${escapeHtml(s.stage)}</div>
+        <div class="deal-funnel__label">${escapeHtml(stageLabel)}</div>
         <div class="deal-funnel__value">${countHtml}</div>
         ${amount}
         <div class="deal-funnel__status"><span class="deal-dot ${dealStatusDot(s.status)}"></span>${escapeHtml(s.status)}</div>
@@ -6380,6 +6401,28 @@ function renderDealFunnel(d) {
     ? `<p class="deal-stage-note">${escapeHtml(d.pipeline_stage_reason || "Open opportunity stage data is unavailable from the durable HubSpot deal ledger.")}</p>`
     : "";
   return `${header}<div class="deal-funnel">${cells}</div>${note}`;
+}
+
+// PR-ADS-177A-F1 (truth audit MAJOR 2): the legacy lead-status backlog, OUT
+// of the funnel. It was the funnel's last stage ("SQLs Not Yet Closed-Won")
+// and read as the cohort SQL stage's continuation; it is a different metric.
+function renderDealLeadStatusBacklog(d) {
+  const b = d.lead_status_backlog || {};
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">${escapeHtml(b.label || "Qualified (lead status) · no won deal")}</h3>
+        <p class="dash-panel__sub">A different metric from the funnel above: HubSpot lead status, not the acquisition cohort · not a funnel stage</p>
+      </div>
+    </div>`;
+  const value = (b.count === null || b.count === undefined)
+    ? `<span class="dash-unavailable">Unavailable</span>${b.reason ? ` <small class="metric-reason">${escapeHtml(b.reason)}</small>` : ""}`
+    : escapeHtml(fmtCount(b.count));
+  return `${header}
+    <div class="deal-backlog" role="note">
+      <div class="deal-backlog__value">${value}</div>
+      ${b.definition ? `<p class="deal-stage-note">${escapeHtml(b.definition)}</p>` : ""}
+    </div>`;
 }
 
 function renderDealAging(d) {
@@ -6420,7 +6463,9 @@ function renderDealSourcePipeline(d) {
   }
   // PR-ADS-177A: source groups count the legacy lead-status population
   // (build_revenue_by_source), not the acquisition cohort — said so.
-  const head = ["Source", "Qualified (lead status)", "Open Pipeline", "Won deals", "Customers", "Revenue", "SQL → Customer", "Status"]
+  // PR-ADS-177A-F1: the row's count is lead status, so its rate column is
+  // "Qualified → Customer" (unavailable: two cohorts), never "SQL → Customer".
+  const head = ["Source", "Qualified (lead status)", "Open Pipeline", "Won deals", "Customers", "Revenue", "Qualified → Customer", "Status"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r) => `
     <tr>
@@ -6455,7 +6500,7 @@ function renderDealCampaignPipeline(d) {
   if (!rows.length) {
     return `${header}<p class="rev-breakdown-empty">No campaign pipeline activity in this window.</p>`;
   }
-  const head = ["Campaign", COHORT_SQLS_LABEL, "Open Pipeline", "Won deals", "Customers", "Revenue", "SQL → Customer", "Status"]
+  const head = ["Campaign", COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort), "Open Pipeline", "Won deals", "Customers", "Revenue", "SQL → Customer", "Status"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r) => `
     <tr>
@@ -6582,16 +6627,18 @@ function renderDealSqlNoDeal(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Qualified Leads (lead status) Not Yet Closed-Won</h3>
-        <p class="dash-panel__sub">Leads whose HubSpot lead status is qualified, with no closed-won deal · a different population from the SQLs card (acquisition cohort) · <strong>read-only</strong> — open / lost pipeline is not visible</p>
+        <p class="dash-panel__sub">Leads whose HubSpot lead status is qualified, with no closed-won deal · a different population from the acquisition-cohort card · <strong>read-only</strong> — open / lost pipeline is not visible</p>
       </div>
     </div>`;
   if (d.sql_no_deal_available === false) {
-    return `${header}<p class="deal-stage-note">Per-SQL linkage is unavailable — the qualified-lead source could not be read for this window.</p>`;
+    return `${header}<p class="deal-stage-note">Per-contact linkage is unavailable — the qualified-lead source could not be read for this window.</p>`;
   }
   if (!rows.length) {
-    return `${header}<p class="rev-breakdown-empty">Every qualified SQL has a closed-won deal in this window.</p>`;
+    return `${header}<p class="rev-breakdown-empty">Every qualified (lead status) contact has a closed-won deal in this window.</p>`;
   }
-  const head = ["Company / Contact", "SQL Date", "Days Since SQL", "Campaign", "Country", "Status"]
+  // PR-ADS-177A-F1: the row's date is the contact's CREATION date (the
+  // reader windows on contact_created_at) — never called an SQL date.
+  const head = ["Company / Contact", "Contact Created", "Days Since Created", "Campaign", "Country", "Status"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r) => `
     <tr>
@@ -6603,7 +6650,7 @@ function renderDealSqlNoDeal(d) {
       <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
     </tr>`).join("");
   const more = total > rows.length
-    ? `<p class="deal-stage-note">Showing ${escapeHtml(fmtCount(rows.length))} of ${escapeHtml(fmtCount(total))} qualified SQLs with no closed-won deal.</p>` : "";
+    ? `<p class="deal-stage-note">Showing ${escapeHtml(fmtCount(rows.length))} of ${escapeHtml(fmtCount(total))} qualified (lead status) contacts with no closed-won deal.</p>` : "";
   return `${header}
     <div class="deal-scroll">
       <table class="deal-table deal-table--rows"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
@@ -6818,6 +6865,10 @@ function campaignRowSqlPublication(cohort, row) {
 // row's own copy (`sqls_status` / `sqls_reason`) — a row can be withheld under
 // a published cohort (the country gate), never published under a withheld one.
 const COHORT_SQLS_LABEL = "SQLs · contacts acquired in window";
+// PR-ADS-177A-F1 (truth audit MAJOR 2): the LEGACY lead-status count
+// (`leads.status_category = 'qualified'`) — a different metric from the
+// cohort's SQLs, never shown under the bare word "SQL" / "SQLs".
+const LEAD_STATUS_QUALIFIED_LABEL = "Qualified (lead status)";
 const COHORT_LEADS_LABEL = "Leads · contacts acquired in window";
 const COHORT_COUNT_TITLE = "Acquisition cohort: Google Ads-sourced HubSpot contacts created in this window (Leads), and those canonical lifecycle evidence proves reached SQL as of the contact-funnel watermark (SQLs). The same count on every page.";
 function cohortCountPublication(cohort, row) {
@@ -6828,6 +6879,53 @@ function cohortCountPublication(cohort, row) {
   return campaignRowSqlPublication(cohort, {
     cohort_sql_status: row.sqls_status, cohort_sql_reason: row.sqls_reason });
 }
+// PR-ADS-177A-F1 (truth audit MAJOR 1): a cohort is published over a STALE
+// contact funnel only as of its watermark (`docs/44` §7). Campaign Evidence
+// says so ("measured as of …"); every mart / Dashboard count says it too, with
+// Campaign Evidence's own helper (`campaignCohortAsOf`) — never a bare number.
+function cohortIsStale(cohort) {
+  const c = cohort || {};
+  return c.sql_status === "published"
+    && (((c.metadata || {}).source_freshness) || {}).reason === "source_stale";
+}
+function cohortAsOfNote(cohort) {
+  return cohortIsStale(cohort)
+    ? ` <small class="metric-reason cohort-as-of">measured as of ${escapeHtml(campaignCohortAsOf(cohort))}</small>`
+    : "";
+}
+// PR-ADS-177A-F1 (truth audit MINOR 1): the last day the cohort counts. The
+// campaign and deal views run through today, the country view through
+// yesterday — until PR-ADS-177B aligns them, each count says which.
+function cohortThrough(cohort) {
+  const end = (((cohort || {}).window) || {}).end_date;
+  if (!end) return "";
+  try {
+    return `through ${new Date(`${end}T00:00:00Z`).toLocaleDateString("en-GB", {
+      day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" })}`;
+  } catch (_) {
+    return `through ${end}`;
+  }
+}
+// PR-ADS-177A-F1 (truth audit MINOR 2): a cohort count's period-over-period
+// change. An acquisition cohort is still MATURING while its window is open —
+// contacts acquired this quarter keep reaching SQL for months — so a current
+// quarter / YTD count compared with a closed prior period reads as a fall it
+// is not. The chip is shown only for a completed window, and only under a
+// published cohort; otherwise the card says why there is no comparison.
+function cohortDeltaChip(key, pc, d) {
+  const data = d || {};
+  if (!cohortCountPublication(data.cohort).publish) return "";
+  if (((data.window) || {}).is_closed_window !== true) {
+    const note = ((((data.cohort) || {}).metadata) || {}).maturity_note || "";
+    return `<span class="dash-delta dash-delta--none cohort-maturing" title="${escapeHtml(note)}">No comparison · window still maturing</span>`;
+  }
+  return dashDeltaChip(key, pc);
+}
+function cohortThroughSuffix(cohort) {
+  const t = cohortThrough(cohort);
+  return t ? ` · ${t}` : "";
+}
+
 function cohortReasonText(code) {
   if (!code) return "";
   return CAMPAIGN_COHORT_REASONS[code] || canonicalReasonLabel(code);
@@ -6838,7 +6936,7 @@ function cohortReasonText(code) {
 function cohortCountHtml(value, cohort, row, formatter) {
   const pub = cohortCountPublication(cohort, row);
   if (pub.publish && value !== null && value !== undefined) {
-    return escapeHtml((formatter || fmtCount)(value));
+    return escapeHtml((formatter || fmtCount)(value)) + cohortAsOfNote(cohort);
   }
   const r = row || {};
   let code;
@@ -6853,7 +6951,9 @@ function cohortCountHtml(value, cohort, row, formatter) {
 // A KPI's "SQLs" value as plain text for an SVG tooltip (no markup).
 function cohortCountText(value, cohort, row) {
   const pub = cohortCountPublication(cohort, row);
-  if (pub.publish && value !== null && value !== undefined) return String(value);
+  if (pub.publish && value !== null && value !== undefined) {
+    return cohortIsStale(cohort) ? `${value} (as of ${campaignCohortAsOf(cohort)})` : String(value);
+  }
   return (!pub.publish && pub.state === "withheld") ? "Withheld" : "Unavailable";
 }
 
@@ -16929,8 +17029,8 @@ function renderMartSummaryStrip(data) {
   return `
     <div class="revenue-summary-strip">
       <div><span>Spend (USD)</span><strong>${s.spend_usd == null ? "Unavailable" : fmtMoney(s.spend_usd)}</strong></div>
-      <div><span title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<small> · contacts acquired in window</small></span><strong>${cohortCountHtml(s.leads, data && data.cohort, null)}</strong></div>
-      <div><span title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<small> · contacts acquired in window</small></span><strong>${cohortCountHtml(s.sqls, data && data.cohort, null)}</strong></div>
+      <div><span title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(data && data.cohort))}</small></span><strong>${cohortCountHtml(s.leads, data && data.cohort, null)}</strong></div>
+      <div><span title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(data && data.cohort))}</small></span><strong>${cohortCountHtml(s.sqls, data && data.cohort, null)}</strong></div>
       <div><span>Closed-Won Deals</span><strong>${martMetricHtml(s, "closed_won_deals", fmtCount)}</strong></div>
       <div><span>Customers</span><strong>${martMetricHtml(s, "customers", fmtCount)}</strong></div>
       <div><span>Won Revenue</span><strong>${martMetricHtml(s, "revenue_usd", fmtMoney)}</strong></div>
@@ -17086,8 +17186,8 @@ function renderRoasCampaignSummary(summary, spendIncomplete, cohort) {
     ${spendBlock}
     <div class="revenue-summary-strip">
       <div><span>Spend</span><strong>${spendCell}</strong></div>
-      <div><span>Leads<small> · contacts acquired in window</small></span><strong>${cohortCountHtml(s.leads, cohort, null)}</strong></div>
-      <div><span>SQLs<small> · contacts acquired in window</small></span><strong>${cohortCountHtml(s.sqls, cohort, null)}</strong></div>
+      <div><span>Leads<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</small></span><strong>${cohortCountHtml(s.leads, cohort, null)}</strong></div>
+      <div><span>SQLs<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</small></span><strong>${cohortCountHtml(s.sqls, cohort, null)}</strong></div>
       <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount, businessBlockerOpts())}</strong></div>
       <div><span>Customers</span><strong>${rowMetricHtml(s, "customers", fmtCount, businessBlockerOpts())}</strong></div>
       <div><span>Won Revenue</span><strong>${rowMetricHtml(s, "won_revenue", fmtMoney, businessBlockerOpts())}</strong></div>
@@ -17340,8 +17440,8 @@ function renderRoasCampaignTable(rows, spendIncomplete, cohort) {
     <tr>
       <th>Campaign</th>
       <th>Spend</th>
-      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<span class="th-sub"> · contacts acquired in window</span></th>
-      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<span class="th-sub"> · contacts acquired in window</span></th>
+      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<span class="th-sub"> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</span></th>
+      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<span class="th-sub"> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</span></th>
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across campaigns">Customers</th>
       <th>Won Revenue</th>
@@ -17851,8 +17951,9 @@ function renderRoasCountrySummary(data) {
     { key: "sqls", label: COHORT_SQLS_LABEL,
       value: cohortCountPublication(data && data.cohort).publish
         ? withBlockedCountry(rowMetricHtml(s, "sqls", fmtCount, opts), s, "sqls")
+          + ((s.sqls !== null && s.sqls !== undefined) ? cohortAsOfNote(data && data.cohort) : "")
         : cohortCountHtml(s.sqls, data && data.cohort, null),
-      sub: `${countryLeadScopeLabel(s.lead_scope)} · listed markets`,
+      sub: `${countryLeadScopeLabel(s.lead_scope)} · listed markets${cohortThroughSuffix(data && data.cohort)}`,
       source: "HubSpot acquisition cohort", ok: known("sqls") },
     { key: "deals", label: "Closed-Won Deals",
       value: withBlockedCountry(rowMetricHtml(s, "closed_won_deals", fmtCount, opts), s, "closed_won_deals"),
@@ -18186,7 +18287,7 @@ function renderCountriesRegionalMix(data) {
         <div class="ctry-region-row__meta">
           <span>${escapeHtml(fmtCount(r.countries || 0))} ${r.countries === 1 ? "market" : "markets"}</span>
           <span>Spend ${withBlockedCountry(rowMetricHtml(r, "spend", fmtCountrySpend, opts), r, "spend")}</span>
-          <span>SQLs ${rowMetricHtml(r, "sqls", fmtCount, opts)}</span>
+          <span>SQLs ${rowMetricHtml(r, "sqls", fmtCount, opts)}${(r.sqls !== null && r.sqls !== undefined) ? cohortAsOfNote(data && data.cohort) : ""}</span>
           <span>Won deals ${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</span>
         </div>
       </li>`;
@@ -18228,7 +18329,7 @@ function renderCountriesResidualPanel(res, opts) {
       <div><dt>Residual spend</dt><dd>${countryResidualSpendValue(res)}</dd></div>
       <div><dt>Closed-won deals</dt><dd>${rowMetricHtml(res, "closed_won_deals", fmtCount, opts)}</dd></div>
       <div><dt>Won revenue</dt><dd>${rowMetricHtml(res, "won_revenue", fmtMoney, opts)}</dd></div>
-      <div><dt>${escapeHtml(COHORT_SQLS_LABEL)}</dt><dd>${cohortCountHtml(res.sqls, opts.cohort, res)}</dd></div>
+      <div><dt>${escapeHtml(COHORT_SQLS_LABEL + cohortThroughSuffix(opts.cohort))}</dt><dd>${cohortCountHtml(res.sqls, opts.cohort, res)}</dd></div>
     </dl>
     ${parts}
     <p class="ctry-residual-note">${escapeHtml(notes[0] || "Spend, deals and leads no listed market owns are preserved separately — never spread across real countries.")}</p>`;
@@ -18455,8 +18556,8 @@ function renderRoasCountryTable(rows, opts) {
       <th>Country</th>
       <th>Region</th>
       <th>Spend</th>
-      <th title="${leadsTitle}">Leads<span class="th-sub"> · contacts acquired in window</span></th>
-      <th title="${leadsTitle}">SQLs<span class="th-sub"> · contacts acquired in window</span></th>
+      <th title="${leadsTitle}">Leads<span class="th-sub"> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</span></th>
+      <th title="${leadsTitle}">SQLs<span class="th-sub"> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</span></th>
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across countries">Customers</th>
       <th>Won Revenue</th>
@@ -18666,8 +18767,8 @@ function renderCountryDrawer(r, data) {
     </div>
     <dl class="ctry-drawer__summary">
       <div><dt>Spend</dt><dd>${roasCountrySpendCell(r)}</dd></div>
-      <div><dt>${escapeHtml(COHORT_LEADS_LABEL)}</dt><dd>${cohortCountHtml(r.leads, (data || {}).cohort, r)}</dd></div>
-      <div><dt>${escapeHtml(COHORT_SQLS_LABEL)}</dt><dd>${cohortCountHtml(r.sqls, (data || {}).cohort, r)}</dd></div>
+      <div><dt>${escapeHtml(COHORT_LEADS_LABEL + cohortThroughSuffix((data || {}).cohort))}</dt><dd>${cohortCountHtml(r.leads, (data || {}).cohort, r)}</dd></div>
+      <div><dt>${escapeHtml(COHORT_SQLS_LABEL + cohortThroughSuffix((data || {}).cohort))}</dt><dd>${cohortCountHtml(r.sqls, (data || {}).cohort, r)}</dd></div>
       <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</dd></div>
       <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, opts)}</dd></div>
       <div><dt>Won revenue</dt><dd>${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</dd></div>

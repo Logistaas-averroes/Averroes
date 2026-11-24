@@ -6905,3 +6905,35 @@ the one Campaigns page, PR-ADS-177C retires the old ones. Doc: `docs/59`.
 
 **Next.** PR-ADS-177B (the one Campaigns page). Remaining legacy SQL readers,
 all labelled and none mart-derived, are listed in `docs/59` §8.
+
+## PR-ADS-177A-F1 — truth audit round 1 on the one SQL count
+
+Fixes on top of PR-ADS-177A; `docs/59` §10 has each finding, fix and the
+fail-before / mutation evidence.
+
+* **Stale cohort (MAJOR 1).** The mart's `cohort` block declares `stale`,
+  `as_of` and `window`. Every published cohort count prints "measured as of …"
+  over a `source_stale` funnel, via Campaign Evidence's `campaignCohortAsOf`
+  inside the one gate `cohortCountHtml`. `audit_marketing_outcome_cohorts`
+  fails a stale published payload without them (`stale_disclosed`).
+* **Two "SQLs" (MAJOR 2).** Dashboard Deals: the legacy backlog is out of the
+  funnel (`lead_status_backlog`, `kpis.lead_status_qualified_no_won_deal`,
+  was `sqls_not_closed_won`); its cards, statuses and headers say
+  "Qualified (lead status)"; the funnel's SQL stage under a withheld cohort
+  says "Withheld" and the reason. Dashboard Channels' lead-status counts are
+  labelled "Qualified (lead status)" everywhere
+  (`kpis.total_sqls_metric_family`).
+* **Windows (MINOR 1).** Each cohort label says its last day; §5's "same
+  total" corrected (campaign / deal views through today, country views
+  through yesterday); `cohort_sql_parity.campaign_view` compares the campaign
+  view's days with Campaign Evidence like for like.
+* **Delta (MINOR 2).** No SQL delta on an open window (`cohortDeltaChip`).
+* **Names (MINOR 4).** Overview `kpis.google_ads_cohort_sqls` /
+  `campaign_row_cohort_sqls` (were the names of two other scopes).
+* **Audit endpoint (MINOR 5).** `build_revenue_attribution_audit` judges the
+  lead window on the cohort verdict; the legacy table's grain is reported only.
+* **Flake (MINOR 6).** The 154c / 154c_f3 CLI cases run at a fixed instant;
+  both pass at 2026-10-01 08:00Z.
+* **Tests.** `tests/test_pr_ads_177a_f1_truth_audit.py` (14) and four PG cases
+  (`test_08`–`test_10`) in the 177A PG module. `cohort_sql_parity` still runs
+  only from the manual CLI — a follow-up.

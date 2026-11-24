@@ -514,7 +514,8 @@ def _withhold_cohort(cohort: dict, reason: str) -> dict:
     out = {k: (_none(v) if k in ("totals", "campaign_residual") else v)
            for k, v in cohort.items()}
     out.update({"sql_status": cwt.UNAVAILABLE, "sql_reason": reason,
-                "leads_status": cwt.UNAVAILABLE, "leads_reason": reason})
+                "leads_status": cwt.UNAVAILABLE, "leads_reason": reason,
+                "stale": False})
     out["reconciliation"] = {**(cohort.get("reconciliation") or {}),
                              "status": "unavailable", "problem_count": None}
     out["metadata"] = {**(cohort.get("metadata") or {}),

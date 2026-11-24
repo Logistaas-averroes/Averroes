@@ -1625,7 +1625,8 @@ def _cohort_slots(outcomes: dict) -> tuple[dict, dict]:
     return campaign, dict(cohort.get("by_group") or {})
 
 
-def _cohort_contract_block(outcomes: dict, campaign_slots: dict) -> dict:
+def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
+                           start_date=None, end_date=None) -> dict:
     """The cohort contract every mart response carries (PR-ADS-177A).
 
     One verdict (``sql_status`` / ``sql_reason``) for leads AND SQLs; the
@@ -1698,6 +1699,18 @@ def _cohort_contract_block(outcomes: dict, campaign_slots: dict) -> dict:
         },
         "window_instants": {"start_at": outcomes.get("start_at"),
                             "end_before": outcomes.get("end_before")},
+        # PR-ADS-177A-F1 (truth audit MINOR 1): the inclusive account-local
+        # days the cohort was measured over. The campaign and deal views run
+        # through today, the country view through yesterday; a page says
+        # which, beside the count.
+        "window": {"start_date": start_date.isoformat() if start_date else None,
+                   "end_date": end_date.isoformat() if end_date else None},
+        # PR-ADS-177A-F1 (truth audit MAJOR 1): a STALE source is published
+        # only as of its watermark — every surface that prints a published
+        # count prints this beside it (`cohortAsOfNote` in static/app.js).
+        "stale": bool(published and ((outcomes.get("freshness") or {}).get("reason")
+                                     == "source_stale")),
+        "as_of": (outcomes.get("freshness") or {}).get("last_successful_incremental_at"),
     }
 
 
@@ -2224,7 +2237,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     owner_labelled_geo = ((geo_by_country.get("owner_labelled_geo") or {})
                           if canonical_geo_country else {})
     countries = stamp_owner_labelled_countries(countries, owner_labelled_geo)
-    cohort_block = _cohort_contract_block(cohort_outcomes, campaign_slots)
+    cohort_block = _cohort_contract_block(cohort_outcomes, campaign_slots,
+                                          start_date=start_date, end_date=end_date)
     summary = _build_db_summary(
         campaign_spend_rows, cohort_block["totals"], revenue_rows,
         revenue_available=revenue_available,
@@ -2785,7 +2799,8 @@ def _withhold_json_cohort(contract: dict, start_date=None, end_date=None) -> dic
     contract["cohort"] = _cohort_contract_block(
         {"cohort": None, "sql_publication": (status, reason),
          "missing_created_at": None, "freshness": {},
-         "start_at": start_at, "end_before": end_before}, {})
+         "start_at": start_at, "end_before": end_before}, {},
+        start_date=start_date, end_date=end_date)
     for holder in (contract, contract.setdefault("source_health", {})):
         holder["lead_metrics_status"] = status
     return contract
@@ -3279,7 +3294,19 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     # never report a window as revenue-safe using a lineage no page consumes.
     revenue_base = canonical_revenue.load_won_deals(window, now=now)
 
-    lead_window_safe = bool(grain.get("lead_window_safe"))
+    # PR-ADS-177A-F1 (truth audit MINOR 5): every lead / SQL figure a window
+    # publishes is the ACQUISITION COHORT (PR-ADS-177A); the legacy `leads`
+    # table feeds none of them. Lead-window safety is therefore the cohort's
+    # own verdict for this window — the same block the pages read — and the
+    # legacy table's date grain is reported, never judged on.
+    cohort_block = None
+    try:
+        cohort_block = (build_revenue_attribution(window, now=now) or {}).get("cohort")
+    except Exception:  # noqa: BLE001 - an unreadable cohort is not safe
+        logger.exception("[revenue_attribution] audit: the cohort could not be read")
+    cohort_status = (cohort_block or {}).get("sql_status")
+    cohort_reason = (cohort_block or {}).get("sql_reason")
+    lead_window_safe = cohort_status == "published"
     spend_window_safe = True   # geo.run_date is the per-day source date
     # The canonical ledger is windowed by the canonical deal close date, never a
     # scheduler run date.
@@ -3287,7 +3314,11 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
 
     date_grain_health = {
         "spend_date_field": "geo.run_date",
-        "lead_date_field_current": "leads.contact_created_at",
+        "lead_date_field_current": "acquisition cohort · contact_created_at",
+        "lead_cohort_status": cohort_status,
+        "lead_cohort_reason": cohort_reason,
+        # The legacy table's own grain: reported for the record only.
+        "legacy_leads_table_window_safe": bool(grain.get("lead_window_safe")),
         "lead_event_date_field_available": bool(grain.get("lead_event_date_field_available")),
         "deal_date_field": "hubspot_deal_ledger.deal_close_date",
         "lead_window_safe": lead_window_safe,
@@ -3317,10 +3348,10 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
             window_ranges[wk] = {}
 
     blockers: list[str] = []
-    if not grain.get("available"):
-        blockers.append("Database unavailable — cannot audit durable lead date grain.")
     if not lead_window_safe:
-        blockers.append("leads.contact_created_at missing for historical rows")
+        blockers.append(
+            f"Acquisition cohort is {cohort_status or 'unavailable'} for this window "
+            f"({cohort_reason or 'cohort unreadable'}) — leads and SQLs are withheld.")
     if pollution.get("pseudo_campaign_rows"):
         blockers.append("Pseudo-traffic campaign rows present in the leads table.")
     if pollution.get("email_campaign_rows"):

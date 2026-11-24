@@ -314,7 +314,7 @@ CONSUMERS: list[dict] = [
     # one Countries page's SQLs are the mart's (_MART / _RAS below).
 
     # ── Executive / Revenue ─────────────────────────────────────────────────
-    _c("Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)",
+    _c("Dashboard Overview KPI strip (google_ads_cohort_sqls + kpis.sqls)",
        "PR-ADS-177A: the SQL headline and kpis.leads / kpis.sqls are the Revenue "
        "Decision Mart's Google Ads acquisition cohort (the legacy "
        "page_reconciliation headline is no longer read). The source mix's "
@@ -453,7 +453,7 @@ CONSUMERS: list[dict] = [
        migration_notes="revenue_per_sql is an inverse-CPQL family metric on the legacy denominator.",
        truth_status="rates None on None/0 denominator",
        headline=True, row=True, executive=True),
-    _c("Dashboard Deals", "kpis.sqls, sqls_not_closed_won panel, source breakdown status.",
+    _c("Dashboard Deals", "kpis.sqls, lead_status_qualified_no_won_deal backlog (out of the funnel), source breakdown status.",
        endpoint="GET /api/dashboard/deals",
        service_function="services.dashboard_deals_service._build_kpis / _build_sql_no_deal / _source_status",
        repository_source="revenue_decision_mart summary + db.revenue_repository.fetch_sql_lead_details",
@@ -464,7 +464,7 @@ CONSUMERS: list[dict] = [
        scope="google_ads_cohort | source group (legacy)", classification=CLS_MIXED,
        code_location="services/dashboard_deals_service.py:_build_sql_no_deal",
        migration_notes="Per-contact SQL rows (contact id + company) in the drawer.",
-       truth_status="sqls_not_closed_won None when unavailable",
+       truth_status="lead_status_qualified_no_won_deal None when unavailable",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
 
     # ── Operational ─────────────────────────────────────────────────────────
@@ -686,7 +686,7 @@ _CE = "Campaign Evidence table + KPI strip"
 _CD = "Campaign drawer (headline, lead quality, countries, recent leads)"
 _KW = "Keyword Evidence table / drawer / CSV export"
 _ST = "Search Terms table / flagged tab / drawer / CSV export"
-_OVW = "Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)"
+_OVW = "Dashboard Overview KPI strip (google_ads_cohort_sqls + kpis.sqls)"
 _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
 _RAS = "Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)"
@@ -1263,7 +1263,8 @@ RULES: list[dict] = [
     # PR-ADS-177A: one SQL count across the Countries page, Dashboard
     # Countries and Campaign Evidence over the same days. Reads, publishes nothing.
     _r("diag.parity.cohort", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
-       symbol="_cohort_sql_parity"),
+       # PR-ADS-177A-F1: and over the campaign view's days.
+       symbol=["_cohort_sql_parity", "_cohort_sql_parity_campaign_view"]),
     _r("diag.parity.cli", "scripts/audit_cross_page_canonical_parity.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="main"),
     # PR-ADS-161B round 3: the module-level regexes NAME the legacy fields in
@@ -1331,7 +1332,10 @@ RULES: list[dict] = [
                "renderRevenueBlockedState", "renderRevenueHealth"]),
     _r("ui.deals_tab", "static/app.js", CLS_MIXED, _DEALS,
        symbol=["renderDashboardDeals", "renderDealKpiRow", "renderDealSourcePipeline",
-               "renderDealCampaignPipeline", "renderDealSqlNoDeal", "renderDealTruthFooter"]),
+               "renderDealCampaignPipeline", "renderDealSqlNoDeal", "renderDealTruthFooter",
+               # PR-ADS-177A-F1: the funnel's cohort SQL stage, and the legacy
+               # lead-status backlog out of it.
+               "renderDealFunnel", "renderDealLeadStatusBacklog"]),
     _r("ui.mart", "static/app.js", CLS_CANONICAL, _MART,
        symbol=["renderMartSummaryStrip", "getBusinessVerdictBadge"]),
     # PR-ADS-177A: the one SQL-count gate for every mart / Dashboard leads and

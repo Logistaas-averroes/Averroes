@@ -76,8 +76,11 @@ logger = logging.getLogger(__name__)
 
 # ── Business-facing status copy ──────────────────────────────────────────────
 STATUS_REVENUE_PROVEN = "Revenue proven"
-STATUS_SQL_NOT_CUSTOMER = "SQL — not yet a customer"
-STATUS_SQL_AGING = "Aging SQL — needs sales review"
+# PR-ADS-177A-F1 (truth audit MAJOR 2): these two describe rows of the LEGACY
+# lead-status population (the `leads` table's qualified status), not the
+# acquisition cohort's SQLs, so they never say "SQL".
+STATUS_SQL_NOT_CUSTOMER = "Qualified (lead status) — no won deal yet"
+STATUS_SQL_AGING = "Aging qualified lead — needs sales review"
 STATUS_AMOUNT_UNAVAILABLE = "Amount unavailable"
 STATUS_ATTR_REVIEW = "Attribution needs review"
 STATUS_STAGE_UNAVAILABLE = "Stage unavailable"
@@ -88,6 +91,10 @@ STATUS_OUTCOME_WITHHELD = "Closed-won outcome withheld"
 # PR-ADS-177A: a row whose SQL count is withheld (the acquisition cohort's
 # verdict is not published) and that has no won deal is not judged on SQLs.
 STATUS_SQLS_WITHHELD = "SQLs withheld"
+# PR-ADS-177A-F1 (truth audit MAJOR 2): the Source → Pipeline rows count the
+# LEGACY lead-status population, so their statuses never say "SQL".
+STATUS_QUALIFIED_PRODUCER = "Qualified-lead producer"
+STATUS_QUALIFIED_WITHHELD = "Qualified-lead count withheld"
 
 # The single, precise reason every open-pipeline / lost / aging field carries.
 OPEN_PIPELINE_REASON = (
@@ -174,7 +181,7 @@ def _build_deals(mart_rows: list, revenue_connected: bool, ledger_available: boo
 
 # ── KPIs ─────────────────────────────────────────────────────────────────────
 
-def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
+def _build_kpis(summary: dict, revenue_connected: bool, lead_status_no_won,
                 amount_unknown: bool) -> dict:
     sqls = summary.get("sqls")
     # PR-ADS-161E: closed-won DEALS and customers (distinct proven HubSpot
@@ -220,12 +227,15 @@ def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
         "sql_to_customer_rate": None,
         "sql_to_customer_rate_status": cwt.UNAVAILABLE,
         "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
-        "sqls_not_closed_won": sqls_not_closed_won,
         # PR-ADS-177A: `sqls` above is the acquisition cohort; this count is
         # NOT — it is the legacy lead-status population (leads.status_category
         # = 'qualified', fetch_sql_lead_details), declared as such so it is
-        # never read as a subset of `sqls`.
-        "sqls_not_closed_won_metric_family": "legacy_lead_status_category",
+        # never read as a subset of `sqls`. PR-ADS-177A-F1 (truth audit MAJOR
+        # 2): keyed and labelled for what it is. It was `sqls_not_closed_won`,
+        # which named the cohort's metric over a lead-status count.
+        "lead_status_qualified_no_won_deal": lead_status_no_won,
+        "lead_status_qualified_no_won_deal_label": LEAD_STATUS_BACKLOG_LABEL,
+        "lead_status_qualified_no_won_deal_metric_family": LEAD_STATUS_METRIC_FAMILY,
         # This tab never computes or exposes a spend ratio (period ratios
         # belong to the spend pages; ROAS / CAC are unavailable everywhere), so
         # the mart's metric block is republished without them.
@@ -250,15 +260,33 @@ def _count_status(count, positive_status: str) -> str:
     return positive_status
 
 
-def _build_funnel(kpis: dict) -> list:
+#: PR-ADS-177A-F1 (truth audit MAJOR 2): the legacy lead-status count is a
+#: different metric from the funnel's SQL stage (the acquisition cohort). It
+#: is not a stage of that funnel and never sits under an "SQL" word.
+LEAD_STATUS_BACKLOG_LABEL = "Qualified (lead status) · no won deal"
+LEAD_STATUS_METRIC_FAMILY = "legacy_lead_status_category"
+
+
+def _build_funnel(kpis: dict, cohort: dict | None = None) -> list:
     sqls = kpis.get("sqls")
     deals = kpis.get("closed_won_deals")
     won = kpis.get("closed_won_revenue_usd")
-    not_won = kpis.get("sqls_not_closed_won")
+    c = cohort or {}
+    cohort_status = c.get("sql_status")
+    # PR-ADS-177A-F1 (truth audit MAJOR 2): a cohort that is not published is
+    # WITHHELD (or unavailable) with its reason — never "Stage unavailable",
+    # which says the pipeline has no such stage.
+    if cohort_status != "published" and sqls is None:
+        sql_stage_status = STATUS_SQLS_WITHHELD
+    else:
+        sql_stage_status = _count_status(sqls, STATUS_SQL_PRODUCER)
     return [
         {"stage": "SQLs", "count": sqls, "amount_usd": None,
          "rate_from_previous": None,
-         "status": _count_status(sqls, STATUS_SQL_PRODUCER)},
+         "metric_family": c.get("metric_family"),
+         "sql_status": cohort_status,
+         "sql_reason": c.get("sql_reason"),
+         "status": sql_stage_status},
         {"stage": "Opportunities Created", "count": None, "amount_usd": None,
          "rate_from_previous": None, "status": STATUS_STAGE_UNAVAILABLE},
         {"stage": "Open Pipeline", "count": None, "amount_usd": None,
@@ -271,10 +299,28 @@ def _build_funnel(kpis: dict) -> list:
          "status": _count_status(deals, STATUS_REVENUE_PROVEN)},
         {"stage": "Closed Lost", "count": None, "amount_usd": None,
          "rate_from_previous": None, "status": STATUS_STAGE_UNAVAILABLE},
-        {"stage": "SQLs Not Yet Closed-Won", "count": not_won,
-         "amount_usd": None, "rate_from_previous": None,
-         "status": _count_status(not_won, STATUS_SQL_NOT_CUSTOMER)},
     ]
+
+
+def _build_lead_status_backlog(kpis: dict, reason: str | None) -> dict:
+    """PR-ADS-177A-F1 (truth audit MAJOR 2) — the legacy lead-status backlog,
+    OUT of the funnel. It was the funnel's last stage, "SQLs Not Yet
+    Closed-Won", which read as the cohort SQL stage's continuation; it is a
+    different population (HubSpot lead status, contacts created in the
+    window), so it is its own block, labelled for what it counts."""
+    count = kpis.get("lead_status_qualified_no_won_deal")
+    return {
+        "label": LEAD_STATUS_BACKLOG_LABEL,
+        "metric_family": LEAD_STATUS_METRIC_FAMILY,
+        "count": count,
+        "status": ("Unavailable" if count is None
+                   else _count_status(count, STATUS_SQL_NOT_CUSTOMER)),
+        "reason": reason if count is None else None,
+        "definition": ("Contacts created in the window whose HubSpot lead status is "
+                       "qualified and who have no closed-won deal. Lead status, not "
+                       "the acquisition cohort: not a stage of the funnel, and not a "
+                       "subset of the cohort's count."),
+    }
 
 
 def _build_stage_mix(kpis: dict) -> list:
@@ -310,7 +356,9 @@ def _row_metrics(metrics, revenue_connected: bool):
             if k in metrics}
 
 
-def _source_status(sqls, deals, won) -> str:
+def _source_status(sqls, deals, won, *, lead_status: bool = False) -> str:
+    """``lead_status``: the row's count is the legacy lead-status population
+    (a Source → Pipeline row), described as such (PR-ADS-177A-F1)."""
     # A closed-won deal IS revenue proof (even if that deal's exact amount is
     # unavailable), so deals>0 → proven regardless of the won total.
     if deals is None:
@@ -322,9 +370,9 @@ def _source_status(sqls, deals, won) -> str:
     if sqls is None:
         # PR-ADS-177A: unknown is not zero — never "no activity" over a
         # withheld SQL count.
-        return STATUS_SQLS_WITHHELD
+        return STATUS_QUALIFIED_WITHHELD if lead_status else STATUS_SQLS_WITHHELD
     if sqls > 0:
-        return STATUS_SQL_PRODUCER
+        return STATUS_QUALIFIED_PRODUCER if lead_status else STATUS_SQL_PRODUCER
     return STATUS_NO_ACTIVITY
 
 
@@ -356,8 +404,11 @@ def _build_source_breakdown(by_source: dict, revenue_connected: bool,
             "sql_to_opportunity_rate": None,
             "opportunity_to_customer_rate": None,
             "sql_to_customer_rate": None,
-            "sql_to_customer_rate_reason": cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE,
-            "status": _source_status(sqls, deals, won),
+            # PR-ADS-177A-F1 (MAJOR 2): this row counts qualified LEADS (lead
+            # status), so its rate is the lead → customer one, unavailable for
+            # the same reason: two populations, two cohorts.
+            "sql_to_customer_rate_reason": cwt.R_LEAD_TO_CUSTOMER_INCOMPATIBLE,
+            "status": _source_status(sqls, deals, won, lead_status=True),
         })
     out.sort(key=lambda r: (
         r.get("closed_won_revenue_usd") or 0.0,
@@ -436,17 +487,18 @@ def _sql_no_deal_status(days, has_gclid) -> str:
 # Distinct unavailability reasons so the UI stays honest and actionable.
 SQL_NO_DEAL_REASON_DISCONNECTED = (
     "Closed-won status cannot be trusted — the revenue integration is disconnected "
-    "(no closed-won deals are durable), so qualified SQLs cannot be classified."
+    "(no closed-won deals are durable), so qualified (lead status) contacts cannot "
+    "be classified."
 )
 SQL_NO_DEAL_REASON_SOURCE = (
-    "Per-SQL linkage is unavailable — the qualified-lead source could not be read."
+    "Per-contact linkage is unavailable — the qualified-lead source could not be read."
 )
 
 
 SQL_NO_DEAL_REASON_LINK_UNPROVEN = (
-    "Per-SQL closed-won linkage is unavailable — a won deal's contact "
-    "association lookup did not succeed, so an SQL cannot be shown as not yet "
-    "closed-won."
+    "Per-contact closed-won linkage is unavailable — a won deal's contact "
+    "association lookup did not succeed, so a qualified (lead status) contact "
+    "cannot be shown as not yet closed-won."
 )
 
 
@@ -560,51 +612,59 @@ def _build_decision_cards(kpis: dict, source_rows: list, sql_no_deal_total: int,
             "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
-    # Watch — a source with SQL volume but weak customer conversion.
+    # Watch — a source with qualified-lead volume but weak customer conversion.
+    # PR-ADS-177A-F1 (truth audit MAJOR 2): a source row's count is the legacy
+    # LEAD-STATUS population (the source groups), not the acquisition cohort's
+    # SQLs — so the card never calls it "SQLs".
     weak = [s for s in source_rows if (s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") == 0]
     if weak:
         top = max(weak, key=lambda s: s.get("sqls") or 0)
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": f"{top['source_detail']} has SQL volume but no won deals",
-            "body": (f"{top['source_detail']} produced {top['sqls']} SQLs but no closed-won "
-                     "deals in this window. Review lead quality and sales follow-up."),
+            "headline": (f"{top['source_detail']} has qualified (lead status) volume "
+                         "but no won deals"),
+            "body": (f"{top['source_detail']} has {top['sqls']} contacts qualified by "
+                     "HubSpot lead status but no closed-won deals in this window. "
+                     "Review lead quality and sales follow-up."),
             "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     elif any((s.get("sqls") or 0) >= 3 and s.get("closed_won_deals") is None
              for s in source_rows):
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": "SQL conversion cannot be judged",
-            "body": ("Closed-won deals are withheld for sources with SQL volume, so "
-                     "unconverted SQL volume is not claimed."),
+            "headline": "Qualified-lead conversion cannot be judged",
+            "body": ("Closed-won deals are withheld for sources with qualified (lead "
+                     "status) volume, so unconverted volume is not claimed."),
             "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
     else:
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": "No source with unconverted SQL volume",
-            "body": "Every source with meaningful SQL volume produced at least one won deal, "
-                    "or there is not enough SQL volume to judge.",
+            "headline": "No source with unconverted qualified-lead volume",
+            "body": "Every source with meaningful qualified (lead status) volume produced at "
+                    "least one won deal, or there is not enough volume to judge.",
             "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
-    # Investigate — qualified SQLs that have not become customers.
+    # Investigate — qualified (lead status) contacts with no won deal. Lead
+    # status, not the acquisition cohort (PR-ADS-177A-F1, MAJOR 2).
     if sql_no_deal_available and sql_no_deal_total > 0:
         cards.append({
             "type": "investigate", "title": "Investigate",
-            "headline": "Qualified SQLs not yet closed-won",
-            "body": (f"{sql_no_deal_total} qualified SQL{'s' if sql_no_deal_total != 1 else ''} "
-                     "in this window have no closed-won deal yet. Open / lost pipeline is not "
-                     "visible here — review these as a sales follow-up gap."),
+            "headline": "Qualified (lead status) contacts not yet closed-won",
+            "body": (f"{sql_no_deal_total} contact{'s' if sql_no_deal_total != 1 else ''} "
+                     "created in this window and qualified by HubSpot lead status "
+                     f"{'have' if sql_no_deal_total != 1 else 'has'} no closed-won deal yet. "
+                     "Open / lost pipeline is not visible here — review these as a sales "
+                     "follow-up gap."),
             "target_page": "leads", "target_label": "Open Leads",
         })
     else:
         cards.append({
             "type": "investigate", "title": "Investigate",
-            "headline": "No unconverted SQL backlog surfaced",
-            "body": "Either every qualified SQL has a closed-won deal, or per-SQL linkage is "
-                    "unavailable for this window.",
+            "headline": "No unconverted qualified-lead backlog surfaced",
+            "body": "Either every qualified (lead status) contact has a closed-won deal, or "
+                    "per-contact linkage is unavailable for this window.",
             "target_page": "leads", "target_label": "Open Leads",
         })
 
@@ -650,7 +710,7 @@ def _build_truth_status(readiness: dict, deals: list, revenue_connected: bool,
 def _build_unavailable(kpis: dict, deals: list, revenue_connected: bool,
                        ledger_available: bool, sql_no_deal_available: bool,
                        sql_no_deal_reason, amount_unknown: bool,
-                       period_change: dict) -> list:
+                       period_change: dict, sqls_reason: str | None = None) -> list:
     out = [
         {"metric": "open_pipeline_usd", "reason": OPEN_PIPELINE_REASON},
         {"metric": "opportunities_created", "reason": OPEN_PIPELINE_REASON},
@@ -675,7 +735,10 @@ def _build_unavailable(kpis: dict, deals: list, revenue_connected: bool,
                               "so the total is withheld (never a lowered $0). Won deals are still counted."})
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
-                    "reason": "SQLs withheld — lead business event dates are unavailable."})
+                    # PR-ADS-177A-F1: the cohort's own reason — the SQLs are
+                    # the acquisition cohort, not lead event dates.
+                    "reason": ("SQLs withheld — the acquisition cohort is not published "
+                               f"for this window ({sqls_reason or 'reason unavailable'}).")})
     if not sql_no_deal_available:
         out.append({"metric": "sql_no_deal",
                     "reason": sql_no_deal_reason or SQL_NO_DEAL_REASON_SOURCE})
@@ -777,11 +840,12 @@ def build_dashboard_deals(window: str = "current_quarter",
     sql_result = repo.fetch_sql_lead_details(start, end)
     sql_no_deal_rows, sql_no_deal_total, sql_no_deal_available, sql_no_deal_reason = \
         _build_sql_no_deal(sql_result, ref_now, revenue_connected)
-    sqls_not_closed_won = sql_no_deal_total if sql_no_deal_available else None
+    lead_status_no_won = sql_no_deal_total if sql_no_deal_available else None
 
-    kpis = _build_kpis(summary, revenue_connected, sqls_not_closed_won, amount_unknown)
+    kpis = _build_kpis(summary, revenue_connected, lead_status_no_won, amount_unknown)
     deals = _build_deals(won_deal_rows, revenue_connected, ledger_available)
-    funnel = _build_funnel(kpis)
+    funnel = _build_funnel(kpis, mart.get("cohort"))
+    lead_status_backlog = _build_lead_status_backlog(kpis, sql_no_deal_reason)
     stage_mix = _build_stage_mix(kpis)
     aging_buckets = _build_aging_buckets()
     source_breakdown = _build_source_breakdown(by_source, revenue_connected, null_amount_groups)
@@ -796,7 +860,8 @@ def build_dashboard_deals(window: str = "current_quarter",
                                            canonical.get("reason")))
     unavailable = _build_unavailable(kpis, deals, revenue_connected, ledger_available,
                                      sql_no_deal_available, sql_no_deal_reason,
-                                     amount_unknown, period_change)
+                                     amount_unknown, period_change,
+                                     sqls_reason=(mart.get("cohort") or {}).get("sql_reason"))
 
     # PR-ADS-154C-F2 §3: per-metric provenance. Every KPI on this page is read
     # from the mart summary, so the all-source closed-won pair here is the SAME
@@ -873,6 +938,9 @@ def build_dashboard_deals(window: str = "current_quarter",
         "window_basis": (mart.get("cohort") or {}).get("window_basis"),
         "period_change": period_change,
         "funnel": funnel,
+        # PR-ADS-177A-F1 (MAJOR 2): the legacy lead-status backlog, out of the
+        # funnel — a different metric, never its continuation.
+        "lead_status_backlog": lead_status_backlog,
         "stage_mix": stage_mix,
         "source_breakdown": source_breakdown,
         "campaign_breakdown": campaign_breakdown,

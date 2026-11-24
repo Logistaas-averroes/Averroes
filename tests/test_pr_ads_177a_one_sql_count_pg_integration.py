@@ -231,7 +231,7 @@ def test_04_an_incomplete_contact_sync_withholds_every_count_on_every_surface(
     # decision-ready, only the leads / SQLs are withheld.
     assert mart["readiness"]["revenue_decision_ready"] is True
     assert mart["readiness"]["lead_metrics_ready"] is False
-    assert payloads["dashboard/overview"]["kpis"]["google_ads_source_sqls"] is None
+    assert payloads["dashboard/overview"]["kpis"]["google_ads_cohort_sqls"] is None
     country = payloads["mart/country"]
     assert country["country_totals"]["metrics"]["sqls"]["reason"] == WITHHELD_REASON
     # The audit's per-window check agrees.
@@ -414,3 +414,119 @@ def test_07c_dashboard_campaigns_renders_the_gate_from_its_own_response(
     assert all("Withheld" in h for h in out)
     kpi = out[0][out[0].index('data-kpi="sqls"'):]
     assert "SQLs · contacts acquired in window" in kpi
+
+
+# ── PR-ADS-177A-F1 (truth audit round 1) ────────────────────────────────────
+def _funnel_stale(hours=48):
+    """The contact sync last succeeded `hours` ago: the real `assess` calls it
+    `source_stale` — published, but only AS OF that watermark."""
+    from db import writers
+    then = datetime.now(timezone.utc) - timedelta(hours=hours)
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete", last_incremental_at=then,
+        last_modified_watermark=then, last_status="success",
+        last_sync_mode="incremental", last_incremental_status="success",
+        last_successful_incremental_at=then, last_error=None)
+
+
+def test_08_a_stale_cohort_renders_measured_as_of_never_a_bare_number(
+        live_db, monkeypatch):
+    """MAJOR 1: `last_successful_incremental_at = now - 48h`. The real Overview
+    and the real Countries page payloads publish the cohort — and every count
+    they print says "measured as of …"."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _ready(live_db)
+    _funnel_stale(48)
+    ov = _json(__import__("services.dashboard_overview_service", fromlist=["x"])
+               .build_dashboard_overview(window=WINDOW))
+    page = _mart("country")
+    for p in (ov, page):
+        c = p["cohort"]
+        assert (c["sql_status"], c["metadata"]["source_freshness"]["reason"]) == (
+            "published", "source_stale")
+        assert c["stale"] is True and c["as_of"] and c["metadata"]["as_of"]
+    assert ov["kpis"]["google_ads_cohort_sqls"] == 4
+    out = _render(
+        "const ov = %s; const page = %s;"
+        "roasCountryMart = page; roasCountriesData = page.rows || [];"
+        "[renderDashKpiRow(ov), renderRoasCountrySummary(page),"
+        " renderRoasCountryTable(page.rows, campBlockerOpts(page)),"
+        " renderCountriesRegionalMix(page)]" % (json.dumps(ov), json.dumps(page)))
+    kpis, summary, table, mix = out
+    ov_sql = kpis[kpis.index('data-kpi="google_ads_cohort_sqls"'):]
+    ov_sql = ov_sql[:ov_sql.index("</article>") if "</article>" in ov_sql else 1200]
+    assert "measured as of" in ov_sql, ov_sql
+    page_sql = summary[summary.index('data-kpi="sqls"'):summary.index('data-kpi="deals"')]
+    assert "measured as of" in page_sql
+    # Every published count cell of the table carries it — never a bare number.
+    ae = table[table.index("United Arab Emirates"):]
+    ae = ae[:ae.index("</tr>")]
+    assert '<td class="ctry-num">1</td>' not in ae
+    assert ae.count("measured as of") >= 2                  # its leads and its SQLs
+    assert "measured as of" in mix
+    # And the audit holds the payloads to it.
+    from scripts import audit_marketing_outcome_cohorts as audit
+    assert audit.mart_stale_disclosure_problems(ov) == []
+    assert audit.mart_stale_disclosure_problems(page) == []
+
+
+def test_08b_counterfactual_the_audit_goes_red_when_a_stale_payload_drops_as_of(
+        live_db, monkeypatch):
+    from scripts import audit_marketing_outcome_cohorts as audit
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _ready(live_db)
+    _funnel_stale(48)
+    payloads = audit._build_mart_payloads(WINDOW, None)
+    a = audit.Audit()
+    audit.audit_mart_window(a, window=WINDOW, payloads=payloads)
+    assert a.violations == [], a.violations
+    for p in payloads.values():
+        p["cohort"]["as_of"] = None
+    a = audit.Audit()
+    audit.audit_mart_window(a, window=WINDOW, payloads=payloads)
+    assert len([v for v in map(str, a.violations) if "stale_disclosed" in v]) == len(payloads)
+
+
+def test_09_an_approved_manual_mapping_places_cohort_contacts_on_the_mapped_row(
+        live_db, monkeypatch):
+    """MINOR 3: an admin maps the external label "Mystery" onto the canonical
+    `brand - uk`. The cohort contact carrying it (c-fj, an SQL) is then on the
+    `brand - uk` row — not on a "Mystery" row, not in the residual — and the
+    rows still conserve the total."""
+    from db import writers
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _ready(live_db)
+    before = _mart("campaign")
+    assert _row(before, campaign_name="Mystery")["sqls"] == 1
+    assert writers.upsert_campaign_identity(
+        CUSTOMER, "Mystery", campaign_id="111", canonical_campaign_name="brand - uk",
+        match_method="manual", approved_by="admin@test")
+    m = _mart("campaign")
+    names = [r["campaign_name"] for r in m["rows"]]
+    assert "Mystery" not in names
+    uk = _row(m, campaign_name="brand - uk")
+    assert (uk["leads"], uk["sqls"]) == (4, 3)            # c-uk, c-uk2, c-ae + c-fj
+    residual = m["cohort"]["campaign_residual"]
+    assert (residual["leads"], residual["sqls"]) == (1, 1)  # c-nolb, unchanged
+    for field in ("leads", "sqls"):
+        assert sum(r[field] for r in m["rows"]) + residual[field] == m["summary"][field]
+    assert (m["summary"]["leads"], m["summary"]["sqls"]) == (5, 4)
+
+
+def test_10_the_campaign_view_days_agree_across_the_mart_the_overview_and_campaign_evidence(
+        live_db, monkeypatch):
+    """MINOR 1: the campaign view runs through TODAY, the country view through
+    yesterday — two groups, each like for like."""
+    from services import cross_page_parity_service as parity
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _ready(live_db)
+    report = parity.audit_window(WINDOW)
+    cv = report["cohort_sql_parity"]["campaign_view"]
+    assert cv["status"] == "identical", cv
+    assert cv["readings"] == {"mart_campaign_view": 4, "dashboard_overview": 4,
+                              "campaign_evidence": 4}
+    _, today = _window_dates(WINDOW)
+    assert cv["window"]["end_date"] == today.isoformat()
+    assert report["cohort_sql_parity"]["window"]["end_date"] == (
+        today - timedelta(days=1)).isoformat()
+    assert "cohort_sql_parity_broken" not in report["violation_codes"]

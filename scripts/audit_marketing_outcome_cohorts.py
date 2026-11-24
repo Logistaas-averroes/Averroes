@@ -276,7 +276,7 @@ _MART_SUMMARY_FIELDS = ("leads", "sqls")
 _MART_ROW_FIELDS = ("leads", "sqls")
 _COHORT_TOTAL_FIELDS = ("leads", "sqls", "sqls_missing_event_timestamp")
 _DASH_KPI_FIELDS = ("leads", "sqls", "sqls_residual", "leads_residual",
-                    "google_ads_source_sqls", "campaign_attributable_sqls")
+                    "google_ads_cohort_sqls", "campaign_row_cohort_sqls")
 #: The marker an itemised outside-market sub-row carries instead of a count.
 _IN_RESIDUAL = "in_residual"
 
@@ -391,6 +391,37 @@ def mart_conservation_problems(payload: dict, *, view: str) -> list[str]:
     return problems
 
 
+def mart_stale_disclosure_problems(payload: dict) -> list[str]:
+    """PR-ADS-177A-F1 (truth audit MAJOR 1) — a cohort published over a STALE
+    contact funnel is a count *as of* its watermark (`docs/44` §7). A payload
+    that publishes it must say so in machine-readable form: ``stale`` true and
+    an ``as_of`` on the block and in its metadata, from which every surface
+    prints "measured as of …". A stale published count without them reads as
+    current, which it is not.
+
+    Also (MINOR 1): a published cohort declares the last day it counts
+    (``window.end_date``) — the campaign and country views end on different
+    days and each count says which."""
+    c = payload.get("cohort") or {}
+    if c.get("sql_status") != "published":
+        return []
+    meta = c.get("metadata") or {}
+    reason = (meta.get("source_freshness") or {}).get("reason")
+    problems = []
+    if reason == "source_stale":
+        if c.get("stale") is not True:
+            problems.append("cohort.stale is not true over a source_stale funnel")
+        if not c.get("as_of"):
+            problems.append("cohort.as_of is missing over a source_stale funnel")
+        if not meta.get("as_of"):
+            problems.append("cohort.metadata.as_of is missing over a source_stale funnel")
+    elif c.get("stale"):
+        problems.append(f"cohort.stale is true but the funnel is {reason!r}")
+    if not ((c.get("window") or {}).get("end_date")):
+        problems.append("cohort.window.end_date is not declared")
+    return problems
+
+
 def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
     """PR-ADS-177A — every mart / Dashboard payload of one business window.
 
@@ -418,6 +449,13 @@ def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
             a.holds(f"{w} {name} withheld_not_exposed",
                     f"cohort {status} ({(payload.get('cohort') or {}).get('sql_reason')}); "
                     "no lead or SQL count is present")
+        stale_problems = mart_stale_disclosure_problems(payload)
+        if stale_problems:
+            a.broken(f"{w} {name} stale_disclosed", "; ".join(stale_problems))
+        elif status == "published":
+            a.holds(f"{w} {name} stale_disclosed",
+                    "the published cohort declares its window end and, when "
+                    "the funnel is stale, its as-of watermark")
         view = ("campaign" if name == "mart/campaign" else "country"
                 if name == "mart/country" else name)
         if view in ("campaign", "country", "dashboard/countries"):

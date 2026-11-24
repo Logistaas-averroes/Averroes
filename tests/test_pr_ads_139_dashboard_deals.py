@@ -444,10 +444,13 @@ def test_sql_no_deal_preserved_and_excludes_customers(monkeypatch):
     assert "Acme" not in companies
     assert set(companies) == {"Pending Co", "Old Lead", "No Attr"}
     assert out["sql_no_deal_total"] == 3
-    assert out["kpis"]["sqls_not_closed_won"] == 3
+    # PR-ADS-177A-F1 (MAJOR 2): keyed for what it counts — lead status.
+    assert out["kpis"]["lead_status_qualified_no_won_deal"] == 3
+    assert out["lead_status_backlog"]["count"] == 3
     # An aging SQL (168 days) is flagged for review; a contact with no campaign is attribution review.
     by = {r["company"]: r for r in out["sql_no_deal"]}
-    assert by["Old Lead"]["status"] == "Aging SQL — needs sales review"
+    # PR-ADS-177A-F1 (MAJOR 2): a lead-status row is never called an SQL.
+    assert by["Old Lead"]["status"] == "Aging qualified lead — needs sales review"
     assert by["No Attr"]["status"] == "Attribution needs review"
     assert by["Pending Co"]["days_since_sql"] == 12
 
@@ -456,7 +459,7 @@ def test_sql_no_deal_unavailable_when_source_down(monkeypatch):
     out = _deals(monkeypatch, sql_leads={"available": False, "rows": []})
     assert out["sql_no_deal_available"] is False
     assert out["sql_no_deal"] == []
-    assert out["kpis"]["sqls_not_closed_won"] is None
+    assert out["kpis"]["lead_status_qualified_no_won_deal"] is None
     assert "sql_no_deal" in {u["metric"] for u in out["unavailable"]}
     # The reason names the lead-source outage (not the disconnected case).
     reason = next(u["reason"] for u in out["unavailable"] if u["metric"] == "sql_no_deal")
@@ -469,7 +472,7 @@ def test_sql_no_deal_unavailable_when_revenue_disconnected(monkeypatch):
     out = _deals(monkeypatch, revenue_connected=False)
     assert out["sql_no_deal_available"] is False
     assert out["sql_no_deal"] == []
-    assert out["kpis"]["sqls_not_closed_won"] is None
+    assert out["kpis"]["lead_status_qualified_no_won_deal"] is None
     reason = next(u["reason"] for u in out["unavailable"] if u["metric"] == "sql_no_deal")
     assert "disconnected" in reason.lower()
 

@@ -101,6 +101,11 @@ from services.dashboard_overview_service import (
 
 logger = logging.getLogger(__name__)
 
+#: PR-ADS-177A-F1 (truth audit MAJOR 2): the label and family of this page's
+#: lead counts — the legacy lead-status population, not the acquisition cohort.
+LEAD_STATUS_QUALIFIED_LABEL = "Qualified (lead status)"
+LEAD_STATUS_METRIC_FAMILY = "legacy_lead_status_category"
+
 # ── Executive channel buckets ────────────────────────────────────────────────
 # A PRESENTATION mapping from the PR-ADS-133 classifier channels to the eight
 # executive channel buckets this tab shows. This never changes the classifier;
@@ -697,8 +702,10 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         top = max(watch, key=lambda c: c["sqls"])
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": f"{top['channel_label']} has SQLs but no connected spend",
-            "body": (f"It produced {top['sqls']} SQL{'s' if top['sqls'] != 1 else ''}"
+            "headline": (f"{top['channel_label']} has qualified (lead status) contacts "
+                         "but no connected spend"),
+            "body": (f"It produced {top['sqls']} contact{'s' if top['sqls'] != 1 else ''} "
+                     "qualified by HubSpot lead status"
                      + (" (its closed-won deals are withheld this window)"
                         if top.get("closed_won_deals") is None else
                         f" and {top['closed_won_deals']} won deal"
@@ -711,7 +718,8 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No unmeasured demand channels",
-            "body": "Every channel producing SQLs either has connected spend or no won deals yet.",
+            "body": ("Every channel producing qualified (lead status) contacts either has "
+                     "connected spend or no won deals yet."),
             "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
@@ -824,7 +832,8 @@ def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
                     "reason": "Revenue integration not connected for this window."})
     if kpis.get("total_sqls") is None:
         out.append({"metric": "total_sqls",
-                    "reason": "Lead metrics withheld — business event dates unavailable."})
+                    "reason": ("Qualified (lead status) counts withheld — business event "
+                               "dates unavailable.")})
     if google_spend["usd"] is None:
         out.append({"metric": "google_ads_spend_usd",
                     "reason": "Google Ads USD spend requires verified spend coverage and FX."})
@@ -963,6 +972,12 @@ def build_dashboard_channels(window: str = "current_quarter",
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)
     kpis["top_channel"] = top_channel
     kpis["top_platform"] = top_platform
+    # PR-ADS-177A-F1 (truth audit MAJOR 2): this page's `sqls` / `total_sqls`
+    # are the LEGACY lead-status population (the source groups), not the
+    # acquisition cohort the Dashboard's SQL cards count. Declared, and
+    # labelled for what they are, so nothing reads them as "SQLs".
+    kpis["total_sqls_label"] = LEAD_STATUS_QUALIFIED_LABEL
+    kpis["total_sqls_metric_family"] = LEAD_STATUS_METRIC_FAMILY
     # PR-ADS-161E: channel rows count closed-won DEALS (additive across
     # channels). Customers — distinct proven HubSpot companies — are not
     # additive, so the page's customer figure is the canonical window metric.

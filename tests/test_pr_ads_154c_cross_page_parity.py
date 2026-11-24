@@ -1440,17 +1440,18 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
 
     t138._patch_durable(monkeypatch)
     # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort, whose
-    # read honours its window as the SQL does. The CLI audits the CURRENT
-    # quarter at the wall clock, so the fixture's same contacts are created
-    # inside it (its first day, noon UTC), with a sync state proven now.
-    from datetime import date as _date
-    from services.canonical_contract import resolve_canonical_window
+    # read honours its window as the SQL does. PR-ADS-177A-F1 (truth audit
+    # MINOR 6): the CLI audits at a FIXED mid-quarter instant, never the wall
+    # clock — on a quarter's first day the settled country view is an empty
+    # range and contacts created at noon of that day lay after the clock.
     from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
-    _now = datetime.now(timezone.utc)
-    _q = _date.fromisoformat(resolve_canonical_window("current_quarter")["start_date"])
+    _now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
     patch_cohort(monkeypatch, contacts_from_lead_rows(
-        t138.LEAD_ROWS, created=datetime(_q.year, _q.month, _q.day, 12, tzinfo=timezone.utc)),
+        t138.LEAD_ROWS, created=datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)),
         as_of=_now)
+    _real_all = parity.audit_all_windows
+    monkeypatch.setattr(parity, "audit_all_windows",
+                        lambda windows=None, now=None: _real_all(windows, now=_now))
     monkeypatch.setattr("db.connection.init_pool", lambda: None)
     # The 138 fixture leaves the contact funnel unwired; supply the one signal
     # that makes the lifecycle strip a measurement rather than an empty schema.

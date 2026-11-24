@@ -1068,13 +1068,20 @@ def build_dashboard_overview(window: str = "current_quarter",
         # the window (leads) and those proven to have reached SQL (sqls). None
         # with the cohort's reason when its verdict is not published.
         "leads": summary.get("leads"),
-        # The SQL headline (key kept for the page): the cohort's Google Ads SQLs.
-        "google_ads_source_sqls": summary.get("sqls"),
-        "google_ads_source_sqls_scope": _cohort.get("sqls_scope"),
-        "google_ads_source_sqls_status": _cohort.get("sql_status"),
+        # The SQL headline: the cohort's Google Ads SQLs. PR-ADS-177A-F1
+        # (truth audit MINOR 4): named for what it holds. It was
+        # `google_ads_source_sqls` — the name of the canonical contact-outcome
+        # scope (`canonical_contact_outcome_service.SCOPE_GOOGLE_ADS_SOURCE`),
+        # a different population the Keyword page still reads under that name.
+        "google_ads_cohort_sqls": summary.get("sqls"),
+        "google_ads_cohort_sqls_scope": _cohort.get("sqls_scope"),
+        "google_ads_cohort_sqls_status": _cohort.get("sql_status"),
         # The part of it the campaign rows hold (the rest has no campaign
-        # label, or a pseudo- / email- / conflicting one).
-        "campaign_attributable_sqls": _on_campaign_rows,
+        # label, or a pseudo- / email- / conflicting one). Not
+        # `campaign_attributable_sqls`: that names the canonical
+        # resolved-identity scope (`analysis/revenue_scope.py`), not "cohort
+        # contacts on a campaign row".
+        "campaign_row_cohort_sqls": _on_campaign_rows,
         "sqls": summary.get("sqls"),
         "sqls_scope": _cohort.get("sqls_scope"),
         "sqls_status": _cohort.get("sql_status"),

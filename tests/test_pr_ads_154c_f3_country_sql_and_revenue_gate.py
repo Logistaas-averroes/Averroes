@@ -687,6 +687,12 @@ def _with_synced_lifecycle(built):
     return built
 
 
+#: PR-ADS-177A-F1 (MINOR 6): the CLI scenarios run at one fixed mid-quarter
+#: instant, never the wall clock; their contacts are created inside its quarter.
+_CLI_NOW = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+_CLI_CREATED = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+
+
 def _cli_both_formats(monkeypatch, capsys, label, *, rows=None, sync_state=None,
          leads=None, mutate=None):
     import json
@@ -702,19 +708,19 @@ def _cli_both_formats(monkeypatch, capsys, label, *, rows=None, sync_state=None,
                                           "excluded_non_paid_count": 0,
                                           "excluded_pseudo_campaign_count": 0})
     # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort, whose
-    # read honours its window as the SQL does. The CLI audits the CURRENT
-    # quarter at the wall clock, so the scenario's contacts (the 138 fixture's,
-    # or `leads`) are created inside it — its first day, noon UTC — with a
-    # sync state proven now.
-    from datetime import date as _date
+    # read honours its window as the SQL does. PR-ADS-177A-F1 (truth audit
+    # MINOR 6): the CLI audits at a FIXED instant (`_CLI_NOW`, mid-quarter),
+    # not the wall clock — on a quarter's first day the settled country view
+    # is an empty range and the scenario's contacts (created at noon of that
+    # day) lay after the clock, so the "fully healthy" scenario was not.
     import tests.test_pr_ads_138_dashboard_countries as t138
-    from services.canonical_contract import resolve_canonical_window
     from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
-    _q = _date.fromisoformat(resolve_canonical_window("current_quarter")["start_date"])
     patch_cohort(monkeypatch, contacts_from_lead_rows(
-        leads if leads is not None else t138.LEAD_ROWS,
-        created=datetime(_q.year, _q.month, _q.day, 12, tzinfo=timezone.utc)),
-        as_of=datetime.now(timezone.utc))
+        leads if leads is not None else t138.LEAD_ROWS, created=_CLI_CREATED),
+        as_of=_CLI_NOW)
+    _real_all = parity.audit_all_windows
+    monkeypatch.setattr(parity, "audit_all_windows",
+                        lambda windows=None, now=None: _real_all(windows, now=_CLI_NOW))
     _rows = rows if rows is not None else [_deal(1)]
     # PR-ADS-161E: "fully healthy" includes proven, current company identity
     # for every won deal, so the canonical customer metric publishes.

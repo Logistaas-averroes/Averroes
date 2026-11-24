@@ -93,7 +93,12 @@ AUDITS = (
     ("crm_truth_exceptions", "scripts.audit_crm_truth_exceptions",
      "every withheld figure names the deals that block it"),
     ("marketing_outcome_cohorts", "scripts.audit_marketing_outcome_cohorts",
-     "Campaign Evidence SQL cohorts reconcile or are withheld"),
+     # PR-ADS-177A-F1 (MINOR 7): since PR-ADS-177A this audit covers every
+     # mart / Dashboard surface of the one SQL count, not Campaign Evidence
+     # alone.
+     "The acquisition cohort (Campaign Evidence and every mart / Dashboard "
+     "leads and SQLs count) reconciles, conserves and discloses staleness, "
+     "or is withheld"),
     ("campaign_evidence", "scripts.audit_campaign_evidence_certification",
      "Campaign Evidence spend and outcomes are certified"),
 )

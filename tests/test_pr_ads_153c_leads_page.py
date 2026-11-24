@@ -483,7 +483,8 @@ def test_campaign_attributable_sqls_stay_explicitly_named():
     # PR-ADS-177A: `sqls` is the acquisition cohort, still explicitly scoped
     # (its scope is the cohort's `google_ads_cohort_sqls`).
     assert '"sqls_scope": _cohort.get("sqls_scope")' in source
-    assert '"google_ads_source_sqls"' in source
+    # PR-ADS-177A-F1 (MINOR 4): the headline key names the cohort it holds.
+    assert '"google_ads_cohort_sqls"' in source
 
 
 # =============================================================================
