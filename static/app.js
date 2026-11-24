@@ -2518,7 +2518,7 @@ function renderDashKpiRow(d) {
       sub: ((!cohortCountPublication(d.cohort).publish
             || k.campaign_row_cohort_sqls === null || k.campaign_row_cohort_sqls === undefined)
         ? "Google Ads contacts created in this window"
-        : `${escapeHtml(fmtCount(k.campaign_row_cohort_sqls))} on a campaign row`)
+        : `${cohortCountHtml(k.campaign_row_cohort_sqls, d.cohort, null)} on a campaign row`)
         + escapeHtml(cohortThroughSuffix(d.cohort)),
       // Both periods are the cohort (the mart's summary.sqls), like for like.
       delta: cohortDeltaChip("sqls", pc, d),
@@ -3618,10 +3618,12 @@ function renderRevKpiRow(d) {
       value: canonicalMetricHtml(
         { value: k.sql_to_customer_rate, status: k.sql_to_customer_rate_status,
           reason: k.sql_to_customer_rate_reason }, (v) => `${(v * 100).toFixed(1)}%`),
-      sub: (!cohortCountPublication(d.cohort).publish || k.sqls === null || k.sqls === undefined)
-        ? "SQLs withheld or unavailable" : `${escapeHtml(fmtCount(k.sqls))} SQLs · contacts acquired in window`,
+      // PR-ADS-177A-F2 (truth audit round 2, MINOR 1): the cohort count goes
+      // through the one gate (as-of note when stale, Withheld + reason) and
+      // says its last day.
+      sub: `${COHORT_SQLS_LABEL}${escapeHtml(cohortThroughSuffix(d.cohort))}: ${cohortCountHtml(k.sqls, d.cohort, null)}`,
       delta: '<span class="dash-delta dash-delta--none">Not a cohort rate</span>',
-      source: "HubSpot qualified leads",
+      source: "HubSpot acquisition cohort",
       ok: k.sql_to_customer_rate_status === "published",
     },
   ];
@@ -4078,8 +4080,15 @@ const CHAN_ORDER = [
   "google_ads", "paid_social", "other_paid", "organic_search_direct",
   "organic_social", "referrals_partner", "offline", "unclassified",
 ];
+// PR-ADS-177A-F1 (truth audit MAJOR 2): the LEGACY lead-status count
+// (`leads.status_category = 'qualified'`) — a different metric from the
+// cohort's SQLs, never shown under the bare word "SQL" / "SQLs".
+const LEAD_STATUS_QUALIFIED_LABEL = "Qualified (lead status)";
+// (PR-ADS-177A-F2: declared before CHAN_METRICS, which reads it at load.)
 const CHAN_METRICS = [
-  { key: "sqls", label: "SQLs" },
+  // PR-ADS-177A-F2 (truth audit round 2, MINOR 1): the Momentum series counts
+  // the legacy lead-status population (`status_category = 'qualified'`).
+  { key: "sqls", label: LEAD_STATUS_QUALIFIED_LABEL },
   { key: "closed_won_deals", label: "Won deals" },
   { key: "revenue", label: "Revenue" },
 ];
@@ -4999,7 +5008,7 @@ function renderCampKpiRow(d) {
       value: cohortCountHtml(k.sqls, d.cohort, null),
       sub: (k.sqls_residual === null || k.sqls_residual === undefined)
         ? `Google Ads contacts · this window${cohortThroughSuffix(d.cohort)}`
-        : `Google Ads contacts · ${fmtCount(k.sqls_residual)} on no campaign row${cohortThroughSuffix(d.cohort)}`,
+        : `Google Ads contacts · ${cohortCountHtml(k.sqls_residual, d.cohort, null)} on no campaign row${cohortThroughSuffix(d.cohort)}`,
       delta: cohortDeltaChip("sqls", pc, d),
       source: "HubSpot acquisition cohort",
       ok: cohortCountPublication(d.cohort).publish && k.sqls !== null && k.sqls !== undefined,
@@ -5672,7 +5681,7 @@ function renderCtryKpiRow(d) {
       value: cohortCountHtml(k.sqls, d.cohort, { sqls_status: k.sqls_status, sqls_reason: k.sqls_reason }),
       sub: (k.sqls_residual === null || k.sqls_residual === undefined)
         ? `Google Ads contacts · by the contact's country · listed markets${cohortThroughSuffix(d.cohort)}`
-        : `Google Ads contacts · listed markets · ${fmtCount(k.sqls_residual)} in the residual${cohortThroughSuffix(d.cohort)}`,
+        : `Google Ads contacts · listed markets · ${cohortCountHtml(k.sqls_residual, d.cohort, null)} in the residual${cohortThroughSuffix(d.cohort)}`,
       delta: cohortDeltaChip("sqls", pc, d),
       source: "HubSpot acquisition cohort",
       ok: cohortCountPublication(d.cohort).publish && k.sqls !== null && k.sqls !== undefined,
@@ -6865,10 +6874,6 @@ function campaignRowSqlPublication(cohort, row) {
 // row's own copy (`sqls_status` / `sqls_reason`) — a row can be withheld under
 // a published cohort (the country gate), never published under a withheld one.
 const COHORT_SQLS_LABEL = "SQLs · contacts acquired in window";
-// PR-ADS-177A-F1 (truth audit MAJOR 2): the LEGACY lead-status count
-// (`leads.status_category = 'qualified'`) — a different metric from the
-// cohort's SQLs, never shown under the bare word "SQL" / "SQLs".
-const LEAD_STATUS_QUALIFIED_LABEL = "Qualified (lead status)";
 const COHORT_LEADS_LABEL = "Leads · contacts acquired in window";
 const COHORT_COUNT_TITLE = "Acquisition cohort: Google Ads-sourced HubSpot contacts created in this window (Leads), and those canonical lifecycle evidence proves reached SQL as of the contact-funnel watermark (SQLs). The same count on every page.";
 function cohortCountPublication(cohort, row) {
@@ -8548,7 +8553,13 @@ function renderRevenueHealth(audit) {
   const ranges = audit.window_ranges || {};
   const cmpKeys = ["current_quarter", "ytd", "all_time"];
 
-  const leadGrainOk = !!dg.lead_window_safe;
+  // PR-ADS-177A-F2 (truth audit round 2, MAJOR): the window's leads and SQLs
+  // are the acquisition cohort. Its verdict is its OWN check — a withheld
+  // cohort withholds leads and SQLs with the reason and blocks no page (owner
+  // decision, docs/59 §3) — so it is never part of revenue readiness. The
+  // legacy `leads` table's date grain feeds no figure and is not judged here.
+  const leadCohort = audit.lead_cohort || {};
+  const cohortPublished = leadCohort.published === true;
   // PR-ADS-161E: the canonical closed-won population (not a legacy
   // gclid_attribution check) vs selected-window status.
   const integrationConnected = audit.canonical_revenue_status === "canonical_available";
@@ -8567,10 +8578,10 @@ function renderRevenueHealth(audit) {
   });
   const windowIntegrityOk = !audit.window_ranges || new Set(rangeSignatures).size > 1;
 
-  // Revenue truth is ready when the audit is SAFE, lead dates are safe, and the
-  // integration is connected. A connected integration whose selected window has
-  // no closed-won deals is a SAFE EMPTY state — never "not wired".
-  const revenueReady = audit.verdict === "SAFE" && leadGrainOk && integrationConnected;
+  // Revenue truth is ready when the audit is SAFE and the integration is
+  // connected. A connected integration whose selected window has no
+  // closed-won deals is a SAFE EMPTY state — never "not wired".
+  const revenueReady = audit.verdict === "SAFE" && integrationConnected;
 
   const blockers = (audit.blockers || []).slice();
   if (!integrationConnected) {
@@ -8580,9 +8591,7 @@ function renderRevenueHealth(audit) {
   // The next action points at a REAL admin workflow — never a nonexistent
   // generic lead re-import action.
   let nextAction = "Revenue truth is ready — no action needed.";
-  if (!leadGrainOk) {
-    nextAction = "Run Lead Event-Date Reconciliation (below) to resolve included paid leads still missing an event date.";
-  } else if (!integrationConnected) {
+  if (!integrationConnected) {
     nextAction = "Run Revenue Truth Recovery (below) to connect closed-won attribution, then re-check this page.";
   } else if (!pollutionOk) {
     nextAction = "Clean pseudo/email campaign rows from the leads table, then re-check this page.";
@@ -8592,12 +8601,12 @@ function renderRevenueHealth(audit) {
     ? `<div class="revenue-blocked-card revenue-empty-card">
          <div class="revenue-blocked-card__eyebrow">Revenue readiness</div>
          <h3>Revenue Ready</h3>
-         <p>The audit is SAFE, lead event dates are safe, and the revenue integration is connected.${!windowHasRevenue ? " The selected window has no closed-won deals yet — a safe empty state." : ""}</p>
+         <p>The audit is SAFE and the revenue integration is connected.${!windowHasRevenue ? " The selected window has no closed-won deals yet — a safe empty state." : ""}</p>
        </div>`
     : `<div class="revenue-blocked-card">
          <div class="revenue-blocked-card__eyebrow">Revenue readiness</div>
          <h3>Revenue is not ready</h3>
-         <p>Revenue truth is ready only when the audit is SAFE, lead event dates are safe, and the revenue integration is connected. (A connected integration with no closed-won deals in the selected window is safe-empty, not a blocker.)</p>
+         <p>Revenue truth is ready only when the audit is SAFE and the revenue integration is connected. (A connected integration with no closed-won deals in the selected window is safe-empty, not a blocker.)</p>
          <ul class="revenue-health-blockers">${blockers.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
          <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(nextAction)}</div>
        </div>`;
@@ -8609,7 +8618,9 @@ function renderRevenueHealth(audit) {
 
   const cmpRow = (k, label) => {
     const s = wc[k] || {};
-    const leads = (s.leads === null || s.leads === undefined) ? "Withheld" : fmtCount(s.leads);
+    // PR-ADS-177A-F2: the window's leads are its acquisition cohort, through
+    // the one gate with THAT window's own cohort verdict.
+    const leads = cohortCountHtml(s.leads, (audit.window_cohorts || {})[k], null);
     return `<tr>
       <td>${label}</td>
       <td class="revenue-health-range">${escapeHtml(fmtRange(ranges[k]))}</td>
@@ -8623,12 +8634,16 @@ function renderRevenueHealth(audit) {
     <div class="revenue-health-note">A SAFE audit verdict alone does not mean Revenue Ready.</div>
 
     <div class="revenue-status-grid revenue-health-checks">
-      ${revenueHealthCheckChip("Lead date grain", leadGrainOk, "Event-date safe", "Unsafe (sync date)")}
+      ${revenueHealthCheckChip("Leads / SQLs (acquisition cohort)", cohortPublished,
+        `Published${escapeHtml(cohortThroughSuffix(audit.window_cohorts && audit.window_cohorts[(audit.window || {}).key]))}`,
+        `${leadCohort.status === "withheld" ? "Withheld" : "Unavailable"} — ${escapeHtml(cohortReasonText(leadCohort.reason) || "reason unavailable")}`)}
       ${revenueHealthCheckChip("Revenue integration", integrationConnected, "Connected", "Not connected")}
       ${revenueHealthCheckChip("Selected window", true, windowHasRevenue ? "Revenue rows" : "No closed-won revenue (safe)", "")}
       ${revenueHealthCheckChip("Campaign pollution", pollutionOk, "Clean", `${pollutionCount} polluted row(s)`)}
       ${revenueHealthCheckChip("Window integrity", windowIntegrityOk, "Windows differ", "Windows identical")}
     </div>
+
+    ${cohortPublished ? "" : `<p class="revenue-health-note revenue-health-cohort-step">Leads / SQLs: withheld separately, never a revenue blocker.${COHORT_LEADS_WITHHELD_STEP}</p>`}
 
     ${readinessCard}
 
@@ -8636,7 +8651,7 @@ function renderRevenueHealth(audit) {
       <h3>Source date rails</h3>
       <ul>
         <li><span>Spend</span><code>${escapeHtml(dg.spend_date_field || "geo.run_date")}</code></li>
-        <li><span>Leads</span><code>${escapeHtml(dg.lead_date_field_current || "leads.contact_created_at")}</code></li>
+        <li><span>Leads</span><code>${escapeHtml(dg.lead_date_field_current || "acquisition cohort · contact_created_at")}</code></li>
         <li><span>Revenue</span><code>${escapeHtml(dg.deal_date_field || "gclid_attribution.deal_close_date")}</code></li>
       </ul>
     </div>

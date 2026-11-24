@@ -58,6 +58,7 @@ from services.canonical_contract import (
     SOURCE_CANONICAL_SPEND,
     SOURCE_REVENUE_BY_SOURCE,
     SOURCE_REVENUE_DECISION_MART,
+    NO_SETTLED_DAY_IN_WINDOW,
     THROUGH_TODAY_NOT_SETTLED,
     TRUTH_READY,
     resolve_canonical_window,
@@ -86,6 +87,9 @@ V_CONTRACT_INCONSISTENT = "metric_contract_inconsistent"
 #: PR-ADS-154C-F2. A registered consumer that was built, published a window, and
 #: certified no metric identity. Building is not certification.
 V_CONSUMER_UNCERTIFIED = "consumer_certified_nothing"
+#: PR-ADS-177A-F2: an identity every consumer of which withholds with
+#: `no_settled_day_in_window` (the window's first day) — nothing to compare.
+STATUS_NO_SETTLED_DAY = "not_evaluable_no_settled_day"
 #: A consumer named in the registry that the audit never built at all.
 V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
 #: PR-ADS-154C-F3. A consumer published a NUMBER while its own contract says the
@@ -1199,6 +1203,19 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                     "unavailable_reason": (r["contract"] or {}).get("unavailable_reason"),
                     "canonical_source": (r["contract"] or {}).get("data_source"),
                 } for r in published_over_unavailable]})
+        elif (not present and readings
+              and all(r.get("unavailable_reason") == NO_SETTLED_DAY_IN_WINDOW
+                      for r in readings)):
+            # PR-ADS-177A-F2 (truth audit round 2, MINOR 3): on a window's FIRST
+            # day (a quarter's, or the year's for YTD) no day of it has ended,
+            # so every settled-day consumer withholds every metric with
+            # `no_settled_day_in_window` — by contract, never a verified zero
+            # over no day (canonical_contract.NO_SETTLED_DAY_IN_WINDOW). That is
+            # a known, legitimate unavailability with nothing to compare, not
+            # an unexplained absence: no violation. Only when EVERY consumer of
+            # the identity says exactly this; one other reason, or one silent
+            # consumer, still falls through to the classification below.
+            status = STATUS_NO_SETTLED_DAY
         elif not present:
             # PR-ADS-155 §7. "No consumer published this metric" was one bucket
             # holding four situations an operator resolves in four different
@@ -1341,7 +1358,8 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
     # when at least one metric identity it is registered for came back with a
     # value AND a contract the registry accepts.
     certified: dict = {name: {"consumer": name, "identities_certified": 0,
-                              "identities_registered": 0, "certified": False}
+                              "identities_registered": 0, "certified": False,
+                              "identities_no_settled_day": 0}
                        for name in sorted(CERTIFIED_CONSUMERS)}
     for entry in metrics:
         for r in entry["readings"]:
@@ -1351,6 +1369,9 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             row["identities_registered"] += 1
             if r["value"] is not None and not r["contract_problem"]:
                 row["identities_certified"] += 1
+            elif (r["value"] is None
+                  and r.get("unavailable_reason") == NO_SETTLED_DAY_IN_WINDOW):
+                row["identities_no_settled_day"] += 1
     for name, row in certified.items():
         row["certified"] = row["identities_certified"] > 0
         if name not in consumers:
@@ -1358,6 +1379,13 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                 "code": V_CONSUMER_NOT_BUILT, "consumer": name,
                 "detail": ("registered in METRIC_IDENTITIES but not built by "
                            "_build_consumers, so nothing about it was checked")})
+        elif (not row["certified"] and row["identities_registered"]
+              and row["identities_no_settled_day"] == row["identities_registered"]):
+            # PR-ADS-177A-F2 (MINOR 3): a settled-day consumer on its window's
+            # first day has no ended day to measure — every identity says so by
+            # contract. Not certified (nothing was checked), and reported as
+            # such, but not a violation.
+            row["not_evaluable_reason"] = NO_SETTLED_DAY_IN_WINDOW
         elif not row["certified"]:
             violations.append({
                 "code": V_CONSUMER_UNCERTIFIED, "consumer": name,

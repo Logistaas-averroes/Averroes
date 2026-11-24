@@ -6937,3 +6937,28 @@ fail-before / mutation evidence.
 * **Tests.** `tests/test_pr_ads_177a_f1_truth_audit.py` (14) and four PG cases
   (`test_08`–`test_10`) in the 177A PG module. `cohort_sql_parity` still runs
   only from the manual CLI — a follow-up.
+
+## PR-ADS-177A-F2 — truth audit round 2 on the one SQL count
+
+`docs/59` §11 has the findings, the fixes, the evidence and the measurements.
+
+* **Revenue Health (MAJOR).** F1's MINOR 5 fix made a withheld cohort an UNSAFE
+  revenue verdict ("Revenue is not ready", "Run Lead Event-Date
+  Reconciliation"). The revenue audit now reports the cohort in its own
+  `lead_cohort` field (never a blocker); Revenue Health shows a separate
+  "Leads / SQLs (acquisition cohort)" chip with the reason and the
+  contact-funnel sync as its remedy; its window comparison's leads go through
+  the gate.
+* **Gate / labels (MINOR 1).** The Revenue tab rate card, three Dashboard
+  sub-lines and the Revenue Health comparison print cohort counts through
+  `cohortCountHtml`; the Channels Momentum toggle says "Qualified (lead
+  status)". A source guard fails any bare-formatted cohort count.
+* **Parity.** The campaign-view violation's wiring is tested (MINOR 2). A
+  window's first day — `no_settled_day_in_window` from every settled-day
+  consumer — is `not_evaluable_no_settled_day`, not six violations (MINOR 3);
+  Channels reads its ledger at the page's `now`, not the wall clock.
+* **Certification cost.** The extended cohort audit: 11.5 s / 61 MB resident
+  (was 0.5 s / 46 MB) on a 21,750-contact fixture — within the memory budget;
+  the shared-core memoisation that halves it is deferred (single-snapshot
+  reader contract).
+* **Tests.** `tests/test_pr_ads_177a_f2_truth_audit.py` (12).

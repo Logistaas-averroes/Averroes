@@ -449,6 +449,9 @@ scopes under those names — correctly. Evidence: `test_n4` fails on
 
 ### 10.7 MINOR 5 — the revenue-attribution audit endpoint
 
+**Superseded in F2 (§11.1):** F1's fix made the cohort verdict a revenue
+blocker, a regression. What follows is the F1 text, kept for the record.
+
 `build_revenue_attribution_audit` judged lead-window safety on the legacy
 `leads` table, which feeds no window figure since PR-ADS-177A. It now
 **points at the cohort verdict**: `lead_window_safe` is the window's cohort
@@ -496,3 +499,164 @@ No assertion was weakened, skipped or quarantined.
 | `177a::test_05_the_audit_flags_every_count_beside_a_withheld_cohort` (one parameter), PG `test_04` | MINOR 4 rename of the Overview key the exposure scan names |
 | `revenue_attribution_audit::_audit`, `::test_audit_date_grain_health_fields`, `::test_audit_verdict_unsafe_when_lead_grain_unsafe` | MINOR 5: the fixture feeds the cohort through the real `assess` (healthy unless the case passes another sync row); the lead date field is the cohort's; "lead window unsafe" is a withheld cohort |
 | `154c::test_f2_7…`, `154c_f3::_cli_both_formats` | MINOR 6: a fixed instant instead of the wall clock (§10.8). Assertions unchanged |
+
+## 11. PR-ADS-177A-F2 — truth audit round 2
+
+Verdict "fix first": one new MAJOR, introduced by the F1 MINOR 5 fix. New
+cases: `tests/test_pr_ads_177a_f2_truth_audit.py` (12 cases, no database).
+
+### 11.1 MAJOR — a withheld cohort said "Revenue is not ready"
+
+F1 set `date_grain_health.lead_window_safe` to "the cohort is published" and
+added a blocker for a withheld cohort. `renderRevenueHealth` read it as
+`leadGrainOk`. So a withheld cohort turned Revenue Health into "Revenue is
+not ready", with the chip "Lead date grain: Unsafe (sync date)" and the next
+step "Run Lead Event-Date Reconciliation". That remedy repairs a table that
+feeds no figure. At `e7b5bc4` the page said "Revenue Ready" in the same
+state, and the owner's decision is that a withheld cohort blocks no page.
+
+* `build_revenue_attribution_audit`
+  (`services/revenue_attribution_service.py`) reports the cohort in its OWN
+  field, `lead_cohort` (`status`, `reason`, `published`,
+  `next_step: contact_funnel_sync`, `blocks_revenue: false`). The
+  `lead_window_safe` key is gone, and no cohort blocker remains, so the
+  revenue verdict does not read the cohort. Each comparison window's cohort
+  block is returned in `window_cohorts`. One mart build per window is shared
+  by the cohort read and the comparison.
+* `renderRevenueHealth` (`static/app.js`):
+  * `revenueReady` = SAFE verdict and integration connected.
+  * The "Lead date grain … (sync date)" chip and the reconciliation next step
+    are removed.
+  * A separate "Leads / SQLs (acquisition cohort)" chip shows Published (with
+    its last day), or Withheld / Unavailable with the reason in words.
+  * Under a withheld cohort, a note names the contact-funnel sync as its
+    remedy (`COHORT_LEADS_WITHHELD_STEP`, the step PR-ADS-177A gave the
+    blocked cards).
+  * The window comparison's leads go through `cohortCountHtml` with each
+    window's own cohort.
+  * The Leads rail's fallback names the cohort.
+
+Evidence: `test_a`–`test_d` render the real audit payload (canonical ledger
+available, cohort through the real `assess`) with the real
+`renderRevenueHealth`. They fail on `7ad983f`: there, `test_b` finds
+"Revenue is not ready".
+
+### 11.2 MINOR 1 — renderers around the gate
+
+* The Revenue tab's "SQL → Customer Rate" card sub-line went through neither
+  the gate nor the window suffix. It now reads `COHORT_SQLS_LABEL` + through
+  + `cohortCountHtml(k.sqls, d.cohort)`.
+* The Revenue Health window comparison: see §11.1.
+* The Channels Momentum toggle's `CHAN_METRICS` "SQLs" (the lead-status
+  series) is now `LEAD_STATUS_QUALIFIED_LABEL`. The constant moved above
+  `CHAN_METRICS`, which reads it at load time.
+* The sweep found three more: the Overview sub-line's
+  `campaign_row_cohort_sqls`, and the Campaigns and Dashboard Countries
+  sub-lines' `sqls_residual`. All three were printed with `fmtCount`, and
+  all three now go through `cohortCountHtml`.
+
+The sweep covered every `fmtCount(` / `dashValue(` over a field named
+`sqls`, `leads`, `sqls_residual`, `leads_residual`,
+`campaign_row_cohort_sqls`, `google_ads_cohort_sqls` or `cohort_sqls`, every
+direct `${….sqls}` / `String(….sqls)` interpolation, and every
+`rowMetricHtml(…, "sqls" | "leads")`. What remains outside the gate:
+
+* Channels (lead status, labelled);
+* the Deals Source → Pipeline rows (lead status, labelled);
+* the mapping workbench (legacy, `docs/59` §8);
+* the Campaign Evidence row (behind `campaignRowSqlPublication`);
+* the two Countries-page `rowMetricHtml` paths, which carry the as-of note
+  (F1).
+
+`test_h` makes the sweep a guard: a bare formatter over those fields outside
+that allow-list fails. It fails on `7ad983f` (`renderDashKpiRow`,
+`renderCampKpiRow`, `renderCtryKpiRow`).
+
+`test_f` / `test_g` extend MAJOR 2's check from payload strings to the JS
+itself: every string and template literal (comments removed) in the Channels
+renderers, `CHAN_METRICS` and the Deals legacy renderers. `test_f` fails on
+`7ad983f`. `test_g` passes there (F1 had fixed those renderers) and fails
+under the mutation that restores the "SQL → Customer" header.
+
+### 11.3 MINOR 2 — the campaign-view violation was untested wiring
+
+`test_i` audits the healthy fixture with the Overview headline off by one.
+It asserts that the campaign view is `broken`, the settled group is not, and
+`cohort_sql_parity_broken` is in `violation_codes`. It fails under the
+mutation that removes the append in `audit_window` — the mutation that left
+every test green.
+
+### 11.4 MINOR 3 — a window's first day
+
+The F1 clock pin hid a real defect. On a quarter's first day, and on 1 Jan
+for YTD, no day of the window has ended. Every settled-day consumer then
+withholds every metric with `no_settled_day_in_window`, by contract. The
+parity audit reported that as six violations: `canonical_source_unavailable`
+×5 ("none of which the audit can classify") and `consumer_certified_nothing
+(dashboard/countries)`.
+
+* `services/cross_page_parity_service.py`: an identity whose EVERY consumer
+  declares exactly `NO_SETTLED_DAY_IN_WINDOW` gets status
+  `not_evaluable_no_settled_day` and no violation. A consumer whose every
+  identity says that is not certified, and is reported with
+  `not_evaluable_reason`, but it is not a violation either. The CLI prints
+  the reason. Any other reason, or a silent consumer, still falls through to
+  the existing classification.
+* `services/dashboard_channels_service.py`: building the first-day test found
+  a second defect. Channels read the deal ledger at the WALL clock (the
+  `_canonical_daily_revenue` / `_build_trend` reads omitted `now`), so a page
+  built for a fixed instant judged its ledger's staleness at another instant.
+  It now passes the page's `now`. Production behaviour is unchanged (there
+  `now` is the wall clock).
+
+Evidence:
+* `test_j` (quarter day 1, 2026-10-01 08:00Z; YTD 2026-01-01 08:00Z) fails
+  on `7ad983f`. It also fails under the mutation that drops `now` from the
+  Channels read.
+* `test_k` (counterfactual: one identity declaring another reason on day 1)
+  holds the line. It fails under the mutation that exempts any absence, and
+  under the one that exempts a consumer with only SOME identities in
+  `no_settled_day_in_window`.
+* The pinned 154c / 154c_f3 tests are kept.
+
+### 11.5 Certification cost of the extended cohort audit
+
+Measured under the certification child
+(`scripts.certification_child --memory-mb 320`, as the platform
+certification runs it). The database is one throwaway PostgreSQL seeded with
+the 177A PG fixture plus 21,750 canonical-funnel contacts over 18 months and
+400 won deals. Two runs per tree:
+
+| Tree | Wall time | Peak RSS (VmHWM) | Peak address space (VmPeak) | Checks |
+| --- | --- | --- | --- | --- |
+| `dce66da` (Campaign Evidence windows only) | 0.5 s | 46 MB | 78 MB | 56 |
+| F2 (adds 7 payloads × 5 business windows) | 11.5 s | 61 MB | 92 MB | 106 |
+
+* **Memory fits.** +15 MB resident, inside the per-audit resident budget
+  (`min_audit_budget_mb` 96; 127–157 MB in production) and far from the
+  320 MB address-space backstop and its 16 MB guard band.
+* **Runtime more than doubles relative to the audit itself.** 8.5 s of the
+  11.5 s is the mart core (`_build_from_db`): 75 builds over 27 distinct
+  inputs, because every Dashboard payload rebuilds its own and its
+  previous-period marts.
+* **The smallest reduction** is to memoise `_build_from_db` per (dates,
+  window, now, resolved window) inside `_build_mart_payloads`, returning a
+  deep copy per caller. Measured: 11.1 s → 5.0–5.5 s for the payload builds,
+  with the same 27 distinct cores.
+* **Not implemented.** The page builders read the reader contract inside one
+  snapshot (`@single_snapshot`, `docs/48`). A cached core would join a page's
+  own reads from a different snapshot, so the audit would no longer check
+  what one request serves. Doing it safely means running each window's seven
+  builders inside one REPEATABLE READ transaction. That is a follow-up if
+  production time demands it. The absolute cost (seconds) is well inside the
+  900 s per-audit timeout.
+
+### 11.6 Existing tests changed in F2
+
+No assertion was weakened, skipped or quarantined.
+
+| Test | Why |
+| --- | --- |
+| `test_revenue_attribution_audit::test_audit_verdict_unsafe_when_lead_grain_unsafe` (F1's) | It pinned the F1 regression (withheld cohort → UNSAFE revenue verdict). It now asserts the opposite: SAFE, no blocker, the cohort reported in `lead_cohort` with its reason |
+| `test_revenue_attribution_audit::test_audit_legacy_leads_grain_alone_no_longer_decides_the_verdict` (F1's) | `lead_window_safe` is gone; reads `lead_cohort.published` |
+| `113::test_health_shows_checks_and_rails` | The "Lead date grain" check judged the legacy `leads` table. It is replaced by the "Leads / SQLs (acquisition cohort)" check, and the Leads rail's fallback names the cohort. The test also asserts "Lead date grain" and "sync date" are gone |

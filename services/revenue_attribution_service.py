@@ -3296,17 +3296,39 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
 
     # PR-ADS-177A-F1 (truth audit MINOR 5): every lead / SQL figure a window
     # publishes is the ACQUISITION COHORT (PR-ADS-177A); the legacy `leads`
-    # table feeds none of them. Lead-window safety is therefore the cohort's
-    # own verdict for this window — the same block the pages read — and the
-    # legacy table's date grain is reported, never judged on.
+    # table feeds none of them, so its date grain is reported, never judged on.
+    #
+    # PR-ADS-177A-F2 (truth audit round 2, MAJOR): the cohort's verdict is
+    # reported in its OWN field (`lead_cohort`) and is NOT part of this
+    # audit's revenue verdict or blockers. A withheld cohort withholds leads
+    # and SQLs, one by one, with the reason — it blocks no page (owner
+    # decision, docs/59 §3). F1 made it `lead_window_safe`, which Revenue
+    # Health read as "Revenue is not ready".
+    _builds: dict = {}
+
+    def _build(wk):
+        # One build per window, shared by the cohort read and the comparison.
+        if wk not in _builds:
+            _builds[wk] = build_revenue_attribution(wk, now=now)
+        return _builds[wk]
+
     cohort_block = None
     try:
-        cohort_block = (build_revenue_attribution(window, now=now) or {}).get("cohort")
+        cohort_block = (_build(window) or {}).get("cohort")
     except Exception:  # noqa: BLE001 - an unreadable cohort is not safe
         logger.exception("[revenue_attribution] audit: the cohort could not be read")
     cohort_status = (cohort_block or {}).get("sql_status")
     cohort_reason = (cohort_block or {}).get("sql_reason")
-    lead_window_safe = cohort_status == "published"
+    lead_cohort = {
+        "label": "Leads / SQLs (acquisition cohort)",
+        "status": cohort_status or "unavailable",
+        "reason": cohort_reason if cohort_block is not None else "cohort_unreadable",
+        "published": cohort_status == "published",
+        "metric_family": (cohort_block or {}).get("metric_family"),
+        # The one remedy for a withheld cohort: the HubSpot contact-funnel sync.
+        "next_step": "contact_funnel_sync",
+        "blocks_revenue": False,
+    }
     spend_window_safe = True   # geo.run_date is the per-day source date
     # The canonical ledger is windowed by the canonical deal close date, never a
     # scheduler run date.
@@ -3315,13 +3337,12 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     date_grain_health = {
         "spend_date_field": "geo.run_date",
         "lead_date_field_current": "acquisition cohort · contact_created_at",
-        "lead_cohort_status": cohort_status,
-        "lead_cohort_reason": cohort_reason,
+        "lead_cohort_status": lead_cohort["status"],
+        "lead_cohort_reason": lead_cohort["reason"],
         # The legacy table's own grain: reported for the record only.
         "legacy_leads_table_window_safe": bool(grain.get("lead_window_safe")),
         "lead_event_date_field_available": bool(grain.get("lead_event_date_field_available")),
         "deal_date_field": "hubspot_deal_ledger.deal_close_date",
-        "lead_window_safe": lead_window_safe,
         "spend_window_safe": spend_window_safe,
         "revenue_window_safe": revenue_window_safe,
     }
@@ -3331,12 +3352,18 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     # all available data falls inside the current quarter. Window integrity is a
     # property of the resolved DATE BOUNDARIES (window_ranges), not the aggregates.
     window_comparison = {}
+    window_cohorts = {}
     window_ranges = {}
     for wk in ("current_quarter", "ytd", "all_time"):
         try:
-            window_comparison[wk] = build_revenue_attribution(wk, now=now)["summary"]
+            _built = _build(wk)
+            window_comparison[wk] = _built["summary"]
+            # PR-ADS-177A-F2: each window's leads are the cohort's — the page
+            # gates them on that window's own verdict.
+            window_cohorts[wk] = _built.get("cohort")
         except Exception:  # noqa: BLE001
             window_comparison[wk] = {}
+            window_cohorts[wk] = None
         try:
             wr = resolve_canonical_window(wk, now=now)
             window_ranges[wk] = {
@@ -3348,10 +3375,6 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
             window_ranges[wk] = {}
 
     blockers: list[str] = []
-    if not lead_window_safe:
-        blockers.append(
-            f"Acquisition cohort is {cohort_status or 'unavailable'} for this window "
-            f"({cohort_reason or 'cohort unreadable'}) — leads and SQLs are withheld.")
     if pollution.get("pseudo_campaign_rows"):
         blockers.append("Pseudo-traffic campaign rows present in the leads table.")
     if pollution.get("email_campaign_rows"):
@@ -3394,6 +3417,10 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
                                      else "canonical_unavailable"),
         "revenue_window_status": "has_revenue" if window_has_revenue else "no_closed_won",
         "window_comparison": window_comparison,
+        "window_cohorts": window_cohorts,
+        # PR-ADS-177A-F2: the selected window's cohort verdict — reported,
+        # never a revenue blocker.
+        "lead_cohort": lead_cohort,
         "window_ranges": window_ranges,
         "verdict": verdict,
         "blockers": blockers,

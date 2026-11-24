@@ -500,7 +500,7 @@ def _utc_midnight(day):
     return datetime.combine(day, time.min, tzinfo=timezone.utc)
 
 
-def _canonical_daily_revenue(start_key, end_key) -> dict:
+def _canonical_daily_revenue(start_key, end_key, now=None) -> dict:
     """Canonical won deals for a date range, carrying a per-day ``close_date``.
 
     The bounds arrive as inclusive dates from the resolved window block, so the
@@ -512,9 +512,13 @@ def _canonical_daily_revenue(start_key, end_key) -> dict:
 
     if end_key is None:
         return {"available": False, "rows": []}
+    # PR-ADS-177A-F2: the page's own instant, never the wall clock — the
+    # ledger's staleness gate is judged at the same `now` as every other read
+    # of this page (it read the wall clock, so a page built for a fixed
+    # instant judged its ledger at another one).
     base = canonical_revenue.load_won_deals(
         start=_utc_midnight(start_key),
-        end=_utc_midnight(end_key + timedelta(days=1)))
+        end=_utc_midnight(end_key + timedelta(days=1)), now=now)
     if not base.get("available"):
         return {"available": False, "rows": [], "reason": base.get("reason")}
     rows = []
@@ -525,7 +529,8 @@ def _canonical_daily_revenue(start_key, end_key) -> dict:
     return {"available": True, "rows": rows}
 
 
-def _build_trend(window_block: dict, *, revenue_total_published: bool = True) -> dict:
+def _build_trend(window_block: dict, *, revenue_total_published: bool = True,
+                 now=None) -> dict:
     """Per-bucket SQLs (by created date) + won deals/revenue (by close date) per
     executive channel. Each metric uses its OWN business event date. A bucket
     whose revenue includes an unknown amount reports that channel's revenue as
@@ -539,7 +544,7 @@ def _build_trend(window_block: dict, *, revenue_total_published: bool = True) ->
     # by the canonical deal close date. `deal_source_attribution` supplied the
     # same shape but a different population and no currency contract, so the
     # trend and the KPI above it could disagree about the same quarter.
-    revenue = _canonical_daily_revenue(start_key, end_key)
+    revenue = _canonical_daily_revenue(start_key, end_key, now=now)
     if not leads.get("available") or not revenue.get("available"):
         return {"bucket": None, "points": [], "status": "unavailable",
                 "reason": "Per-day channel source series is unavailable."}
@@ -910,7 +915,7 @@ def build_dashboard_channels(window: str = "current_quarter",
     # reported Unavailable rather than trusting a possibly-understated total.
     start_key = _parse_iso_date(window_block.get("start_date"))
     end_key = _parse_iso_date(window_block.get("end_date"))
-    raw_revenue = _canonical_daily_revenue(start_key, end_key) if end_key else {
+    raw_revenue = _canonical_daily_revenue(start_key, end_key, now=now) if end_key else {
         "available": True, "rows": []}
     amounts_verifiable = bool(raw_revenue.get("available"))
     exec_unknown, platform_unknown = _unknown_amount_maps(raw_revenue.get("rows") or [])
@@ -994,7 +999,7 @@ def build_dashboard_channels(window: str = "current_quarter",
 
     period_change = _build_period_change(window, ref_now, kpis)
     trend = _build_trend(window_block, revenue_total_published=bool(
-        _revenue_verdict["publishable"])) if revenue_connected else {
+        _revenue_verdict["publishable"]), now=now) if revenue_connected else {
         "bucket": None, "points": [], "status": "unavailable",
         "reason": "The canonical closed-won population is unavailable — a channel series cannot be shown without fabricating zeros."}
     # The quality matrix plots customers (y) and revenue (bubble) — both unknown

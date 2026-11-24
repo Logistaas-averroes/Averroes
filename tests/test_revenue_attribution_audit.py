@@ -101,21 +101,28 @@ def test_audit_date_grain_health_fields():
 
 
 def test_audit_verdict_unsafe_when_lead_grain_unsafe():
-    # PR-ADS-177A-F1 (truth audit MINOR 5): the lead window is unsafe when the
-    # ACQUISITION COHORT is not published — the population every page reads.
+    # PR-ADS-177A-F2 (truth audit round 2, MAJOR): F1 made a withheld cohort
+    # an UNSAFE revenue verdict, which Revenue Health rendered as "Revenue is
+    # not ready". A withheld cohort blocks no page (owner decision): it is
+    # reported in its own field, with its reason and next step, and the
+    # revenue verdict does not read it. (The name is kept for history: no
+    # lead grain makes the revenue verdict unsafe any more.)
     a = _audit(cohort_sync_row=withheld_sync_row(NOW))
-    assert a["verdict"] == "UNSAFE"
-    assert a["date_grain_health"]["lead_window_safe"] is False
-    assert any("Acquisition cohort is withheld" in b for b in a["blockers"])
+    assert a["verdict"] == "SAFE" and a["blockers"] == []
+    lc = a["lead_cohort"]
+    assert (lc["status"], lc["reason"], lc["published"], lc["blocks_revenue"]) == (
+        "withheld", "source_bootstrap_incomplete", False, False)
+    assert "lead_window_safe" not in a["date_grain_health"]
+    assert a["date_grain_health"]["lead_cohort_status"] == "withheld"
 
 
 def test_audit_legacy_leads_grain_alone_no_longer_decides_the_verdict():
     # PR-ADS-177A-F1 (MINOR 5): the legacy `leads` table feeds no window figure
-    # since PR-ADS-177A. Its grain is reported for the record; a published
-    # cohort is the lead window's safety.
+    # since PR-ADS-177A. Its grain is reported for the record, judged on
+    # nothing.
     a = _audit(grain=_grain(safe=False))
     assert a["date_grain_health"]["legacy_leads_table_window_safe"] is False
-    assert a["date_grain_health"]["lead_window_safe"] is True
+    assert a["lead_cohort"]["published"] is True
     assert a["verdict"] == "SAFE"
 
 
