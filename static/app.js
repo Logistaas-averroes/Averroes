@@ -8593,9 +8593,10 @@ function renderRevenueHealth(audit) {
   let nextAction = "Revenue truth is ready — no action needed.";
   if (!integrationConnected) {
     nextAction = "Run Revenue Truth Recovery (below) to connect closed-won attribution, then re-check this page.";
-  } else if (!pollutionOk) {
-    nextAction = "Clean pseudo/email campaign rows from the leads table, then re-check this page.";
   }
+  // PR-ADS-177A-F3 (truth audit round 3, MINOR 1): pseudo / email rows in the
+  // legacy `leads` table are reported (the chip below), never a next step for
+  // revenue: no figure reads that table.
 
   const readinessCard = revenueReady
     ? `<div class="revenue-blocked-card revenue-empty-card">
@@ -8635,11 +8636,14 @@ function renderRevenueHealth(audit) {
 
     <div class="revenue-status-grid revenue-health-checks">
       ${revenueHealthCheckChip("Leads / SQLs (acquisition cohort)", cohortPublished,
-        `Published${escapeHtml(cohortThroughSuffix(audit.window_cohorts && audit.window_cohorts[(audit.window || {}).key]))}`,
+        // PR-ADS-177A-F3: the selected window's own cohort (every window the
+        // selector offers), its last day and — over a stale funnel — its
+        // as-of watermark.
+        `Published${escapeHtml(cohortThroughSuffix(leadCohort.cohort))}${cohortAsOfNote(leadCohort.cohort)}`,
         `${leadCohort.status === "withheld" ? "Withheld" : "Unavailable"} — ${escapeHtml(cohortReasonText(leadCohort.reason) || "reason unavailable")}`)}
       ${revenueHealthCheckChip("Revenue integration", integrationConnected, "Connected", "Not connected")}
       ${revenueHealthCheckChip("Selected window", true, windowHasRevenue ? "Revenue rows" : "No closed-won revenue (safe)", "")}
-      ${revenueHealthCheckChip("Campaign pollution", pollutionOk, "Clean", `${pollutionCount} polluted row(s)`)}
+      ${revenueHealthCheckChip("Campaign pollution", pollutionOk, "Clean", `${pollutionCount} legacy leads-table row(s) · read by no figure`)}
       ${revenueHealthCheckChip("Window integrity", windowIntegrityOk, "Windows differ", "Windows identical")}
     </div>
 
@@ -10741,11 +10745,13 @@ function renderCampaignMappingCard(row, nativeCur, customerId, options) {
   const leadsTxt = (row.leads === null || row.leads === undefined) ? "—" : fmtCount(row.leads);
   const sqlsTxt = (row.sqls === null || row.sqls === undefined) ? "—" : fmtCount(row.sqls);
 
+  // PR-ADS-177A-F3: these are the LEGACY `leads` table's counts (the mapping
+  // workbench reads `fetch_lead_quality`), labelled as such — never "SQLs".
   const metrics = `
     <div class="mapping-card__metrics">
       <span>Revenue <strong>${rowMetricHtml(row, "revenue_usd", fmtUSD, businessBlockerOpts())}</strong></span>
-      <span>Leads <strong>${leadsTxt}</strong></span>
-      <span>SQLs <strong>${sqlsTxt}</strong></span>
+      <span>Leads · legacy leads table <strong>${leadsTxt}</strong></span>
+      <span>${LEAD_STATUS_QUALIFIED_LABEL} <strong>${sqlsTxt}</strong></span>
       <span>Won deals <strong>${rowMetricHtml(row, "closed_won_deals", fmtCount, businessBlockerOpts())}</strong></span>
       <span>Customers <strong>${rowMetricHtml(row, "customers", fmtCount, businessBlockerOpts())}</strong></span>
     </div>`;

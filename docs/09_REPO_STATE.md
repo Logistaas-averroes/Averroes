@@ -6962,3 +6962,19 @@ fail-before / mutation evidence.
   the shared-core memoisation that halves it is deferred (single-snapshot
   reader contract).
 * **Tests.** `tests/test_pr_ads_177a_f2_truth_audit.py` (12).
+
+## PR-ADS-177A-F3 — truth audit round 3 (verdict: merge)
+
+`docs/59` §12.
+
+* **Revenue audit.** Pseudo / email rows in the legacy `leads` table are
+  reported (`legacy_table_findings`), never a revenue blocker — no figure reads
+  that table. The audit's verdict has no legacy-table input left.
+* **Parity.** `not_evaluable_no_settled_day` requires the audit's own settled
+  range to be empty, not only the consumers' declaration
+  (`_no_settled_day_exempt`); a false declaration on a settled day is a
+  violation.
+* **UI.** The mapping workbench labels its legacy counts; the Revenue Health
+  cohort chip states the selected window's last day (every window) and its
+  as-of watermark when stale.
+* **Tests.** `tests/test_pr_ads_177a_f3_truth_audit.py` (12).

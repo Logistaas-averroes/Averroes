@@ -3328,6 +3328,10 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         # The one remedy for a withheld cohort: the HubSpot contact-funnel sync.
         "next_step": "contact_funnel_sync",
         "blocks_revenue": False,
+        # PR-ADS-177A-F3: the selected window's own cohort block — whichever
+        # business window was selected — so the page states its last day and,
+        # over a stale funnel, its as-of watermark.
+        "cohort": cohort_block,
     }
     spend_window_safe = True   # geo.run_date is the per-day source date
     # The canonical ledger is windowed by the canonical deal close date, never a
@@ -3374,11 +3378,21 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         except Exception:  # noqa: BLE001
             window_ranges[wk] = {}
 
-    blockers: list[str] = []
+    # PR-ADS-177A-F3 (truth audit round 3, MINOR 1): pseudo / email campaign
+    # rows in the legacy `leads` table are a data-quality FINDING, reported —
+    # never a revenue blocker. No figure reads that table since PR-ADS-177A
+    # (leads and SQLs are the acquisition cohort; revenue is the canonical deal
+    # ledger), so they cannot make revenue unsafe. They were the last input to
+    # this verdict from that table.
+    legacy_table_findings: list[str] = []
     if pollution.get("pseudo_campaign_rows"):
-        blockers.append("Pseudo-traffic campaign rows present in the leads table.")
+        legacy_table_findings.append(
+            "Pseudo-traffic campaign rows present in the legacy leads table "
+            "(read by no figure).")
     if pollution.get("email_campaign_rows"):
-        blockers.append("Email-campaign rows present in the leads table.")
+        legacy_table_findings.append(
+            "Email-campaign rows present in the legacy leads table (read by no figure).")
+    blockers: list[str] = []
 
     verdict = "SAFE" if not blockers else "UNSAFE"
 
@@ -3424,5 +3438,7 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         "window_ranges": window_ranges,
         "verdict": verdict,
         "blockers": blockers,
+        # PR-ADS-177A-F3: reported, never blocking (see above).
+        "legacy_table_findings": legacy_table_findings,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

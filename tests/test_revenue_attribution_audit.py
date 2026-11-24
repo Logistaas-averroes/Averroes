@@ -133,9 +133,13 @@ def test_audit_verdict_safe_when_all_safe_and_clean():
 
 
 def test_audit_verdict_unsafe_when_pseudo_pollution_present():
+    # PR-ADS-177A-F3 (truth audit round 3, MINOR 1): pseudo rows in the
+    # LEGACY `leads` table are reported, never a revenue blocker — no figure
+    # reads that table since PR-ADS-177A. (The name is kept for history.)
     a = _audit(grain=_grain(True), pollution=_pollution(clean=False))
-    assert a["verdict"] == "UNSAFE"
-    assert any("pseudo" in b.lower() for b in a["blockers"])
+    assert a["verdict"] == "SAFE" and a["blockers"] == []
+    assert a["pseudo_campaign_rows"] == ["(direct)"]
+    assert any("pseudo" in f.lower() for f in a["legacy_table_findings"])
 
 
 def test_audit_window_comparison_has_three_windows():

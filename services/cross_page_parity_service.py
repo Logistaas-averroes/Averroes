@@ -208,6 +208,21 @@ _UNAVAILABLE_CLASSES = {
 }
 
 
+def _no_settled_day_exempt(readings: list, settled_empty: bool) -> bool:
+    """PR-ADS-177A-F2/F3 — is this absence the window's first day, and nothing
+    else?
+
+    True only when the audit's OWN settled window (``resolve_settled_window``
+    for the same key and instant) is empty AND every consumer of the identity
+    declares exactly ``NO_SETTLED_DAY_IN_WINDOW``. A consumer's word alone is
+    not enough (F3): one that declares it on a day with a settled range is
+    withholding something the audit can see exists. One consumer with another
+    reason, or none, means the absence is not only the first day."""
+    return bool(settled_empty and readings
+                and all(r.get("unavailable_reason") == NO_SETTLED_DAY_IN_WINDOW
+                        for r in readings))
+
+
 def _classify_unavailable(readings: list, metric_key: str):
     """Which of the four situations made every consumer withhold this metric.
 
@@ -1046,6 +1061,9 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
     # instant: a declaration the audit cannot reproduce (wrong days, or a
     # closed window claiming to be cut) is a window mismatch.
     settled = resolve_settled_window(window, now=now)
+    # PR-ADS-177A-F3: the audit's own answer to "has any day of this window
+    # ended?" — the only ground on which `no_settled_day_in_window` is exempt.
+    settled_empty = bool((settled.get("window_range") or {}).get("empty"))
     window_rows = []
     signatures: dict = {}
     for name, entry in consumers.items():
@@ -1203,9 +1221,7 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                     "unavailable_reason": (r["contract"] or {}).get("unavailable_reason"),
                     "canonical_source": (r["contract"] or {}).get("data_source"),
                 } for r in published_over_unavailable]})
-        elif (not present and readings
-              and all(r.get("unavailable_reason") == NO_SETTLED_DAY_IN_WINDOW
-                      for r in readings)):
+        elif not present and _no_settled_day_exempt(readings, settled_empty):
             # PR-ADS-177A-F2 (truth audit round 2, MINOR 3): on a window's FIRST
             # day (a quarter's, or the year's for YTD) no day of it has ended,
             # so every settled-day consumer withholds every metric with
@@ -1379,7 +1395,7 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                 "code": V_CONSUMER_NOT_BUILT, "consumer": name,
                 "detail": ("registered in METRIC_IDENTITIES but not built by "
                            "_build_consumers, so nothing about it was checked")})
-        elif (not row["certified"] and row["identities_registered"]
+        elif (not row["certified"] and settled_empty and row["identities_registered"]
               and row["identities_no_settled_day"] == row["identities_registered"]):
             # PR-ADS-177A-F2 (MINOR 3): a settled-day consumer on its window's
             # first day has no ended day to measure — every identity says so by

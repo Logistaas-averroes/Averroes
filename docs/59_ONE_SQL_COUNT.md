@@ -660,3 +660,70 @@ No assertion was weakened, skipped or quarantined.
 | `test_revenue_attribution_audit::test_audit_verdict_unsafe_when_lead_grain_unsafe` (F1's) | It pinned the F1 regression (withheld cohort → UNSAFE revenue verdict). It now asserts the opposite: SAFE, no blocker, the cohort reported in `lead_cohort` with its reason |
 | `test_revenue_attribution_audit::test_audit_legacy_leads_grain_alone_no_longer_decides_the_verdict` (F1's) | `lead_window_safe` is gone; reads `lead_cohort.published` |
 | `113::test_health_shows_checks_and_rails` | The "Lead date grain" check judged the legacy `leads` table. It is replaced by the "Leads / SQLs (acquisition cohort)" check, and the Leads rail's fallback names the cohort. The test also asserts "Lead date grain" and "sync date" are gone |
+
+## 12. PR-ADS-177A-F3 — truth audit round 3
+
+Verdict "merge", three minors. New cases:
+`tests/test_pr_ads_177a_f3_truth_audit.py` (12 cases, no database).
+
+### 12.1 Legacy-table pollution no longer blocks revenue
+
+`build_revenue_attribution_audit` still turned pseudo / email campaign rows
+in the legacy `leads` table (`fetch_campaign_pollution_report`) into revenue
+blockers, which meant UNSAFE, "Revenue is not ready", and the next step
+"Clean pseudo/email campaign rows from the leads table". No figure reads
+that table. Those rows were the audit's last input from it.
+
+They are now reported, not blocking: `pseudo_campaign_rows` /
+`email_campaign_rows` as before, plus `legacy_table_findings` ("… read by no
+figure"). `blockers` holds no legacy-table entry. In Revenue Health, the
+"Campaign pollution" chip says "N legacy leads-table row(s) · read by no
+figure", and the next-step branch is removed.
+
+Evidence: `test_a` (polluted legacy rows, published ledger → SAFE, pollution
+reported, the real Revenue Health says "Revenue Ready") fails on `4fc3f8a`. It
+also fails under the mutation that turns the findings back into blockers.
+
+### 12.2 The first-day exemption
+
+* The exemption is now `_no_settled_day_exempt(readings, settled_empty)`
+  (`services/cross_page_parity_service.py`). It grants
+  `not_evaluable_no_settled_day` only when the audit's OWN settled window
+  (`resolve_settled_window(window, now)`, already resolved in `audit_window`)
+  is empty AND every consumer declares exactly `no_settled_day_in_window`.
+  The consumer-certification exemption needs the same empty range.
+* `test_b` checks the identity level with two consumers: one declaring
+  another reason, `None`, or nothing denies the exemption, and so does a
+  non-empty settled range. It fails under `all(` → `any(` in the helper, and
+  under dropping its `settled_empty` term.
+* `test_c` covers a consumer falsely declaring the reason mid-quarter (a
+  settled range exists). Every country identity is then a violation, and
+  `consumer_certified_nothing` is back. It fails on `4fc3f8a` (all exempted),
+  under dropping `settled_empty` from the helper, and under dropping it from
+  the certification exemption.
+* `test_d` is the positive control: the same declaration on a real first day
+  is exempt.
+
+### 12.3 Leftovers
+
+* **Mapping workbench** (`renderCampaignMappingCard`): its counts are the
+  legacy `leads` table's (`fetch_lead_quality`). They are now labelled
+  "Leads · legacy leads table" and `LEAD_STATUS_QUALIFIED_LABEL`. `test_e`
+  checks every literal. The function stays on `test_h`'s allow-list, and
+  relabelling is not what keeps it there: it formats those LEGACY counts with
+  `fmtCount`, which is correct for a population the cohort gate does not
+  govern.
+* **Revenue Health cohort chip**: it reads the SELECTED window's own cohort
+  block, now returned as `lead_cohort.cohort` for every window the selector
+  offers. It states that window's last day and, over a stale funnel,
+  "measured as of …" (`cohortAsOfNote`). F2's version read
+  `window_cohorts[selected]`, which covered only the three comparison
+  windows, so `last_quarter` and `last_6_months` got no suffix. `test_f`
+  (all five windows) and `test_g` (the audit carries `last_quarter` /
+  `last_6_months` cohorts) fail on `4fc3f8a`.
+
+### 12.4 Existing tests changed in F3
+
+| Test | Why |
+| --- | --- |
+| `test_revenue_attribution_audit::test_audit_verdict_unsafe_when_pseudo_pollution_present` | It pinned legacy-table pollution as a revenue blocker (the finding). Now: SAFE, no blocker, the rows reported in `pseudo_campaign_rows` and `legacy_table_findings`. The name is kept for history |
