@@ -247,8 +247,22 @@ def test_country_roas_unavailable_on_variance(monkeypatch):
                      "deal_amount_usd": 10000.0, "match_status": "matched"}]
     _patch_revattr(monkeypatch, canonical=canonical, geo_rows=geo_rows,
                    coverage=coverage, revenue_rows=revenue_rows)
+    # PR-ADS-176C-F1 (F5): the variance comes from CANONICAL geo spend. This
+    # case drove it through the legacy `geo` snapshot rows (`geo_rows`), which
+    # the country gate no longer reads: with no canonical geo the geo total is
+    # unknown — reconciled is None, never the snapshot's 99 — and country ROAS
+    # stays unavailable either way.
+    legacy_only = build("current_quarter", now=_at("2026-06-22"))
+    assert legacy_only["source_health"]["country_spend_reconciled"] is None
+    assert legacy_only["source_health"]["country_roas_available"] is False
+    monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total",
+                        lambda *a, **k: {"available": True, "has_rows": True,
+                                         "total_spend": 99.0, "rows_counted": 1,
+                                         "country_count": 1, "customer_count": 1,
+                                         "currency_count": 1, "currency_code": "USD"})
     out = build("current_quarter", now=_at("2026-06-22"))
     assert out["source_health"]["country_spend_reconciled"] is False
+    assert out["source_health"]["country_roas_available"] is False
     # Customer id / currency are preserved (test 9).
     assert out["source_health"]["canonical_customer_id"] == "C1"
     assert out["source_health"]["canonical_currency"] == "USD"

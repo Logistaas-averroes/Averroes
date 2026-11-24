@@ -6768,21 +6768,35 @@ and the owner-label disclosure.
 `lead_intelligence` page. That list is now `["/api/leads"]`. No identity or
 check changed.
 
-**Findings: properties `/api/geo` held that the live surfaces do not.** Each
-is pinned as observed. None is fixed here.
+**Findings, fixed in PR-ADS-176C-F1.** The port found four properties
+`/api/geo` held that the live surfaces did not. The first commit pinned them
+"as observed"; the follow-up commit fixes each in the code and asserts the
+correct behaviour. Each case fails on `2b056a4` and on `5a9b5e9`. Full record:
+`docs/58` §8.4 / §8.7.
 
-* **F1.** A listed market's lead text in an ISO or legacy spelling is counted
-  in the residual, not on its market. Examples: "libyan arab jamahiriya",
-  "Iran, Islamic Republic of", "Türkiye".
-* **F2.** Dashboard → Countries keeps native spend under any gate failure while
-  geo coverage is complete, labelled "USD unavailable (FX)". With two accounts
-  and none configured, that is the UK's spend summed over both accounts.
-* **F3.** all_time publishes spend dated before the earliest verified chunk, as
-  "verified".
-* **F4.** With no account configured, the surfaces publish the one account the
-  data holds (the PR-ADS-154B design).
-* **F5.** When canonical geo has no rows, the mart builds country rows and
-  `country_geo_total` from the legacy `geo` snapshot. Every figure is withheld.
+* **F1.** A listed market's lead text in an ISO or legacy spelling
+  ("libyan arab jamahiriya", "Iran, Islamic Republic of", "Türkiye",
+  "Jordan.") now joins its market. `country_identity.resolve` falls back to
+  the exact complete-ISO lookup, for listed markets only. There is no fuzzy
+  matching, and conservation holds.
+* **F2.** Dashboard → Countries keeps native spend only for an FX-only gap.
+  This is one rule, `geo_gate.native_country_spend_publishable`, shared with
+  the mart. Two accounts summed, `totals_differ` and unreadable campaign spend
+  now withhold.
+* **F3.** Open-start (all_time) spend reads count each account's rows only from
+  its earliest verified coverage chunk (`revenue_repository._certified_from`).
+  The six reads are campaign spend, the daily series, the geo total, geo by
+  country, the reconciliation breakdown and FX coverage. They reach the mart
+  and every page on it, Dashboard Countries / Campaigns / Overview, Channels,
+  Campaign Evidence, the mapping review, the spend audits and the geo panel.
+  The deal resolver's all-time campaign-name read is exempt as identity
+  evidence.
+* **F5.** The mart no longer builds country rows, `top_campaign` or
+  `country_geo_total` from the legacy `geo` snapshot. With no canonical geo
+  rows, the geo total is unknown and the source is `unavailable`.
+
+One account in the data with none configured still publishes that account.
+This is PR-ADS-154B's design, asserted as such. It is not a finding.
 
 **Guard.** `tests/test_pr_ads_176c_country_feed_retired.py` (6 cases) covers:
 
@@ -6795,5 +6809,4 @@ is pinned as observed. None is fixed here.
 
 Cases 01–03, 05 and 06 fail on `5a9b5e9`.
 
-**Next.** The owner decides F1–F5. The likeliest to need a fix are F2 and F3,
-which publish a figure the evidence does not support.
+**Next.** None from this slice.

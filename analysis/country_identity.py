@@ -73,6 +73,10 @@ REASON_BLANK = "no_country_evidence"
 REASON_UNSUPPORTED_CODE = "two_letter_token_is_not_a_supported_country_code"
 REASON_UNRECOGNIZED_NAME = "country_name_not_in_supported_registry"
 REASON_RESIDUAL_LABEL = "explicit_unattributed_residual"
+#: PR-ADS-176C-F1: a name the market alias table does not spell, which the
+#: complete ISO table names EXACTLY (``resolve_iso_country_text``), and whose
+#: code is a listed market — "libyan arab jamahiriya" -> LY.
+REASON_ISO_NAME_MATCH = "iso_name_resolved_to_supported_code"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The residual bucket
@@ -410,6 +414,24 @@ def resolve(name=None, code=None) -> CountryIdentity:
                                        if code_rejected else REASON_ALIAS_MATCH),
                                raw=raw)
 
+    # PR-ADS-176C-F1: a listed market named by its ISO / legacy name, which
+    # the alias table does not carry ("libyan arab jamahiriya", "Iran,
+    # Islamic Republic of", "Türkiye", "Jordan."). The retired /api/geo feed
+    # joined such text through the complete ISO table; the live country pages
+    # put it in the residual, so the market's row understated its leads. The
+    # lookup is EXACT (``resolve_iso_country_text``: normalised text, then one
+    # dictionary lookup — no prefix, no fuzzy match; two-letter tokens other
+    # than UK / US are never codes; ambiguous names such as "Congo" name
+    # nothing). Only a LISTED market is a valid identity here: a country
+    # outside the 96 stays the residual, as before.
+    iso = resolve_iso_country_text(name)
+    if iso and iso in SUPPORTED_CODES:
+        return CountryIdentity(code=iso, key=f"code:{iso}",
+                               label=SUPPORTED_COUNTRIES[iso], status=STATUS_VALID,
+                               reason=(f"{REASON_ISO_NAME_MATCH}_after_{code_rejected}"
+                                       if code_rejected else REASON_ISO_NAME_MATCH),
+                               raw=raw)
+
     # A bare two-letter token that is not a supported code is NOT a country.
     reason = (REASON_UNSUPPORTED_CODE if len(norm) == 2 and norm.isalpha()
               else REASON_UNRECOGNIZED_NAME)
@@ -497,16 +519,15 @@ __all__ = [
 # Through the market registry most of that page read "(unresolved location)"
 # or "not matched". These functions resolve against the COMPLETE ISO 3166-1
 # table in ``analysis.iso_countries`` instead. They are deliberately separate
-# names: nothing above calls them and they call nothing above but
-# ``_RESIDUAL_LABELS``.
+# names, and they call nothing above but ``_RESIDUAL_LABELS``.
 #
 # PR-ADS-176C retired that page's feed (``/api/geo``,
-# ``services/country_evidence_service``), the only production caller. The
-# functions stay: they are the complete-ISO rule the live country pages would
-# need to join a listed market's lead text that the market registry does not
-# spell — production's "libyan arab jamahiriya" (Libya) is in the residual on
-# Countries and Dashboard → Countries today (docs/58 §8, finding 176C-F1).
-# Adopting them there is the publication change described above, not done here.
+# ``services/country_evidence_service``). PR-ADS-176C-F1 then made the
+# publication change described above, narrowly: :func:`resolve` (above) falls
+# back to :func:`resolve_iso_country_text` for a NAME the alias table does not
+# spell, and accepts the result only when it is a listed market. The registry
+# (``SUPPORTED_COUNTRIES``) is unchanged; a country outside it stays the
+# residual (docs/58 §8.4).
 
 import unicodedata as _unicodedata
 

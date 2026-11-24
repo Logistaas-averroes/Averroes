@@ -1630,8 +1630,16 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             # canonical geo had already answered, with a different source.
             geo_total_for_recon = 0.0
         else:
-            geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
-        if canonical_total > 0:
+            # PR-ADS-176C-F1 (finding F5): canonical geo is unreadable, or has
+            # no rows over a range the ledger does not certify. The geo total is
+            # UNKNOWN. PR-ADS-124 summed the legacy monthly `geo` snapshot here
+            # instead, so the snapshot's figure reached `country_geo_total` /
+            # `country_spend_variance` (and, below, the country rows). Unknown is
+            # not a different source's answer.
+            geo_total_for_recon = None
+        if geo_total_for_recon is None:
+            country_spend_reconciled = None
+        elif canonical_total > 0:
             country_spend_reconciled = (
                 abs(geo_total_for_recon - canonical_total) / canonical_total
                 <= SPEND_VARIANCE_TOLERANCE
@@ -1641,10 +1649,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # PR-ADS-129: surface the exact geo↔canonical variance so the ROAS by
         # Country blocked card can show real totals (never fabricated).
         country_geo_total_native = geo_total_for_recon
-        country_spend_variance_native = round(geo_total_for_recon - canonical_total, 2)
+        country_spend_variance_native = (
+            None if geo_total_for_recon is None
+            else round(geo_total_for_recon - canonical_total, 2))
         country_spend_variance_pct = (
             round(abs(country_spend_variance_native) / canonical_total * 100, 4)
-            if canonical_total > 0 else None
+            if (canonical_total > 0 and country_spend_variance_native is not None)
+            else None
         )
         country_spend_tolerance = SPEND_VARIANCE_TOLERANCE
     else:
@@ -1790,8 +1801,14 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
                 "fx_complete": r.get("fx_complete"),
             })
     else:
-        geo_country_source = "legacy_geo_table"
-        country_source_rows = spend_rows
+        # PR-ADS-176C-F1 (finding F5): no canonical geo rows, and no ledger
+        # proof that the range is genuinely empty. PR-ADS-124 built the country
+        # rows from the legacy monthly `geo` snapshot here (withheld by the
+        # gate, but the rows, their `top_campaign` and the Dashboard rows built
+        # on them were the snapshot's). There are no country spend rows: the
+        # gate withholds country spend as unavailable.
+        geo_country_source = "unavailable"
+        country_source_rows = []
 
     # Campaign spend is a trusted ROAS denominator only when canonical coverage is
     # complete AND FX coverage is complete (USD reporting). Country spend

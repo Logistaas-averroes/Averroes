@@ -152,7 +152,12 @@ def campaign_resolver(now: datetime | None = None) -> tuple:
         from services.campaign_evidence_service import (  # noqa: PLC0415
             _assign_lead, _identity_index, _spend_by_campaign_id,
         )
-        spend = repo.fetch_canonical_campaign_spend(None, account_today(now))
+        # PR-ADS-176C-F1: identity evidence (which campaign NAMES exist), not a
+        # spend figure, so the all-time read is not bounded at the certified
+        # range — a campaign whose only spend predates the ledger is still a
+        # campaign a deal may name.
+        spend = repo.fetch_canonical_campaign_spend(None, account_today(now),
+                                                    certified_only=False)
         if not spend.get("available"):
             return None, "canonical campaign spend could not be read"
         identity = repo.fetch_campaign_identity(spend.get("customer_id"))

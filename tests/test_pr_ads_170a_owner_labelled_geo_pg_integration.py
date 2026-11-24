@@ -240,9 +240,9 @@ def test_10_production_shape_reads_cuba_and_iran_with_provenance_and_nothing_unr
     residual, owner-labelled, and its leads are in the residual with it. The
     cell-level owner note is case 10b.
 
-    FINDING 176C-F1 (docs/58 §8.4): the production spelling "Iran, Islamic
-    Republic of" does not join the Iran row on the live surfaces; it is in the
-    residual. /api/geo joined it through the complete ISO table."""
+    PR-ADS-176C-F1 (F1): the production spelling "Iran, Islamic Republic of"
+    joins the Iran row (the exact complete-ISO lookup, as /api/geo did); it was
+    in the residual."""
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _production_shape(live_db)
     mart, page = _live()
@@ -270,9 +270,9 @@ def test_10_production_shape_reads_cuba_and_iran_with_provenance_and_nothing_unr
             {"criterion_id": "2364", "country_code": "IR", "country": "Iran",
              "approved": "2026-11-22", "by": "owner"}],
         "mismatches": []}
-    # Cuba's two leads are in the residual with Cuba's spend.
-    # FINDING 176C-F1, as observed: so is Iran's ("Iran, Islamic Republic of").
-    assert (rows["residual"]["leads"], ir["leads"], gb["leads"], pk["leads"]) == (3, 0, 1, 1)
+    # Cuba's two leads are in the residual with Cuba's spend; Iran's lead
+    # ("Iran, Islamic Republic of") is on Iran's row (F1).
+    assert (rows["residual"]["leads"], ir["leads"], gb["leads"], pk["leads"]) == (2, 1, 1, 1)
 
     # Totals conserved: the label moved spend between rows, and added none.
     # (Each row is rounded to the cent.)
@@ -486,9 +486,9 @@ def test_14_a_malformed_config_does_not_crash_the_page_and_labels_nothing(
     assert rows["residual"]["spend_components"]["country_unidentified"] == pytest.approx(
         round((17 * 0.45 + 8 * 0.42) * RATE, 2))
     assert mart["spend_truth"]["owner_labelled_geo"] == {"criteria": [], "mismatches": []}
-    # Iran is not withheld here only because it has no market row: its one
-    # lead is spelled "Iran, Islamic Republic of" (FINDING 176C-F1).
-    assert page["kpis"]["zero_withheld_countries"] == ["Pakistan"]
+    # Iran ("Iran, Islamic Republic of", F1) and Pakistan: no spend row, no
+    # carrier, spend without a country in the window.
+    assert page["kpis"]["zero_withheld_countries"] == ["Iran", "Pakistan"]
     assert sum(r["spend"] or 0 for r in mart["rows"]) == pytest.approx(
         (30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, abs=0.02)
 

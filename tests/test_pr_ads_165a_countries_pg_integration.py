@@ -237,9 +237,9 @@ def test_05_the_country_spend_reader_reads_the_canonical_table_and_never_the_leg
     and Dashboard → Countries) reads the canonical daily table and names no
     legacy one, and the page registries key on the canonical dataset.
 
-    (The mart's country view still has PR-ADS-124's legacy fallback when
-    canonical geo has no rows — FINDING 176C-F5, docs/58 §8.4; every figure
-    it could carry is withheld by the gate, case 04 of the 176C suite.)"""
+    PR-ADS-176C-F1 (F5): the mart's country view no longer falls back to the
+    legacy snapshot (PR-ADS-124's ``legacy_geo_table``) when canonical geo has
+    no rows; behaviour in case 04 of the 176C suite, structure below."""
     shared = (ROOT / "services/country_spend_zero_rule.py").read_text(encoding="utf-8")
     code = "\n".join(line for line in shared.splitlines()
                      if not line.lstrip().startswith("#"))
@@ -250,6 +250,9 @@ def test_05_the_country_spend_reader_reads_the_canonical_table_and_never_the_leg
                  "services/dashboard_countries_service.py"):
         assert "zero_rule.read_country_spend(" in (ROOT / path).read_text(
             encoding="utf-8"), path
+    rev = (ROOT / "services/revenue_attribution_service.py").read_text(encoding="utf-8")
+    assert 'geo_country_source = "legacy_geo_table"' not in rev
+    assert "country_source_rows = spend_rows" not in rev
     # The shared day arithmetic, fed chunks clipped to the days each settles.
     spend_src = (ROOT / "services/google_ads_spend_service.py").read_text(
         encoding="utf-8")

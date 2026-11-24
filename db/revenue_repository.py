@@ -46,6 +46,41 @@ _PSEUDO_CAMPAIGNS = (
 _CONTACT_KEY = "COALESCE(NULLIF(contact_id, ''), 'id:' || id::text)"
 
 
+#: PR-ADS-176C-F1 (finding F3) — the coverage ledger that certifies each
+#: canonical spend table.
+SPEND_COVERAGE_LEDGER = "google_ads_spend_coverage"
+GEO_COVERAGE_LEDGER = "google_ads_geo_coverage"
+
+
+def _certified_from(alias: str, ledger: str, start, certified_only: bool) -> str:
+    """SQL (no parameters) bounding an OPEN-START read of a canonical spend
+    table at the start of the range its coverage ledger certifies.
+
+    PR-ADS-176C-F1 (finding F3). For a window with a start, the window start
+    bounds the read and the coverage verdict proves every day in it. For
+    ``all_time`` (``start is None``) the coverage verdict starts at the
+    earliest VERIFIED chunk (``google_ads_spend_service.analyze_coverage``) —
+    but the reads had no lower bound, so a row dated before anything the
+    ledger certifies was summed into a figure published as verified (the
+    defect PR-ADS-165A case 09 fixed for the retired ``/api/geo``). Each row
+    now counts only from ITS account's earliest verified chunk, the same
+    lower bound the verdict uses. An account with no verified chunk at all is
+    not bounded here: nothing is certified, so its coverage verdict is
+    incomplete and no figure is published as verified.
+
+    ``alias`` qualifies the OUTER table's columns, with its dot (``"s."``, or
+    the table name for an unaliased query): unqualified, ``customer_id`` in the
+    subquery would bind to the ledger's own column.
+    ``certified_only=False`` is for a read that is identity evidence, not a
+    spend figure (the all-time campaign NAMES the deal resolver matches).
+    """
+    if start is not None or not certified_only:
+        return ""
+    return (f" AND {alias}spend_date >= COALESCE((SELECT MIN(cov.chunk_start) "
+            f"FROM {ledger} cov WHERE cov.customer_id = {alias}customer_id "
+            f"AND cov.status = 'verified'), {alias}spend_date) ")
+
+
 def _unavailable(table: str, extra: dict | None = None) -> dict:
     result = {"available": False, "rows": [], "table": table,
               "coverage_start": None, "coverage_end": None}
@@ -1031,7 +1066,8 @@ def fetch_search_term_signals(start: date | None, end: date) -> dict:
 
 
 def fetch_canonical_campaign_spend(start: date | None, end: date,
-                                   customer_id: str | None = None) -> dict:
+                                   customer_id: str | None = None, *,
+                                   certified_only: bool = True) -> dict:
     """Per-campaign canonical Google Ads spend from google_ads_campaign_daily_spend.
 
     Spend truth read DIRECTLY from the canonical table (never the geo table).
@@ -1049,6 +1085,11 @@ def fetch_canonical_campaign_spend(start: date | None, end: date,
     its OWN spend_date (LEFT JOIN fx_rates) — never one spot rate for the whole
     window. ``fx_complete`` is False when any spend_date lacks an FX rate, which
     must block ROAS (USD spend is only trustworthy when FX coverage is complete).
+
+    PR-ADS-176C-F1: an open-start read (``start is None``, all_time) counts
+    each account's rows only from its earliest verified coverage chunk
+    (:func:`_certified_from`); ``certified_only=False`` keeps the unbounded
+    read for identity evidence.
 
     Returns {available, rows:[{campaign_id, campaign_name, cost_micros, spend,
              spend_usd, fx_complete}], total_cost_micros, total_spend (native),
@@ -1074,6 +1115,7 @@ def fetch_canonical_campaign_spend(start: date | None, end: date,
                      AND fx.base_currency = s.currency_code
                      AND fx.quote_currency = %s
                     WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                    """ + _certified_from("s.", SPEND_COVERAGE_LEDGER, start, certified_only) + """
                       AND (%s::text IS NULL OR s.customer_id = %s)
                     GROUP BY s.campaign_id
                     """,
@@ -1105,6 +1147,7 @@ def fetch_canonical_campaign_spend(start: date | None, end: date,
                            COUNT(DISTINCT currency_code) AS currency_count
                     FROM google_ads_campaign_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """ + _certified_from("google_ads_campaign_daily_spend.", SPEND_COVERAGE_LEDGER, start, certified_only) + """
                       AND (%s::text IS NULL OR customer_id = %s)
                     """,
                     (start, start, end, customer_id, customer_id),
@@ -1120,6 +1163,7 @@ def fetch_canonical_campaign_spend(start: date | None, end: date,
                          AND fx.base_currency = s.currency_code
                          AND fx.quote_currency = %s
                         WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                    """ + _certified_from("s.", SPEND_COVERAGE_LEDGER, start, certified_only) + """
                           AND (%s::text IS NULL OR s.customer_id = %s)
                           AND fx.rate IS NULL
                     ) m
@@ -1191,6 +1235,7 @@ def fetch_spend_daily_series(start: date | None, end: date) -> dict:
                      AND fx.base_currency = s.currency_code
                      AND fx.quote_currency = %s
                     WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                    """ + _certified_from("s.", SPEND_COVERAGE_LEDGER, start, True) + """
                     GROUP BY s.spend_date
                     ORDER BY s.spend_date
                     """,
@@ -1535,6 +1580,7 @@ def fetch_geo_daily_spend_total(start: date | None, end: date,
                            COUNT(DISTINCT currency_code) AS currency_count
                     FROM google_ads_geo_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """ + _certified_from("google_ads_geo_daily_spend.", GEO_COVERAGE_LEDGER, start, True) + """
                       AND (%s::text IS NULL OR customer_id = %s)
                     """,
                     (start, start, end, customer_id, customer_id),
@@ -1675,6 +1721,7 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                          AND fx.base_currency = g.currency_code
                          AND fx.quote_currency = %s
                         WHERE (%s::date IS NULL OR g.spend_date >= %s) AND g.spend_date <= %s
+                        """ + _certified_from("g.", GEO_COVERAGE_LEDGER, start, True) + """
                           AND (%s::text IS NULL OR g.customer_id = %s)
                         GROUP BY g.country_criterion_id
                     ),
@@ -1735,6 +1782,7 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date,
                     SELECT MIN(customer_id) AS customer_id, MIN(currency_code) AS currency
                     FROM google_ads_geo_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """ + _certified_from("google_ads_geo_daily_spend.", GEO_COVERAGE_LEDGER, start, True) + """
                       AND (%s::text IS NULL OR customer_id = %s)
                     """,
                     (start, start, end, customer_id, customer_id),
@@ -1906,12 +1954,14 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                         SELECT spend_date, SUM(cost_micros)::bigint AS micros
                         FROM google_ads_campaign_daily_spend
                         WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        """ + _certified_from("google_ads_campaign_daily_spend.", SPEND_COVERAGE_LEDGER, start, True) + """
                         GROUP BY spend_date
                     ),
                     geo AS (
                         SELECT spend_date, SUM(cost_micros)::bigint AS micros
                         FROM google_ads_geo_daily_spend
                         WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        """ + _certified_from("google_ads_geo_daily_spend.", GEO_COVERAGE_LEDGER, start, True) + """
                         GROUP BY spend_date
                     )
                     SELECT COALESCE(camp.spend_date, geo.spend_date) AS spend_date,
@@ -1938,12 +1988,14 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                                SUM(cost_micros)::bigint AS micros
                         FROM google_ads_campaign_daily_spend
                         WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        """ + _certified_from("google_ads_campaign_daily_spend.", SPEND_COVERAGE_LEDGER, start, True) + """
                         GROUP BY campaign_id
                     ),
                     geo AS (
                         SELECT campaign_id, SUM(cost_micros)::bigint AS micros
                         FROM google_ads_geo_daily_spend
                         WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        """ + _certified_from("google_ads_geo_daily_spend.", GEO_COVERAGE_LEDGER, start, True) + """
                         GROUP BY campaign_id
                     )
                     SELECT COALESCE(camp.campaign_id, geo.campaign_id) AS campaign_id,
@@ -1969,6 +2021,7 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                     SELECT COALESCE(SUM(cost_micros), 0)::bigint
                     FROM google_ads_geo_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """ + _certified_from("google_ads_geo_daily_spend.", GEO_COVERAGE_LEDGER, start, True) + """
                       AND (country_code IS NULL OR country_criterion_id = '')
                     """,
                     (start, start, end),
@@ -1980,6 +2033,7 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                     """
                     SELECT COUNT(*) FROM google_ads_geo_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """ + _certified_from("google_ads_geo_daily_spend.", GEO_COVERAGE_LEDGER, start, True) + """
                       AND (country_code IS NULL OR country_criterion_id = '')
                     """,
                     (start, start, end),
@@ -1989,6 +2043,7 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                     """
                     SELECT COUNT(*) FROM google_ads_campaign_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """ + _certified_from("google_ads_campaign_daily_spend.", SPEND_COVERAGE_LEDGER, start, True) + """
                     """,
                     (start, start, end),
                 )
@@ -2151,6 +2206,7 @@ def fetch_fx_coverage(start: date | None, end: date,
                         SELECT DISTINCT spend_date, currency_code
                         FROM google_ads_campaign_daily_spend
                         WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        """ + _certified_from("google_ads_campaign_daily_spend.", SPEND_COVERAGE_LEDGER, start, True) + """
                           AND (%s::text IS NULL OR customer_id = %s)
                     ) s
                     LEFT JOIN fx_rates fx

@@ -698,7 +698,7 @@ def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> 
         return rows
     gaps = list(spend_truth.get("country_gap_codes") or [])
     reason = next(iter(gaps), None) or "country_geo_not_ready"
-    fx_only = gaps == [geo_gate.GEO_GAP_FX_COVERAGE_INCOMPLETE]
+    fx_only = geo_gate.native_country_spend_publishable(gaps)
     figures = ("leads", "sqls", "closed_won_deals", "customers", "won_revenue",
                "period_revenue_per_ad_spend", "period_spend_per_customer_won",
                "roas", "cac", "spend_usd")

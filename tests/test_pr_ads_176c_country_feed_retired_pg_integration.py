@@ -21,10 +21,10 @@ fixture writes campaign spend that reconciles with its geo spend: the live
 gate is the strict one (decision 2), and a fixture that failed it would
 prove nothing about the property under test.
 
-Where a live surface does NOT hold a property the old suite asserted, the case
-says so in a ``FINDING 176C-Fn`` block (docs/58 §8.4) and asserts what the
-surface does today, so the fix has to change the assertion on purpose. The
-port table, old case → new home, is docs/58 §8.3.
+The port found four properties the live surfaces did not hold (F1, F2, F3, F5:
+docs/58 §8.4). PR-ADS-176C-F1 fixed each in the code; the cases here assert
+the correct behaviour and fail on 2b056a4. The port table, old case → new
+home, is docs/58 §8.3.
 """
 from __future__ import annotations
 
@@ -313,19 +313,22 @@ def test_02_b_nothing_synced_or_only_another_accounts_history_is_not_covered(
 def test_02_c_with_no_account_configured_two_accounts_are_never_summed(
         live_db, monkeypatch):
     """165A case 02b, third half: "no account configured: the question cannot
-    be asked". The live surfaces answer it differently (PR-ADS-154B): with no
-    account configured they read the account the data holds, and with two
-    accounts in the data the comparison is not like for like and the mart
-    withholds. See FINDING 176C-F4 (one account, published) and 176C-F2 (two
-    accounts, Dashboard native spend)."""
+    be asked". The live surfaces answer it by PR-ADS-154B's design: with no
+    account configured they read the one account the data holds (its spend
+    and its ledger), and with two accounts in the data the comparison is not
+    like for like, so BOTH surfaces withhold — never two accounts summed.
+
+    PR-ADS-176C-F1 (F2): the Dashboard kept the UK's native spend summed over
+    both accounts (£700) on its row and its card, labelled "USD unavailable
+    (FX)"."""
     import db.writers as writers
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     start, today, y = _bounds()
     lo = _seed([_spend_rows(UK, y, 200.0)])
     _deal_sync(live_db)
     monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID")
-    # FINDING 176C-F4: one account in the data, none configured — the mart
-    # reads that account's spend and ledger and publishes. /api/geo refused.
+    # PR-ADS-154B's design: one account in the data, none configured — the
+    # surfaces read that account's spend and ledger, and publish.
     one = _mart()
     assert one["spend_truth"]["country_spend_status"] == "verified"
     assert _by_code(one)["GB"]["spend"] == 250.0
@@ -342,15 +345,57 @@ def test_02_c_with_no_account_configured_two_accounts_are_never_summed(
     mart, page = _mart(), _dash()
     assert mart["spend_truth"]["country_gap_codes"] == ["comparison_not_like_for_like"]
     _assert_nothing_published(mart, page)
-    assert "875.0" not in json.dumps(mart["rows"])     # £700 summed over two accounts
-    # FINDING 176C-F2 — NOT HELD on Dashboard → Countries. It keeps native
-    # spend on its rows and its KPI whenever geo COVERAGE is complete, whatever
-    # else withholds the gate (``_withhold_when_geo_not_ready``: keep_native =
-    # geo_coverage_status == "complete"), and the card then reads "USD
-    # unavailable (FX)". Here that is the UK's spend summed over two accounts.
-    # Pinned as observed so the fix flips it on purpose (docs/58 §8.4).
-    assert _dash_by_code(page)["GB"]["spend_native"] == pytest.approx(700.0)
-    assert page["kpis"]["verified_spend_native"]["amount"] == pytest.approx(700.0)
+    # Two accounts are never summed onto a row or a card — neither in USD nor
+    # natively (F2: the Dashboard kept £700 native).
+    _assert_no_native_spend(page)
+    assert "875.0" not in json.dumps(mart["rows"])
+    assert "700.0" not in json.dumps(page["countries"]) + json.dumps(page["kpis"])
+
+
+def _assert_no_native_spend(page):
+    """F2: when any gap but FX withholds the gate, Dashboard → Countries
+    carries no native spend either — rows, card, outside-market amount."""
+    k = page["kpis"]
+    assert k["verified_spend_native"]["amount"] is None, k["verified_spend_native"]
+    assert k["countries_with_spend"] is None
+    out = k.get("spend_outside_listed_markets") or {}
+    assert out.get("native") is None and out.get("usd") is None, out
+    for r in page["countries"]:
+        assert r["spend_native"] is None and r["spend_usd"] is None, r
+    assert page["residual"].get("spend_native") is None
+
+
+def test_02_d_any_gap_but_fx_withholds_native_spend_on_the_dashboard_as_on_the_mart(
+        live_db, monkeypatch):
+    """PR-ADS-176C-F1 (F2). Geo COVERAGE is complete in each case; another
+    gap withholds the gate. Dashboard → Countries now follows the mart's one
+    rule (``geo_gate.native_country_spend_publishable``): native spend only
+    for an FX-only gap (case 03c keeps it), nothing for any other."""
+    import db.writers as writers
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    start, today, y = _bounds()
+    _seed([_spend_rows(UK, y, 100.0)])
+    _deal_sync(live_db)
+    # totals_differ: campaign spend £7,777 beside £100 of geo spend. The card
+    # read "£0.00 native" in the legacy-only shape and £100 here.
+    assert writers.upsert_campaign_daily_spend([{
+        "customer_id": CUSTOMER, "currency_code": "GBP", "campaign_id": "111",
+        "campaign_name": "brand - uk", "spend_date": y, "cost_micros": 7_777_000_000,
+        "source_query_version": "t"}]) == 1
+    mart, page = _mart(), _dash()
+    assert mart["spend_truth"]["geo_coverage_status"] == "complete"
+    assert mart["spend_truth"]["country_spend_status"] == "mismatch"
+    assert "fx_coverage_incomplete" not in mart["spend_truth"]["country_gap_codes"]
+    _assert_nothing_published(mart, page)
+    _assert_no_native_spend(page)
+    # Unreadable campaign spend (the reconciliation baseline).
+    from db import revenue_repository as repo
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend",
+                        lambda *a, **k: {"available": False, "rows": []})
+    mart, page = _mart(), _dash()
+    assert mart["spend_truth"]["country_spend_status"] not in (
+        "verified", "reconciled_with_residual")
+    _assert_no_native_spend(page)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -407,6 +452,12 @@ def test_03_c_a_missing_fx_rate_is_never_converted_at_another_days_rate(
     _deal_sync(live_db)
     mart = _mart()
     assert mart["spend_truth"]["country_gap_codes"] == ["fx_coverage_incomplete"]
+    # The one gap that keeps native spend (F2's rule, on both surfaces).
+    from services import google_ads_geo_sync_service as geo_gate
+    assert geo_gate.native_country_spend_publishable(["fx_coverage_incomplete"])
+    for gaps in (["totals_differ"], ["comparison_not_like_for_like"],
+                 ["fx_coverage_incomplete", "geo_coverage_incomplete"], [], None):
+        assert not geo_gate.native_country_spend_publishable(gaps), gaps
     rows = _by_code(mart)
     assert (rows["GB"]["spend"], rows["AE"]["spend"]) == (70.0, 30.0)   # GBP, as stored
     assert rows["GB"]["spend"] != 7 * 10.0 * RATE
@@ -427,15 +478,15 @@ def test_04_the_legacy_monthly_snapshot_is_never_a_countrys_spend(live_db, monke
     no row, no total, no Dashboard figure carries it. Beside a covered
     canonical window the published figure is the canonical one, to the cent.
 
-    FINDING 176C-F5 (minor) — not held in full. While canonical geo has no
-    rows and its coverage is incomplete, the mart's country view still reads
-    the legacy table (PR-ADS-124's ``legacy_geo_table`` fallback): it builds
-    the row list from it — a "United Kingdom" row whose ``top_campaign`` is the
-    snapshot's campaign — and ``spend_truth.country_geo_total`` /
-    ``country_spend_variance`` are its sum. Every figure on those rows is
-    withheld by the gate (it never unblocks on the legacy source) and the
-    Countries page draws its gate card, not the table; /api/geo's payload
-    carried none of it. Pinned as observed (docs/58 §8.4)."""
+    PR-ADS-176C-F1 (F5). With canonical geo holding no rows and its coverage
+    incomplete, the mart's country view still read the legacy table
+    (PR-ADS-124's ``legacy_geo_table`` fallback): it built the row list from
+    it — a "United Kingdom" row whose ``top_campaign`` was the snapshot's
+    campaign, on the mart and the Dashboard — and
+    ``spend_truth.country_geo_total`` / ``country_spend_variance`` were its
+    sum. Now no field of either payload is derived from the snapshot: the geo
+    total is unknown (``None``), there are no country spend rows, and the
+    only UK row is the one the UK lead creates."""
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _seed_legacy_monthly_snapshot(live_db, days_ago=2)
     _deal_sync(live_db)
@@ -443,18 +494,13 @@ def test_04_the_legacy_monthly_snapshot_is_never_a_countrys_spend(live_db, monke
     for window in (WINDOW, "current_quarter", "all_time"):
         mart, page = _mart(window), _dash(window)
         _assert_nothing_published(mart, page)
-        for blob in (json.dumps(mart["rows"]), json.dumps(mart["country_totals"]),
-                     json.dumps(page["countries"]), json.dumps(page["kpis"]),
-                     json.dumps(page["residual"])):
-            assert "7777" not in blob and "9721" not in blob, window
-        # FINDING 176C-F5, as observed — on the mart, and on the Dashboard,
-        # whose country rows are the mart's.
-        assert mart["spend_truth"]["country_geo_total"] == 7777.0, window
-        gb = _by_code(mart)["GB"]
-        assert (gb["spend"], gb["top_campaign"]) == (None, "legacy-only-campaign"), window
-        dgb = _dash_by_code(page)["GB"]
-        assert (dgb["spend_native"], dgb["top_campaign"]) == (
-            None, "legacy-only-campaign"), window
+        for blob in (json.dumps(mart), json.dumps(page)):
+            for legacy in ("7777", "9721", "legacy-only-campaign", "4242"):
+                assert legacy not in blob, (window, legacy)
+        st = mart["spend_truth"]
+        assert (st["country_geo_total"], st["country_spend_variance"]) == (None, None), window
+        assert _by_code(mart)["GB"]["top_campaign"] is None, window
+        assert _dash_by_code(page)["GB"]["top_campaign"] is None, window
 
     start, today, y = _bounds()
     _seed([_spend_rows(UK, y, 8.0)])
@@ -598,25 +644,19 @@ def test_07_b_a_text_that_names_no_listed_market_is_never_a_market_or_a_zero(
 # ═════════════════════════════════════════════════════════════════════════════
 # 165A: all_time reads only the certified range
 # ═════════════════════════════════════════════════════════════════════════════
-def test_09_all_time_publishes_only_rows_inside_the_certified_range(live_db, monkeypatch):
-    """165A case 09. ``all_time`` has no requested start, so coverage starts at
-    the earliest VERIFIED chunk; a row dated 20 days before anything either
-    ledger certifies must not be summed into a "covered" figure.
-
-    FINDING 176C-F3 — NOT HELD on either live surface. The campaign and the geo
-    coverage analyses start at the earliest verified chunk, but the spend
-    reads have no lower bound: £5,000 on a day no chunk certifies is summed on
-    both sides, the two reconcile, and the UK row reads $6,375 "verified"
-    where the certified figure is $125. Pinned as observed (docs/58 §8.4)."""
+def _stray_before_the_certified_range(cluster):
+    """UK £10 on each of the last ten days, inside the range BOTH ledgers
+    certify; £5,000 on a day twenty days before it, which no chunk certifies.
+    Campaign spend equals geo spend day by day, so the two always reconcile —
+    with or without the stray day."""
     import db.writers as writers
-    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     start, today, y = _bounds()
     certified_from = y - timedelta(days=9)
     stray = certified_from - timedelta(days=20)
     _fx(stray - timedelta(days=5), today)
     _write_spend([_spend_rows(UK, certified_from + timedelta(days=i), 10.0)
                   for i in range(10)] + [_spend_rows(UK, stray, 5000.0)])
-    with live_db.connect() as conn, conn.cursor() as cur:
+    with cluster.connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT spend_date, SUM(cost_micros) FROM google_ads_geo_daily_spend "
                     "GROUP BY spend_date")
         camp = [{"customer_id": CUSTOMER, "currency_code": "GBP", "campaign_id": "111",
@@ -627,13 +667,35 @@ def test_09_all_time_publishes_only_rows_inside_the_certified_range(live_db, mon
     assert writers.upsert_spend_coverage(CUSTOMER, certified_from, today, "verified",
                                          rows_written=10, cost_micros_total=100_000_000)
     _verify(certified_from, today)
-    _deal_sync(live_db)
+    _deal_sync(cluster)
+    return certified_from, stray, today
+
+
+def test_09_all_time_publishes_only_rows_inside_the_certified_range(live_db, monkeypatch):
+    """165A case 09. ``all_time`` has no requested start, so coverage starts at
+    the earliest VERIFIED chunk; a row dated 20 days before anything either
+    ledger certifies must not be summed into a "covered" figure.
+
+    PR-ADS-176C-F1 (F3): the coverage analyses started at the earliest
+    verified chunk but the spend reads had no lower bound — £5,000 on a day no
+    chunk certifies was summed on both sides, the two reconciled, and the UK
+    row read $6,375 "verified" where the certified figure is $125. Both reads
+    are now bounded at each account's earliest verified chunk
+    (``revenue_repository._certified_from``)."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    certified_from, stray, today = _stray_before_the_certified_range(live_db)
     mart = _mart("all_time")
     assert mart["window"]["start_date"] is None
-    # FINDING 176C-F3, as observed: the uncertified £5,000 is in the figure.
     assert mart["spend_truth"]["country_spend_status"] == "verified"
-    assert _by_code(mart)["GB"]["spend"] == (5000.0 + 100.0) * RATE == 6375.0
-    assert _dash("all_time")["kpis"]["verified_spend_usd"] == pytest.approx(6375.0)
+    assert _by_code(mart)["GB"]["spend"] == 100.0 * RATE == 125.0
+    assert mart["country_totals"]["spend"] == 125.0
+    assert (mart["spend_truth"]["campaign_spend_total"],
+            mart["spend_truth"]["country_geo_total"]) == (100.0, 100.0)
+    page = _dash("all_time")
+    assert page["kpis"]["verified_spend_usd"] == pytest.approx(125.0)
+    assert _dash_by_code(page)["GB"]["spend_native"] == pytest.approx(100.0)
+    for blob in (json.dumps(mart), json.dumps(page)):
+        assert "6375" not in blob and "5100" not in blob
     # A gap INSIDE the certified span still makes all_time not covered.
     with live_db.connect() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM google_ads_geo_coverage")
@@ -642,6 +704,83 @@ def test_09_all_time_publishes_only_rows_inside_the_certified_range(live_db, mon
     _verify(certified_from + timedelta(days=5), today)
     _assert_nothing_published(_mart("all_time"), _dash("all_time"),
                               "geo_coverage_incomplete")
+
+
+def test_09_b_every_open_start_spend_reader_counts_only_certified_days(live_db, monkeypatch):
+    """PR-ADS-176C-F1 (F3): the bound lives in the three repository reads, so
+    it reaches every caller that reads them with an open start (all_time).
+    Each surface below is driven over the same evidence: certified £100, plus
+    £5,000 before the certified range. No surface sums the £5,000; a window
+    WITH a start is not bounded by the ledger (its start bounds it), and the
+    campaign-name identity read opts out on purpose."""
+    from db import revenue_repository as repo
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    certified_from, stray, today = _stray_before_the_certified_range(live_db)
+
+    # The three reads, account-wide and account-scoped.
+    for cid in (None, CUSTOMER):
+        camp = repo.fetch_canonical_campaign_spend(None, today, cid)
+        assert (camp["total_spend"], str(camp["coverage_start"])) == (
+            100.0, certified_from.isoformat()), cid
+        assert repo.fetch_geo_daily_spend_total(None, today, cid)["total_spend"] == 100.0
+        by = repo.fetch_geo_daily_spend_by_country(None, today, cid)
+        assert sum(r["spend"] for r in by["rows"]) == 100.0
+    # A window with a start is its own bound: the stray day is read when asked.
+    assert repo.fetch_canonical_campaign_spend(stray, today)["total_spend"] == 5100.0
+    assert repo.fetch_geo_daily_spend_total(stray, today)["total_spend"] == 5100.0
+    # Identity evidence (campaign names for the deal resolver) is unbounded.
+    assert repo.fetch_canonical_campaign_spend(
+        None, today, certified_only=False)["total_spend"] == 5100.0
+
+    # The surfaces.
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    from services.dashboard_overview_service import build_dashboard_overview
+    from services.google_ads_geo_sync_service import build_geo_reconciliation
+    from services.revenue_attribution_service import build_revenue_attribution
+    from services.revenue_decision_mart import build_revenue_decision_mart
+    attribution = build_revenue_attribution("all_time")
+    assert attribution["source_health"]["spend_native_total"] == 100.0
+    campaign_view = build_revenue_decision_mart(view="campaign", window="all_time")
+    assert campaign_view["spend_truth"]["native_spend"] == 100.0
+    assert campaign_view["summary"]["spend_usd"] == pytest.approx(125.0)
+    overview = json.loads(json.dumps(build_dashboard_overview("all_time"), default=str))
+    assert overview["kpis"]["google_ads_spend_usd"] == pytest.approx(125.0)
+    campaigns = json.loads(json.dumps(build_dashboard_campaigns("all_time"), default=str))
+    assert campaigns["kpis"]["verified_spend_usd"] == pytest.approx(125.0)
+    panel = build_geo_reconciliation("all_time")
+    assert (panel["canonical_campaign_total"], panel["geo_total"]) == (
+        pytest.approx(100.0), pytest.approx(100.0))
+    # The panel's per-day / per-campaign breakdown reads the same bound (the
+    # fixture's geo rows sit under campaign "c1", its campaign rows under
+    # "111": only the certified £100 shows as a per-campaign gap).
+    assert panel["campaign_spend_without_geo_native"] == pytest.approx(100.0)
+    for blob in (json.dumps(attribution, default=str), json.dumps(campaign_view, default=str),
+                 json.dumps(overview), json.dumps(campaigns), json.dumps(panel, default=str)):
+        assert "6375" not in blob and "5100" not in blob
+    # The evidence-window and audit surfaces that read campaign spend.
+    from services.campaign_evidence_service import build_campaign_evidence
+    from services.campaign_identity_service import build_mapping_review
+    from services.google_ads_spend_service import (
+        build_google_ads_spend_audit, is_window_spend_verified)
+    from services.revenue_spend_truth_service import build_google_ads_spend_truth_for_days
+    evidence = json.loads(json.dumps(build_campaign_evidence("all_time"), default=str))
+    assert (evidence["summary"]["spend_native"], evidence["summary"]["spend_usd"]) == (
+        100.0, 125.0)
+    audit = build_google_ads_spend_audit("all_time")
+    assert (audit["native_total"], audit["campaign_daily_total"]) == (100.0, 100.0)
+    assert is_window_spend_verified("all_time")["local_total_spend"] == 100.0
+    mapping = build_mapping_review("all_time")
+    assert [o["native_spend"] for o in mapping["campaign_options"]] == [100.0]
+    days = build_google_ads_spend_truth_for_days(None, today - timedelta(days=1))
+    assert (days["native_spend"], days["usd_spend"]) == (100.0, 125.0)
+    for blob in (json.dumps(evidence), json.dumps(audit, default=str),
+                 json.dumps(mapping, default=str), json.dumps(days, default=str)):
+        assert "6375" not in blob and "5100" not in blob
+    breakdown = repo.fetch_geo_reconciliation_breakdown(None, today)
+    assert sum(d["campaign_spend"] for d in breakdown["daily"]) == 100.0
+    assert sum(d["geo_spend"] for d in breakdown["daily"]) == 100.0
+    series = repo.fetch_spend_daily_series(None, today)
+    assert min(str(r["spend_date"]) for r in series["rows"]) == certified_from.isoformat()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -656,13 +795,13 @@ def test_10_every_production_spend_code_keeps_its_spend_and_leads_join_their_mar
     Pakistan (leads, never a geo row) is unavailable while that code-less spend
     is in the window. Totals are conserved.
 
-    FINDING 176C-F1 — NOT HELD for one production spelling. A lead text that
-    names a listed market by an ISO or legacy name the market registry does
-    not carry — production's "libyan arab jamahiriya" (Libya) — does not join
-    its market: it is counted in the residual (conserved, never guessed, never
-    a $0, but Libya's row understates its leads). /api/geo joined it through
-    the complete ISO table (``country_identity.resolve_iso_country_text``).
-    Pinned as observed (docs/58 §8.4)."""
+    PR-ADS-176C-F1 (F1): a lead text that names a listed market by an ISO or
+    legacy name the market alias table does not carry — production's
+    "libyan arab jamahiriya" (Libya) — was counted in the residual, so
+    Libya's row understated its leads. ``country_identity.resolve`` now falls
+    back to the exact complete-ISO lookup (``resolve_iso_country_text``) for a
+    listed market, as /api/geo did. Every production spelling joins its
+    market; conservation holds."""
     from analysis import country_identity as ci
     from tests.test_pr_ads_165a_country_identity_complete import (
         PRODUCTION_LEAD_COUNTRIES, PRODUCTION_SPEND_CODES)
@@ -698,20 +837,20 @@ def test_10_every_production_spend_code_keeps_its_spend_and_leads_join_their_mar
     # Pakistan: unavailable, and says why — never $0.
     assert (rows["PK"]["spend"], rows["PK"]["spend_reason"]) == (
         None, "spend_location_unresolved")
-    # Leads: each production spelling of a listed market joins it.
+    # Leads: EVERY production spelling of a listed market joins it — the
+    # resolver is asked by text, and must name the code the spelling is.
     for text, code in PRODUCTION_LEAD_COUNTRIES.items():
-        if ci.resolve(name=text).is_country:
+        if ci.resolve(code=code).is_country:
+            assert ci.resolve(name=text).code == code, text
             assert rows[code]["leads"] == 1, text
     outside = sorted(t for t, c in PRODUCTION_LEAD_COUNTRIES.items()
                      if not ci.resolve(code=c).is_country)
     assert outside == ["benin", "cameroon", "kazakhstan", "mozambique", "nepal",
                        "somalia", "uzbekistan"]
-    # FINDING 176C-F1, as observed: Libya is a listed market and spent, but its
-    # lead is in the residual.
+    # F1: Libya is a listed market and spent; its lead is on its row.
     assert ci.resolve(code="LY").is_country and rows["LY"]["spend"] > 0
-    assert ci.resolve_iso_country_text("libyan arab jamahiriya") == "LY"
-    assert rows["LY"]["leads"] == 0
-    assert rows["residual"]["leads"] == len(outside) + 1
+    assert rows["LY"]["leads"] == 1
+    assert rows["residual"]["leads"] == len(outside)
     assert sum(r["leads"] for r in mart["rows"]) == 40
 
     page = _dash()
@@ -730,8 +869,10 @@ def test_11_named_spend_is_never_relabelled_and_no_text_is_joined_by_guess(
     is theirs, itemised in the residual — not merged with the spend Google
     gave no country for. Lead text joins only a market it names exactly.
 
-    FINDING 176C-F1 again: "Türkiye" and "Jordan." name listed markets the
-    registry does not spell; they are in the residual."""
+    F1: "Türkiye" and "Jordan." name listed markets the alias table does not
+    spell; the exact ISO lookup joins them to Turkey and Jordan. "Congo",
+    "Dubai", "IN", "CA" and "North Korea" (not a listed market) still name no
+    market."""
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     start, today, y = _bounds()
     _seed([_spend_rows(UK, y, 100.0), _spend_rows(KZ, y, 50.0), _spend_rows(GE, y, 30.0),
@@ -753,9 +894,9 @@ def test_11_named_spend_is_never_relabelled_and_no_text_is_joined_by_guess(
     for code in ("CG", "CD", "IN", "CA", "AE", "KP"):
         assert code not in rows, code
     assert (rows["GB"]["leads"], rows["US"]["leads"]) == (1, 1)   # England, US
-    # FINDING 176C-F1, as observed: Türkiye and "Jordan." are not on TR / JO.
-    assert "TR" not in rows and "JO" not in rows
-    assert rows["residual"]["leads"] == len(leads) - 2
+    # F1: Türkiye and "Jordan." are on Turkey and Jordan.
+    assert (rows["TR"]["leads"], rows["JO"]["leads"]) == (1, 1)
+    assert rows["residual"]["leads"] == len(leads) - 4    # England, US, Türkiye, Jordan.
     assert sum(r["leads"] for r in mart["rows"]) == len(leads)
     assert sum(r["spend"] or 0 for r in mart["rows"]) == pytest.approx(
         (100 + 50 + 30 + 7) * RATE)

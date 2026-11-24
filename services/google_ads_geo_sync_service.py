@@ -970,6 +970,21 @@ def country_geo_ready(country_spend_status) -> bool:
     return country_spend_status in GEO_ACCEPTED_STATES
 
 
+def native_country_spend_publishable(gap_codes) -> bool:
+    """Whether a country surface may still show NATIVE spend while the gate
+    withholds country spend: only when the ONE gap is FX (the spend is fully
+    covered, reconciled and in one account; only its USD conversion is
+    missing).
+
+    PR-ADS-176C-F1 (finding F2): the one rule for the mart's country rows and
+    Dashboard → Countries. The Dashboard kept native spend whenever geo
+    COVERAGE was complete, whatever else withheld the gate — two accounts
+    summed with none configured, totals that differ — and labelled it "USD
+    unavailable (FX)".
+    """
+    return list(gap_codes or []) == [GEO_GAP_FX_COVERAGE_INCOMPLETE]
+
+
 # One sentence per gap code, so every surface names the SAME cause in the same
 # words. PR-ADS-153F blocker 1 made the gate holistic, which means one status
 # (`unavailable`) now stands for several very different causes — an unreadable
