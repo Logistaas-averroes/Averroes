@@ -688,7 +688,7 @@ surfaces.
 | 165A 01 | exact per-country sums; restated days once; other account, out-of-window and today excluded; dropped metrics absent | 176C 01 |
 | 165A 02 (×3) | uncovered window (sync behind, gap, failed chunk): no spend, no zero, no partial | 176C 02 (×3) |
 | 165A 02b | nothing synced; another account's ledger does not cover | 176C 02b |
-| 165A 02b (no account) | no account configured → unavailable | 176C 02c: one account in the data is read by PR-ADS-154B's design; two accounts withhold on both surfaces (F2, fixed) |
+| 165A 02b (no account) | no account configured → unavailable | 176C 02c: both country surfaces withhold with `google_ads_customer_id_not_configured`, with one account in the data or two (PR-ADS-176C-F2 m4) |
 | 165A 03 | a resolved country, covered window, no row → `$0`; control | 176C 03 (control: 176C 02) |
 | 165A 03b | covered, no spend at all → `$0` total | 176C 03b |
 | 165A 03c | missing FX: never converted at another day's rate; total withheld | 176C 03c (stricter: the window is withheld); also 176C 02d (F2) |
@@ -778,18 +778,20 @@ behaviour, and each fails on `2b056a4` and on `5a9b5e9` (§8.7).
     counts each account's rows only from its own earliest verified chunk in
     the table's ledger — the lower bound the verdict uses. A window with a
     start is unchanged: its start bounds it, and coverage proves every day.
-    An account with no verified chunk is not bounded: nothing is certified, so
-    nothing is published as verified.
-  * Applied in: `fetch_canonical_campaign_spend` (`:1068`),
-    `fetch_spend_daily_series` (`:1206`), `fetch_geo_daily_spend_total`
-    (`:1551`), `fetch_geo_daily_spend_by_country` (`:1664`),
-    `fetch_geo_reconciliation_breakdown` (`:1933`) and `fetch_fx_coverage`
-    (`:2182`). One rule for every read.
-  * One deliberate opt-out: the deal resolver's all-time campaign NAMES
-    (`canonical_customer_revenue_service.campaign_resolver`, `:160`,
-    `certified_only=False`). That read is identity evidence — which
-    campaigns exist — not a spend figure.
-  * Cases: 176C 09 and 09b. The callers it reaches are listed in §8.7.
+    An account with no verified chunk contributes nothing to an open-start
+    read: its bound is `'infinity'` (PR-ADS-176C-F2 m3).
+  * Applied in: `fetch_canonical_campaign_spend` (`:1073`),
+    `fetch_spend_daily_series` (`:1209`, now also scoped to the configured
+    account on the Overview — m3), `fetch_geo_daily_spend_total` (`:1561`),
+    `fetch_geo_daily_spend_by_country` (`:1674`),
+    `fetch_geo_reconciliation_breakdown` (`:1943`) and `fetch_fx_coverage`
+    (`:2192`). One rule for every read, with no exemption.
+  * PR-ADS-176C-F2 (m2) removed the one exemption 56adcfc had made: the deal
+    resolver's all-time campaign names (`certified_only=False`). The resolver
+    now reads certified-day names, as the leads side does, so deals and leads
+    resolve campaigns from one population.
+  * Cases: 176C 09, 09b, 25 (FX), 26 (no-ledger account) and 27 (one
+    identity population). The callers it reaches are listed in §8.7.
 * **F5 — the legacy `geo` snapshot is never read for country rows.**
   * The defect: PR-ADS-124's `legacy_geo_table` fallback built the country
     rows (and their `top_campaign`, also on the Dashboard) and
@@ -802,10 +804,22 @@ behaviour, and each fails on `2b056a4` and on `5a9b5e9` (§8.7).
   * Cases: 176C 04 (no snapshot-derived value in either payload, in three
     windows) and 165A 05 (structure).
 
-**F4 is not a finding.** With one account in the data and none configured,
-the surfaces publish that account's figures. This is PR-ADS-154B's documented
-design, asserted as such in 176C 02c. With two accounts, both surfaces now
-withhold (F2).
+**F4 — no account configured (fixed in PR-ADS-176C-F2, m4).** 56adcfc called
+the live behaviour a design: with one account in the data and none configured,
+the reads fall back to PR-ADS-154B's account-wide default, and the country
+view published that account's figures. It is not a documented design for
+Countries. The PR-ADS-165A Countries contract (docs/09) says "no account
+configured → Unavailable", and docs/51 and docs/54 agree.
+
+The mart's country view now fails closed: `_withhold_country_spend_without_account`
+(`services/revenue_decision_mart.py:686`, called at `:992`) withholds country
+spend with gap `google_ads_customer_id_not_configured` (new
+`GEO_GAP_ACCOUNT_NOT_CONFIGURED`, `services/google_ads_geo_sync_service.py:836`,
+first in repair priority). Dashboard → Countries, which republishes the mart's
+spend truth, withholds with it. This is asserted in 176C 02c.
+
+**Follow-up observation, not changed here:** every other view keeps the 154B
+account-wide default when no account is configured.
 
 ### 8.5 Tests changed or removed, each with its reason
 
@@ -866,9 +880,9 @@ windows that is `all_time` only, and every other window is unchanged.
 
 | Caller | Read | What it does now (open start only) | Asserted in |
 | --- | --- | --- | --- |
-| `revenue_attribution_service._build_from_db` via `canonical_campaign_spend_block`: the mart's every view, which feeds Overview, Revenue, Channels, Campaigns, Deals, Countries and Campaign Revenue & Spend | campaign spend, geo total, geo by country, geo breakdown (residual evaluation) | campaign and geo totals, rows and the gate count only certified days | 176C 09, 09b (`build_revenue_attribution`, campaign view, country view) |
+| `revenue_attribution_service._build_from_db` via `canonical_campaign_spend_block`: the mart's every view, which feeds Overview, Revenue, Channels, Campaigns, Deals, Countries and Campaign Revenue & Spend | campaign spend, geo total, geo by country, geo breakdown (residual evaluation) | campaign and geo totals, rows and the gate count only certified days; an account with no verified chunk counts nothing | 176C 09, 09b, 26 |
 | `dashboard_countries_service` (`read_country_spend`) | geo by country | Dashboard country rows and KPI over certified days | 176C 09 |
-| `dashboard_overview_service` (mart; `_build_trend` → `fetch_spend_daily_series`) | campaign spend, daily series | the KPI and the trend start at the certified range | 176C 09b |
+| `dashboard_overview_service` (mart; `_build_trend` → `fetch_spend_daily_series`) | campaign spend, daily series | the KPI and the trend start at the certified range; the trend reads the configured account only (m3) | 176C 09b, 26 |
 | `dashboard_campaigns_service.build_dashboard_campaigns` | campaign spend | verified spend over certified days | 176C 09b |
 | `revenue_spend_truth_service.build_google_ads_spend_truth_for_days` (Channels) | campaign spend | certified days | 176C 09b |
 | `campaign_evidence_service.build_campaign_evidence` / `build_campaign_drawer_evidence` | campaign spend | page and drawer spend over certified days | 176C 09b (page) |
@@ -876,8 +890,8 @@ windows that is `all_time` only, and every other window is unchanged.
 | `google_ads_spend_service.build_google_ads_spend_audit`, `is_window_spend_verified`, `build_campaign_spend_coverage_audit` | campaign spend | audit totals over certified days | 176C 09b (first two) |
 | `google_ads_geo_sync_service.build_geo_reconciliation` (panel) | campaign spend, geo total, breakdown, FX coverage | both totals and the per-day / per-campaign gaps over certified days | 176C 09b |
 | `keyword_evidence_service._build_population`, `search_term_evidence_service._build_population_in_snapshot`, `platform_sql_attribution_service.fetch_and_resolve_contacts`, `canonical_contact_outcome_service._build_identity_resolver` | campaign spend (its campaign set) | the campaign index matches campaigns by name over certified days — the same set whose spend these pages publish | the repository read, 176C 09b |
-| `fx_service.build_fx_coverage`, `canonical_coverage_repair_service.verify_fx_coverage` | FX coverage | FX completeness judged over certified spend days | the repository read |
-| `canonical_customer_revenue_service.campaign_resolver` | campaign spend | **not bounded** (`certified_only=False`). It is the deal resolver's all-time set of campaign NAMES: identity evidence, independent of any window, not a spend figure | 176C 09b (the unbounded read) |
+| `fx_service.build_fx_coverage`, `canonical_coverage_repair_service.verify_fx_coverage` | FX coverage | FX completeness judged over certified spend days | 176C 25 |
+| `canonical_customer_revenue_service.campaign_resolver` | campaign spend | the deal resolver's all-time campaign NAMES over certified days, the same population the leads-side resolver reads (m2; 56adcfc exempted it) | 176C 27 |
 
 In production none of this moves a figure unless spend rows exist before an
 account's earliest verified chunk. The bound is the same everywhere: each
@@ -904,3 +918,86 @@ account's earliest verified chunk in the table's own ledger.
 | `165a_countries_pg::05` | also asserts that the legacy branch is gone | F5 |
 | `170a` 10, 14 | Iran's production spelling joins Iran (10); with no labels, Iran's `$0` is withheld like Pakistan's (14) | F1 |
 | 176C 02c, 03c, 04, 09, 10, 11 | from "as observed" to the correct behaviour; new 02d and 09b | the findings, fixed |
+
+### 8.9 Truth audit round 1 (PR-ADS-176C-F2)
+
+The audit's verdict was "merge, no blocker". These items are fixed.
+
+* **M1 (predated 176C).** With canonical campaign spend unreadable,
+  `_build_from_db` set `campaign_spend_rows = spend_rows`, the legacy `geo`
+  snapshot ("diagnostic display only"). `view=campaign` then published
+  `{campaign_name: "legacy-only-campaign", spend: 7777.0}` beside "campaign
+  spend unavailable", and `app.js` would print £7,777.00.
+  * The fix: those rows are now `[]`
+    (`services/revenue_attribution_service.py:1696`).
+  * The guard: 176C 24 checks every mart view and the Overview, Campaigns and
+    Countries dashboards for every snapshot value.
+  * `fetch_campaign_country_spend` keeps **one production reader**:
+    `_build_from_db` (`:1493`). It uses it as its DB-reachability probe
+    (`available` False → the JSON fallback) and for the presence flags
+    `campaign_spend_status` / `db_tables_used`. No value it holds reaches a row,
+    a total or the gate.
+  * It is not deleted: about twenty test modules patch it as the DB seam.
+    Replacing the reachability probe belongs to another PR.
+* **m1.** The FX bound is now guarded. 176C 25 puts a spend day with no FX rate
+  before the ledger's first chunk; all-time FX coverage is complete. The case
+  fails when `_certified_from` is removed from `fetch_fx_coverage`.
+* **m2.** The deal-resolver exemption is removed (`certified_only` is gone).
+  Doctrine is one identity population per window. A deal must not land on a
+  campaign the leads side cannot see, and the code gives no reason it should:
+  the exemption only kept pre-ledger campaign names. 176C 27 pins that deals
+  and leads see the same names. It fails on 56adcfc.
+* **m3.** An account with no verified chunk now contributes nothing to an
+  open-start read (`COALESCE(…, 'infinity'::date)` in `_certified_from`,
+  `db/revenue_repository.py:55`). `fetch_spend_daily_series` takes the
+  configured account (`:1209`; Overview `services/dashboard_overview_service.py:352`).
+  176C 26 drives the auditor's two probes: the Overview trend, and the spend
+  audit's `native_total`.
+  * **Observation, not changed (a follow-up).** In a deployment with campaign
+    spend and NO verified ledger at all, an open-start read is now empty. Every
+    published spend figure is still gated by its coverage verdict, which is
+    incomplete there, but an ungated diagnostic can echo the empty sum. The
+    search-term coverage block prints canonical spend `0.0` under
+    "unavailable". Making such a read unavailable instead was tried: it turned
+    the all-time campaign-identity resolvers unavailable, and the 159
+    lifecycle-SQL audit's no-ledger fixture lost 4 of its 44 combinations. That
+    is a wider contract change than this PR, so it was reverted.
+* **m4.** "No account configured → Unavailable" is restored on both country
+  surfaces (§8.4, F4).
+* **m5.**
+  * `CLAUDE.md` points at `google_ads_geo_sync_service.analyze_published_geo_coverage`,
+    not the deleted service.
+  * `PRODUCTION_LEAD_COUNTRIES` gains "iran (islamic republic of)" (→ IR) and
+    "democratic republic of the congo" (→ the residual, never CG), both pinned
+    in identity case 07.
+  * `REASON_ISO_NAME_MATCH` is in `country_identity.__all__`.
+
+**Evidence.**
+
+* On `56adcfc` (this commit's tests copied in), 176C 02c, 24, 26 and 27 fail.
+* 176C 25 fails when the bound is removed from `fetch_fx_coverage`: FX
+  coverage reads incomplete, with the stray date missing.
+* Identity case 07 fails when `resolve` accepts any ISO code: the DRC resolves
+  to `code:CD`.
+* Identity case 07 also fails when the ISO fallback is removed: "libyan arab
+  jamahiriya" goes to the residual.
+* 176C 26 fails when 56adcfc's COALESCE is restored (an account with no
+  ledger is unbounded): 5,655 against the certified 100.
+
+**Existing tests changed.**
+
+* `134` (Overview): the fake `fetch_spend_daily_series` accepts the account
+  argument the real reader now takes; its data is unchanged.
+* `173A` scenario (`tests/pr_ads_173a_scenarios.py`): the matrix's campaign
+  spend now sits inside a verified spend-coverage chunk (OLD..D0), as
+  production's does. Every golden payload is unchanged, byte for byte.
+  * Why: the fixture had campaign spend and no ledger. Under m3 its all_time
+    reads certified nothing, so 38 payloads changed: coverage went from `ok` to
+    `unavailable`, and canonical spend went from 1,240 to 0.0.
+  * That change is m3's intended behaviour for a deployment with no ledger,
+    not a property of the search-term pages, which the 173A matrix pins. The
+    no-ledger case is 176C 26, plus the observation under m3 above.
+* 176C 10: the two new production spellings — 42 leads, Iran withheld like
+  Pakistan.
+* 176C 02c: as above.
+* 176C 09b: its exemption line is removed.

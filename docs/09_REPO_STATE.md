@@ -6795,8 +6795,29 @@ correct behaviour. Each case fails on `2b056a4` and on `5a9b5e9`. Full record:
   `country_geo_total` from the legacy `geo` snapshot. With no canonical geo
   rows, the geo total is unknown and the source is `unavailable`.
 
-One account in the data with none configured still publishes that account.
-This is PR-ADS-154B's design, asserted as such. It is not a finding.
+### PR-ADS-176C-F2 — truth audit round 1 (merge, no blocker; fixed anyway)
+
+* **M1.** With canonical campaign spend unreadable, the mart campaign view no
+  longer builds rows from the legacy `geo` snapshot (`campaign_spend_rows = []`).
+  `fetch_campaign_country_spend` remains only as `_build_from_db`'s
+  reachability probe and presence flags.
+* **m1.** The FX bound is guarded (176C 25).
+* **m2.** The deal resolver's all-time campaign names are bounded like the
+  leads side's: one identity population (176C 27).
+* **m3.** An account with no verified chunk contributes nothing to an
+  open-start read. The Overview spend trend is scoped to the configured
+  account (176C 26). Follow-up: with no ledger at all, an ungated diagnostic
+  can echo an empty all-time sum (`docs/58` §8.9). The 173A fixture gains the verified
+  ledger production has; its golden payloads are unchanged.
+* **m4.** No Google Ads account configured: the mart country view and
+  Dashboard → Countries withhold country spend with
+  `google_ads_customer_id_not_configured`, as the PR-ADS-165A Countries
+  contract says. Other views keep the PR-ADS-154B default; this is noted as a
+  follow-up.
+* **m5.** CLAUDE.md now names the live ledger judge; two production spellings
+  are pinned; `REASON_ISO_NAME_MATCH` is exported.
+
+Details and mutation evidence: `docs/58` §8.9.
 
 **Guard.** `tests/test_pr_ads_176c_country_feed_retired.py` (6 cases) covers:
 

@@ -18223,6 +18223,8 @@ const COUNTRY_GAP_NEXT_STEP = {
   fx_coverage_incomplete: "Open Revenue Health and review FX coverage for this window.",
   comparison_not_like_for_like: "Open Revenue Health: the campaign and geographic totals span different accounts or currencies.",
   totals_differ: "Open Revenue Health and review the Google Ads Geo Sync totals.",
+  // PR-ADS-176C-F2 (m4).
+  google_ads_customer_id_not_configured: "Configure the Google Ads account (GOOGLE_ADS_CUSTOMER_ID); country spend is withheld until it is.",
 };
 // Which run buttons a gap warrants ("geo" / "spend" / none).
 const COUNTRY_GAP_RUN = {

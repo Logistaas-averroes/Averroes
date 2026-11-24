@@ -121,6 +121,13 @@ def seed(execute) -> None:
                     " cost_micros, spend_account_currency) "
                     "VALUES (%s,'GBP',%s,%s,%s,50000000,50.0)",
                     (ACCOUNT, cid, name, day))
+    # PR-ADS-176C-F2 (m3): production's campaign spend sits inside a verified
+    # coverage ledger; an open-start (all_time) read counts each account's
+    # rows only from its earliest verified chunk, and an account with none
+    # contributes nothing. The ledger certifies every day this matrix stores,
+    # so every payload is unchanged.
+    execute("INSERT INTO google_ads_spend_coverage (customer_id, chunk_start,"
+            " chunk_end, status) VALUES (%s,%s,%s,'verified')", (ACCOUNT, OLD, D0))
     for label in ("KSA Freight (legacy)", "ksa freight old"):
         execute("INSERT INTO google_ads_campaign_identity (customer_id, campaign_id,"
                 " canonical_campaign_name, external_campaign_label, match_method,"

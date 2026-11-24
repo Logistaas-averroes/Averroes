@@ -258,7 +258,7 @@ disclosure. A re-read never takes a day with verified spend to zero
   `SUM(...) WHERE run_date >= NOW() - N days` returns nothing or part of the
   window mid-month — and the Countries page printed that as Spend `$0` under
   "Fresh with data". A page figure over a window comes from a daily canonical
-  table AND its coverage ledger (`services/country_evidence_service.py`
+  table AND its coverage ledger (`services/google_ads_geo_sync_service.py::analyze_published_geo_coverage`
   judges the ledger's chunks with `analyze_settled_coverage`, which must
   certify every day), and an uncovered window
   renders "Unavailable" with the covered range — never `$0`, never the sum of

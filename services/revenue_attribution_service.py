@@ -1486,6 +1486,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     Returns the full contract dict, or None when the database is unavailable
     (so the caller can fall back to the local-JSON diagnostic path).
     """
+    # PR-ADS-176C-F2: the legacy `geo` snapshot read is the DB-reachability
+    # probe and feeds only the presence flags `campaign_spend_status` /
+    # `db_tables_used`. No value it holds reaches a campaign or country row,
+    # a total or the gate (PR-ADS-176C-F1 F5, PR-ADS-176C-F2 M1).
     spend = repo.fetch_campaign_country_spend(start_date, end_date)
     if not spend["available"]:
         return None  # DB unreachable — signal caller to fall back
@@ -1684,7 +1688,12 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         fx_effective_rate = None
         spend_native_total = None
         spend_usd_total = None
-        campaign_spend_rows = spend_rows  # diagnostic display only
+        # PR-ADS-176C-F2 (M1): no campaign rows from the legacy `geo` snapshot.
+        # This was `spend_rows` ("diagnostic display only"), and `_build_db_rows`
+        # turned it into `view=campaign` rows with the snapshot's campaign names
+        # and spend (£7,777 printed beside "campaign spend unavailable").
+        # Canonical campaign spend is unreadable: there are no spend rows.
+        campaign_spend_rows = []
         canonical_total = None
         canonical_customer_id = None
         canonical_currency = None

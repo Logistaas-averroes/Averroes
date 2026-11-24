@@ -45,6 +45,9 @@ PRODUCTION_LEAD_COUNTRIES = {
     "tanzania": "TZ", "nepal": "NP", "pakistan": "PK", "philippines": "PH",
     "libyan arab jamahiriya": "LY", "denmark": "DK", "bahrain": "BH",
     "netherlands": "NL", "united kingdom": "GB", "kazakhstan": "KZ",
+    # PR-ADS-176C-F2 (m5): two more production spellings (7 and 32 leads).
+    "iran (islamic republic of)": "IR",
+    "democratic republic of the congo": "CD",
 }
 
 #: The 162 ISO codes with Google Ads country spend in the last 30 days.
@@ -224,6 +227,15 @@ def test_07_the_market_registry_is_unchanged_and_resolve_adds_only_exact_iso_nam
     for text in ("Jordann", "Jor dan", "Libya Arab", "Congo", "Dubai", "California",
                  "CA", "IN", "ZZ", "North Korea", "Kosovo", "Other", "N/A", "Narnia"):
         assert ci.resolve(name=text).key == ci.RESIDUAL_KEY, text
+    # PR-ADS-176C-F2 (m5): two production spellings. Iran is a listed market;
+    # the Democratic Republic of the Congo is not (CD), so it is the residual —
+    # and never the Republic of the Congo (CG).
+    assert ci.resolve(name="iran (islamic republic of)").key == "code:IR"
+    drc = ci.resolve(name="democratic republic of the congo")
+    assert (drc.key, drc.code) == (ci.RESIDUAL_KEY, None)
+    assert ci.resolve_iso_country_text("democratic republic of the congo") == "CD"
+    assert "CD" not in ci.SUPPORTED_CODES and "CG" not in ci.SUPPORTED_CODES
+    assert ci.resolve(name="Congo").key == ci.RESIDUAL_KEY
     # A supplied code still wins over any name.
     assert ci.resolve(name="libyan arab jamahiriya", code="JO").key == "code:JO"
     # The one production caller of the complete resolver is `resolve` itself.

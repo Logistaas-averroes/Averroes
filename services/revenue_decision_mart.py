@@ -683,6 +683,28 @@ def _withhold_empty_settled_window(spend_truth: dict, summary: dict,
     return spend_truth, summary, readiness
 
 
+def _withhold_country_spend_without_account(spend_truth: dict) -> dict:
+    """PR-ADS-176C-F2 (m4) — the country surfaces fail closed when no Google
+    Ads account is configured.
+
+    The retired ``/api/geo`` (the PR-ADS-165A Countries contract) answered
+    ``google_ads_customer_id_not_configured``. The mart's reads instead fall
+    back to PR-ADS-154B's account-wide default (the one account the data
+    holds), so with none configured the country view published a figure no
+    configured account certifies. The country view — and Dashboard →
+    Countries, which republishes it — now withholds country spend with that
+    reason. Other views keep the 154B default (docs/58 §8.4).
+    """
+    from services.google_ads_spend_service import configured_customer_id  # noqa: PLC0415
+    if configured_customer_id():
+        return spend_truth
+    reason = geo_gate.GEO_GAP_ACCOUNT_NOT_CONFIGURED
+    return {**spend_truth, "country_spend_status": geo_gate.GEO_STATUS_UNAVAILABLE,
+            "country_roas_unblockable": False, "country_gap_codes": [reason],
+            "country_gap_message": geo_gate.describe_geo_gap([reason]),
+            "country_gap_primary": reason}
+
+
 def _withhold_country_rows_when_geo_not_ready(rows: list, spend_truth: dict) -> list:
     """PR-ADS-167A — the country view's rows withhold what the country gate
     withholds (the rule Dashboard Countries applies to its own rows).
@@ -966,6 +988,8 @@ def build_revenue_decision_mart(
     core = _canonical_core(window, now, settled_days=settled)
 
     spend_truth = _spend_truth_block(core)
+    if view == "country":
+        spend_truth = _withhold_country_spend_without_account(spend_truth)
     summary = _summary_block(core, spend_truth)
     readiness = _readiness_block(core, spend_truth)
     payload = _view_payload(view, window, core, now)

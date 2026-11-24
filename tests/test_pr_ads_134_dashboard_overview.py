@@ -246,7 +246,8 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
     )
     monkeypatch.setattr(
         repo, "fetch_spend_daily_series",
-        lambda s, e: {"available": True, "rows": list(daily)},
+        # PR-ADS-176C-F2 (m3): the real reader takes the account scope too.
+        lambda s, e, *_a: {"available": True, "rows": list(daily)},
     )
     import db.writers as db_writers
     monkeypatch.setattr(

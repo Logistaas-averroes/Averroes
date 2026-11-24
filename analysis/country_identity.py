@@ -496,7 +496,7 @@ __all__ = [
     "RESOLVED_STATUSES", "NON_COUNTRY_STATUSES",
     "REASON_SUPPORTED_CODE", "REASON_ALIAS_MATCH", "REASON_BLANK",
     "REASON_UNSUPPORTED_CODE", "REASON_UNRECOGNIZED_NAME", "REASON_RESIDUAL_LABEL",
-    "RESIDUAL_KEY", "RESIDUAL_LABEL", "ESTIMATE_GRADE_NOTE",
+    "REASON_ISO_NAME_MATCH", "RESIDUAL_KEY", "RESIDUAL_LABEL", "ESTIMATE_GRADE_NOTE",
     "SUPPORTED_COUNTRIES", "SUPPORTED_CODES", "COUNTRY_ALIASES",
     "CountryIdentity", "normalize_label", "is_supported_code", "resolve",
     "country_key", "display_label", "code_for_key", "country_name_for_code",

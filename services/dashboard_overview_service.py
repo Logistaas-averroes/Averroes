@@ -345,7 +345,11 @@ def _build_trend(window_block: dict, readiness: dict, spend_truth: dict,
 
     spend_rows = []
     if spend_ready:
-        series = repo.fetch_spend_daily_series(start, end)
+        # PR-ADS-176C-F2 (m3): the account the spend KPI reads (PR-ADS-154B).
+        from services.google_ads_spend_service import (  # noqa: PLC0415
+            configured_customer_id,
+        )
+        series = repo.fetch_spend_daily_series(start, end, configured_customer_id())
         if series.get("available"):
             spend_rows = series.get("rows") or []
             # Fail closed: inside a verified window every day must carry USD.
