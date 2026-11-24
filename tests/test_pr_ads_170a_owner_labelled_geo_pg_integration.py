@@ -13,15 +13,18 @@ only a listed id is labelled; a stored Google code always wins; a stored code
 that differs from the label is surfaced, never merged; and the label is applied
 when the data is READ — the stored rows stay what Google sent.
 
-Real PostgreSQL, the real writers and sync, the real ``api_geo`` handler and
-the real mart / Dashboard Countries builders — the harness of
-``test_pr_ads_165a_countries_pg_integration``.
+Real PostgreSQL, the real writers and sync, and the real mart / Dashboard
+Countries builders — the harness of ``test_pr_ads_165a_countries_pg_integration``
+and ``test_pr_ads_176c_country_feed_retired_pg_integration``.
 
 PR-ADS-176B deleted the ``#/geo`` page these cases also rendered through
-``loadGeo``. Each case keeps its payload assertions; what the page printed is
-asserted on the row it printed. The one Countries page's owner note (market
-rows, the drawer, the residual's "In residual" items) is checked in case 18
-and in ``tests/test_pr_ads_176b_*``.
+``loadGeo``; PR-ADS-176C retired the ``GET /api/geo`` payload cases 10–14 and
+24 asserted on. Each of those cases now asserts the same property on the
+mart's country view (the one Countries page) and Dashboard → Countries: Iran
+is a listed market, so its own row; Cuba is not, so an itemised country of the
+residual. The one Countries page's owner note (market rows, the drawer, the
+residual's "In residual" items) is checked in cases 10b / 12b / 18 and in
+``tests/test_pr_ads_176b_*``.
 """
 from __future__ import annotations
 
@@ -40,8 +43,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tests.test_pr_ads_165a_countries_pg_integration import (  # noqa: E402,F401
-    CUSTOMER, RATE, UK, _GoogleAds, _api, _seed_leads, _spend_rows,
-    _today, _verify, _window, _write_fx, _write_spend, live_db,
+    CUSTOMER, RATE, UK, _GoogleAds, _spend_rows,
+    _today, _verify, _write_fx, _write_spend, live_db,
 )
 
 APP_JS = ROOT / "static" / "app.js"
@@ -77,7 +80,10 @@ def test_01_the_owner_table_lists_exactly_the_two_approved_criteria():
         "2364": {"code": "IR", "name": "Iran", "approved": "2026-11-22", "by": "owner"},
     }
     assert all(v["code"] in ISO_COUNTRY_NAMES for v in labels.values())
-    assert geo_owner_labels.OWNER_LABEL_NOTE == NOTE
+    # PR-ADS-176C: the server-side copy of the note (OWNER_LABEL_NOTE, carried
+    # only by the retired /api/geo payload) is deleted; the pages' note is
+    # pinned to NOTE in case 18.
+    assert not hasattr(geo_owner_labels, "OWNER_LABEL_NOTE")
 
 
 def test_02_only_a_listed_criterion_is_labelled_and_nothing_is_inferred_from_the_id():
@@ -183,23 +189,41 @@ def test_05_an_unreadable_or_empty_config_means_no_labels(monkeypatch, tmp_path,
 
 
 def _production_shape(cluster, *, extra_rows=(), leads=None):
-    """UK spend every day of a 30-day window; 2192 on 17 days and 2364 on 8,
-    all inside it, none with a code — the production state. Leads: Cuba (two
-    spellings), Iran, the UK, and Pakistan (no Google spend ever)."""
-    start, end = _window(30)
-    _write_fx(start - timedelta(days=30), end)
+    """UK spend every day of the last 30 days; 2192 on 17 days and 2364 on 8,
+    all inside them, none with a code — the production state. Campaign spend
+    reconciles (the live gate is strict). Leads: Cuba (two spellings), Iran
+    (as production stores it), the UK, and Pakistan (no Google spend ever).
+
+    PR-ADS-176C: these cases ran against ``GET /api/geo``; they now run the
+    same evidence through the mart's country view (the one Countries page) and
+    Dashboard → Countries, on the harness of the 176C suite."""
+    from tests.test_pr_ads_176c_country_feed_retired_pg_integration import (
+        _bounds, _deal_sync, _leads, _seed)
+    _, today, y = _bounds()
+    start = y - timedelta(days=29)
     rows = [_spend_rows(UK, start + timedelta(days=i), 20.0) for i in range(30)]
     rows += [_spend_rows(C2192, start + timedelta(days=i), 0.45) for i in range(17)]
     rows += [_spend_rows(C2364, start + timedelta(days=i), 0.42) for i in range(8)]
     rows += list(extra_rows)
-    _write_spend(rows)
-    _verify(start - timedelta(days=30), end)
-    _seed_leads(cluster, leads if leads is not None else [
+    _seed(rows)
+    _deal_sync(cluster)
+    _leads(cluster, leads if leads is not None else [
         ("u1", "United Kingdom", "qualified"),
         ("c1", "cuba", "junk"), ("c2", "Cuba", "qualified"),
         ("i1", "Iran, Islamic Republic of", "junk"),
         ("p1", "Pakistan", "junk")])
-    return start, end
+    return start, y
+
+
+def _live():
+    """``(mart country view, Dashboard → Countries)``, as served."""
+    from tests.test_pr_ads_176c_country_feed_retired_pg_integration import _dash, _mart
+    return _mart(), _dash()
+
+
+def _rows_items(mart):
+    from tests.test_pr_ads_176c_country_feed_retired_pg_integration import _by_code, _items
+    return _by_code(mart), _items(mart)
 
 
 def _stored_codes(cluster, criterion: str) -> set:
@@ -210,47 +234,55 @@ def _stored_codes(cluster, criterion: str) -> set:
 
 
 def test_10_production_shape_reads_cuba_and_iran_with_provenance_and_nothing_unresolved(
-        live_db, tmp_path):
-    _production_shape(live_db)
-    api = _api("30d")
+        live_db, monkeypatch):
+    """PR-ADS-176C: on the live surfaces. Iran is a listed market — its own
+    row, owner-labelled. Cuba is not — its spend is an itemised country of the
+    residual, owner-labelled, and its leads are in the residual with it. The
+    cell-level owner note is case 10b.
 
-    geo = api["geo"]
-    by = {r["country_key"]: r for r in geo["rows"]}
-    cu, ir, gb, pk = by["code:CU"], by["code:IR"], by["code:GB"], by["code:PK"]
-    assert (cu["country"], cu["country_code"], cu["country_resolved"]) == ("Cuba", "CU", True)
-    assert (cu["spend_usd"], cu["spend_status"], cu["spend_reason"]) == (
-        round(17 * 0.45 * RATE, 2), "published", None)
-    assert (cu["country_provenance"], cu["owner_labelled_criteria"]) == (
-        "owner_labelled", ["2192"])
-    assert (cu["total_leads"], cu["lead_country_spellings"]) == (2, ["Cuba", "cuba"])
-    assert (ir["country"], ir["spend_usd"], ir["country_provenance"],
-            ir["owner_labelled_criteria"]) == (
-        "Iran", round(8 * 0.42 * RATE, 2), "owner_labelled", ["2364"])
-    assert ir["lead_country_spellings"] == ["Iran, Islamic Republic of"]
+    FINDING 176C-F1 (docs/58 §8.4): the production spelling "Iran, Islamic
+    Republic of" does not join the Iran row on the live surfaces; it is in the
+    residual. /api/geo joined it through the complete ISO table."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _production_shape(live_db)
+    mart, page = _live()
+    assert mart["spend_truth"]["country_spend_status"] == "verified"
+    rows, items = _rows_items(mart)
+    ir, gb, pk, cu = rows["IR"], rows["GB"], rows["PK"], items["CU"]
+    assert (cu["country"], cu["provenance"]) == ("Cuba", "owner_labelled")
+    assert cu["spend"] == pytest.approx(round(17 * 0.45 * RATE, 2))
+    assert cu["leads"] == "in_residual"
+    assert (ir["country"], ir["spend"]) == ("Iran", round(8 * 0.42 * RATE, 2))
+    assert (ir["spend_country_provenance"], ir["owner_labelled_criteria"]) == (
+        "owner_labelled", ["2364"])
     # A Google-named country and a lead-only one carry no owner provenance.
-    assert (gb["country_provenance"], gb["owner_labelled_criteria"]) == (None, [])
-    assert (pk["country_provenance"], pk["owner_labelled_criteria"]) == (None, [])
-    assert (pk["spend_usd"], pk["spend_status"], pk["spend_reason"]) == (
-        0.0, "published", None)
+    assert "spend_country_provenance" not in gb and "spend_country_provenance" not in pk
+    assert (pk["spend"], pk.get("spend_reason")) == (0.0, None)
     # The zero's dependency on the labels is a field; a row with spend has none.
     assert pk["zero_rests_on_owner_labels"] == ["2192", "2364"]
-    assert [r["zero_rests_on_owner_labels"] for r in (cu, ir, gb)] == [[], [], []]
-    assert "spend:unresolved" not in by
-    assert geo["unresolved_spend"] == {
-        "criteria": 0, "conflicting_criteria": 0, "spend_usd": None,
-        "blocks_zero": False, "zero_withheld_countries": []}
-    assert geo["owner_labelled_geo"] == {
+    assert [r["zero_rests_on_owner_labels"] for r in (ir, gb)] == [[], []]
+    # Nothing unresolved: no spend without a country.
+    assert rows["residual"]["spend_components"]["country_unidentified"] == 0.0
+    assert mart["spend_truth"]["owner_labelled_geo"] == {
         "criteria": [
             {"criterion_id": "2192", "country_code": "CU", "country": "Cuba",
              "approved": "2026-11-22", "by": "owner"},
             {"criterion_id": "2364", "country_code": "IR", "country": "Iran",
              "approved": "2026-11-22", "by": "owner"}],
-        "mismatches": [], "note": NOTE}
+        "mismatches": []}
+    # Cuba's two leads are in the residual with Cuba's spend.
+    # FINDING 176C-F1, as observed: so is Iran's ("Iran, Islamic Republic of").
+    assert (rows["residual"]["leads"], ir["leads"], gb["leads"], pk["leads"]) == (3, 0, 1, 1)
 
     # Totals conserved: the label moved spend between rows, and added none.
-    expected = round((30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, 2)
-    assert geo["total_spend_usd"] == expected
-    assert round(sum(r["spend_usd"] or 0 for r in geo["rows"]), 2) == expected
+    # (Each row is rounded to the cent.)
+    expected = (30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE
+    assert sum(r["spend"] for r in mart["rows"]) == pytest.approx(expected, abs=0.02)
+
+    d = {r["country_code"]: r for r in page["countries"]}
+    assert d["IR"]["spend_country_provenance"] == "owner_labelled"
+    assert (d["PK"]["spend_native"], d["PK"]["zero_rests_on_owner_labels"]) == (
+        0.0, ["2192", "2364"])
 
     # The stored rows are what Google sent: no code, no name. Nothing was written.
     assert _stored_codes(live_db, "2192") == {(None, None)}
@@ -258,57 +290,59 @@ def test_10_production_shape_reads_cuba_and_iran_with_provenance_and_nothing_unr
 
 
 def test_11_an_unlisted_code_less_criterion_stays_unresolved_and_still_withholds(
-        live_db, tmp_path):
-    """2368 is code-less and NOT listed. It stays "(unresolved location)" and
-    Pakistan stays unavailable — the labels did not loosen the 167A rule."""
-    start, end = _window(30)
-    _production_shape(live_db, extra_rows=[_spend_rows(UNLISTED, end, 3.0)])
-    api = _api("30d")
-    geo = api["geo"]
-    # PR-ADS-176B: what the deleted #/geo table printed, as the rows say it.
-    by = {r["country"]: r for r in geo["rows"]}
-    assert by["Pakistan"]["spend_usd"] is None
-    assert by["Pakistan"]["spend_reason"] == "spend_location_unresolved"
-    assert (by["Cuba"]["spend_usd"], by["Cuba"]["country_provenance"]) == (
-        round(17 * 0.45 * RATE, 2), "owner_labelled")          # printed "$10"
-    assert "Iraq" not in by
-    assert geo["unresolved_spend"] == {
-        "criteria": 1, "conflicting_criteria": 0, "spend_usd": 3.0 * RATE,
-        "blocks_zero": True, "zero_withheld_countries": ["Pakistan"]}
-    assert geo["total_spend_usd"] == round(
-        (30 * 20.0 + 17 * 0.45 + 8 * 0.42 + 3.0) * RATE, 2)
+        live_db, monkeypatch):
+    """2368 is code-less and NOT listed. Its spend stays spend without a
+    country and Pakistan stays unavailable — the labels did not loosen the
+    167A rule. Nothing infers Iraq from the id."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _, y = _production_shape(live_db, extra_rows=[_spend_rows(UNLISTED, _today() - timedelta(days=1), 3.0)])
+    mart, page = _live()
+    rows, items = _rows_items(mart)
+    assert (rows["PK"]["spend"], rows["PK"]["spend_reason"]) == (
+        None, "spend_location_unresolved")
+    assert (items["CU"]["spend"], items["CU"]["provenance"]) == (
+        pytest.approx(round(17 * 0.45 * RATE, 2)), "owner_labelled")
+    assert "IQ" not in rows and "IQ" not in items
+    assert rows["residual"]["spend_components"]["country_unidentified"] == 3.0 * RATE
+    assert page["kpis"]["zero_withheld_countries"] == ["Pakistan"]
+    assert sum(r["spend"] or 0 for r in mart["rows"]) == pytest.approx(
+        (30 * 20.0 + 17 * 0.45 + 8 * 0.42 + 3.0) * RATE, abs=0.02)
 
 
-def test_12_an_owner_labelled_criterion_is_the_carrier_of_its_code(live_db, tmp_path):
+def test_12_an_owner_labelled_criterion_is_the_carrier_of_its_code(live_db, monkeypatch):
     """167A's zero rule: a spend-less country is a measured ``$0`` beside loose
     spend only when another criterion carries its code. Cuba's carrier is
-    2192 — on the owner's word — so with 2192's rows OUTSIDE the window and an
-    unlisted code-less criterion inside it, Cuba is ``$0`` and says why;
-    Pakistan, carried by nothing, is still unavailable."""
+    2192 — on the owner's word. Pakistan and Iran, carried by nothing here,
+    are unavailable while an unlisted code-less criterion has spend in the
+    window.
+
+    PR-ADS-176C: Cuba is not a listed market, so the "$0 carried by 2192"
+    half has no market row on the live surfaces; the same property on a
+    listed market (Iran, carried by 2364) is case 12b."""
     from db import revenue_repository as repo
-    start, end = _window(7)
+    from tests.test_pr_ads_176c_country_feed_retired_pg_integration import (
+        _bounds, _deal_sync, _leads, _seed)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    start, today, y = _bounds()
     old = start - timedelta(days=20)
-    _write_fx(old, end)
-    _write_spend([_spend_rows(UK, start + timedelta(days=i), 20.0) for i in range(7)]
-                 + [_spend_rows(C2192, old, 0.45), _spend_rows(UNLISTED, end, 3.0)])
-    _verify(old, end)
-    _seed_leads(live_db, [("c1", "Cuba", "junk"), ("p1", "Pakistan", "junk"),
-                          ("i1", "Iran", "junk")])
+    _seed([_spend_rows(UK, y - timedelta(days=i), 20.0) for i in range(7)]
+          + [_spend_rows(C2192, old, 0.45), _spend_rows(UNLISTED, y, 3.0)])
+    _deal_sync(live_db)
+    _leads(live_db, [("c1", "Cuba", "junk"), ("p1", "Pakistan", "junk"),
+                     ("i1", "Iran", "junk")])
 
     found = repo.fetch_geo_code_carriers(["CU", "IR", "PK", "GB"])
     assert found == {"available": True, "carriers": {
         "CU": [{"criterion_id": "2192", "codes": ["CU"], "provenance": "owner_labelled"}],
         "GB": [{"criterion_id": UK[0], "codes": ["GB"], "provenance": "google_ads"}]}}
 
-    api = _api("7d")
-    by = {r["country_key"]: r for r in api["geo"]["rows"]}
-    assert (by["code:CU"]["spend_usd"], by["code:CU"]["spend_status"],
-            by["code:CU"]["country_provenance"],
-            by["code:CU"]["owner_labelled_criteria"]) == (
-        0.0, "published", "owner_labelled", ["2192"])
-    assert by["code:CU"]["zero_rests_on_owner_labels"] == ["2192"]
-    assert api["geo"]["unresolved_spend"]["zero_withheld_countries"] == [
-        "Iran", "Pakistan"]
+    mart, page = _live()
+    rows, _items = _rows_items(mart)
+    for code in ("IR", "PK"):
+        assert (rows[code]["spend"], rows[code]["spend_reason"]) == (
+            None, "spend_location_unresolved"), code
+    assert "CU" not in rows
+    assert page["kpis"]["zero_withheld_countries"] == ["Iran", "Pakistan"]
 
 
 # ── the one Countries page (PR-ADS-176B-F1, truth audit M2) ────────────────
@@ -391,36 +425,41 @@ def test_12_b_on_countries_a_zero_carried_by_a_labelled_criterion_says_so(
 
 
 def test_13_a_stored_google_code_beats_the_label_and_the_mismatch_is_surfaced(
-        live_db, tmp_path, caplog):
+        live_db, monkeypatch, caplog):
     """Google one day reports 2192 as Mexico. Every row of 2192 is then
     Mexico's — the stored code — the owner's "Cuba" is not applied, the two are
     never merged, and the payload and the log both say so."""
     from db import geo_identity_sql
+    from tests.test_pr_ads_176c_country_feed_retired_pg_integration import _bounds
     geo_identity_sql._MISMATCH_LOGGED.clear()
-    start, end = _window(30)
-    _production_shape(live_db, extra_rows=[
-        _spend_rows(("2192", "MX", "Mexico"), start - timedelta(days=5), 1.0)])
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    window_start, _today_, _y = _bounds()
+    # Outside the mart's window: identity evidence, not spend in it.
+    start, end = _production_shape(live_db, extra_rows=[
+        _spend_rows(("2192", "MX", "Mexico"), window_start - timedelta(days=5), 1.0)])
     with caplog.at_level(logging.WARNING, logger="db.geo_identity_sql"):
-        api = _api("30d")
-    geo = api["geo"]
-    by = {r["country_key"]: r for r in geo["rows"]}
-    assert (by["code:MX"]["spend_usd"], by["code:MX"]["country_provenance"]) == (
-        round(17 * 0.45 * RATE, 2), None)
-    # Cuba has leads and no spend row; nothing unresolved is in the window and
-    # no criterion carries CU: a measured zero, and not an owner-set COUNTRY.
-    assert (by["code:CU"]["spend_usd"], by["code:CU"]["country_provenance"]) == (0.0, None)
-    assert by["code:CU"]["zero_rests_on_owner_labels"] == ["2364"]
-    assert geo["owner_labelled_geo"]["mismatches"] == [
+        mart, page = _live()
+    rows, items = _rows_items(mart)
+    assert rows["MX"]["spend"] == round(17 * 0.45 * RATE, 2)
+    assert "spend_country_provenance" not in rows["MX"]
+    # No criterion carries CU now: no Cuba anywhere, and nothing unresolved.
+    assert "CU" not in rows and "CU" not in items
+    assert rows["residual"]["spend_components"]["country_unidentified"] == 0.0
+    # Pakistan's zero rests on the one label left in the window.
+    assert (rows["PK"]["spend"], rows["PK"]["zero_rests_on_owner_labels"]) == (0.0, ["2364"])
+    owner = mart["spend_truth"]["owner_labelled_geo"]
+    assert owner["mismatches"] == [
         {"criterion_id": "2192", "owner_code": "CU", "stored_codes": ["MX"]}]
-    assert [c["criterion_id"] for c in geo["owner_labelled_geo"]["criteria"]] == ["2364"]
+    assert [c["criterion_id"] for c in owner["criteria"]] == ["2364"]
+    assert page["owner_labelled_geo"]["mismatches"] == owner["mismatches"]
     assert any("2192" in r.getMessage() and "MX" in r.getMessage()
                for r in caplog.records)
-    assert geo["total_spend_usd"] == round(
-        (30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, 2)
+    assert sum(r["spend"] for r in mart["rows"]) == pytest.approx(
+        (30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, abs=0.02)
 
     # Google agreeing with the owner is Google's word, and no mismatch.
     from db import revenue_repository as repo
-    _write_spend([_spend_rows(("2364", "IR", "Iran"), start - timedelta(days=5), 1.0)],
+    _write_spend([_spend_rows(("2364", "IR", "Iran"), window_start - timedelta(days=5), 1.0)],
                  run="sync-2")
     out = repo.fetch_geo_daily_spend_by_country(start, end)
     row = {r["country_criterion_id"]: r for r in out["rows"]}["2364"]
@@ -430,22 +469,28 @@ def test_13_a_stored_google_code_beats_the_label_and_the_mismatch_is_surfaced(
 
 def test_14_a_malformed_config_does_not_crash_the_page_and_labels_nothing(
         live_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _production_shape(live_db)
     _labels_at(monkeypatch, tmp_path,
                'owner_labelled_geo_criteria:\n'
                '  "2192": {code: Cuba, approved: "2026-11-22", by: owner}\n'
                '  "2364": {code: IR}\n')
-    api = _api("30d")
-    # Exactly the pre-170A payload: no row rests on an owner label.
-    by = {r["country"]: r for r in api["geo"]["rows"]}
-    assert by["Pakistan"]["spend_reason"] == "spend_location_unresolved"
-    assert not any(r.get("country_provenance") == "owner_labelled"
-                   for r in api["geo"]["rows"])
-    assert api["geo"]["unresolved_spend"]["criteria"] == 2
-    assert api["geo"]["owner_labelled_geo"] == {"criteria": [], "mismatches": [],
-                                                "note": NOTE}
-    assert api["geo"]["total_spend_usd"] == round(
-        (30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, 2)
+    mart, page = _live()
+    rows, items = _rows_items(mart)
+    # Exactly the pre-170A state: no row rests on an owner label.
+    assert (rows["PK"]["spend"], rows["PK"]["spend_reason"]) == (
+        None, "spend_location_unresolved")
+    assert not any(r.get("spend_country_provenance") == "owner_labelled"
+                   for r in mart["rows"])
+    assert items == {}
+    assert rows["residual"]["spend_components"]["country_unidentified"] == pytest.approx(
+        round((17 * 0.45 + 8 * 0.42) * RATE, 2))
+    assert mart["spend_truth"]["owner_labelled_geo"] == {"criteria": [], "mismatches": []}
+    # Iran is not withheld here only because it has no market row: its one
+    # lead is spelled "Iran, Islamic Republic of" (FINDING 176C-F1).
+    assert page["kpis"]["zero_withheld_countries"] == ["Pakistan"]
+    assert sum(r["spend"] or 0 for r in mart["rows"]) == pytest.approx(
+        (30 * 20.0 + 17 * 0.45 + 8 * 0.42) * RATE, abs=0.02)
 
 
 # ── the sync: the label is never written ────────────────────────────────────
@@ -535,9 +580,9 @@ def test_16_neither_writer_reads_the_owner_table():
         part = part[:part.index("\ndef ")]
         assert "criterion_identity(" in part, fn
         assert "resolved_code(" not in part, fn
-    service = (ROOT / "services" / "country_evidence_service.py").read_text(encoding="utf-8")
-    part = service[service.index("def identify_spend_rows"):]
-    assert "criterion_identity(" in part[:part.index("\ndef ")]
+    # PR-ADS-176C: ``country_evidence_service.identify_spend_rows`` applied
+    # the rule too; it is deleted with /api/geo. The live readers take each
+    # row's identity from ``fetch_geo_daily_spend_by_country`` (above).
 
 
 # ── Country Revenue & Spend and Dashboard Countries ─────────────────────────
@@ -862,20 +907,26 @@ def test_23_a_future_approval_and_a_non_ascii_id_are_not_labels(
 
 
 def test_24_the_map_hover_and_the_revenue_pages_carry_the_marker_and_the_mismatch(
-        live_db, tmp_path):
+        live_db, tmp_path, monkeypatch):
     """Provenance wherever a labelled country's spend is shown, not only in
     the table: the Countries map hover, the Dashboard Countries bubble tooltip
     and row drawer; and the mismatch notice on the two revenue pages.
 
-    PR-ADS-176B: the Countries map (#/geo) is deleted with its page. What it
-    drew from is still served: the payload marks both labelled countries, and
-    in production's shape names no mismatch (so no notice)."""
+    PR-ADS-176B: the Countries map (#/geo) is deleted with its page.
+    PR-ADS-176C: so is the /api/geo payload it drew from. The live payloads
+    mark both labelled countries — Iran's market row, Cuba's itemised residual
+    country — and in production's shape name no mismatch (so no notice)."""
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _production_shape(live_db)
-    geo = _api("30d")["geo"]
-    prov = {r["country"]: r.get("country_provenance") for r in geo["rows"]}
-    assert (prov["Cuba"], prov["Iran"]) == ("owner_labelled", "owner_labelled")
-    assert prov["United Kingdom"] != "owner_labelled"
-    assert (geo.get("owner_labelled_geo") or {}).get("mismatches") == []
+    mart, page = _live()
+    rows, items = _rows_items(mart)
+    assert (items["CU"]["provenance"], rows["IR"]["spend_country_provenance"]) == (
+        "owner_labelled", "owner_labelled")
+    assert rows["GB"].get("spend_country_provenance") != "owner_labelled"
+    assert mart["spend_truth"]["owner_labelled_geo"]["mismatches"] == []
+    assert page["owner_labelled_geo"]["mismatches"] == []
+    d = {r["country_code"]: r for r in page["countries"]}
+    assert d["IR"]["spend_country_provenance"] == "owner_labelled"
 
     src = APP_JS.read_text(encoding="utf-8")
 

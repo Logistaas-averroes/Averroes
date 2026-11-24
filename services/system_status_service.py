@@ -141,8 +141,9 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "blocks": [],
     },
     # PR-ADS-165A: the legacy `geo` snapshot, written by the monthly job
-    # alone. The Countries page (`#/geo`) no longer reads it — its spend is
-    # `canonical_geo`, above — so this pipeline names no page. What still reads
+    # alone. No page reads it — the Countries page's spend is `canonical_geo`,
+    # above (PR-ADS-176C retired the `#/geo` feed) — so this pipeline names no
+    # page. What still reads
     # the table is listed in services.freshness_service (the `geo` entry).
     "geo": {
         "label": "Geo (legacy monthly snapshot)",
@@ -273,10 +274,10 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "search-terms": ["search_terms"],
     # PR-ADS-153F: the N-Gram page's only real dependency is search_terms.
     "ngrams": ["search_terms"],
-    # PR-ADS-165A: the Google Ads → Countries page reads canonical daily
-    # country spend. It named the legacy `geo` snapshot, which the monthly
-    # job alone writes and the page no longer reads.
-    "geo": ["canonical_geo"],
+    # PR-ADS-176C: "geo" removed. It mapped the retired `#/geo` page (and
+    # its `/api/geo` feed) to canonical daily country spend; the one Countries
+    # page is `countries` below, which depends on that and on the campaign
+    # total its gate reconciles against.
     # PR-ADS-153F: Countries depends on canonical geo spend and the campaign
     # total it must reconcile against.
     "countries": ["canonical_geo", "canonical_spend"],

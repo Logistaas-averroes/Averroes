@@ -589,7 +589,8 @@ PENDING_REDESIGN_CONSUMERS = {
     "lead_intelligence": {
         "classification": "pending_redesign_non_authoritative",
         "overlapping_metrics": ["leads", "sqls"],
-        "services": ["/api/leads", "/api/leads/country-summary"],
+        # PR-ADS-176C: "/api/leads/country-summary" retired with /api/geo.
+        "services": ["/api/leads"],
         "note": ("Publishes lead and SQL counts from the pre-canonical lead "
                  "snapshot. Not a canonical executive total. Consumer migration "
                  "belongs to the Lead Intelligence redesign."),

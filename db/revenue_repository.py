@@ -1372,7 +1372,8 @@ def fetch_geo_coverage(customer_id: str, start: date | None, end: date) -> dict:
                         # PR-ADS-165A: WHEN the chunk was last fetched. A
                         # chunk verified during a day holds only part of that
                         # day; a reader that needs complete days compares this
-                        # with the end of each day (country_evidence_service).
+                        # with the end of each day
+                        # (google_ads_spend_service.analyze_settled_coverage).
                         "fetched_at": r.get("fetched_at"),
                     })
             return {"available": True, "chunks": chunks}
@@ -1563,11 +1564,13 @@ def fetch_geo_daily_spend_total(start: date | None, end: date,
         return {"available": False, "has_rows": False}
 
 
-# ── One snapshot for the Countries page's geo reads (PR-ADS-167A) ───────────
+# ── One snapshot for the country pages' geo reads (PR-ADS-167A) ─────────────
 #
-# The Countries page reads the window's spend rows, the identity of every
+# A country page reads the window's spend rows, the identity of every
 # criterion in them, and which criteria carry each spend-less country's code —
-# three statements. A sync naming a code-less criterion between them could
+# up to three statements (``services.country_spend_zero_rule.read_country_spend``
+# since PR-ADS-176C retired the Countries evidence feed; the rows carry their
+# identity from the same statement). A sync naming a code-less criterion between them could
 # make the carriers read disagree with the identities read and turn an
 # "Unavailable" into a false $0. Inside ``geo_read_snapshot()`` the three
 # readers share ONE connection in a REPEATABLE READ, READ ONLY transaction, so
@@ -1814,7 +1817,7 @@ def fetch_geo_criterion_identities(criterion_ids) -> dict:
 def fetch_geo_code_carriers(codes) -> dict:
     """Which Google criteria carry each of ``codes`` on record. Read-only.
 
-    PR-ADS-167A. The Countries page may call a country with no spend row a
+    PR-ADS-167A. A country page may call a country with no spend row a
     measured ``$0`` while the window also holds spend against a location no
     stored row names — but only if that location cannot be this country. It
     cannot when Google keys this country under ANOTHER criterion: one country,

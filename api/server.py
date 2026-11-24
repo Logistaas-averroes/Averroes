@@ -31,9 +31,7 @@ Protected endpoints (require authenticated session):
   POST /run/daily           — Trigger daily run (requires admin or ADMIN_API_TOKEN).
   POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
   POST /run/incremental-sync — Trigger daily incremental sync manually (requires admin or ADMIN_API_TOKEN).
-  GET  /api/geo                    — Per-country Google Ads spend from the canonical daily table, with a coverage verdict (requires auth).
   GET  /api/keywords               — Windsor keyword performance by campaign/ad group/keyword (requires auth).
-  GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
   GET  /api/campaign-detail        — Campaign drill-down detail, query-param form (requires auth). Preferred.
   GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
@@ -828,8 +826,8 @@ def api_campaigns(
 
 
 # Lead dedup key: latest run per contact (rows with no contact_id stay individual,
-# keyed by their row id) — matches /api/leads/country-summary and the old
-# client-side dedup exactly.
+# keyed by their row id) — matches the old client-side dedup exactly.
+# (PR-ADS-176C retired /api/leads/country-summary, which used the same key.)
 _LEAD_DEDUP_KEY = (
     "CASE WHEN contact_id IS NOT NULL AND contact_id <> '' "
     "THEN contact_id ELSE CAST(id AS TEXT) END"
@@ -1127,72 +1125,6 @@ def api_runs(
     return {"days": days, "runs": runs_out}
 
 
-@app.get("/api/geo")
-def api_geo(
-    user: dict = Depends(require_auth),
-    days: int = Query(default=30, description="Number of days to look back (1–365)"),
-    window: str | None = Query(
-        default=None,
-        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
-    ),
-) -> dict[str, Any]:
-    """The Countries page: one row per country, spend and leads joined. Requires auth.
-
-    PR-ADS-165A. Spend is read from the canonical DAILY country table
-    (``google_ads_geo_daily_spend``, written by the daily incremental sync)
-    and its coverage ledger — never the legacy ``geo`` snapshot, which only
-    the monthly job writes.
-
-    The window is N account-local days ending YESTERDAY (``window_range``).
-    ``coverage`` says whether every one of those days has a verified fetch
-    made after that day ended (``status``: covered / not_covered /
-    unavailable, with the complete range and a reason). A day fetched while it
-    was still in progress holds a part-day and does not count, so the window
-    is covered from the morning sync onward and ``not_covered``
-    (``spend_not_reread_since_day_ended``) before it. A spend figure appears
-    ONLY when the window is covered — never 0 and never a partial sum.
-
-    Lead figures are the ``/api/leads/country-summary`` rows for the same
-    evidence window (which runs through today), joined to spend HERE on an ISO
-    country code: spend by the code its Google criterion carries on any stored
-    row (no code on record = "(unresolved location)"), lead text through the
-    complete ISO table (in ``services.country_evidence_service``). A lead
-    country that names no single country is its own row with spend
-    ``unavailable`` / ``country_not_matched``, never 0; blanks and
-    placeholders are one "No country recorded" row. A country with no spend
-    row is 0 only when the window holds no unresolved spend; otherwise it is
-    ``unavailable`` / ``spend_location_unresolved``. Clicks, impressions and
-    conversions are not returned (``dropped_metrics``).
-    """
-    from analysis.evidence_windows import is_evidence_window  # noqa: PLC0415
-    requested_window = window if isinstance(window, str) and window else None
-    days, window_key = _resolve_evidence_window(requested_window, days)
-    from services.country_evidence_service import build_country_evidence  # noqa: PLC0415
-    try:
-        # The lead half, from the endpoint that owns it — the same rows the
-        # page used to fetch separately, for the same window.
-        leads = api_leads_country_summary(
-            user=user, days=days if days is not None else 30,
-            window=window_key if is_evidence_window(window_key) else None)
-        return build_country_evidence(
-            days=days, window_key=window_key,
-            lead_rows=leads.get("rows") or [],
-            leads_available=not leads.get("db_unavailable"))
-    except Exception as exc:  # noqa: BLE001
-        log.error("[api/geo] country evidence unavailable: %s", exc, exc_info=True)
-        # Unknown, said as unknown: no rows, no total, and a verdict that is
-        # not "covered" — so the page prints "Unavailable", never $0.
-        return {
-            "days": days, "window": window_key, "rows": [],
-            "spend_status": "unavailable", "leads_status": "unavailable",
-            "leads_reason": "lead_summary_unreadable",
-            "total_spend_usd": None, "countries_active": None,
-            "coverage": {"status": "unavailable", "covered_from": None,
-                         "covered_through": None,
-                         "reason": "geo_rows_unreadable"},
-        }
-
-
 @app.get("/api/keywords")
 def api_keywords(
     user: dict = Depends(require_auth),
@@ -1261,104 +1193,6 @@ def api_keywords(
         return _db_empty_response(days, "rows", window_key)
 
     return {"days": days, "window": window_key, "rows": kw_out}
-
-
-@app.get("/api/leads/country-summary")
-def api_leads_country_summary(
-    user: dict = Depends(require_auth),
-    days: int = Query(default=30, description="Number of days to look back (1–365)"),
-    window: str | None = Query(
-        default=None,
-        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
-    ),
-) -> dict[str, Any]:
-    """Return HubSpot lead quality aggregated by country for the evidence window. Requires auth."""
-    days, window_key = _resolve_evidence_window(window, days)
-    date_clause, date_params = _evidence_date_clause("run_date", days)
-
-    from db.connection import get_conn  # noqa: PLC0415
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return _db_empty_response(days, "rows", window_key)
-            with conn.cursor() as cur:
-                # Deduplicate leads by contact_id (latest run per contact),
-                # then aggregate status counts per country.
-                cur.execute(
-                    f"""
-                    WITH deduped AS (
-                        SELECT DISTINCT ON (
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END
-                        )
-                            country,
-                            campaign_name,
-                            keyword,
-                            status_category,
-                            run_date
-                        FROM leads
-                        WHERE {date_clause}
-                        ORDER BY
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END,
-                            run_date DESC,
-                            id DESC
-                    )
-                    SELECT
-                        COALESCE(NULLIF(BTRIM(country), ''), '(unknown)') AS country,
-                        COUNT(*)                                     AS total_leads,
-                        SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
-                        SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
-                        SUM(CASE WHEN status_category = 'junk'        THEN 1 ELSE 0 END) AS confirmed_junk,
-                        SUM(CASE WHEN status_category = 'wrong_fit'   THEN 1 ELSE 0 END) AS wrong_fit,
-                        SUM(CASE WHEN status_category = 'unknown'     THEN 1 ELSE 0 END) AS unknown,
-                        mode() WITHIN GROUP (ORDER BY campaign_name)  AS top_campaign,
-                        mode() WITHIN GROUP (ORDER BY keyword)        AS top_keyword,
-                        MAX(run_date)                                AS last_run_date
-                    FROM deduped
-                    GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
-                    ORDER BY total_leads DESC
-                    """,
-                    (*date_params,),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                summary_out = []
-                for row in rows:
-                    r = dict(zip(cols, row))
-                    confirmed_junk = int(r["confirmed_junk"] or 0)
-                    qualified      = int(r["confirmed_sqls"] or 0)
-                    in_progress    = int(r["in_progress"] or 0)
-                    wrong_fit      = int(r["wrong_fit"] or 0)
-                    verdicted      = qualified + in_progress + confirmed_junk + wrong_fit
-                    junk_rate      = None
-                    if verdicted > 0:
-                        junk_rate = round((confirmed_junk / verdicted) * 100, 2)
-                    summary_out.append({
-                        "country":         r["country"],
-                        "total_leads":     int(r["total_leads"] or 0),
-                        "confirmed_sqls":  qualified,
-                        "in_progress":     in_progress,
-                        "confirmed_junk":  confirmed_junk,
-                        "wrong_fit":       wrong_fit,
-                        "unknown":         int(r["unknown"] or 0),
-                        "verdicted_leads": verdicted,
-                        "junk_rate_pct":   junk_rate,
-                        "top_campaign":    r["top_campaign"],
-                        "top_keyword":     r["top_keyword"],
-                        "last_run_date":   str(r["last_run_date"]) if r["last_run_date"] else None,
-                    })
-    except Exception as exc:  # noqa: BLE001
-        log.error("[api/leads/country-summary] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "rows", window_key)
-
-    return {"days": days, "window": window_key, "rows": summary_out}
 
 
 # ── Campaign detail — shared builder ───────────────────────────────────────────

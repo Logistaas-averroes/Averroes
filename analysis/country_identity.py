@@ -499,6 +499,14 @@ __all__ = [
 # table in ``analysis.iso_countries`` instead. They are deliberately separate
 # names: nothing above calls them and they call nothing above but
 # ``_RESIDUAL_LABELS``.
+#
+# PR-ADS-176C retired that page's feed (``/api/geo``,
+# ``services/country_evidence_service``), the only production caller. The
+# functions stay: they are the complete-ISO rule the live country pages would
+# need to join a listed market's lead text that the market registry does not
+# spell — production's "libyan arab jamahiriya" (Libya) is in the residual on
+# Countries and Dashboard → Countries today (docs/58 §8, finding 176C-F1).
+# Adopting them there is the publication change described above, not done here.
 
 import unicodedata as _unicodedata
 

@@ -14,7 +14,8 @@ The rule now lives once, in ``google_ads_spend_service.analyze_settled_coverage`
 and ``analyze_published_geo_coverage`` applies it for every publishing geo
 consumer. What each consumer now does with a window that ends today:
 
-* Countries: its window already ends yesterday; unchanged.
+* Countries (the retired ``/api/geo`` feed, PR-ADS-176C): its window already
+  ended yesterday; unchanged.
 * Country Revenue & Spend / mart / Dashboard Countries / geo reconciliation:
   their business windows end today, and the page divides revenue THROUGH
   TODAY by this spend, so the spend cannot end a day earlier. The verdict is
@@ -95,14 +96,21 @@ def test_01_the_shared_rule_names_every_way_a_fetched_window_is_not_complete():
     assert v["complete"] is False
 
 
-def test_02_there_is_one_settle_rule_and_the_countries_page_uses_it():
-    import services.country_evidence_service as countries
+def test_02_there_is_one_settle_rule_and_every_publishing_geo_reader_uses_it():
+    # PR-ADS-176C: the first half of this case pinned that the Countries
+    # evidence page (services/country_evidence_service, /api/geo) re-exported
+    # the rule rather than holding a copy. That page and its feed are retired;
+    # the property — ONE definition of the rule — is held below: it is defined
+    # once, in the spend service, and nowhere else in production code.
     import services.google_ads_spend_service as spend
-    assert countries.settled_through is spend.settled_through
-    assert countries.settled_chunks is spend.settled_chunks
-    src = (ROOT / "services" / "country_evidence_service.py").read_text(encoding="utf-8")
-    assert "def settled_through" not in src and "def settled_chunks" not in src
-    assert "analyze_settled_coverage(" in src
+    assert callable(spend.settled_through) and callable(spend.settled_chunks)
+    defs = sorted(
+        str(p.relative_to(ROOT)) for pkg in ("analysis", "api", "db", "scheduler",
+                                             "services", "scripts", "connectors")
+        for p in (ROOT / pkg).rglob("*.py") if "__pycache__" not in p.parts
+        and ("def settled_through" in p.read_text(encoding="utf-8")
+             or "def settled_chunks" in p.read_text(encoding="utf-8")))
+    assert defs == ["services/google_ads_spend_service.py"]
     # Every PUBLISHING geo reader applies it; the sync's own check does not.
     geo_src = (ROOT / "services" / "google_ads_geo_sync_service.py").read_text(encoding="utf-8")
     recon = geo_src[geo_src.index("def build_geo_reconciliation"):]

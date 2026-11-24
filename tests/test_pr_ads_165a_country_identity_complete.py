@@ -213,7 +213,12 @@ def test_07_the_market_registry_and_its_callers_are_unchanged():
     for name in ("resolve_iso_country_text", "ISO_COUNTRY_NAMES", "iso_countries",
                  "ISO_NAME_TO_CODE", "is_no_country_placeholder"):
         assert name not in old, name
-    # And only the Countries page service calls the complete resolver.
+    # And no live page calls the complete resolver. PR-ADS-165A: only the
+    # Countries page service did; PR-ADS-176C retired that service with
+    # /api/geo, so no production module calls it now. The live country pages
+    # resolve lead text through the market registry — which is why a listed
+    # market's ISO-only spelling lands in their residual (FINDING 176C-F1,
+    # docs/58 §8.4). Adopting this resolver there is a publication change.
     callers = sorted(
         str(p.relative_to(ROOT)) for pkg in ("analysis", "api", "db", "scheduler",
                                              "services", "scripts", "connectors")
@@ -221,8 +226,7 @@ def test_07_the_market_registry_and_its_callers_are_unchanged():
         if "__pycache__" not in p.parts
         and "resolve_iso_country_text" in p.read_text(encoding="utf-8"))
     assert callers == ["analysis/country_identity.py",
-                       "analysis/iso_countries.py",       # names it in its docstring
-                       "services/country_evidence_service.py"]
+                       "analysis/iso_countries.py"]       # names it in its docstring
 
 
 def test_08_kosovo_resolves_to_the_code_google_uses_and_iso_stays_iso():

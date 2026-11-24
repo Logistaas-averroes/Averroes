@@ -6719,3 +6719,81 @@ Tests: 11 new cases (one-page 14–20, PG 06–07, 170A 10b / 12b), all failing 
 * M1 reaches Campaign Revenue & Spend too: won deals with withheld revenue read
   "Not judged — revenue unknown" (`docs/58` §7.10, `161e` case 05). The unused
   `NOT_JUDGED_VERDICTS` set is deleted.
+
+---
+
+## PR-ADS-176C — the legacy country feed is retired
+
+**Why.** After PR-ADS-176B nothing in `static/` read `GET /api/geo`
+(`services/country_evidence_service`) or `GET /api/leads/country-summary`, but
+both were live, and the service kept its own copy of the owner-label zero
+disclosure. A second builder of a country figure is a second rule waiting to
+drift. They are deleted. Their truth properties were first re-asserted on the
+surfaces that are left. Full record: `docs/58` §8.
+
+**Port before delete.** Every property the 165A / 167A / 170A PostgreSQL suites
+asserted on the `/api/geo` payload now runs, on real PostgreSQL, against the
+mart's country view (the one Countries page) and Dashboard → Countries. The
+properties are:
+
+* exact sums, with restated days counted once;
+* uncovered windows, the settle rule, failed re-reads, the account time zone;
+* the zero rule and its carriers;
+* owner labels and mismatches;
+* FX gaps, the legacy snapshot and all_time;
+* the lead join, unmatched text and unreadable leads;
+* the 162-code production shape.
+
+The ports are a new module,
+`tests/test_pr_ads_176c_country_feed_retired_pg_integration.py` (26 cases),
+plus in-place rewrites of 167A zero-rule 01–06 and 170A 10–14 / 24. 165A
+case 12 (merged top campaign / keyword) is not ported: lead-quality columns
+were dropped by owner decision 3. The port table is `docs/58` §8.3.
+
+**Deleted.**
+
+* Both routes, now 404.
+* `country_evidence_service.py`.
+* `geo_owner_labels.OWNER_LABEL_NOTE`.
+* `PAGE_PIPELINE_IMPACT["geo"]`.
+* The doctrine-registry consumer and rules for the Geo country summary.
+  `ui.index` is rebound to the Countries consumer.
+* The two `API_CONTRACT.md` sections.
+
+`country_spend_zero_rule` is now the only implementation of the zero verdict
+and the owner-label disclosure.
+
+**Parity.** `cross_page_parity_service` never compared `/api/geo`. It listed
+`/api/leads/country-summary` as a service of the uncertified
+`lead_intelligence` page. That list is now `["/api/leads"]`. No identity or
+check changed.
+
+**Findings: properties `/api/geo` held that the live surfaces do not.** Each
+is pinned as observed. None is fixed here.
+
+* **F1.** A listed market's lead text in an ISO or legacy spelling is counted
+  in the residual, not on its market. Examples: "libyan arab jamahiriya",
+  "Iran, Islamic Republic of", "Türkiye".
+* **F2.** Dashboard → Countries keeps native spend under any gate failure while
+  geo coverage is complete, labelled "USD unavailable (FX)". With two accounts
+  and none configured, that is the UK's spend summed over both accounts.
+* **F3.** all_time publishes spend dated before the earliest verified chunk, as
+  "verified".
+* **F4.** With no account configured, the surfaces publish the one account the
+  data holds (the PR-ADS-154B design).
+* **F5.** When canonical geo has no rows, the mart builds country rows and
+  `country_geo_total` from the legacy `geo` snapshot. Every figure is withheld.
+
+**Guard.** `tests/test_pr_ads_176c_country_feed_retired.py` (6 cases) covers:
+
+* the routes are 404 and absent from the app;
+* no handler is defined for them;
+* the service is absent and imported nowhere, by any spelling;
+* the UI reads neither route;
+* the zero rule has one implementation;
+* no registry or audit names a deleted reader.
+
+Cases 01–03, 05 and 06 fail on `5a9b5e9`.
+
+**Next.** The owner decides F1–F5. The likeliest to need a fix are F2 and F3,
+which publish a figure the evidence does not support.

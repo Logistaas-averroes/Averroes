@@ -34,10 +34,9 @@ EVIDENCE_MODULE = open(os.path.join(ROOT, "analysis", "evidence_windows.py"),
 EVIDENCE_ENDPOINTS = [
     "/api/campaigns",
     "/api/keywords",
-    "/api/geo",
+    # PR-ADS-176C: "/api/geo" and "/api/leads/country-summary" retired (404).
     "/api/leads",
     "/api/waste",
-    "/api/leads/country-summary",
     "/api/search-terms",
     "/api/search-terms/summary",
     "/api/search-terms/ngrams",
@@ -182,8 +181,9 @@ def test_evidence_module_is_read_only():
 def test_evidence_endpoint_handlers_are_select_only():
     # Extract each evidence handler body and assert it never issues a write.
     handlers = [
-        "def api_campaigns(", "def api_keywords(", "def api_geo(",
-        "def api_leads(", "def api_waste(", "def api_leads_country_summary(",
+        # PR-ADS-176C: api_geo / api_leads_country_summary deleted.
+        "def api_campaigns(", "def api_keywords(",
+        "def api_leads(", "def api_waste(",
         "def api_search_terms(", "def api_search_terms_summary(",
         "def api_search_terms_ngrams(",
     ]
@@ -307,8 +307,8 @@ def test_evidence_loaders_use_window_param():
     # the page sends its evidence window to ONE endpoint; the lead summary
     # endpoint still exists and still takes the window (EVIDENCE_ENDPOINTS).
     # PR-ADS-176B: that page is deleted. Countries reads the mart's country
-    # view on a BUSINESS window, and nothing in the UI reads /api/geo (its
-    # endpoint stays until PR-ADS-176C).
+    # view on a BUSINESS window, and nothing in the UI reads /api/geo.
+    # PR-ADS-176C: both endpoints are retired.
     assert "/api/geo" not in APP_JS
     assert "/api/leads/country-summary" not in APP_JS
     assert 'fetchRevenuePerformance("country", window_)' in APP_JS

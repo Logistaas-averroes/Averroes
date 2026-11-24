@@ -58,9 +58,10 @@ CONFIG_KEY = "owner_labelled_geo_criteria"
 PROVENANCE_GOOGLE_ADS = "google_ads"
 PROVENANCE_OWNER_LABELLED = "owner_labelled"
 
-#: What the pages say beside an owner-labelled country.
-OWNER_LABEL_NOTE = ("Country set by owner — Google Ads reports this location "
-                    "without a country")
+# PR-ADS-176C: ``OWNER_LABEL_NOTE`` (the note text the retired /api/geo payload
+# carried as ``owner_labelled_geo.note``) is deleted with that payload. The
+# pages' wording is ``OWNER_LABELLED_COUNTRY_NOTE`` in static/app.js, pinned
+# in tests/test_pr_ads_170a_* case 18.
 
 
 def _approved_date(value) -> str | None:
@@ -193,6 +194,6 @@ def owner_labels() -> dict:
 
 
 __all__ = [
-    "CONFIG_KEY", "CONFIG_PATH", "OWNER_LABEL_NOTE", "PROVENANCE_GOOGLE_ADS",
+    "CONFIG_KEY", "CONFIG_PATH", "PROVENANCE_GOOGLE_ADS",
     "PROVENANCE_OWNER_LABELLED", "owner_labels", "validate_owner_labels",
 ]
