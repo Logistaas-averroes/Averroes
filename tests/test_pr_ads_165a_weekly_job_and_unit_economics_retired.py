@@ -818,7 +818,10 @@ def test_13_monthly_datasets_are_marked_monthly_and_none_of_them_is_core(
     assert monthly_pages == {
         "dashboard": ["waste_terms"], "waste": ["waste_terms"],
         "gclid-attribution": ["gclid_coverage_snapshots"]}
-    assert status.PAGE_PIPELINE_IMPACT["geo"] == ["canonical_geo"]
+    # PR-ADS-176C: the retired #/geo page's key is removed; the one Countries
+    # page (`countries`) keys on canonical geo and canonical spend.
+    assert "geo" not in status.PAGE_PIPELINE_IMPACT
+    assert status.PAGE_PIPELINE_IMPACT["countries"] == ["canonical_geo", "canonical_spend"]
     assert status.PAGE_PIPELINE_IMPACT["keywords"] == ["keyword_facts"]
 
     _db_state(monkeypatch, monthly_age_days=18.0)
@@ -879,7 +882,10 @@ def test_13_monthly_datasets_are_marked_monthly_and_none_of_them_is_core(
     assert stale_core["overall_status"] != "ok"
     assert [b["id"] for b in stale_core["critical_blockers"]] == [
         "canonical_geo_stale"]
-    geo_impact = [i for i in stale_core["page_impact"] if i.get("page") == "Geo"]
+    # PR-ADS-176C: the retired #/geo page ("Geo") is no longer a page; the one
+    # Countries page is the page a stale canonical_geo degrades.
+    assert not [i for i in stale_core["page_impact"] if i.get("page") == "Geo"]
+    geo_impact = [i for i in stale_core["page_impact"] if i.get("page") == "Countries"]
     assert [(i["status"], i["blocked_by"]) for i in geo_impact] == [
         ("degraded", "canonical_geo")], stale_core["page_impact"]
 
@@ -915,9 +921,10 @@ def test_13c_the_countries_page_is_not_fed_by_a_monthly_table():
     the registry half: nothing about the page points at the monthly snapshot."""
     from services import freshness_service as fresh
     assert fresh.DATASET_FRESHNESS_CONFIG["geo"]["page"] is None
-    handler = SERVER.split('@app.get("/api/geo")')[1].split("\n@app.")[0]
-    assert "FROM geo" not in handler
-    assert "build_country_evidence" in handler
+    # PR-ADS-176C: the /api/geo handler this case read (it built from the
+    # canonical service and named no legacy table) is retired with its feed;
+    # the route is asserted gone in tests/test_pr_ads_176c_country_feed_retired.
+    assert '@app.get("/api/geo")' not in SERVER
     # PR-ADS-176B: the Countries page is `roas-countries` (the #/geo page is
     # deleted and redirects there). The same property, on the page that is
     # left: its copy does not point at the monthly snapshot, and its freshness

@@ -121,6 +121,15 @@ def seed(execute) -> None:
                     " cost_micros, spend_account_currency) "
                     "VALUES (%s,'GBP',%s,%s,%s,50000000,50.0)",
                     (ACCOUNT, cid, name, day))
+    # PR-ADS-176C-F3: the matrix runs both without a spend-coverage ledger (the
+    # shape the golden was captured in, and the no-ledger state open-start
+    # reads must not turn into a $0) and, when asked, with a verified ledger
+    # over every stored day (production's shape). The golden holds for both:
+    # an account's spend is bounded at its earliest verified chunk, and an
+    # account with none is not bounded at all.
+    if os.environ.get("PR_ADS_173A_SPEND_LEDGER") == "1":
+        execute("INSERT INTO google_ads_spend_coverage (customer_id, chunk_start,"
+                " chunk_end, status) VALUES (%s,%s,%s,'verified')", (ACCOUNT, OLD, D0))
     for label in ("KSA Freight (legacy)", "ksa freight old"):
         execute("INSERT INTO google_ads_campaign_identity (customer_id, campaign_id,"
                 " canonical_campaign_name, external_campaign_label, match_method,"

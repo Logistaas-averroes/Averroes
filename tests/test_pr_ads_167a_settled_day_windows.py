@@ -263,12 +263,19 @@ def test_10_conservation_against_the_full_window_would_be_unequal_windows(monkey
     assert parity.V_WINDOW_MISMATCH in out["violation_codes"]
 
 
-# ── the Countries page's geo reads share one snapshot (review observation) ──
+# ── the country pages' geo reads share one snapshot (review observation) ────
 def test_11_countries_reads_spend_identities_and_carriers_in_one_snapshot():
     """A sync naming a code-less criterion between the identities read and the
-    carriers read could turn "Unavailable" into a false $0. The three readers
-    share one REPEATABLE READ, READ ONLY connection inside
-    ``repo.geo_read_snapshot()``, and the page opens it before the first."""
+    carriers read could turn "Unavailable" into a false $0. The readers share
+    one REPEATABLE READ, READ ONLY connection inside
+    ``repo.geo_read_snapshot()``, and the caller opens it before the first.
+
+    PR-ADS-176C: this pinned the order inside the retired Countries evidence
+    page (``country_evidence_service``: spend → identities → carriers). The
+    one caller left is the shared reader both live country builders use,
+    ``country_spend_zero_rule.read_country_spend``: the spend rows carry their
+    criterion identity from the same statement, and ``assess`` reads the
+    carriers — both inside the snapshot block it opens."""
     import ast
     import inspect
 
@@ -279,29 +286,27 @@ def test_11_countries_reads_spend_identities_and_carriers_in_one_snapshot():
                repo.fetch_geo_criterion_identities, repo.fetch_geo_code_carriers):
         src = inspect.getsource(fn)
         assert "_geo_conn()" in src and "get_conn()" not in src, fn.__name__
-    page = (ROOT / "services" / "country_evidence_service.py").read_text(encoding="utf-8")
-    tree = ast.parse(page)
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-              and "geo_read_snapshot" in ast.get_source_segment(page, n))
-    body = ast.get_source_segment(page, fn)
-    i_snap = body.index("geo_reads.enter_context(repo.geo_read_snapshot())")
-    i_with = body.index("with contextlib.ExitStack() as geo_reads:")
-    # PR-ADS-176A: the carriers read moved, with the zero rule, into the ONE
-    # shared rule (`services.country_spend_zero_rule.assess`), which reads them
-    # in the caller's snapshot. The page calls it inside the same block.
-    reads = [body.index(r) for r in ("repo.fetch_geo_daily_spend_by_country(",
-                                     "repo.fetch_geo_criterion_identities(",
-                                     "zero_rule.assess(")]
     shared = (ROOT / "services" / "country_spend_zero_rule.py").read_text(encoding="utf-8")
+    tree = ast.parse(shared)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "read_country_spend")
+    body = ast.get_source_segment(shared, fn)
+    i_with = body.index("with repo.geo_read_snapshot():")
+    reads = [body.index(r) for r in ("repo.fetch_geo_daily_spend_by_country(",
+                                     "assess(rows")]
     assess = shared[shared.index("def assess("):shared.index("\ndef zero_spend_verdict(")]
     assert "repo.fetch_geo_code_carriers(" in assess
     assert "repo.geo_read_snapshot()" not in assess.split("\"\"\"")[2]  # no snapshot of its own
-    assert i_with < i_snap < min(reads)
-    # All three reads sit inside the ExitStack block (indented under it).
+    assert i_with < min(reads)
+    # Both reads sit inside the snapshot block (indented under it).
     with_indent = len(body[:i_with].rsplit("\n", 1)[1])
     for r in reads:
         line_start = body.rfind("\n", 0, r) + 1
         assert r - line_start > with_indent, body[line_start:r + 40]
+    # And both live builders go through it (no builder reads geo spend alone).
+    for path in ("services/revenue_attribution_service.py",
+                 "services/dashboard_countries_service.py"):
+        assert "zero_rule.read_country_spend(" in (ROOT / path).read_text(encoding="utf-8")
 
 
 def test_12_a_settled_consumer_reading_the_utc_calendar_is_a_window_mismatch(monkeypatch):

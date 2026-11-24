@@ -152,6 +152,10 @@ def campaign_resolver(now: datetime | None = None) -> tuple:
         from services.campaign_evidence_service import (  # noqa: PLC0415
             _assign_lead, _identity_index, _spend_by_campaign_id,
         )
+        # PR-ADS-176C-F2 (m2): the all-time campaign NAMES are read over the
+        # certified range, exactly as the leads side's campaign resolver reads
+        # them, so a deal can never land on a campaign the leads side cannot
+        # see.
         spend = repo.fetch_canonical_campaign_spend(None, account_today(now))
         if not spend.get("available"):
             return None, "canonical campaign spend could not be read"

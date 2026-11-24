@@ -666,6 +666,39 @@ def _first_difference(expected, actual, path="$"):
     return None if expected == actual else f"{path}: {expected!r} != {actual!r}"
 
 
+@pytest.fixture(scope="module")
+def published_with_spend_ledger():
+    """The same matrix with a verified spend-coverage ledger over every stored
+    day (PR-ADS-176C-F3): production's shape, beside the no-ledger capture."""
+    cluster = _PgCluster().start()
+    try:
+        env = {**_child_env(cluster.url), "PR_ADS_173A_SPEND_LEDGER": "1"}
+        proc = subprocess.run(
+            [sys.executable, str(_SCENARIOS)], cwd=_ROOT, env=env,
+            capture_output=True, text=True, timeout=1800)
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        yield json.loads(proc.stdout.strip().splitlines()[-1])
+    finally:
+        cluster.stop()
+
+
+@_needs_pg
+def test_22_b_a_verified_spend_ledger_changes_no_payload(published_with_spend_ledger):
+    """PR-ADS-176C-F3 (R2-1). The open-start spend reads are bounded at each
+    account's earliest verified chunk and leave an account with no chunk
+    unbounded. So the matrix is byte-identical to the golden whether its
+    spend sits inside a verified ledger or has none (test_22, the capture's
+    own no-ledger shape). PR-ADS-176C-F2's ``'infinity'`` bound changed 71
+    payloads of the no-ledger run (coverage 'ok' → 'unavailable', canonical
+    spend → 0.0)."""
+    index, golden = _golden()
+    assert set(published_with_spend_ledger) == set(golden["payloads"])
+    differing = [name for name in golden["payloads"]
+                 if not _same_document(index["scenarios"][name]["sha256"],
+                                       published_with_spend_ledger[name])]
+    assert not differing, (len(differing), differing[:5])
+
+
 @_needs_pg
 def test_21_the_same_requests_are_answered(published):
     """No request of the matrix silently dropped, none added unrecorded."""

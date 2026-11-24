@@ -524,19 +524,21 @@ def test_no_geo_data_remains_blocked_never_zero(monkeypatch):
     # fixture certifies the whole range as fetched, so canonical geo DID answer
     # — the answer was "no country spend here". Reaching for the legacy table at
     # that point would replace a proven answer with a different source's guess
-    # at the same question. The legacy fallback still applies when the range is
-    # genuinely unproven, which the second half of this test covers.
+    # at the same question. (PR-ADS-176C-F1: nor is it reached when the range
+    # is unproven — the second half of this test.)
     assert out["source_health"].get("geo_country_source") == "canonical_google_ads_api"
     assert out["source_health"]["country_geo_verified_zero"] is True
 
-    # With NO coverage, the same empty table proves nothing, so the legacy
-    # fallback is still reached — and Country ROAS is still blocked.
+    # With NO coverage, the same empty table proves nothing. PR-ADS-176C-F1
+    # (F5): the legacy `geo` snapshot is no longer reached for it — there are
+    # no country spend rows and the source says "unavailable" — and Country
+    # ROAS is still blocked.
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
                    geo_daily=geo_daily, country_rows=[], revenue_rows=_REVENUE_ROWS,
                    geo_country=None, legacy_spend=[], geo_coverage=[])
     unproven = build("ytd", now=_at("2026-06-30"), settled_days=True)
     assert unproven["source_health"]["country_geo_verified_zero"] is False
-    assert unproven["source_health"].get("geo_country_source") == "legacy_geo_table"
+    assert unproven["source_health"].get("geo_country_source") == "unavailable"
     assert unproven["source_health"]["country_roas_available"] is False
 
 

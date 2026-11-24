@@ -1370,8 +1370,9 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
     closed-won deals and SQLs are withheld. Each country row and the residual
     then withhold the same figures with the same reason: rows that add back
     up to a withheld total would publish it. Native spend stays only where the
-    KPI keeps it — when the geo COVERAGE is complete (an FX-only gap: "native
-    spend is shown instead").
+    ONLY gap is FX ("native spend is shown instead"):
+    ``geo_gate.native_country_spend_publishable``, the mart's rule
+    (PR-ADS-176C-F1).
     """
     if spend_truth.get("country_roas_unblockable") or spend_truth.get("geo_ready"):
         return kpis, rows, residual
@@ -1382,7 +1383,9 @@ def _withhold_when_geo_not_ready(kpis: dict, rows: list, residual: dict,
                        "customers", "sqls", "period_revenue_per_ad_spend")
     reason = next(iter(spend_truth.get("country_gap_codes") or []),
                   None) or "country_geo_not_ready"
-    keep_native = spend_truth.get("geo_coverage_status") == "complete"
+    # PR-ADS-176C-F1 (finding F2): the mart's rule, not "coverage complete".
+    keep_native = geo_gate.native_country_spend_publishable(
+        spend_truth.get("country_gap_codes"))
     kpis = {**kpis, "verified_spend_usd": None, "won_revenue_usd": None,
             "closed_won_deals": None, "sqls": None}
     if not keep_native and isinstance(kpis.get("verified_spend_native"), dict):

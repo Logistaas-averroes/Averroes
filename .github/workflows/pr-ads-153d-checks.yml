@@ -129,6 +129,7 @@ jobs:
             tests/test_pr_ads_170a_owner_labelled_geo_pg_integration.py \
             tests/test_pr_ads_176a_country_builder_pg_integration.py \
             tests/test_pr_ads_176b_countries_pg_integration.py \
+            tests/test_pr_ads_176c_country_feed_retired_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -268,6 +269,11 @@ jobs:
                            # and an unready gate publish no total, and the real
                            # payload on the real page.
                            "tests.test_pr_ads_176b_countries_pg_integration",
+                           # PR-ADS-176C. /api/geo and its country summary are
+                           # retired: every truth property their 165A / 167A /
+                           # 170A cases asserted on that payload, on the mart
+                           # country view and Dashboard → Countries.
+                           "tests.test_pr_ads_176c_country_feed_retired_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

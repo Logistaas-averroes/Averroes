@@ -1486,6 +1486,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     Returns the full contract dict, or None when the database is unavailable
     (so the caller can fall back to the local-JSON diagnostic path).
     """
+    # PR-ADS-176C-F2: the legacy `geo` snapshot read is the DB-reachability
+    # probe and feeds only the presence flags `campaign_spend_status` /
+    # `db_tables_used`. No value it holds reaches a campaign or country row,
+    # a total or the gate (PR-ADS-176C-F1 F5, PR-ADS-176C-F2 M1).
     spend = repo.fetch_campaign_country_spend(start_date, end_date)
     if not spend["available"]:
         return None  # DB unreachable — signal caller to fall back
@@ -1630,8 +1634,16 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             # canonical geo had already answered, with a different source.
             geo_total_for_recon = 0.0
         else:
-            geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
-        if canonical_total > 0:
+            # PR-ADS-176C-F1 (finding F5): canonical geo is unreadable, or has
+            # no rows over a range the ledger does not certify. The geo total is
+            # UNKNOWN. PR-ADS-124 summed the legacy monthly `geo` snapshot here
+            # instead, so the snapshot's figure reached `country_geo_total` /
+            # `country_spend_variance` (and, below, the country rows). Unknown is
+            # not a different source's answer.
+            geo_total_for_recon = None
+        if geo_total_for_recon is None:
+            country_spend_reconciled = None
+        elif canonical_total > 0:
             country_spend_reconciled = (
                 abs(geo_total_for_recon - canonical_total) / canonical_total
                 <= SPEND_VARIANCE_TOLERANCE
@@ -1641,10 +1653,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # PR-ADS-129: surface the exact geo↔canonical variance so the ROAS by
         # Country blocked card can show real totals (never fabricated).
         country_geo_total_native = geo_total_for_recon
-        country_spend_variance_native = round(geo_total_for_recon - canonical_total, 2)
+        country_spend_variance_native = (
+            None if geo_total_for_recon is None
+            else round(geo_total_for_recon - canonical_total, 2))
         country_spend_variance_pct = (
             round(abs(country_spend_variance_native) / canonical_total * 100, 4)
-            if canonical_total > 0 else None
+            if (canonical_total > 0 and country_spend_variance_native is not None)
+            else None
         )
         country_spend_tolerance = SPEND_VARIANCE_TOLERANCE
     else:
@@ -1673,7 +1688,12 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         fx_effective_rate = None
         spend_native_total = None
         spend_usd_total = None
-        campaign_spend_rows = spend_rows  # diagnostic display only
+        # PR-ADS-176C-F2 (M1): no campaign rows from the legacy `geo` snapshot.
+        # This was `spend_rows` ("diagnostic display only"), and `_build_db_rows`
+        # turned it into `view=campaign` rows with the snapshot's campaign names
+        # and spend (£7,777 printed beside "campaign spend unavailable").
+        # Canonical campaign spend is unreadable: there are no spend rows.
+        campaign_spend_rows = []
         canonical_total = None
         canonical_customer_id = None
         canonical_currency = None
@@ -1790,8 +1810,14 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
                 "fx_complete": r.get("fx_complete"),
             })
     else:
-        geo_country_source = "legacy_geo_table"
-        country_source_rows = spend_rows
+        # PR-ADS-176C-F1 (finding F5): no canonical geo rows, and no ledger
+        # proof that the range is genuinely empty. PR-ADS-124 built the country
+        # rows from the legacy monthly `geo` snapshot here (withheld by the
+        # gate, but the rows, their `top_campaign` and the Dashboard rows built
+        # on them were the snapshot's). There are no country spend rows: the
+        # gate withholds country spend as unavailable.
+        geo_country_source = "unavailable"
+        country_source_rows = []
 
     # Campaign spend is a trusted ROAS denominator only when canonical coverage is
     # complete AND FX coverage is complete (USD reporting). Country spend
@@ -1976,7 +2002,11 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         canonical_base=canonical_base,
     )
 
-    campaign_spend_status = "db" if spend_rows else "db_empty"
+    # PR-ADS-176C-F3 (R2-2): from the CANONICAL campaign spend read, never the
+    # legacy `geo` snapshot's row count ("db" whenever the snapshot held rows,
+    # whatever canonical spend said).
+    campaign_spend_status = (("db" if canonical_rows else "db_empty")
+                             if canonical_access else "source_unavailable")
     contacts_status = "db" if leads.get("rows") else "db_empty"
     deals_status = "db" if revenue_rows else "db_empty"
 
@@ -2031,7 +2061,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             "/ ad spend is unavailable (null), not zero."
         )
     if campaign_spend_status == "db_empty":
-        warnings.append("No Google Ads spend rows in durable table 'geo' for this window.")
+        warnings.append("No canonical Google Ads campaign spend rows for this window.")
     # PR-ADS-129: the spend-coverage warning is driven by the CANONICAL coverage
     # ledger classification (missing / failed chunks), never the geo table's first
     # row. Coverage that is complete — including verified-zero before the first
@@ -2171,8 +2201,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "data_is_partial": data_is_partial,
         # Revenue coverage now comes from the canonical ledger's own window, not
         # from a legacy table's min/max close date.
-        "coverage_start": spend.get("coverage_start") or canonical_base.get("window_start"),
-        "coverage_end": spend.get("coverage_end") or canonical_base.get("window_end"),
+        # PR-ADS-176C-F3 (R2-2): the canonical ledger's window only. These read
+        # the legacy `geo` snapshot's MIN/MAX(run_date) first.
+        "coverage_start": canonical_base.get("window_start"),
+        "coverage_end": canonical_base.get("window_end"),
         "missing_contact_created_at_count": leads.get("missing_contact_created_at_count", 0),
         "excluded_non_paid_count": leads.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": leads.get("excluded_pseudo_campaign_count", 0),

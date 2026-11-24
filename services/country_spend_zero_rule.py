@@ -2,10 +2,15 @@
 services/country_spend_zero_rule.py
 
 PR-ADS-176A — ONE rule for "this country spent $0", shared by every builder
-that publishes per-country Google Ads spend: the Countries page
-(``services/country_evidence_service.py``), the revenue attribution country
-rows the mart's country view serves (Country Revenue & Spend), and Dashboard →
-Countries (``services/dashboard_countries_service.py``).
+that publishes per-country Google Ads spend: the revenue attribution country
+rows the mart's country view serves (the one Countries page, PR-ADS-176B) and
+Dashboard → Countries (``services/dashboard_countries_service.py``).
+
+PR-ADS-176C retired the third builder, the Countries evidence feed
+(``GET /api/geo``, ``services/country_evidence_service.py``), which also kept
+its own inline copy of the owner-label disclosure. This module now holds the
+ONLY implementation of the zero verdict (:func:`zero_spend_verdict`) and of
+that disclosure (:func:`zero_rests_on_owner_labels`).
 
 Why it exists
 -------------
@@ -17,8 +22,8 @@ code-less criterion such as ``2997``), Pakistan — leads, no Google spend ever 
 read ``$0`` on the Dashboard and on Country Revenue & Spend and "Unavailable"
 on Countries, over the same evidence. One figure, two rules.
 
-The rule (moved here from ``country_evidence_service``, unchanged)
------------------------------------------------------------------
+The rule (moved here from the retired ``country_evidence_service``, unchanged)
+------------------------------------------------------------------------------
 A country WITH a spend row in the window is unaffected. A country with NO spend
 row is a measured ``$0`` when no spend in the window can be its own:
 
@@ -98,7 +103,7 @@ def assess(spend_rows: list, candidate_codes, *,
     countries the caller would publish; codes with a spend row in the window
     are ignored (their spend is a measurement). ``owner_labelled_criteria``
     are the window's criteria whose country is the owner's label
-    (PR-ADS-170A), used only for the Countries page's disclosure.
+    (PR-ADS-170A), used only for :func:`zero_rests_on_owner_labels`.
 
     Returns ``{unresolved_spend_present, unresolved_criteria,
     conflicting_criteria, spend_codes, carried, carried_by_owner,

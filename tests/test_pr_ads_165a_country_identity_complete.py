@@ -45,6 +45,9 @@ PRODUCTION_LEAD_COUNTRIES = {
     "tanzania": "TZ", "nepal": "NP", "pakistan": "PK", "philippines": "PH",
     "libyan arab jamahiriya": "LY", "denmark": "DK", "bahrain": "BH",
     "netherlands": "NL", "united kingdom": "GB", "kazakhstan": "KZ",
+    # PR-ADS-176C-F2 (m5): two more production spellings (7 and 32 leads).
+    "iran (islamic republic of)": "IR",
+    "democratic republic of the congo": "CD",
 }
 
 #: The 162 ISO codes with Google Ads country spend in the last 30 days.
@@ -177,11 +180,17 @@ def test_06_placeholders_are_no_country_not_an_unmatched_country(text):
     assert ci.resolve_iso_country_text(text) is None
 
 
-def test_07_the_market_registry_and_its_callers_are_unchanged():
-    """The complete resolver is a separate set of names. `resolve`,
-    `country_key` and the registry the revenue pages group on behave exactly
-    as before — widening them would move rows between "valid" and "unknown" on
-    Country Revenue & Spend and Dashboard Countries."""
+def test_07_the_market_registry_is_unchanged_and_resolve_adds_only_exact_iso_names():
+    """The registry the revenue pages group on is unchanged: 96 markets, the
+    same aliases, a country outside it is still the residual.
+
+    PR-ADS-176C-F1 (F1): `resolve` — and so `country_key` — now falls back to
+    the exact complete-ISO lookup for a NAME the alias table does not spell,
+    and accepts it only for a listed market. That moves exactly such text
+    ("libyan arab jamahiriya", "Iran, Islamic Republic of", "Türkiye",
+    "Jordan.") from the residual onto its market, as the retired /api/geo did;
+    nothing else moves. (This case pinned that `resolve` did NOT reach the ISO
+    table — the defect.)"""
     assert len(ci.SUPPORTED_COUNTRIES) == 96
     assert len(ci.COUNTRY_ALIASES) == 124
     assert ci.SUPPORTED_CODES < set(iso_countries.ISO_COUNTRY_NAMES)
@@ -207,13 +216,34 @@ def test_07_the_market_registry_and_its_callers_are_unchanged():
     assert ci.resolve(name="XX").status == ci.STATUS_INVALID
     assert ci.resolve(name="").status == ci.STATUS_UNKNOWN
     assert ci.display_label("code:GB") == "United Kingdom"
-    # The functions above the new block do not reach into it.
+    # F1: exact ISO / legacy names of LISTED markets resolve to them…
+    for text, code in (("libyan arab jamahiriya", "LY"), ("Iran, Islamic Republic of", "IR"),
+                       ("Türkiye", "TR"), ("Jordan.", "JO"), ("  jordan .", "JO")):
+        ident = ci.resolve(name=text)
+        assert (ident.key, ident.status, ident.reason) == (
+            f"code:{code}", ci.STATUS_VALID, ci.REASON_ISO_NAME_MATCH), text
+    # …and nothing looser: no fuzzy or prefix match, no two-letter token, no
+    # ambiguous name, no country outside the 96, no placeholder.
+    for text in ("Jordann", "Jor dan", "Libya Arab", "Congo", "Dubai", "California",
+                 "CA", "IN", "ZZ", "North Korea", "Kosovo", "Other", "N/A", "Narnia"):
+        assert ci.resolve(name=text).key == ci.RESIDUAL_KEY, text
+    # PR-ADS-176C-F2 (m5): two production spellings. Iran is a listed market;
+    # the Democratic Republic of the Congo is not (CD), so it is the residual —
+    # and never the Republic of the Congo (CG).
+    assert ci.resolve(name="iran (islamic republic of)").key == "code:IR"
+    drc = ci.resolve(name="democratic republic of the congo")
+    assert (drc.key, drc.code) == (ci.RESIDUAL_KEY, None)
+    assert ci.resolve_iso_country_text("democratic republic of the congo") == "CD"
+    assert "CD" not in ci.SUPPORTED_CODES and "CG" not in ci.SUPPORTED_CODES
+    assert ci.resolve(name="Congo").key == ci.RESIDUAL_KEY
+    # A supplied code still wins over any name.
+    assert ci.resolve(name="libyan arab jamahiriya", code="JO").key == "code:JO"
+    # The one production caller of the complete resolver is `resolve` itself.
     src = (ROOT / "analysis/country_identity.py").read_text(encoding="utf-8")
     old, new = src.split("# Complete ISO resolution (PR-ADS-165A)")
-    for name in ("resolve_iso_country_text", "ISO_COUNTRY_NAMES", "iso_countries",
-                 "ISO_NAME_TO_CODE", "is_no_country_placeholder"):
-        assert name not in old, name
-    # And only the Countries page service calls the complete resolver.
+    resolve_src = old[old.index("def resolve("):old.index("\ndef country_key(")]
+    assert "resolve_iso_country_text(name)" in resolve_src
+    assert "iso in SUPPORTED_CODES" in resolve_src
     callers = sorted(
         str(p.relative_to(ROOT)) for pkg in ("analysis", "api", "db", "scheduler",
                                              "services", "scripts", "connectors")
@@ -221,8 +251,7 @@ def test_07_the_market_registry_and_its_callers_are_unchanged():
         if "__pycache__" not in p.parts
         and "resolve_iso_country_text" in p.read_text(encoding="utf-8"))
     assert callers == ["analysis/country_identity.py",
-                       "analysis/iso_countries.py",       # names it in its docstring
-                       "services/country_evidence_service.py"]
+                       "analysis/iso_countries.py"]       # names it in its docstring
 
 
 def test_08_kosovo_resolves_to_the_code_google_uses_and_iso_stays_iso():

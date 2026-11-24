@@ -829,6 +829,11 @@ from services.google_ads_spend_service import (  # noqa: E402
 #: first day of the quarter or year). Nothing is measured; every country
 #: figure is unavailable. ``canonical_contract.NO_SETTLED_DAY_IN_WINDOW``.
 GEO_GAP_NO_SETTLED_DAY = "no_settled_day_in_window"
+#: PR-ADS-176C-F2 (m4): no Google Ads account is configured, so whose spend
+#: and whose coverage ledger a country figure would rest on cannot be said.
+#: The country surfaces fail closed on it (the PR-ADS-165A Countries contract,
+#: docs/09 PR-ADS-165A: "no account configured → Unavailable").
+GEO_GAP_ACCOUNT_NOT_CONFIGURED = "google_ads_customer_id_not_configured"
 #: The settle codes a gate accepts in place of `geo_coverage_incomplete`.
 GEO_SETTLE_GAPS = frozenset({GEO_GAP_DAY_IN_PROGRESS, GEO_GAP_DAY_NOT_REREAD,
                              GEO_GAP_REREAD_FAILED, GEO_GAP_ACCOUNT_TZ_UNKNOWN})
@@ -970,6 +975,21 @@ def country_geo_ready(country_spend_status) -> bool:
     return country_spend_status in GEO_ACCEPTED_STATES
 
 
+def native_country_spend_publishable(gap_codes) -> bool:
+    """Whether a country surface may still show NATIVE spend while the gate
+    withholds country spend: only when the ONE gap is FX (the spend is fully
+    covered, reconciled and in one account; only its USD conversion is
+    missing).
+
+    PR-ADS-176C-F1 (finding F2): the one rule for the mart's country rows and
+    Dashboard → Countries. The Dashboard kept native spend whenever geo
+    COVERAGE was complete, whatever else withheld the gate — two accounts
+    summed with none configured, totals that differ — and labelled it "USD
+    unavailable (FX)".
+    """
+    return list(gap_codes or []) == [GEO_GAP_FX_COVERAGE_INCOMPLETE]
+
+
 # One sentence per gap code, so every surface names the SAME cause in the same
 # words. PR-ADS-153F blocker 1 made the gate holistic, which means one status
 # (`unavailable`) now stands for several very different causes — an unreadable
@@ -1025,11 +1045,18 @@ GEO_GAP_MESSAGES = {
     GEO_GAP_NO_SETTLED_DAY:
         "Country figures are unavailable — this window has no completed day yet (today is its first "
         "day). They publish after tomorrow morning's sync.",
+    GEO_GAP_ACCOUNT_NOT_CONFIGURED:
+        "Country spend is unavailable — no Google Ads account is configured "
+        "(GOOGLE_ADS_CUSTOMER_ID), so it cannot be said whose spend and whose "
+        "coverage a country figure would rest on.",
 }
 
 _GEO_GAP_PRIORITY = (
     # First: if the two sides are not comparable, nothing below is worth saying.
     GEO_GAP_NOT_LIKE_FOR_LIKE,
+    # PR-ADS-176C-F2 (m4): no account configured. The country view sets this
+    # code alone, so its place here only orders it against a stray second code.
+    GEO_GAP_ACCOUNT_NOT_CONFIGURED,
     # PR-ADS-167A: a window with no completed day measures nothing (the panel
     # and the mart set this code alone).
     GEO_GAP_NO_SETTLED_DAY,

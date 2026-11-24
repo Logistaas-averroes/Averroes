@@ -306,28 +306,12 @@ CONSUMERS: list[dict] = [
        truth_status="unavailable rows render '—'; flagged truth_state partial when attribution unavailable",
        headline=True, row=True, filters=True, sorting=True, drawer=True, export=True,
        decision=True, operational=True),
-    _c("Geo Intelligence country summary (GET /api/geo; no page since PR-ADS-176B)",
-       "confirmed_sqls per country from raw leads snapshots on run_date.",
-       endpoint="GET /api/leads/country-summary; republished per country by GET /api/geo",
-       service_function="api.server.api_leads_country_summary",
-       repository_source="inline SQL in api/server.py",
-       source_table=LEGACY_TABLE,
-       sql_definition="SUM(CASE WHEN status_category = 'qualified' THEN 1 ELSE 0 END)",
-       date_field="run_date", dedup_key="CASE WHEN contact_id <> '' THEN contact_id ELSE CAST(id AS TEXT) END",
-       windows=EVIDENCE, scope="all_source (no paid_search / exclusion filters)",
-       classification=CLS_LEGACY,
-       code_location="api/server.py:api_leads_country_summary",
-       migration_notes="Different window field (run_date) and different filters from "
-                       "Campaign Evidence under the same Evidence Window label. No "
-                       "sql_reconciliation. PR-ADS-165A: /api/geo "
-                       "(services/country_evidence_service) sums these rows per "
-                       "canonical country identity and joins them to spend; the "
-                       "SQL definition is unchanged and is not recomputed there. "
-                       "PR-ADS-176B deleted the Countries evidence page that "
-                       "rendered it; the endpoint stays until PR-ADS-176C.",
-       truth_status="none — no reconciliation block; counts are summed across "
-                    "spellings of one country, never redefined",
-       headline=True, row=True, filters=True, sorting=True, decision=True, operational=True),
+    # PR-ADS-176C: "Geo Intelligence country summary" stood here —
+    # confirmed_sqls per raw country text on run_date from the leads snapshot,
+    # served by GET /api/leads/country-summary and republished per country by
+    # GET /api/geo (services/country_evidence_service). Both routes and the
+    # service are deleted; no surface carries that population any more. The
+    # one Countries page's SQLs are the mart's (_MART / _RAS below).
 
     # ── Executive / Revenue ─────────────────────────────────────────────────
     _c("Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)",
@@ -683,7 +667,6 @@ _CE = "Campaign Evidence table + KPI strip"
 _CD = "Campaign drawer (headline, lead quality, countries, recent leads)"
 _KW = "Keyword Evidence table / drawer / CSV export"
 _ST = "Search Terms table / flagged tab / drawer / CSV export"
-_GEO = "Geo Intelligence country summary (GET /api/geo; no page since PR-ADS-176B)"
 _OVW = "Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)"
 _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
@@ -1200,13 +1183,8 @@ RULES: list[dict] = [
     _r("revrepo.sql_details", "db/revenue_repository.py", CLS_LEGACY, _DEALS, symbol="fetch_sql_lead_details"),
 
     # ── api/server.py by route function ─────────────────────────────────────
-    _r("api.geo", "api/server.py", CLS_LEGACY, _GEO, symbol="api_leads_country_summary"),
-    # PR-ADS-165A: the Countries page join. It names the summary's count
-    # fields to sum them per canonical country; it defines no SQL of its own.
-    _r("country_evidence.join", "services/country_evidence_service.py", CLS_LEGACY,
-       _GEO, symbol="_lead_figures"),
-    _m("country_evidence.module", "services/country_evidence_service.py", CLS_LEGACY,
-       _GEO, ["confirmed_sqls_ref"]),
+    # PR-ADS-176C: "api.geo" (api_leads_country_summary), "country_evidence.join"
+    # and "country_evidence.module" removed with the routes and the service.
     _r("api.leads", "api/server.py", CLS_LEGACY, _LEADS_API,
        symbol=["api_leads", "_lead_quality_sql_reconciliation"]),
     _r("api.campaign_detail", "api/server.py", CLS_LEGACY, _CD, symbol="_build_campaign_detail"),
@@ -1346,7 +1324,11 @@ RULES: list[dict] = [
     # no SQL figure.
     _r("ui.canonical_metrics", "static/app.js", CLS_DIAGNOSTIC, _READER_CUTOVER,
        symbol=["dashValue", "dealRateCell"]),
-    _m("ui.index", "static/index.html", CLS_LEGACY, _GEO,
+    # PR-ADS-176C: bound to the retired Geo country summary until now. Since
+    # PR-ADS-176B deleted the #/geo page, the one hit left in index.html is the
+    # Countries page subtitle ("SQLs"), which republishes the mart country
+    # view's SQLs — the consumer `ui.roas` names.
+    _m("ui.index", "static/index.html", CLS_MIXED, _RAS,
        ["confirmed_sqls_ref", "frontend_sqls_label", "sqls_field_ref"]),
 ]
 
@@ -1528,10 +1510,11 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
                 "windows by date_entered_sql. The same contact lands in different windows.",
      "code_location": "services/crm_funnel_reconciliation_service.py:compare_sql_counts"},
     {"id": "date.run_date_windows",
-     "summary": "Geo country summary and /api/leads window the leads "
-                "table by run_date; Campaign Evidence windows the same table by "
-                "contact_created_at under the same Evidence Window label.",
-     "code_location": "api/server.py:api_leads_country_summary"},
+     "summary": "/api/leads windows the leads table by run_date; Campaign "
+                "Evidence windows the same table by contact_created_at under the "
+                "same Evidence Window label. (PR-ADS-176C retired the Geo country "
+                "summary, the other run_date reader.)",
+     "code_location": "api/server.py:api_leads"},
     # PR-ADS-162H: "doctrine.third_snapshot_population" stood here —
     # campaigns.confirmed_sqls counted mql_status literals from a JSON pull with
     # no date, dedup or exclusions, and the weekly/monthly report published it.

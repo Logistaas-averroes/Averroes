@@ -238,8 +238,9 @@ def test_03_one_rule_the_countries_page_and_both_builders_call_the_same_function
     assert _mart_row(_mart(), "PK")["spend"] == 0.0
     assert _dash_row(_dash(), "PK")["spend_native"] == 0.0
     # And every builder imports it from one module, never a copy.
-    for path in ("services/country_evidence_service.py",
-                 "services/dashboard_countries_service.py",
+    # (PR-ADS-176C: services/country_evidence_service.py, the third builder,
+    # is retired with /api/geo; its absence is guarded by the 176C suite.)
+    for path in ("services/dashboard_countries_service.py",
                  "services/revenue_attribution_service.py"):
         src = (ROOT / path).read_text(encoding="utf-8")
         assert "country_spend_zero_rule" in src, path

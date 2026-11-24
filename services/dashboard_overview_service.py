@@ -345,7 +345,11 @@ def _build_trend(window_block: dict, readiness: dict, spend_truth: dict,
 
     spend_rows = []
     if spend_ready:
-        series = repo.fetch_spend_daily_series(start, end)
+        # PR-ADS-176C-F2 (m3): the account the spend KPI reads (PR-ADS-154B).
+        from services.google_ads_spend_service import (  # noqa: PLC0415
+            configured_customer_id,
+        )
+        series = repo.fetch_spend_daily_series(start, end, configured_customer_id())
         if series.get("available"):
             spend_rows = series.get("rows") or []
             # Fail closed: inside a verified window every day must carry USD.
@@ -791,6 +795,21 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                      "SQLs, so unexplained spend is neither claimed nor ruled out."),
             "target_page": "roas-campaigns",
             "target_label": "Open Campaign Revenue & Spend",
+        })
+    elif spend_truth.get("campaign_spend_status") != "verified":
+        # PR-ADS-176C-F3 (R2-1): "no unexplained spend" is a claim ABOUT spend.
+        # With the window's Google Ads spend not verified (coverage incomplete,
+        # unreadable, or no ledger at all) an absent or zero spend figure is not
+        # evidence that nothing is unexplained — the card said so anyway when
+        # an empty read summed to 0.0.
+        cards.append({
+            "type": "investigate",
+            "title": "Investigate",
+            "headline": "Paid spend cannot be judged",
+            "body": ("Google Ads spend for this window is not verified, so "
+                     "unexplained spend is neither claimed nor ruled out."),
+            "target_page": "revenue-health",
+            "target_label": "Open Revenue Health",
         })
     else:
         cards.append({
