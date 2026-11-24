@@ -6804,11 +6804,10 @@ correct behaviour. Each case fails on `2b056a4` and on `5a9b5e9`. Full record:
 * **m1.** The FX bound is guarded (176C 25).
 * **m2.** The deal resolver's all-time campaign names are bounded like the
   leads side's: one identity population (176C 27).
-* **m3.** An account with no verified chunk contributes nothing to an
-  open-start read. The Overview spend trend is scoped to the configured
-  account (176C 26). Follow-up: with no ledger at all, an ungated diagnostic
-  can echo an empty all-time sum (`docs/58` §8.9). The 173A fixture gains the verified
-  ledger production has; its golden payloads are unchanged.
+* **m3.** The Overview spend trend is scoped to the configured account
+  (176C 26). This round also made an account with no verified chunk
+  contribute nothing to open-start reads (`'infinity'`). That was a
+  regression; F3 reverted it (below).
 * **m4.** No Google Ads account configured: the mart country view and
   Dashboard → Countries withhold country spend with
   `google_ads_customer_id_not_configured`, as the PR-ADS-165A Countries
@@ -6818,6 +6817,25 @@ correct behaviour. Each case fails on `2b056a4` and on `5a9b5e9`. Full record:
   are pinned; `REASON_ISO_NAME_MATCH` is exported.
 
 Details and mutation evidence: `docs/58` §8.9.
+
+### PR-ADS-176C-F3 — truth audit round 2 ("fix first")
+
+* **R2-1 (regression from F2).** The `'infinity'` bound turned a no-ledger
+  account's spend into 0.0 with `available: True`. The Overview claimed "No
+  unexplained paid spend", and the spend audit's reconciliations read
+  verified / reconciled. The fixes:
+  * the bound is restored to 56adcfc's (unbounded without a chunk);
+  * configured-account figures stay clean by scope: the daily series, and now
+    both spend audits;
+  * the Overview card requires verified spend (that gap predated 176C).
+
+  Regression test 176C 28 (the no-ledger probe), plus 26 (scoped) and 29
+  (card gate). The 173A matrix runs with and without a verified ledger and is
+  byte-identical to its golden both ways.
+* **R2-2.** `/api/revenue-attribution` no longer reads the legacy snapshot for
+  `source_health.coverage_start` / `coverage_end` or `campaign_spend_status`
+  (176C 30).
+* **R2-3.** `docs/58` §8.9 corrected: 71 payloads, not 38; §8.10 added.
 
 **Guard.** `tests/test_pr_ads_176c_country_feed_retired.py` (6 cases) covers:
 

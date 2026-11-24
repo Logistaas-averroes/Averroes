@@ -796,6 +796,21 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "target_page": "roas-campaigns",
             "target_label": "Open Campaign Revenue & Spend",
         })
+    elif spend_truth.get("campaign_spend_status") != "verified":
+        # PR-ADS-176C-F3 (R2-1): "no unexplained spend" is a claim ABOUT spend.
+        # With the window's Google Ads spend not verified (coverage incomplete,
+        # unreadable, or no ledger at all) an absent or zero spend figure is not
+        # evidence that nothing is unexplained — the card said so anyway when
+        # an empty read summed to 0.0.
+        cards.append({
+            "type": "investigate",
+            "title": "Investigate",
+            "headline": "Paid spend cannot be judged",
+            "body": ("Google Ads spend for this window is not verified, so "
+                     "unexplained spend is neither claimed nor ruled out."),
+            "target_page": "revenue-health",
+            "target_label": "Open Revenue Health",
+        })
     else:
         cards.append({
             "type": "investigate",

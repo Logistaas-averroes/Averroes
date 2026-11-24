@@ -474,7 +474,11 @@ def build_campaign_spend_coverage_audit(window: str, now: datetime | None = None
     requested_start = resolved.get("start_date")
     requested_end = resolved.get("end_date")
 
-    canonical = repo.fetch_canonical_campaign_spend(start, end)
+    # PR-ADS-176C-F3 (R2-1): the configured account, as the readiness check
+    # and the revenue contract read it (PR-ADS-154B) — another account's rows
+    # are not this account's coverage.
+    scope_customer_id = configured_customer_id()
+    canonical = repo.fetch_canonical_campaign_spend(start, end, scope_customer_id)
     if not canonical.get("available"):
         return {
             "window": window,
@@ -495,7 +499,7 @@ def build_campaign_spend_coverage_audit(window: str, now: datetime | None = None
 
     first_spend_date = _coerce_iso(canonical.get("coverage_start"))
     last_spend_date = _coerce_iso(canonical.get("coverage_end"))
-    chunks = repo.fetch_spend_coverage(start, end).get("chunks", [])
+    chunks = repo.fetch_spend_coverage(start, end, scope_customer_id).get("chunks", [])
     classification = classify_coverage(start, end, chunks, first_spend_date)
 
     return {
@@ -534,8 +538,11 @@ def build_google_ads_spend_audit(window: str, now: datetime | None = None,
     account_time_zone = repo.fetch_account_time_zone()
     resolved, start, end = _window_bounds(window, now, account_time_zone)
 
-    canonical = repo.fetch_canonical_campaign_spend(start, end)
-    coverage = repo.fetch_spend_coverage(start, end)
+    # PR-ADS-176C-F3 (R2-1): scoped to the configured account, consistent with
+    # `is_window_spend_verified` and the revenue contract (PR-ADS-154B).
+    scope_customer_id = configured_customer_id()
+    canonical = repo.fetch_canonical_campaign_spend(start, end, scope_customer_id)
+    coverage = repo.fetch_spend_coverage(start, end, scope_customer_id)
     geo = repo.fetch_geo_spend_total(start, end)
     account = repo.fetch_account_daily_spend_total(start, end)
 

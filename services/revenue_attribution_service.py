@@ -2002,7 +2002,11 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         canonical_base=canonical_base,
     )
 
-    campaign_spend_status = "db" if spend_rows else "db_empty"
+    # PR-ADS-176C-F3 (R2-2): from the CANONICAL campaign spend read, never the
+    # legacy `geo` snapshot's row count ("db" whenever the snapshot held rows,
+    # whatever canonical spend said).
+    campaign_spend_status = (("db" if canonical_rows else "db_empty")
+                             if canonical_access else "source_unavailable")
     contacts_status = "db" if leads.get("rows") else "db_empty"
     deals_status = "db" if revenue_rows else "db_empty"
 
@@ -2057,7 +2061,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             "/ ad spend is unavailable (null), not zero."
         )
     if campaign_spend_status == "db_empty":
-        warnings.append("No Google Ads spend rows in durable table 'geo' for this window.")
+        warnings.append("No canonical Google Ads campaign spend rows for this window.")
     # PR-ADS-129: the spend-coverage warning is driven by the CANONICAL coverage
     # ledger classification (missing / failed chunks), never the geo table's first
     # row. Coverage that is complete — including verified-zero before the first
@@ -2197,8 +2201,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "data_is_partial": data_is_partial,
         # Revenue coverage now comes from the canonical ledger's own window, not
         # from a legacy table's min/max close date.
-        "coverage_start": spend.get("coverage_start") or canonical_base.get("window_start"),
-        "coverage_end": spend.get("coverage_end") or canonical_base.get("window_end"),
+        # PR-ADS-176C-F3 (R2-2): the canonical ledger's window only. These read
+        # the legacy `geo` snapshot's MIN/MAX(run_date) first.
+        "coverage_start": canonical_base.get("window_start"),
+        "coverage_end": canonical_base.get("window_end"),
         "missing_contact_created_at_count": leads.get("missing_contact_created_at_count", 0),
         "excluded_non_paid_count": leads.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": leads.get("excluded_pseudo_campaign_count", 0),

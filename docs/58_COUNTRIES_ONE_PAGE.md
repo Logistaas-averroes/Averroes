@@ -778,8 +778,10 @@ behaviour, and each fails on `2b056a4` and on `5a9b5e9` (§8.7).
     counts each account's rows only from its own earliest verified chunk in
     the table's ledger — the lower bound the verdict uses. A window with a
     start is unchanged: its start bounds it, and coverage proves every day.
-    An account with no verified chunk contributes nothing to an open-start
-    read: its bound is `'infinity'` (PR-ADS-176C-F2 m3).
+    An account with no verified chunk is not bounded: nothing of it is
+    certified, so no gated surface publishes it as verified. A second
+    account's spend is kept out of the configured account's figures by
+    scoping the read to that account (PR-ADS-176C-F3, §8.10).
   * Applied in: `fetch_canonical_campaign_spend` (`:1073`),
     `fetch_spend_daily_series` (`:1209`, now also scoped to the configured
     account on the Overview — m3), `fetch_geo_daily_spend_total` (`:1561`),
@@ -880,9 +882,9 @@ windows that is `all_time` only, and every other window is unchanged.
 
 | Caller | Read | What it does now (open start only) | Asserted in |
 | --- | --- | --- | --- |
-| `revenue_attribution_service._build_from_db` via `canonical_campaign_spend_block`: the mart's every view, which feeds Overview, Revenue, Channels, Campaigns, Deals, Countries and Campaign Revenue & Spend | campaign spend, geo total, geo by country, geo breakdown (residual evaluation) | campaign and geo totals, rows and the gate count only certified days; an account with no verified chunk counts nothing | 176C 09, 09b, 26 |
+| `revenue_attribution_service._build_from_db` via `canonical_campaign_spend_block`: the mart's every view, which feeds Overview, Revenue, Channels, Campaigns, Deals, Countries and Campaign Revenue & Spend | campaign spend, geo total, geo by country, geo breakdown (residual evaluation) | campaign and geo totals, rows and the gate count only certified days (reads scoped to the configured account) | 176C 09, 09b, 26, 28 |
 | `dashboard_countries_service` (`read_country_spend`) | geo by country | Dashboard country rows and KPI over certified days | 176C 09 |
-| `dashboard_overview_service` (mart; `_build_trend` → `fetch_spend_daily_series`) | campaign spend, daily series | the KPI and the trend start at the certified range; the trend reads the configured account only (m3) | 176C 09b, 26 |
+| `dashboard_overview_service` (mart; `_build_trend` → `fetch_spend_daily_series`) | campaign spend, daily series | the KPI and the trend start at the certified range; the trend reads the configured account only (m3); "No unexplained paid spend" requires verified spend (§8.10) | 176C 09b, 26, 28, 29 |
 | `dashboard_campaigns_service.build_dashboard_campaigns` | campaign spend | verified spend over certified days | 176C 09b |
 | `revenue_spend_truth_service.build_google_ads_spend_truth_for_days` (Channels) | campaign spend | certified days | 176C 09b |
 | `campaign_evidence_service.build_campaign_evidence` / `build_campaign_drawer_evidence` | campaign spend | page and drawer spend over certified days | 176C 09b (page) |
@@ -947,21 +949,15 @@ The audit's verdict was "merge, no blocker". These items are fixed.
   campaign the leads side cannot see, and the code gives no reason it should:
   the exemption only kept pre-ledger campaign names. 176C 27 pins that deals
   and leads see the same names. It fails on 56adcfc.
-* **m3.** An account with no verified chunk now contributes nothing to an
-  open-start read (`COALESCE(…, 'infinity'::date)` in `_certified_from`,
-  `db/revenue_repository.py:55`). `fetch_spend_daily_series` takes the
-  configured account (`:1209`; Overview `services/dashboard_overview_service.py:352`).
-  176C 26 drives the auditor's two probes: the Overview trend, and the spend
-  audit's `native_total`.
-  * **Observation, not changed (a follow-up).** In a deployment with campaign
-    spend and NO verified ledger at all, an open-start read is now empty. Every
-    published spend figure is still gated by its coverage verdict, which is
-    incomplete there, but an ungated diagnostic can echo the empty sum. The
-    search-term coverage block prints canonical spend `0.0` under
-    "unavailable". Making such a read unavailable instead was tried: it turned
-    the all-time campaign-identity resolvers unavailable, and the 159
-    lifecycle-SQL audit's no-ledger fixture lost 4 of its 44 combinations. That
-    is a wider contract change than this PR, so it was reverted.
+* **m3.** A second account's spend leaked into the configured account's
+  open-start figures: the Overview trend and the spend audit read account-wide.
+  * `fetch_spend_daily_series` now takes the configured account (`:1209`;
+    Overview `services/dashboard_overview_service.py:352`). 176C 26 drives the
+    auditor's two probes.
+  * Round 1 also set `COALESCE(…, 'infinity'::date)` in `_certified_from`, so an
+    account with no verified chunk contributed nothing. **That was a
+    regression, reverted in PR-ADS-176C-F3 (§8.10):** an empty read sums to
+    0.0 with `available: True`.
 * **m4.** "No account configured → Unavailable" is restored on both country
   surfaces (§8.4, F4).
 * **m5.**
@@ -981,23 +977,107 @@ The audit's verdict was "merge, no blocker". These items are fixed.
   to `code:CD`.
 * Identity case 07 also fails when the ISO fallback is removed: "libyan arab
   jamahiriya" goes to the residual.
-* 176C 26 fails when 56adcfc's COALESCE is restored (an account with no
-  ledger is unbounded): 5,655 against the certified 100.
+* 176C 26 (round 1) fails when 56adcfc's COALESCE is restored: 5,655 against
+  the certified 100. Round 2 rewrote 26 onto the scoped reads (§8.10).
 
 **Existing tests changed.**
 
 * `134` (Overview): the fake `fetch_spend_daily_series` accepts the account
   argument the real reader now takes; its data is unchanged.
-* `173A` scenario (`tests/pr_ads_173a_scenarios.py`): the matrix's campaign
-  spend now sits inside a verified spend-coverage chunk (OLD..D0), as
-  production's does. Every golden payload is unchanged, byte for byte.
-  * Why: the fixture had campaign spend and no ledger. Under m3 its all_time
-    reads certified nothing, so 38 payloads changed: coverage went from `ok` to
-    `unavailable`, and canonical spend went from 1,240 to 0.0.
-  * That change is m3's intended behaviour for a deployment with no ledger,
-    not a property of the search-term pages, which the 173A matrix pins. The
-    no-ledger case is 176C 26, plus the observation under m3 above.
+* `173A` scenario (`tests/pr_ads_173a_scenarios.py`): round 1 gave the matrix
+  a verified spend-coverage ledger, because under `'infinity'` its no-ledger
+  all_time reads changed **71** payloads. They were terms 38/89, patterns
+  29/61, quarantine 1/10 and nothing_flagged 3/18; coverage went from `ok` to
+  `unavailable` and canonical spend went to 0.0. PR-ADS-176C-F3 replaced this:
+  see §8.10.
 * 176C 10: the two new production spellings — 42 leads, Iran withheld like
   Pakistan.
 * 176C 02c: as above.
 * 176C 09b: its exemption line is removed.
+
+### 8.10 Truth audit round 2 (PR-ADS-176C-F3)
+
+Verdict: "fix first". Round 1's m3 bound introduced a regression.
+
+**R2-1 (Major, regression against 56adcfc).** `COALESCE(…, 'infinity'::date)`
+made an account with no verified chunk an empty read: 0.0 with
+`available: True`. The auditor ran an all-time probe with no ledger
+(configured account with campaign and geo spend, no spend ledger). Against
+56adcfc:
+
+* the Overview card flipped to "No unexplained paid spend" on
+  `kpis.google_ads_spend_usd` 0.0;
+* the spend audit's account and geo reconciliations flipped to verified and
+  reconciled, with `native_total` 0;
+* Dashboard Campaigns, Campaign Evidence, the mart, the mapping review,
+  `is_window_spend_verified` and the geo panel all read 0.
+
+The auditor confirmed read-only that production cannot reach this (no spend
+rows for any account without a verified chunk). It was still unknown
+published as zero, feeding a positive verdict.
+
+1. The bound is restored to 56adcfc's `COALESCE(…, {alias}spend_date)`
+   (`db/revenue_repository.py:90`). An account with no verified chunk is
+   unbounded and its coverage verdict is incomplete. The docstring states why.
+2. `fetch_spend_daily_series` keeps its `customer_id` scope (the trend leak's
+   fix).
+3. `build_google_ads_spend_audit` and `build_campaign_spend_coverage_audit`
+   read the configured account (`services/google_ads_spend_service.py:543`,
+   `:480`), consistent with `is_window_spend_verified` (`:677`) and the revenue
+   contract.
+4. 176C 26 asserts on the scoped reads. A second account with no ledger leaks
+   nothing into the configured account's Overview trend, spend audit or
+   coverage audit. Mutations: unscoping the audit gives 5,655 against 100;
+   unscoping the daily series gives 5,655 against 100.
+5. The Overview's "No unexplained paid spend" card was the fall-through of the
+   waste check and read no spend verdict. It could make that claim over
+   unverified spend on any path where an unverified campaign showed no unproven
+   spend. It is now gated: unless `spend_truth.campaign_spend_status` is
+   `verified`, the card says "Paid spend cannot be judged"
+   (`services/dashboard_overview_service.py:799`). 176C 29 covers this,
+   including the verified counterfactual. The case fails on 19e766d, and fails
+   when the gate is removed. The defect predated 176C: 5a9b5e9 made the same
+   claim.
+
+The regression test is 176C 28, the auditor's no-ledger probe. It asserts:
+
+* no surface publishes spend 0.0;
+* no Overview card claims "No unexplained paid spend";
+* the spend audit's account and geo reconciliations are not verified or
+  reconciled, and its state is not VERIFIED;
+* the mart's campaign and country spend statuses, the readiness check and the
+  geo panel's country verdict are not ready.
+
+It fails on 19e766d. The geo panel's `status` field compares the two stored
+totals (£300 each, which agree, as on 56adcfc). That is a measurement, not the
+country verdict, so the case asserts `country_spend_status` /
+`country_roas_unblockable` / `geo_ready` and the non-zero totals.
+
+**173A.** With the bound restored, the matrix is byte-identical to the golden
+without the ledger fixture (56adcfc's shape, `test_22`), and with it
+(`test_22_b`, new). Both hold, so the ledger fixture is kept, made opt-in
+(`PR_ADS_173A_SPEND_LEDGER=1`, `tests/pr_ads_173a_scenarios.py:130`), and the
+matrix runs both ways. The default no-ledger run keeps the broad matrix over
+the no-ledger state. On 19e766d, `test_22` fails in four families: the 71
+payloads.
+
+**R2-2 (Minor).** `GET /api/revenue-attribution` still read the legacy snapshot
+in two places, both now canonical:
+
+* `source_health.coverage_start` / `coverage_end` were the snapshot's
+  `MIN/MAX(run_date)`; they are now the canonical ledger window only
+  (`services/revenue_attribution_service.py:2206`);
+* `campaign_spend_status` was "db" whenever the snapshot held rows; it now
+  comes from the canonical read: `db` / `db_empty` / `source_unavailable`
+  (`:2008`). The `db_empty` warning names canonical spend.
+
+176C 30 checks this: no snapshot `run_date` anywhere in the payload, `db_empty`
+with no canonical rows, `db` with one. It fails on 19e766d.
+
+**Fail-before on 19e766d** (this commit's tests copied in): 176C 28, 29 and 30
+fail, and so do 173A `test_22` (terms, patterns, quarantine, nothing_flagged)
+on the no-ledger run.
+
+**Existing test changed.** `118::test_audit_passes_window_bounds`: its fake
+`fetch_canonical_campaign_spend` accepts the account scope the spend audit now
+passes. The window bounds it asserts are unchanged.

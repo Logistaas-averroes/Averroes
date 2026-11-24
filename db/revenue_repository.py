@@ -66,10 +66,14 @@ def _certified_from(alias: str, ledger: str, start) -> str:
     now counts only from ITS account's earliest verified chunk, the same
     lower bound the verdict uses.
 
-    PR-ADS-176C-F2 (m3): an account with NO verified chunk contributes
-    nothing to an open-start read (the bound is ``'infinity'``). Leaving it
-    unbounded summed an uncertified second account's spend into account-wide
-    reads — the Overview trend, the spend audit — beside a certified one.
+    An account with NO verified chunk is not bounded: nothing of it is
+    certified, so its coverage verdict is incomplete and no gated surface
+    publishes it as verified. PR-ADS-176C-F2 (m3) made such an account
+    contribute nothing (``'infinity'``); PR-ADS-176C-F3 (R2-1) reverted that,
+    because an empty read sums to ``0.0`` with ``available: True`` — unknown
+    published as a measured zero, which turned reconciliation verdicts
+    positive. A second account's spend is kept out of the configured
+    account's figures by SCOPING the read (``customer_id``), not by this bound.
 
     Every caller, the deal resolver's campaign-name read included
     (PR-ADS-176C-F2 m2), gets this bound: one population per window for
@@ -83,7 +87,7 @@ def _certified_from(alias: str, ledger: str, start) -> str:
         return ""
     return (f" AND {alias}spend_date >= COALESCE((SELECT MIN(cov.chunk_start) "
             f"FROM {ledger} cov WHERE cov.customer_id = {alias}customer_id "
-            f"AND cov.status = 'verified'), 'infinity'::date) ")
+            f"AND cov.status = 'verified'), {alias}spend_date) ")
 
 
 def _unavailable(table: str, extra: dict | None = None) -> dict:

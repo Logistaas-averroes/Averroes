@@ -89,7 +89,9 @@ def test_audit_passes_window_bounds(monkeypatch):
     svc = _load_spend()
     seen = {}
 
-    def cap(start, end):
+    # PR-ADS-176C-F3 (R2-1): the audit now passes the configured account scope
+    # too; the fake accepts it (the window bounds asserted are unchanged).
+    def cap(start, end, *_scope):
         seen[(start, end)] = True
         return {"available": True, "rows": [], "total_cost_micros": 0,
                 "campaign_count": 0, "customer_id": "C1", "currency_code": "USD",

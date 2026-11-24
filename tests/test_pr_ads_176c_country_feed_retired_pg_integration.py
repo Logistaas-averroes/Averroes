@@ -1219,17 +1219,21 @@ def test_25_all_time_fx_coverage_counts_only_certified_spend_days(live_db, monke
         stray.isoformat()]
 
 
-def test_26_an_account_with_no_verified_chunk_contributes_nothing_to_an_open_start_read(
+def test_26_a_second_account_with_no_ledger_leaks_nothing_into_the_configured_accounts_figures(
         live_db, monkeypatch):
-    """m3. Account A (configured) certified £100; account B holds £5,555 of
-    campaign spend and no coverage ledger at all. An open-start read counts
-    nothing of B — B certifies nothing — and the Overview trend reads the
-    configured account only. The auditor's probe showed the trend's first
-    point at B's spend and the spend audit's native total at £5,554 + A."""
+    """m3, as corrected in PR-ADS-176C-F3 (R2-1). Account A (configured)
+    certified £100; account B holds £5,555 of campaign and geo spend and no
+    coverage ledger at all. The auditor's round-1 probe showed the Overview
+    trend's first point at B's spend and the spend audit's native total at
+    £5,555 + A: account-wide reads. Every configured-account figure is now
+    read SCOPED to that account, so B leaks into none of them. (Round 1
+    bounded B to nothing instead — ``'infinity'`` — which turned a no-ledger
+    deployment's spend into a published 0.0; case 28.)"""
     import db.writers as writers
     from db import revenue_repository as repo
     from services.dashboard_overview_service import build_dashboard_overview
-    from services.google_ads_spend_service import build_google_ads_spend_audit
+    from services.google_ads_spend_service import (
+        build_campaign_spend_coverage_audit, build_google_ads_spend_audit)
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     certified_from, stray, today = _stray_before_the_certified_range(live_db)
     b_day = certified_from + timedelta(days=2)
@@ -1238,13 +1242,10 @@ def test_26_an_account_with_no_verified_chunk_contributes_nothing_to_an_open_sta
         "campaign_name": "other account", "spend_date": b_day,
         "cost_micros": 5_555_000_000, "source_query_version": "t"}]) == 1
     _write_spend([_spend_rows(UK, b_day, 5555.0, campaign="999", customer=OTHER_CUSTOMER)])
-    # Account-wide open-start reads: B contributes nothing.
-    assert repo.fetch_canonical_campaign_spend(None, today)["total_spend"] == 100.0
-    # A window with a start reads B's day.
-    assert repo.fetch_canonical_campaign_spend(
-        certified_from, today, OTHER_CUSTOMER)["total_spend"] == 5555.0
-    assert repo.fetch_geo_daily_spend_total(None, today)["total_spend"] == 100.0
-    series = repo.fetch_spend_daily_series(None, today)
+    # The configured account's open-start reads: certified days, A's only.
+    assert repo.fetch_canonical_campaign_spend(None, today, CUSTOMER)["total_spend"] == 100.0
+    assert repo.fetch_geo_daily_spend_total(None, today, CUSTOMER)["total_spend"] == 100.0
+    series = repo.fetch_spend_daily_series(None, today, CUSTOMER)
     assert sum(r["spend_native"] for r in series["rows"]) == pytest.approx(100.0)
     # Scoped: the series of the configured account only, for ANY window.
     scoped = repo.fetch_spend_daily_series(certified_from, today, CUSTOMER)
@@ -1257,10 +1258,154 @@ def test_26_an_account_with_no_verified_chunk_contributes_nothing_to_an_open_sta
     assert points, overview["trend"]
     assert sum(p.get("spend_usd") or 0 for p in points) == pytest.approx(125.0)
     assert all((p.get("spend_usd") or 0) < 5555 for p in points)
-    assert build_google_ads_spend_audit("all_time")["native_total"] == 100.0
+    audit = build_google_ads_spend_audit("all_time")
+    assert (audit["native_total"], audit["customer_id"]) == (100.0, CUSTOMER)
+    assert build_campaign_spend_coverage_audit("all_time")["first_spend_date"] == (
+        certified_from.isoformat())
     # A window WITH a start reads B's day: the Overview trend is scoped, though.
     overview_6m = json.loads(json.dumps(build_dashboard_overview(WINDOW), default=str))
     assert not _has_number(json.dumps(overview_6m["trend"]), "6943.75")    # 5555 × 1.25
+
+
+def test_28_with_no_ledger_at_all_no_surface_publishes_spend_zero_or_a_positive_verdict(
+        live_db, monkeypatch):
+    """PR-ADS-176C-F3 (R2-1), the auditor's round-2 probe. The configured
+    account holds campaign and geo spend and NO coverage ledger of either
+    kind; all-time. Round 1's ``'infinity'`` bound made every open-start read
+    an empty set summing to 0.0 with ``available: True``: the Overview card
+    flipped to "No unexplained paid spend", the spend audit's account and geo
+    reconciliations to verified / reconciled, and Dashboard Campaigns,
+    Campaign Evidence, the mart, the mapping review, the readiness check and
+    the geo panel to 0. Nothing is certified, so nothing reads as a measured
+    zero, and no verdict is positive. (Fails on 19e766d.)"""
+    import db.writers as writers
+    from services.campaign_evidence_service import build_campaign_evidence
+    from services.campaign_identity_service import build_mapping_review
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    from services.dashboard_overview_service import build_dashboard_overview
+    from services.google_ads_geo_sync_service import build_geo_reconciliation
+    from services.google_ads_spend_service import (
+        build_google_ads_spend_audit, is_window_spend_verified)
+    from services.revenue_decision_mart import build_revenue_decision_mart
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    start, today, y = _bounds()
+    _fx(y - timedelta(days=10), today)
+    days = [y - timedelta(days=i) for i in range(3)]
+    _write_spend([_spend_rows(UK, d, 100.0, campaign="111") for d in days])
+    assert writers.upsert_campaign_daily_spend([
+        {"customer_id": CUSTOMER, "currency_code": "GBP", "campaign_id": "111",
+         "campaign_name": "brand - uk", "spend_date": d, "cost_micros": 100_000_000,
+         "source_query_version": "t"} for d in days]) == 3
+    _deal_sync(live_db)
+    _leads(live_db, [("h1", "United Kingdom", "junk")])
+
+    def nonzero(v):
+        return v is None or v != 0
+
+    overview = json.loads(json.dumps(build_dashboard_overview("all_time"), default=str))
+    assert nonzero(overview["kpis"]["google_ads_spend_usd"]), overview["kpis"]
+    headlines = [c.get("headline") for c in overview["decision_cards"]]
+    assert "No unexplained paid spend" not in headlines, headlines
+    audit = build_google_ads_spend_audit("all_time")
+    assert audit["account_reconciliation_status"] != "verified"
+    assert audit["geo_reconciliation_status"] != "reconciled"
+    assert audit["state"] != "VERIFIED"
+    assert nonzero(audit["native_total"]) and nonzero(audit["campaign_daily_total"])
+    campaigns = json.loads(json.dumps(build_dashboard_campaigns("all_time"), default=str))
+    assert nonzero(campaigns["kpis"]["verified_spend_usd"])
+    evidence = json.loads(json.dumps(build_campaign_evidence("all_time"), default=str))
+    assert nonzero(evidence["summary"]["spend_usd"])
+    for view in ("campaign", "country"):
+        mart = build_revenue_decision_mart(view=view, window="all_time")
+        st = mart["spend_truth"]
+        assert nonzero(st["native_spend"]) and nonzero(st["usd_spend"]), (view, st)
+        assert st["campaign_spend_status"] != "verified", view
+        assert st["country_spend_status"] not in ("verified", "reconciled_with_residual"), view
+    assert all(nonzero(o["native_spend"])
+               for o in build_mapping_review("all_time")["campaign_options"])
+    ready = is_window_spend_verified("all_time")
+    assert nonzero(ready["local_total_spend"]) and ready.get("complete") is not True
+    panel = build_geo_reconciliation("all_time")
+    assert panel["geo_ready"] is False and panel["country_roas_unblockable"] is False
+    assert panel["country_spend_status"] not in ("verified", "reconciled_with_residual")
+    assert "geo_coverage_incomplete" in panel["geo_gap_codes"]
+    # The panel's `status` compares the two STORED totals (£300 each) — they do
+    # agree, as on 56adcfc; it is not the country verdict. Round 1 made it
+    # "reconciled" over two empty reads of £0.
+    assert (panel["canonical_campaign_total"], panel["geo_total"]) == (
+        pytest.approx(300.0), pytest.approx(300.0))
+
+
+def test_29_no_unexplained_paid_spend_is_claimed_only_over_verified_spend(
+        live_db, monkeypatch):
+    """PR-ADS-176C-F3 (R2-1, item 5). The Overview's "No unexplained paid
+    spend" card (``_build_decision_cards``) was the fall-through of the waste
+    check and read no spend verdict: with the window's spend unverified it
+    claimed "every campaign with spend has SQL or won-deal evidence" about
+    spend nobody had verified. The same account, same SQL lead: with no ledger
+    the card says spend cannot be judged; with both ledgers verified the claim
+    is made. (Fails when the gate in ``dashboard_overview_service`` is
+    removed.)"""
+    import db.writers as writers
+    from services.dashboard_overview_service import build_dashboard_overview
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    start, today, y = _bounds()
+    _fx(start - timedelta(days=30), today)
+    days = [y - timedelta(days=i) for i in range(3)]
+    _write_spend([_spend_rows(UK, d, 100.0, campaign="111") for d in days])
+    assert writers.upsert_campaign_daily_spend([
+        {"customer_id": CUSTOMER, "currency_code": "GBP", "campaign_id": "111",
+         "campaign_name": "brand - uk", "spend_date": d, "cost_micros": 100_000_000,
+         "source_query_version": "t"} for d in days]) == 3
+    _deal_sync(live_db)
+    _leads(live_db, [("h1", "United Kingdom", "qualified")])
+
+    def headlines(window):
+        page = json.loads(json.dumps(build_dashboard_overview(window), default=str))
+        return [c.get("headline") for c in page["decision_cards"]]
+
+    unverified = headlines(WINDOW)
+    assert "No unexplained paid spend" not in unverified, unverified
+    assert "Paid spend cannot be judged" in unverified, unverified
+    # Counterfactual: both ledgers verified — the claim is the evidence's.
+    _campaign_from_geo(start - timedelta(days=30), today)
+    verified = headlines(WINDOW)
+    assert "No unexplained paid spend" in verified, verified
+
+
+def test_30_the_revenue_attribution_contract_reads_no_snapshot_date_or_status(
+        live_db, monkeypatch):
+    """PR-ADS-176C-F3 (R2-2). ``GET /api/revenue-attribution`` published the
+    legacy ``geo`` snapshot's ``MIN/MAX(run_date)`` as
+    ``source_health.coverage_start`` / ``coverage_end``, and
+    ``campaign_spend_source_status: "db"`` whenever the snapshot held rows —
+    whatever canonical campaign spend said. Both now come from the canonical
+    reads only. (Fails on 19e766d.)"""
+    import db.writers as writers
+    from services.revenue_attribution_service import build_revenue_attribution
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _seed_legacy_monthly_snapshot(live_db, days_ago=37)
+    with live_db.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT run_date FROM geo")
+        snapshot_day = cur.fetchone()[0].isoformat()
+    _deal_sync(live_db)
+    out = json.loads(json.dumps(build_revenue_attribution(WINDOW), default=str))
+    sh = out["source_health"]
+    assert snapshot_day not in (sh["coverage_start"], sh["coverage_end"])
+    assert snapshot_day not in json.dumps(out), snapshot_day
+    # No canonical campaign spend rows: not "db".
+    assert (sh["campaign_spend_status"], out["campaign_spend_source_status"]) == (
+        "db_empty", "db_empty")
+    # …and with canonical rows, "db".
+    start, today, y = _bounds()
+    _fx(y, y)
+    assert writers.upsert_campaign_daily_spend([{
+        "customer_id": CUSTOMER, "currency_code": "GBP", "campaign_id": "111",
+        "campaign_name": "brand - uk", "spend_date": y, "cost_micros": 1_000_000,
+        "source_query_version": "t"}]) == 1
+    again = build_revenue_attribution(WINDOW)
+    assert (again["source_health"]["campaign_spend_status"],
+            again["campaign_spend_source_status"]) == ("db", "db")
 
 
 def test_27_deals_and_leads_resolve_campaigns_from_one_population(live_db, monkeypatch):
