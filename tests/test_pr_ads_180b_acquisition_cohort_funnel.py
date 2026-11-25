@@ -213,16 +213,20 @@ def test_02_b_withheld_the_stages_are_absent_and_the_audit_names_a_leak(monkeypa
     c = _contract(_outcomes(monkeypatch, fresh=False, missing_created_at=4))
     assert (c["sql_status"], c["sql_reason"]) == ("withheld", "source_bootstrap_incomplete")
     assert all(c["totals"][f] is None for f in STAGE_FIELDS)
-    assert c["contacts_without_created_at"] is None and c["breakdown"] is None
+    assert c["breakdown"] is None
+    # PR-ADS-180B-F1 (m4): the no-created-date count is a table-wide
+    # disclosure, published whatever the verdict (docs/64 §12.3).
+    assert c["contacts_without_created_at"] == 4
     payload = {"cohort": c}
     assert audit.mart_withheld_exposures(payload) == []
     for field in STAGE_FIELDS:
         leaked = json.loads(json.dumps(payload))
         leaked["cohort"]["totals"][field] = 0          # a fabricated zero
         assert f"cohort.totals.{field}" in audit.mart_withheld_exposures(leaked)
+    # Its copies are held to one value instead of to absence.
     leaked = json.loads(json.dumps(payload))
-    leaked["cohort"]["contacts_without_created_at"] = 4
-    assert "cohort.contacts_without_created_at" in audit.mart_withheld_exposures(leaked)
+    leaked["readiness"] = {"missing_contact_created_at_count": 5}
+    assert any("readiness" in p for p in audit.created_at_disclosure_problems(leaked))
 
 
 def test_02_c_the_audit_catches_a_stage_that_breaks_conservation(monkeypatch):
@@ -248,7 +252,8 @@ def test_02_d_a_window_with_no_settled_day_withholds_the_stages_too(monkeypatch)
     c = _withhold_cohort(_contract(_outcomes(monkeypatch, missing_created_at=2)),
                          "no_settled_day_in_window")
     assert all(c["totals"][f] is None for f in STAGE_FIELDS)
-    assert c["contacts_without_created_at"] is None
+    # PR-ADS-180B-F1 (m4): kept — a table-wide disclosure, not a window figure.
+    assert c["contacts_without_created_at"] == 2
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -278,7 +283,8 @@ def test_03_b_overview_withheld_carries_no_count(monkeypatch):
     from scripts import audit_marketing_outcome_cohorts as audit
     contract, f = _overview_block(monkeypatch, fresh=False, missing_created_at=3)
     assert f["publication"] == {"status": "withheld", "reason": "source_bootstrap_incomplete"}
-    assert f["totals"] is None and f["contacts_without_created_at"] is None
+    # PR-ADS-180B-F1 (m4): the cohort's table-wide disclosure is republished.
+    assert f["totals"] is None and f["contacts_without_created_at"] == 3
     payload = {"cohort": contract, "lifecycle_acquisition_funnel": f}
     assert audit.acquisition_funnel_problems(payload) == []
     assert audit.mart_withheld_exposures(payload) == []

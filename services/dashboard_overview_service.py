@@ -1448,8 +1448,9 @@ def _acquisition_funnel_block(cohort: dict | None) -> dict:
     is needed, so the Lead-entry gap that made the old Lead cohort a permanent
     lower bound does not apply.
 
-    Withheld means absent: unless published, ``totals`` and
-    ``contacts_without_created_at`` are None. A published verdict whose slot
+    Withheld means absent: unless published, ``totals`` is None.
+    ``contacts_without_created_at`` is the cohort's table-wide disclosure,
+    republished whatever the verdict (PR-ADS-180B-F1). A published verdict whose slot
     lacks a count is unavailable (``acquisition_funnel_counts_missing``) —
     never a partial set of columns. Channels-shaped (``publication``,
     ``stages``, ``totals``), so one adapter draws both blocks."""
@@ -1484,8 +1485,10 @@ def _acquisition_funnel_block(cohort: dict | None) -> dict:
         "stale": bool(published and c.get("stale")),
         "stages": [{"key": st["key"], "label": st["label"]} for st in ACQUISITION_FUNNEL_STAGES],
         "totals": totals,
-        "contacts_without_created_at": (c.get("contacts_without_created_at")
-                                        if published else None),
+        # PR-ADS-180B-F1 (m4): the cohort's table-wide disclosure, republished
+        # whatever the verdict (it is no figure of this cohort). The page reads
+        # it only beside published counts (`acquisitionFunnelModel`).
+        "contacts_without_created_at": c.get("contacts_without_created_at"),
         "producer": ("services.marketing_outcome_cohort_service.build_cohort "
                      "all_sources slot (the Revenue Decision Mart's cohort)"),
         "notes": {"customer_stage": ("'Customer stage' counts contacts whose HubSpot "

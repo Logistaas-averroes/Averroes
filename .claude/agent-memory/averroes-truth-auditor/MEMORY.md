@@ -906,3 +906,44 @@ truncated list. Verified by execution on exported copies of both commits.
   date_entered_lead (6,105 of 10,285 MQLs). Anchorless is always > 0, so every
   Overview cohort stage reads "at least N" and every cohort rate reads "—".
   This is intended.
+
+## PR-ADS-180B review (46f5396 on bf9deed, 2026-11-25) — acquisition-cohort funnel
+- Verdict: merge with minors. No Major reproduced. All 34 new tests fail on
+  bf9deed (run in a git-archive copy); 06_a / 07_a / PG 06 fail on the figure.
+- Stage-reach rule (`marketing_outcome_cohort_service.stage_reached`, Channels
+  delegates): SQL = sql_proof; other stages = direct date OR recovered date OR
+  CURRENT stage in stages_implying_event. NOT monotone: a dated later stage does
+  not imply earlier ones, the current stage does. Probe: MQL 1 < SQL 2 < Opp 3
+  published, reconcile passes (it checks bucket identities and <= contacts
+  only). No date is ever produced. Same rule as Channels (162A) / cohort SQL (161B).
+- `fetch_undated_stage_reach`: whole-table count, rules out only "created
+  after window end AND no stage date in window". Verified on PG: last-day
+  creation kept, NULL created_at kept, day-after ruled out, recovered date not
+  undated, 'Customer ' (case/space) counted. Cost ~66-90 ms per read at 22k rows
+  (2 per Overview build). The created_at IS NOT NULL guard and the +1 day edge are
+  UNTESTED (mutations K, L survive). So are the fail-closed "missing coverage /
+  missing count_is_bound = bound" branches (mutations G, H survive).
+- Production expectation: Lead undated reach ~9k for every window, so every
+  Activity stage reads "at least N" and every trend reads "No comparison", in
+  practice permanently.
+- Pipeline still uses only window-row bounds. Probe: same window and population,
+  Activity "Leads at least 10" vs Pipeline "Entered Lead 10". Declared open
+  (docs/64 §8). Masked in production.
+- Withheld cohort: `cohort.contacts_without_created_at` is None, but the same
+  figure is still in `readiness.missing_contact_created_at_count` (177A) and in
+  `cohort.metadata.coverage_notes`. `mart_withheld_exposures` reports []. It is a
+  table-wide count, not a cohort count.
+- Countries: KPI SQLs = listed markets; funnel SQL = cohort total incl.
+  residual (probe 2 vs 4; KPI + residual row = funnel). Disclosed only in the
+  panel subtitle.
+- `count_is_bound` (not `lower_bound`) avoids 161E test_10_a's substring ban.
+  The ban exists to stop pages republishing `confirmed_customer_lower_bound`;
+  this field is a stage-count boolean, so the guard's intent is not evaded. The
+  guard is still only a substring check. The rename is not documented in docs/64.
+- Audit gap: stage counts are independently re-derived (own SQL) for
+  all_sources only. The Google Ads stage split is checked only against the
+  payload's own breakdown. `google_ads_split` covers SQL only.
+- Evidence run at 46f5396: 180B + 180A modules 71 passed, PG ran (no skips);
+  23 related contract/PG modules 676 passed, 0 skipped; full suite with -x
+  reached ~92% with no failure before my own 50-min `timeout` cut it (NOT a
+  complete run). Lesson: give the full suite >60 min or run it unbounded.

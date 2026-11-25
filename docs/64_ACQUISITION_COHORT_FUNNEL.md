@@ -64,10 +64,12 @@ every Dashboard payload that republishes it) adds:
 * `funnel_stages` — the columns in order, each naming the `totals` field it
   reads and its label ("Leads · contacts acquired", "MQL", "SQL",
   "Opportunity", "Customer stage");
-* `contacts_without_created_at` — published with the counts, `None`
-  otherwise.
+* `contacts_without_created_at` — the count of canonical contacts with no
+  created date (table-wide). **F1 (§12.3): published whatever the verdict**
+  — it is a data-quality disclosure, not a cohort figure; `None` only when
+  unread.
 
-Withheld means absent: unless `sql_status == "published"`, every one of them
+Withheld means absent: unless `sql_status == "published"`, every stage total
 is `None`. `revenue_decision_mart._withhold_cohort` (a window with no settled
 day) nulls them too. No per-row stage counts are published (the slots have
 them; the rows do not carry them).
@@ -86,8 +88,9 @@ adds no database read and decides nothing:
 * `metric_family: "acquisition_cohort_outcomes"`,
   `window_basis: "contact_created_at"`, copied from the cohort;
 * `totals` (Channels-shaped: `contacts`, `reached_mql`, `reached_sql`,
-  `reached_opportunity`, `reached_customer_stage`) and
-  `contacts_without_created_at`: `None` unless published.
+  `reached_opportunity`, `reached_customer_stage`): `None` unless published;
+  `contacts_without_created_at`: the cohort's, republished whatever the
+  verdict (F1, §12.3).
 
 `metric_truth` gains `lifecycle_acquisition_funnel`
 (`all_source_acquisition_cohort`).
@@ -156,9 +159,17 @@ missing**, or when the undated reach of §5 is above 0 or unreadable.
 
 The page shows "No comparison" with the reason in its title. Test 06_a runs
 the auditor's probe (`audit180a/probe_prevbound.py`) through the real
-`_lifecycle_activity_block`: MQL is "No comparison" with that reason, Lead
-still shows its measured "-25.0%". On `bf9deed` MQL read "+20.0% vs Prior
-Quarter".
+`_lifecycle_activity_block`: MQL is "No comparison" with that reason, and in
+**that fixture** Lead still shows its measured "-25.0%" (the fixture has no
+undated Lead contact). On `bf9deed` MQL read "+20.0% vs Prior Quarter".
+
+**Production will not look like the fixture** (F1 correction). About 9,000
+production contacts reached Lead with no Lead-entry date, and
+`fetch_undated_stage_reach` counts them for every window they could belong
+to. So in production every Activity stage reads "at least N" and every
+trend reads "No comparison" — in practice permanently, until those dates
+are recovered. That is the correct reading of the evidence, not a defect of
+the rule.
 
 ## 5. Finding (b): undated contacts outside the window's rows
 
@@ -264,9 +275,10 @@ ones fail on the figure, not on a missing name:
 ### Audits extended (no check lives only in a test)
 
 * `scripts/audit_marketing_outcome_cohorts.py`:
-  * `mart_withheld_exposures` — the three stage totals,
-    `contacts_without_created_at`, and the Overview's
-    `lifecycle_acquisition_funnel` (`acquisition_funnel_exposures`);
+  * `mart_withheld_exposures` — the three stage totals and the Overview's
+    `lifecycle_acquisition_funnel` (`acquisition_funnel_exposures`).
+    (180B also scanned `contacts_without_created_at`; F1 replaced that with
+    `created_at_disclosure_problems`, §12.3);
   * `cohort_stage_problems` — under a published cohort each stage total
     equals the Google Ads slot, Google Ads + excluded = all sources, none
     above the leads, none missing beside the SQL count; called from
@@ -336,3 +348,144 @@ Each applied alone to a copy of the tree, then both 180B modules run:
 Browser rendering (no screenshot). The production volumes of
 `fetch_undated_stage_reach` (one count-only scan per Overview build, two with
 the previous period) were not measured on production data.
+
+## 12. PR-ADS-180B-F1 — the truth audit's minors
+
+The truth audit of 180B (`46f5396`) found no Major. F1 closes its minors.
+Guards: `tests/test_pr_ads_180b_f1_truth_audit_minors.py` (13 cases) and an
+extended PG case 05.
+
+### 12.1 m1 — the "missing means a bound" branches are tested
+
+`_stage_count_is_bound` (`own is None or own > 0`) and the Activity block's
+`prev_bounds.get(event) is not False` had no case: mutations G
+(`own is not None and own > 0`) and H (`is True`) survived. Now:
+
+* 01_a — a build whose coverage does not report MQL: `count_is_bound` is
+  True and the trend is "No comparison" (current count is a lower bound);
+* 01_b — the helper with no coverage, non-mapping coverage, or a coverage
+  silent on the stage: True even with a readable undated reach of 0;
+* 01_c — a previous period with no `count_is_bound` (all stages, then MQL
+  only): "No comparison", "previous count is a lower bound"; with it, the
+  measured "+20.0%".
+
+**Found while writing 01_a.** The backend marked MQL a bound, but the page
+printed "MQLs 12" exact: `dashActivityLowerBounds` re-derived the bound from
+the coverage (only when reconciliation is `partial`) and the undated reach,
+and never read the payload's own `count_is_bound`. It now republishes it:
+`count_is_bound === true` is a lower bound on the page even where no other
+reason is named. It only ever adds a bound. (A stage without the key keeps
+the page's own rules: the real producer always sets it, and treating its
+absence as a bound would rewrite 180A's fixtures rather than fix a
+production path.) 01_a fails on `46f5396` on the figure ("MQLs 12").
+
+### 12.2 m2 — the undated reach's edges on PostgreSQL
+
+PG case 05 adds four contacts, at the database's own `end::date + 1 day`
+instant (read back, so the case holds in any session time zone):
+
+| Contact | Record | Expected |
+| --- | --- | --- |
+| `edge-last-day` | stage lead, undated, created one minute before the window's end | counted |
+| `edge-no-created` | stage lead, undated, NULL `created_at` | counted |
+| `edge-day-after` | stage lead, undated, created at the window's end instant | ruled out |
+| `edge-recovered` | stage lead, no direct Lead date, Lead date recovered from history | not undated |
+
+Lead is 9 (was 7), All Time 11 (was 8). Mutation K (drop
+`created_at IS NOT NULL`) and mutation L (`>= end` for `>= end + 1 day`)
+each fail it.
+
+### 12.3 m4 — `contacts_without_created_at` is a disclosure, published always
+
+180B withheld `cohort.contacts_without_created_at` with the cohort, but the
+same table-wide count stayed in `readiness.missing_contact_created_at_count`
+and in `cohort.metadata.coverage_notes`. Three copies, two policies.
+
+**Choice: publish it whatever the verdict.** It counts every canonical
+contact with no created date — all sources, no window — so it is a
+data-quality fact about the table, not a figure of the cohort, and no
+withheld cohort count can be recovered from it. Nothing reads it as a cohort
+number: on the page, `martCohortFunnelData` passes it only under
+`campaignSqlPublication(cohort)`, and `acquisitionFunnelModel` reads it only
+beside published counts (04_a / 04_b render a withheld block carrying it:
+no figure, no "no created date" note).
+
+* `revenue_attribution_service._cohort_contract_block`: published always
+  (`_disclosed_count`: the integer read, `None` only when unread);
+* `revenue_decision_mart._withhold_cohort` keeps it (a window with no
+  settled day still discloses it, as readiness does);
+* `dashboard_overview_service._acquisition_funnel_block` republishes it
+  under any verdict;
+* `revenue_decision_mart._readiness_block`: `missing_contact_created_at_count`
+  no longer defaults to 0 when the core did not read it (unknown is not
+  zero);
+* the audit: `mart_withheld_exposures` / `acquisition_funnel_exposures` no
+  longer scan it; new `created_at_disclosure_problems` holds every copy to
+  one value — cohort, readiness, Overview block, and exactly one coverage
+  note naming it when above 0 (none at 0 or unknown) — and
+  `audit_mart_window` runs it on every payload (`created_at_disclosure`).
+
+Changed 180B assertions (the contract changed; each now asserts the value):
+02_b (`== 4`, and a disagreeing readiness is named), 02_d (`== 2`), 03_b
+(`== 3`), PG 03 (`== 0` and `created_at_disclosure_problems == []`).
+
+Channels (`channel_funnel_service`) still withholds its own copy with its
+funnel: its response carries no readiness or coverage-note copy, so within
+that response the figure is either present everywhere or nowhere, and its
+"withheld: no number anywhere" test (162A test_08) stays as it is.
+
+### 12.4 m5 — the legend states the stage-reach rule
+
+`ACQUISITION_FUNNEL_LEGEND` (Overview, Campaigns, Countries) and Channels'
+`STAGE_NOTE` now say a contact counts at a stage when HubSpot records it
+entering that stage **or** its current lifecycle stage is that stage or a
+later one, and that the columns are **not nested subsets** — a contact whose
+stage moved back can count at a later stage without an earlier one, so a
+later column can exceed an earlier one. The rule itself
+(`marketing_outcome_cohort_service.stage_reached`) is unchanged: it drives
+the one SQL count, and changing it is an owner decision.
+
+### 12.5 m6 — Countries: the residual inside Reached SQL
+
+The Countries funnel's Reached SQL is the whole Google Ads cohort
+(`cohort.totals.sqls`); the SQLs card sums the listed markets. The SQL
+column now carries a note, `countryFunnelResidualNote(cohort, residual)`:
+
+* the residual row of the **same** response publishes its SQL count
+  (`cohortCountPublication`, the table cell's gate): "Includes N in markets
+  not listed or with no country (the residual row); the SQLs card above
+  counts the listed markets only";
+* the residual's count is not published: said in words, with its reason —
+  never `cohort − card` in the browser;
+* no residual row: "how many … are outside the listed markets is not
+  stated";
+* gated by `campaignSqlPublication(cohort)` like the funnel; unpublished,
+  no note (and stage notes draw only under a published verdict anyway).
+
+### 12.6 The `lower_bound` → `count_is_bound` rename
+
+180B named the per-stage flag `count_is_bound`, not `lower_bound`. The 161E
+guard (`test_pr_ads_161e_reader_cutover.py` test_10_a) bans the substring
+`lower_bound` in the revenue reader services (`dashboard_overview_service`
+among them) and in `static/app.js`, to stop a reader republishing
+`confirmed_customer_lower_bound` as a customer count. This flag is a boolean on lifecycle stage counts —
+"this count is a lower bound" — and carries no customer figure, so the
+guard's intent is not evaded by the name. The guard remains a substring
+check; a future flag must be judged on what it carries, not on whether its
+name passes.
+
+### 12.7 Recorded, not changed
+
+* **m7 does not arise today.** Production has **0** contacts with NULL
+  `created_at` (checked 25 Nov, 21,947 contacts). So the KPI cards and table
+  cells printing exact cohort counts beside a block that would read "at
+  least N" (§7.6) cannot happen now. It stays open **as a rule**: the day a
+  contact without a created date appears, those figures are lower bounds
+  and must say so.
+* **m3 is the next PR.** Pipeline's stage-entry bound still reads only the
+  window's rows, not `fetch_undated_stage_reach`: same window, same
+  population, Activity "Leads at least 10" against Pipeline "Entered Lead
+  10". Masked in production by the ~9,000 undated Lead contacts.
+* Audit gap carried: stage counts are re-derived by the audit's own SQL for
+  `all_sources` only; the Google Ads stage split is checked against the
+  payload's breakdown.

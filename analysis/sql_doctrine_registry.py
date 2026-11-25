@@ -1357,7 +1357,11 @@ RULES: list[dict] = [
                # PR-ADS-176B: the one Countries page republishes the mart's
                # country rows, `country_totals` and `regional_mix` SQLs.
                "renderCountriesRegionalMix", "renderCountriesResidualPanel",
-               "renderCountryDrawer"]),
+               "renderCountryDrawer",
+               # PR-ADS-180B-F1 (m6): the Countries funnel's Reached SQL note
+               # republishes the residual row's own SQL count under the
+               # cohort gate (its doc comment follows martCohortFunnelHtml).
+               "martCohortFunnelHtml", "countryFunnelResidualNote"]),
     _r("ui.keywords", "static/app.js", CLS_LEGACY, _KW,
        symbol=["kwSqlCoverageNote", "renderKeywordFilters", "renderKeywordTable", "kwDrawerSqlSection"]),
     _r("ui.search_terms", "static/app.js", CLS_LEGACY, _ST,

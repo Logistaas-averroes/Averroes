@@ -525,7 +525,9 @@ def _withhold_cohort(cohort: dict, reason: str) -> dict:
     out["reconciliation"] = {**(cohort.get("reconciliation") or {}),
                              "status": "unavailable", "problem_count": None}
     out["breakdown"] = None   # PR-ADS-177C: withheld means absent
-    out["contacts_without_created_at"] = None   # PR-ADS-180B: likewise
+    # PR-ADS-180B-F1 (m4): `contacts_without_created_at` is KEPT — a table-wide
+    # data-quality disclosure, not a figure of this window (the readiness
+    # block publishes the same count for the same window).
     out["metadata"] = {**(cohort.get("metadata") or {}),
                        "sql_status": cwt.UNAVAILABLE, "sql_reason": reason,
                        "mapped_count": None, "unattributed_count": None,
@@ -673,9 +675,10 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
         "lead_metrics_status": health.get("lead_metrics_status"),
         "canonical_revenue_status": health.get("canonical_revenue_status"),
         "revenue_attribution_status": health.get("revenue_attribution_status"),
-        "missing_contact_created_at_count": health.get(
-            "missing_contact_created_at_count", 0
-        ),
+        # PR-ADS-180B-F1 (m4): None when the core did not read it — unknown,
+        # never 0. The cohort block publishes the same count
+        # (`cohort.contacts_without_created_at`); the audit holds them equal.
+        "missing_contact_created_at_count": health.get("missing_contact_created_at_count"),
         "country_spend_available": bool(core.get("country_spend_available")),
         "geo_country_mapping_status": core.get("geo_country_mapping_status"),
         "geo_country_source": health.get("geo_country_source"),

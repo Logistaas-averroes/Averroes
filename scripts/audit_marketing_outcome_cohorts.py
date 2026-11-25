@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -286,10 +287,12 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
             if (cohort.get("totals") or {}).get(k) is not None]
     out += [f"cohort.campaign_residual.{k}" for k in ("leads", "sqls")
             if (cohort.get("campaign_residual") or {}).get(k) is not None]
-    # PR-ADS-180B: the count of contacts with no created date is a count over
-    # the same funnel read, published with the cohort only.
-    if cohort.get("contacts_without_created_at") is not None:
-        out.append("cohort.contacts_without_created_at")
+    # PR-ADS-180B-F1 (m4): `cohort.contacts_without_created_at` is NOT scanned
+    # here: it is a table-wide data-quality disclosure (every canonical
+    # contact, no window), published whatever the verdict, exactly as
+    # `readiness.missing_contact_created_at_count` and the coverage notes
+    # publish it. Its copies are held equal by
+    # :func:`created_at_disclosure_problems` instead.
     # PR-ADS-180B: the Overview's acquisition-cohort funnel (all sources).
     out += acquisition_funnel_exposures(payload.get("lifecycle_acquisition_funnel"),
                                         published=False)
@@ -376,8 +379,9 @@ def acquisition_funnel_exposures(block, *, published: bool) -> list[str]:
                 if v is not None]
     elif totals is not None:
         out.append("lifecycle_acquisition_funnel.totals")
-    if block.get("contacts_without_created_at") is not None:
-        out.append("lifecycle_acquisition_funnel.contacts_without_created_at")
+    # PR-ADS-180B-F1 (m4): `contacts_without_created_at` is the cohort's
+    # table-wide disclosure, not a count of this block (see
+    # :func:`created_at_disclosure_problems`).
     if own == "published":
         out.append("lifecycle_acquisition_funnel.publication=published")
     return out
@@ -440,6 +444,10 @@ def acquisition_funnel_problems(payload: dict) -> list[str]:
     if own != status and not (own == "unavailable" and status == "published"):
         problems.append(f"lifecycle_acquisition_funnel is {own!r} under a {status!r} cohort")
     problems += acquisition_funnel_exposures(block, published=status == "published")
+    # PR-ADS-180B-F1 (m4): published whatever the verdict, so equal whatever it is.
+    if block.get("contacts_without_created_at") != cohort.get("contacts_without_created_at"):
+        problems.append("lifecycle_acquisition_funnel.contacts_without_created_at differs "
+                        "from the cohort's")
     if own != "published" or status != "published":
         return problems
     totals = block.get("totals") or {}
@@ -450,9 +458,54 @@ def acquisition_funnel_problems(payload: dict) -> list[str]:
                             f"!= cohort breakdown all_sources.{field} {slot.get(field)}")
         elif key != "contacts" and totals[key] > totals.get("contacts", 0):
             problems.append(f"lifecycle_acquisition_funnel.totals.{key} exceeds the contacts")
-    if block.get("contacts_without_created_at") != cohort.get("contacts_without_created_at"):
-        problems.append("lifecycle_acquisition_funnel.contacts_without_created_at differs "
-                        "from the cohort's")
+    return problems
+
+
+#: The coverage note that states the no-created-date count (the cohort
+#: service's ``coverage_notes``), as a pattern: its number is read back.
+_NO_CREATED_DATE_NOTE = re.compile(r"^(\d+) canonical contact\(s\) have no created date")
+
+
+def created_at_disclosure_problems(payload: dict) -> list[str]:
+    """PR-ADS-180B-F1 (m4) — the count of canonical contacts with no created
+    date is ONE table-wide figure (every contact, all sources, no window). It
+    is a data-quality disclosure, not a cohort figure, so it is published
+    whatever the cohort verdict — and every copy of it in one payload must be
+    the same value:
+
+    * ``cohort.contacts_without_created_at`` (None only when unread);
+    * ``readiness.missing_contact_created_at_count`` (mart views);
+    * ``lifecycle_acquisition_funnel.contacts_without_created_at`` (Overview);
+    * ``cohort.metadata.coverage_notes``: exactly one note naming it when it
+      is above 0, none when it is 0 or unknown, never another number.
+
+    Empty for a payload that carries no cohort block."""
+    cohort = payload.get("cohort")
+    if not isinstance(cohort, dict) or "contacts_without_created_at" not in cohort:
+        return []
+    value = cohort.get("contacts_without_created_at")
+    problems = []
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool)
+                              or value < 0):
+        problems.append(f"cohort.contacts_without_created_at {value!r} is not a count")
+    readiness = payload.get("readiness")
+    if isinstance(readiness, dict) and "missing_contact_created_at_count" in readiness \
+            and readiness["missing_contact_created_at_count"] != value:
+        problems.append(f"readiness.missing_contact_created_at_count "
+                        f"{readiness['missing_contact_created_at_count']!r} != "
+                        f"cohort.contacts_without_created_at {value!r}")
+    block = payload.get("lifecycle_acquisition_funnel")
+    if isinstance(block, dict) and block.get("contacts_without_created_at") != value:
+        problems.append(f"lifecycle_acquisition_funnel.contacts_without_created_at "
+                        f"{block.get('contacts_without_created_at')!r} != "
+                        f"cohort.contacts_without_created_at {value!r}")
+    notes = (cohort.get("metadata") or {}).get("coverage_notes") or []
+    stated = [int(m.group(1)) for m in (_NO_CREATED_DATE_NOTE.match(str(n)) for n in notes)
+              if m]
+    expected = [value] if isinstance(value, int) and value > 0 else []
+    if stated != expected:
+        problems.append(f"cohort.metadata.coverage_notes state {stated} contact(s) with no "
+                        f"created date; the cohort states {value!r}")
     return problems
 
 
@@ -571,6 +624,15 @@ def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
             a.holds(f"{w} {name} stale_disclosed",
                     "the published cohort declares its window end and, when "
                     "the funnel is stale, its as-of watermark")
+        # PR-ADS-180B-F1 (m4): the no-created-date disclosure, one value in
+        # every copy, published whatever the verdict.
+        disclosure = created_at_disclosure_problems(payload)
+        if disclosure:
+            a.broken(f"{w} {name} created_at_disclosure", "; ".join(disclosure))
+        elif "contacts_without_created_at" in (payload.get("cohort") or {}):
+            a.holds(f"{w} {name} created_at_disclosure",
+                    "the no-created-date count is one value in every copy "
+                    f"({(payload.get('cohort') or {}).get('contacts_without_created_at')!r})")
         if name == "dashboard/overview":
             # PR-ADS-180B: the Overview's acquisition-cohort funnel.
             acq = acquisition_funnel_problems(payload)

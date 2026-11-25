@@ -1702,6 +1702,14 @@ def _cohort_slots(outcomes: dict) -> tuple[dict, dict]:
     return campaign, dict(cohort.get("by_group") or {})
 
 
+def _disclosed_count(value) -> int | None:
+    """A count published whatever the cohort verdict (PR-ADS-180B-F1): the
+    integer read, or None when it was not read. Never 0 for unknown."""
+    if value is None or isinstance(value, bool):
+        return None
+    return int(value)
+
+
 def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
                            start_date=None, end_date=None) -> dict:
     """The cohort contract every mart response carries (PR-ADS-177A).
@@ -1765,11 +1773,17 @@ def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
                    **{f: _count(ga.get(f)) for f, _e in cohort_svc.STAGE_REACH_FIELDS}},
         # PR-ADS-180B: the funnel the totals above draw, in order, each stage
         # naming its total. A contact with no created date is in no window;
-        # how many there are (published with the count, None otherwise) is what
-        # makes every stage a lower bound when it is above zero.
+        # how many there are is what makes every stage a lower bound when it
+        # is above zero.
         "funnel_stages": [dict(s) for s in COHORT_FUNNEL_STAGES],
-        "contacts_without_created_at": (
-            _count(outcomes.get("missing_created_at")) if cohort is not None else None),
+        # PR-ADS-180B-F1 (m4): a TABLE-WIDE data-quality disclosure (every
+        # canonical contact, all sources, no window), not a cohort figure — so
+        # it is published whatever the verdict, as it already was in
+        # `readiness.missing_contact_created_at_count` and in
+        # `metadata.coverage_notes`. One figure, one value, in every copy
+        # (`audit_marketing_outcome_cohorts.created_at_disclosure_problems`).
+        # None only when the read failed: unknown, never 0.
+        "contacts_without_created_at": _disclosed_count(outcomes.get("missing_created_at")),
         "campaign_residual": {
             "label": CAMPAIGN_RESIDUAL_LABEL,
             "definition": ("Google Ads-sourced contacts created in the window "

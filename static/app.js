@@ -3128,6 +3128,15 @@ function dashActivityLowerBounds(a, stages) {
     } else if (Number(n) > 0) {
       out[s.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot and could belong to this window`;
     }
+    // PR-ADS-180B-F1: the server's own verdict on the count is republished,
+    // never overruled. A stage the server marks a lower bound
+    // (`count_is_bound: true`) is one even where the evidence above names no
+    // reason — e.g. a build whose coverage does not report the stage
+    // (`_stage_count_is_bound`). The page's own rules above still bound a
+    // stage the server states exact; they only ever add a bound.
+    if (!out[s.event] && s.count_is_bound === true) {
+      out[s.event] = "the server does not state this count complete: the evidence does not show every contact that reached this stage with an entry date";
+    }
   });
   return out;
 }
@@ -9081,6 +9090,9 @@ function acquisitionFunnelModel(data, opts) {
           slot: CHANNEL_STAGE_SLOTS[st.key], key: st.key, label: `Reached ${st.label}`,
           metric: funnelCountMetric(channelFunnelCount(totals[st.key]), missing),
           bound_reason: bound, sub: "of the contacts acquired, so far",
+          // PR-ADS-180B-F1 (m6): a page's note on one column (Countries: the
+          // residual inside Reached SQL). Drawn only under a published verdict.
+          notes: ((o.stageNotes || {})[st.key] || []).filter((n) => n && n.text),
         };
       }
       const rate = bound ? null : channelFunnelRate(totals[st.key], totals.contacts);
@@ -9148,7 +9160,7 @@ function martCohortFunnelHtml(cohort, opts) {
   const o = opts || {};
   const model = acquisitionFunnelModel(martCohortFunnelData(cohort), {
     head: "Leads · contacts acquired", headSub: o.headSub || "Google Ads-sourced",
-    reasonText: cohortFunnelReasonText, shares: false,
+    reasonText: cohortFunnelReasonText, shares: false, stageNotes: o.stageNotes,
   });
   const published = campaignSqlPublication(cohort).publish;
   return `
@@ -9164,8 +9176,43 @@ function martCohortFunnelHtml(cohort, opts) {
     </section>`;
 }
 
+// PR-ADS-180B-F1 (m5): the legend states the stage-reach rule as it is
+// (`marketing_outcome_cohort_service.stage_reached`, unchanged): a contact
+// counts at a stage when HubSpot records it entering that stage OR its
+// current lifecycle stage is that stage or a later one. So the columns are
+// not nested subsets: a contact whose stage moved back keeps the later stage
+// it entered without necessarily counting at the stages before it.
+/**
+ * PR-ADS-180B-F1 (m6) — the Countries funnel's Reached SQL column is the
+ * WHOLE Google Ads cohort (`cohort.totals.sqls`), the residual included; the
+ * SQLs card sums the listed markets only. This note says how many of the
+ * column are in the residual, read from the residual row of the SAME response
+ * (`residual`, an argument) and only where that row's SQL count is itself
+ * published (`cohortCountPublication`, the table cell's gate). Nothing is
+ * subtracted: a residual that is not published is said so in words, and a
+ * response with no residual row states no residual. Gated, like the funnel,
+ * by `campaignSqlPublication(cohort)`: unpublished, there is no note at all.
+ */
+function countryFunnelResidualNote(cohort, residual) {
+  if (!campaignSqlPublication(cohort).publish) return null;
+  const tail = "the SQLs card above counts the listed markets only";
+  if (!residual) {
+    return { tone: "bound", text: `This response carries no residual row, so how many of these are outside the listed markets is not stated; ${tail}.` };
+  }
+  const n = residual.sqls;
+  if (cohortCountPublication(cohort, residual).publish && Number.isInteger(n) && n >= 0) {
+    return { text: `Includes ${fmtCount(n)} in markets not listed or with no country (the residual row); ${tail}.` };
+  }
+  const why = cohortReasonText(residual.sqls_reason || residual.withheld_reason);
+  return { tone: "bound", text: `Includes contacts in markets not listed or with no country; their number is not published in this response${why ? ` (${String(why).replace(/\.\s*$/, "")})` : ""}. ${tail[0].toUpperCase()}${tail.slice(1)}.` };
+}
+
 const ACQUISITION_FUNNEL_LEGEND = "Each stage counts every contact of this cohort that "
-  + "has reached it so far, so a recent window keeps maturing. 'Customer stage' is the "
+  + "has reached it so far, so a recent window keeps maturing. A contact counts at a "
+  + "stage when HubSpot records it entering that stage, or when its current lifecycle "
+  + "stage is that stage or a later one. The columns are not nested subsets: a contact "
+  + "whose stage moved back can count at a later stage without counting at an earlier "
+  + "one, so a later column can exceed an earlier one. 'Customer stage' is the "
   + "HubSpot lifecycle stage, counted in contacts — never companies, never deals.";
 
 // Two rankings for one stage: who brings the most, and who converts best.
@@ -16707,7 +16754,9 @@ function renderRoasCountriesPage() {
     ${residualMode ? renderCountryResidualWarning(st) : ""}
     ${renderRoasCountrySummary(data)}
     ${martCohortFunnelHtml(data.cohort, { title: "Lifecycle funnel",
-      sub: "Google Ads-sourced HubSpot contacts created in this window, every country — the residual included, so not only the listed markets above — and how many have reached each stage so far" })}
+      sub: "Google Ads-sourced HubSpot contacts created in this window, every country — the residual included, so not only the listed markets above — and how many have reached each stage so far",
+      stageNotes: { reached_sql: [countryFunnelResidualNote(data.cohort,
+        (data.rows || []).find((r) => r && r.is_residual) || null)] } })}
     <section class="dash-panel dash-anim ctry-leaderboard-panel" aria-label="Countries">
       <div class="dash-panel__header">
         <div>

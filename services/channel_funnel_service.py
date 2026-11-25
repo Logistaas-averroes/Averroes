@@ -79,6 +79,10 @@ SOURCE_LABELS = {
 STAGE_NOTE = (
     "A contact counts for a stage when HubSpot shows it got there: a date it "
     "entered the stage, or a current lifecycle stage at or beyond it. "
+    # PR-ADS-180B-F1 (m5): the consequence of that rule, stated.
+    "The stage columns are not nested subsets: a contact whose stage moved "
+    "back can count at a later stage without counting at an earlier one, so "
+    "a later column can exceed an earlier one. "
     "'Customer stage' counts contacts whose lifecycle stage is Customer; it "
     "is not the number of customer companies shown on the revenue pages.")
 CHANNEL_NOTE = (

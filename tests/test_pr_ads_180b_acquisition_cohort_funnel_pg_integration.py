@@ -160,7 +160,10 @@ def test_03_an_incomplete_contact_sync_withholds_every_stage_on_every_surface(
     for name, p in payloads.items():
         assert p["cohort"]["sql_status"] == "withheld", name
         assert all(p["cohort"]["totals"][f] is None for f in STAGES), name
-        assert p["cohort"]["contacts_without_created_at"] is None, name
+        # PR-ADS-180B-F1 (m4): the table-wide no-created-date count is a
+        # disclosure, published whatever the verdict, one value in every copy.
+        assert p["cohort"]["contacts_without_created_at"] == 0, name
+        assert audit.created_at_disclosure_problems(p) == [], name
         assert audit.mart_withheld_exposures(p) == [], (name, audit.mart_withheld_exposures(p))
     f = payloads["dashboard/overview"]["lifecycle_acquisition_funnel"]
     assert f["publication"] == {"status": "withheld", "reason": "source_bootstrap_incomplete"}
@@ -238,17 +241,68 @@ def _outside_fixture():
     return start, end
 
 
+def _edge_fixture(cluster, start, end):
+    """PR-ADS-180B-F1 (m2): the edges of the one narrowing, on the real table.
+
+    The window's end is the database's own ``end::date + 1 day`` instant
+    (read back, so the case holds in any session time zone):
+
+    * ``edge-last-day``  stage lead, undated, created ONE MINUTE before that
+      instant — on the window's last day: counted;
+    * ``edge-no-created`` stage lead, undated, NULL ``created_at``: never
+      ruled out, counted;
+    * ``edge-day-after`` stage lead, undated, created AT that instant — the
+      day after the window: ruled out;
+    * ``edge-recovered`` stage lead, created before the window, NO direct Lead
+      date, its Lead date recovered from lifecycle history (also before the
+      window): it has an effective entry date, so it is not undated.
+    """
+    from datetime import timedelta
+    from db import writers
+    with cluster.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT (%s::date + INTERVAL '1 day')::timestamptz", (end,))
+        boundary = cur.fetchone()[0]
+    early = _at(start - timedelta(days=40))
+    base = {"lifecycle_stage": "lead", "hs_analytics_source": "ORGANIC_SEARCH"}
+    writers.upsert_hubspot_contact_funnel([
+        {**base, "contact_id": "edge-last-day", "created_at": boundary - timedelta(minutes=1),
+         "last_modified_at": boundary - timedelta(minutes=1)},
+        {**base, "contact_id": "edge-no-created", "created_at": None,
+         "last_modified_at": boundary},
+        {**base, "contact_id": "edge-day-after", "created_at": boundary,
+         "last_modified_at": boundary},
+        {**base, "contact_id": "edge-recovered", "created_at": early, "last_modified_at": early},
+    ])
+    with cluster.connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO hubspot_lifecycle_stage_history
+                   (contact_id, funnel_event, entered_at, hubspot_property,
+                    hubspot_value, hubspot_source_type, lifecycle_rule_version,
+                    recovery_run_id)
+               VALUES ('edge-recovered', 'lead', %s, 'lifecyclestage', 'lead',
+                       'CRM_UI', 'v1', 'pr-ads-180b-f1-fixture')""",
+            (_at(start - timedelta(days=30)),))
+    return boundary
+
+
 def test_05_the_undated_reach_counts_outside_the_windows_rows_on_the_real_table(live_db):
     from db import crm_funnel_repository as repo
     start, end = _outside_fixture()
+    _edge_fixture(live_db, start, end)
     window_rows = repo.fetch_funnel_contacts(start, end)["rows"]
-    assert len(window_rows) == 10                     # the seven are not in them
+    assert len(window_rows) == 10                     # none of the others is in them
+    # The recovered Lead date is read: the contact has an effective date.
+    every = {r["contact_id"]: r for r in repo.fetch_funnel_contacts(None, None)["rows"]}
+    assert every["edge-recovered"]["date_entered_lead"] is not None
     read = repo.fetch_undated_stage_reach(start, end)
     assert read["available"] is True
-    # Lead: 4 + 3 undated, could belong; "late" is ruled out by its creation.
-    assert read["counts"] == {"lead": 7, "mql": 0, "sql": 0, "opportunity": 0, "customer": 0}
-    # All Time rules nothing out.
-    assert repo.fetch_undated_stage_reach(None, None)["counts"]["lead"] == 8
+    # Lead: 4 + 3 undated, could belong; plus edge-last-day (created on the
+    # window's last day) and edge-no-created (no created date is never ruled
+    # out). "late" and edge-day-after are ruled out by their creation;
+    # edge-recovered is not undated.
+    assert read["counts"] == {"lead": 9, "mql": 0, "sql": 0, "opportunity": 0, "customer": 0}
+    # All Time rules nothing out: 4 + 3 + late + the three undated edges.
+    assert repo.fetch_undated_stage_reach(None, None)["counts"]["lead"] == 11
 
 
 def test_06_the_activity_lead_count_is_a_lower_bound_through_the_real_reads(live_db):
