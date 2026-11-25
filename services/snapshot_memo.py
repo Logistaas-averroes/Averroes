@@ -9,10 +9,14 @@ population (``canonical_revenue_service.load_won_deals``). On 25 Nov 2026
 that made ``reader_cutover`` 477 s and ``marketing_outcome_cohorts`` 430 s
 of a 900 s per-audit limit.
 
-Caching those inputs across pages is only sound if every page would have
-read the same database: a core built from one snapshot joined to a page's
-own reads from another is a payload no request ever served (``docs/59``
-§11.5). So the cache lives INSIDE one snapshot and dies with it:
+Caching those inputs across pages is only sound if every page reads the
+same database: a core built from one snapshot joined to a page's own reads
+from another is a combination of reads nothing ever produced (``docs/59``
+§11.5). So the cache lives INSIDE one snapshot and dies with it. What the
+audits then certify is a snapshot-consistent build of each page — not the
+statement-by-statement READ COMMITTED reads of a web request, whose torn
+reads (a sync committing mid-request) certification cannot see
+(``docs/62`` §3.3):
 
 * :func:`certification_window` opens ONE ``REPEATABLE READ, READ ONLY``
   transaction that every read in the block shares
@@ -38,10 +42,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import functools
+import logging
 from collections import Counter
 from contextvars import ContextVar
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+
+log = logging.getLogger(__name__)
 
 _SCOPE: ContextVar = ContextVar("certification_memo_scope", default=None)
 
@@ -146,7 +153,12 @@ def certification_window():
     with stack:
         try:
             pin = stack.enter_context(pinned_read_snapshot())
-        except Exception:  # noqa: BLE001 — unpinned is the pre-179A behaviour
+        except Exception as exc:  # noqa: BLE001 — unpinned is the pre-179A behaviour
+            # E.g. a migration held the schema lock past the window's bound
+            # (``db.connection.WINDOW_SCHEMA_LOCK_WAIT_SECONDS``).
+            log.warning("certification window runs unpinned (every read on its own, "
+                        "nothing cached): the snapshot could not be opened: %s",
+                        type(exc).__name__)
             pin = None
         if pin is None:
             # No shared universe either: without one database snapshot, a
@@ -160,3 +172,13 @@ def certification_window():
             yield scope
         finally:
             _SCOPE.reset(token)
+
+
+def refused_reads(scope: MemoScope | None) -> list:
+    """Every ``PinnedSnapshotError`` raised inside the window ``scope`` ran in
+    — recorded on its snapshot as it was raised, so a reader that caught and
+    swallowed it cannot hide it (PR-ADS-179A-F1). An audit reports a window
+    with any as ``cannot_check``: what it read is not proven to be the
+    snapshot. Empty for an unpinned window (None)."""
+    pin = getattr(scope, "pin", None)
+    return list(getattr(pin, "violations", None) or [])

@@ -7333,3 +7333,42 @@ removed.
   arguments, a dropped payload (Pipeline / the Meta table / Overview), one
   snapshot for the whole audit, any SET TRANSACTION accepted, a universe
   shared without a snapshot, and a key that ignores the window.
+
+## PR-ADS-179A-F1 — truth audit round 1
+
+`docs/62` §3.2, §3.3 and §6.2. On top of `91290f7`. The verdict was merge with
+minors: no cross-window leak, and reports identical between base and head.
+
+* **A window deadlocked with `init_db` on deploy (fixed).** A window holds
+  AccessShareLock on every table it has read; `init_db`'s startup DDL needs
+  AccessExclusiveLock, all in one transaction. Mid-window, PostgreSQL broke
+  the cycle by aborting one side. Either the audit's read failed (NOT
+  CERTIFIED) or `init_db` logged "init_db failed" and the release ran
+  without its migration.
+  * Both now take the advisory lock `db.connection.SCHEMA_LOCK_KEY` before
+    any table lock. Windows take it shared, at session level, before their
+    snapshot, bounded at 60 s, and run unpinned past that. `init_db` takes it
+    exclusive as its first statement, bounded at 180 s. Neither waits while
+    holding a table lock, so no cycle is possible.
+  * Past its bound, `init_db` raises `SchemaMigrationBlocked`, logged at
+    ERROR. The lifespan hook fails, the deploy fails and the old release
+    stays. It never runs without its schema.
+* **A reader that swallows its own failed statement no longer poisons the
+  window.** A clean exit in the aborted state rolls back to the reader's
+  savepoint, as `get_conn`'s commit does outside a window.
+* **Fail closed.** Every `PinnedSnapshotError` is recorded on the pin as it
+  is raised. Each audit reports a window with any refusal as exit 2: cannot
+  check, unavailable, or a page not run. This holds even if a reader
+  swallowed the error; on `91290f7` such a window certified with exit 0.
+  * The mode check also covers `sql.Composed`, `bytes` and `executemany`.
+  * A statement that ends the transaction is caught when it runs, and every
+    later read in that window is refused.
+  * A refusal raised outside any `try` crashes the audit, which is NOT
+    CERTIFIED.
+* **Docs.** Certification checks a snapshot-consistent build of each page.
+  Web requests still read per statement under READ COMMITTED, so a torn read
+  inside one request is invisible to certification by construction.
+  `reader_cutover`'s closed-won universe is read outside every pin.
+* **Tests.** `test_pr_ads_179a_certification_runtime.py` gains 08_a–10_b, 17
+  cases in all. Each new case fails on `91290f7`; 08_a fails with the real
+  `DeadlockDetected`. Each also fails under a named mutation (M14–M17).

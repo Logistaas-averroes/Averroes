@@ -105,8 +105,9 @@ own reads. Each is its own transaction and, under READ COMMITTED, its own
 snapshot per statement.
 
 So no page is one database snapshot today. A cached core shared across
-pages would join one page's reads to another page's instant, and the audit
-would then check a payload no request served.
+pages would join one page's reads to another page's instant. The audit would
+then check a combination of reads that neither a request nor a snapshot
+ever produced.
 
 Pinning everything to one transaction is not free either. Readers open
 their own transactions: `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ,
@@ -133,12 +134,71 @@ block's start. Inside the block (a ContextVar, so this context only), every
   ONLY]` or `SET TRANSACTION READ ONLY` is already satisfied, so it is not
   re-sent.
 * any other mode raises `PinnedSnapshotError`: READ COMMITTED, SERIALIZABLE,
-  READ WRITE, `BEGIN`, `COMMIT` or a bare `ROLLBACK`. This fails closed and
-  is never a silently weaker read. A builder that raises becomes
-  `cannot_check` (exit 2) in every audit, never a pass.
+  READ WRITE, `BEGIN`, `COMMIT` or a bare `ROLLBACK`. The check applies to a
+  `str`, `bytes` or `psycopg2.sql` statement, through `execute` or
+  `executemany`. This fails closed and is never a silently weaker read.
+* a statement that ends the transaction anyway (`SELECT 1; COMMIT`) is caught
+  when it returns. The snapshot is then marked broken, and every later
+  statement and `get_conn()` in it is refused.
+* a reader that catches its own failed statement leaves the transaction
+  aborted. On the reader's clean exit, the view rolls back to the reader's
+  savepoint (PR-ADS-179A-F1). Outside a window, `get_conn`'s commit already
+  rolls back an aborted transaction quietly, so this matches it.
+* every refusal is **recorded on the snapshot as it is raised**
+  (`_Pin.violations`). After each window, each audit reads that record
+  (`snapshot_memo.refused_reads`). A window with any refusal is reported
+  `cannot_check` (cohorts), "unavailable" (campaigns) or a page not run
+  (`reader_cutover`), and each of those is exit 2. This holds even when a
+  reader caught every exception and published "unavailable" instead.
+  `test_10_b` shows a swallowed refusal certifying with exit 0 on `91290f7`.
+* a `PinnedSnapshotError` raised outside any `try` in the audit is different.
+  For example, `reader_cutover` calls `load_won_deals` directly in its window
+  loop. That error ends the audit's process, and the platform certification
+  records the audit as **crashed**, which makes the day NOT CERTIFIED rather
+  than exit 2. Either way, it is never a pass.
 * the transaction is READ ONLY, so PostgreSQL itself refuses a write.
 * on exit, the transaction is rolled back and the connection is returned. A
   broken connection is closed, not pooled.
+
+**Locks, and the deploy migration (PR-ADS-179A-F1).** A window holds
+AccessShareLock on every table it has read until it ends. `init_db` runs the
+startup DDL from the lifespan hook (`api/server.py`): one transaction of 49
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` and many `CREATE … IF NOT EXISTS`,
+which take AccessExclusiveLock even when there is nothing to add.
+
+Run mid-window, the two closed a lock cycle. `init_db` held `leads` and
+waited for a table the window had read; the window then read `leads`.
+PostgreSQL aborted one side. If it aborted the audit's read, the day was NOT
+CERTIFIED for no data reason. If it aborted `init_db`, it only logged
+"init_db failed" and **the new release ran without its schema migration**.
+`test_08_a` reproduces it on `91290f7` as `DeadlockDetected`.
+
+Both sides now take one advisory lock, `SCHEMA_LOCK_KEY`, before any table
+lock:
+
+* **A window** takes it SHARED at session level, in its own short
+  transaction, before its snapshot is taken. It waits at most
+  `WINDOW_SCHEMA_LOCK_WAIT_SECONDS` (60 s) for a running migration. Past that
+  it runs unpinned, which is the pre-179A behaviour: every read on its own,
+  nothing cached, and a warning logged.
+* **`init_db`** takes it EXCLUSIVE as the first statement of its DDL
+  transaction. It waits at most `SCHEMA_LOCK_WAIT_SECONDS` (180 s) for the
+  windows already open. PostgreSQL queues lock requests in order, so a window
+  that starts later waits behind it, and the wait is normally at most one
+  window. While it waits it holds no table lock, so it blocks neither the
+  window nor any web request.
+* **Past the bound, `init_db` raises `SchemaMigrationBlocked`** and logs at
+  ERROR. The lifespan hook then fails, the instance does not start, and
+  Render's deploy health check fails the deploy and keeps the old release.
+  It is never a release running without its schema.
+
+Neither side ever waits while holding a table lock the other needs, so no
+cycle is possible. On this fixture the longest window is about 6 s; at
+production's measured 5.5–6.3× slowdown that is about 40 s. 180 s is 4–5
+times that, and well inside Render's deploy health-check window. The
+health-check window is documented as minutes, not seconds; I did not
+re-measure it from this session. `test_08_a` to `test_08_c` cover the
+protocol, the loud bound and the window-side bound.
 
 Outside a pinned block, `get_conn()` is unchanged: every web request, every
 sync and every other audit. Threads do not inherit the pin.
@@ -180,8 +240,22 @@ The rules:
 Inside one REPEATABLE READ snapshot, with `now` fixed, each of these
 functions is a pure function of its arguments. The same holds for config
 and environment, which are constant for an audit's life. So a memoised value
-is the value a fresh call would return, and timing fields
-(`generated_at`) are the only exception.
+is the value a fresh call in the same snapshot would return, and timing
+fields (`generated_at`) are the only exception.
+
+**What this certifies, exactly (PR-ADS-179A-F1).** Certification now checks
+a **snapshot-consistent build** of each page: every read the page makes,
+taken as of one instant. A web request does not run in a window. It still
+reads statement by statement under READ COMMITTED, so its reads can straddle
+a sync's commit (the PR-ADS-161E / 173A class of torn read).
+
+When nothing commits during a request, the request serves exactly what
+certification checked. When something does commit mid-request, it may not.
+Certification cannot see such a torn read by construction. Before 179A it
+saw one only by chance, when a commit happened to fall inside the audit's own
+page build. The guard against torn reads is still `@single_snapshot` and the
+per-reader REPEATABLE READ transactions; this PR neither strengthens nor
+weakens them.
 
 ### 3.4 The audits
 
@@ -194,26 +268,29 @@ inside its own `certification_window()`:
   commits mid-audit can no longer cause a false mismatch.
   `global_population_split` stays outside, because it belongs to no window.
 * **`reader_cutover`**: the reader-contract read, the 13 pages, the settled
-  publication and the window checks. The closed-won universe is still the one
-  read once at the start and shared with the truth service, because that is
-  the audit's design. Inside a window, every page joins that outer
-  `one_snapshot`. The no-writes fingerprint is still taken before and after,
-  outside any pin.
+  publication and the window checks. The closed-won universe is **read
+  outside every pin**: once, at the start, and shared with the truth service,
+  because that is the audit's design and unchanged by 179A. Inside a window,
+  every page joins that outer `one_snapshot`. So in this audit the won-deal
+  population comes from the start of the audit, and every other read comes
+  from the window's snapshot. The no-writes fingerprint is still taken before
+  and after, outside any pin.
 * **`campaigns`**: the five surfaces and the drawer population. `run()` now
   takes **one instant for the whole audit**. Before, every builder read the
   wall clock on its own, and a wall-clock call is never memoised.
 
 Nothing is carried from one window to the next. Each window has its own
 transaction and its own memo, and it sees whatever committed before it
-started.
+started. A window in which the snapshot refused any read is reported exit 2
+(§3.2).
 
 ### 3.5 Alternatives not taken
 
 * **Memoise across the per-page snapshots** (`docs/59` §11.5 as first
   sketched). This is unsound, as explained in §3.1.
 * **One snapshot for the whole audit.** This would be cheaper, but it gives
-  every window one instant and holds a transaction for minutes. A window
-  should describe what a request at that window's instant would have served.
+  every window one instant and holds a transaction and its locks for minutes.
+  It would also make a migration wait minutes (see "Locks" in §3.2).
 * **Memoise the page builders themselves.** This would hide a page's own
   code from the audit when a page is built twice: Pipeline directly and
   through Dashboard → Deals. Every page builder still runs every time, and
@@ -285,8 +362,9 @@ served the current period's population.
 
 ## 6. Guards
 
-All tests are in `tests/test_pr_ads_179a_certification_runtime.py`: 10
-PostgreSQL cases and 1 case that needs no database. The module is in CI's
+All tests are in `tests/test_pr_ads_179a_certification_runtime.py`. This
+section covers the first 11 cases: 10 PostgreSQL cases and 1 that needs no
+database. §6.2 covers the six F1 cases. The module is in CI's
 PG step and its did-run list.
 
 | Case | Proves | Fails on `ea6a7ae` | Fails under |
@@ -344,6 +422,28 @@ On the final tree, each mutation was applied alone and the whole module
 On `ea6a7ae`, all 11 cases fail: the pinned snapshot and
 `services.snapshot_memo` are missing.
 
+### 6.2 PR-ADS-179A-F1 (truth audit round 1)
+
+Six cases were added (17 in the module, 16 needing PostgreSQL). Each fails
+on `91290f7`, and each fails under a named mutation of the fixed tree:
+
+| Case | Proves | On `91290f7` | Fails under |
+| --- | --- | --- | --- |
+| 08_a | `init_db` run mid-window (another session) neither deadlocks nor fails. It waits holding nothing, every window read succeeds (including one of `leads`, which `init_db` ALTERs first), and the migration completes after the window ends | `DeadlockDetected` on the window's `leads` read | M14 |
+| 08_b | a window held past `SCHEMA_LOCK_WAIT_SECONDS` makes `init_db` raise `SchemaMigrationBlocked` and log at ERROR, and the window's reads are unaffected | no bound exists | M14 |
+| 08_c | a window that would start during a migration waits, bounded, then runs unpinned with a warning | no schema lock | — |
+| 09_a | a reader that swallows its own failed statement does not poison the window: the next read and the next page succeed | `PinnedSnapshotError` from the reader's clean exit | M15 |
+| 10_a | refusals of `sql.Composed`, `bytes` and `executemany` statements are recorded even when swallowed. A statement that ends the transaction is caught when it runs: the next statement in the same block never runs outside the snapshot, and the window refuses every later read | `_Pin` has no record | M17 |
+| 10_b | in all three audits, a refusal any reader swallowed makes every window exit 2 (named as the snapshot's), and nothing else | **exit 0**: the swallowed refusal certified | M16 (cohort audit) |
+
+* **M14**: `init_db` takes no schema lock.
+* **M15**: a swallowed reader error is not rolled back.
+* **M16**: the cohort audit ignores the snapshot's refusals.
+* **M17**: a statement that ends the pinned transaction is not detected when
+  it runs. A first version of 10_a did not catch M17, because the block's
+  RELEASE backstop still raised. It now asserts that the next statement
+  never ran.
+
 ## 7. What did not change, and what is left
 
 * No check, window, payload or audit was removed. No gate changed. No
@@ -356,6 +456,11 @@ On `ea6a7ae`, all 11 cases fail: the pinned snapshot and
   and `association_scan_max_age_hours` still re-parse `config/thresholds.yaml`
   on every won-deal read. That is a follow-up if needed; it is not done here,
   because it changes a production reader outside this PR's scope.
-* **Long transaction.** A window holds one READ ONLY transaction for its
-  duration: seconds here, expected under a minute in production. It holds
-  back vacuum's horizon for that long and takes no locks.
+* **Long transaction, and its locks.** A window holds one READ ONLY
+  transaction for its duration: seconds here, expected under a minute in
+  production. It holds back vacuum's horizon for that long. It also holds
+  AccessShareLock on every table it has read, plus the shared schema lock.
+  These conflict only with DDL. The only DDL is `init_db`, which waits on the
+  schema lock while holding nothing (§3.2). Any future DDL path must take
+  `SCHEMA_LOCK_KEY` exclusive first in the same way, or it can deadlock with
+  a window.

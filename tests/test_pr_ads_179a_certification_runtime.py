@@ -544,3 +544,244 @@ def test_07_without_a_pinned_snapshot_a_window_changes_nothing(monkeypatch):
         assert scope is None and crs._SNAPSHOT.get() is None
         reader("ytd", now=now)
     assert calls == ["ytd", "ytd", "ytd"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-179A-F1 — truth audit round 1
+# ═════════════════════════════════════════════════════════════════════════════
+def _init_db_in_another_session(done: dict):
+    """``init_db()`` as the deploy's lifespan hook runs it: another session,
+    another thread. Records its outcome and the monotonic instant it ended."""
+    import threading
+    import time
+
+    def run():
+        from db.schema import init_db
+        try:
+            init_db()
+            done["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            done["error"] = exc
+        done["at"] = time.monotonic()
+    t = threading.Thread(target=run)
+    t.start()
+    return t
+
+
+def _read_legacy_leads() -> int:
+    """A reader of a table ``init_db`` ALTERs FIRST (``leads``) and that the
+    window has not read yet — the order that closes the lock cycle."""
+    from db.connection import get_conn
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM leads")
+        return cur.fetchone()[0]
+
+
+def test_08_a_init_db_on_deploy_neither_deadlocks_with_nor_abandons_a_window(ready, caplog):
+    """F1 item 1. A window holds AccessShareLock on every table it has read
+    until it ends; ``init_db``'s DDL needs AccessExclusiveLock on them, in one
+    transaction. Run mid-window it used to close a lock cycle: PostgreSQL
+    aborted one side — the audit's read (a NOT CERTIFIED day) or the
+    migration (logged ``init_db failed``; the release ran WITHOUT its schema).
+    Now ``init_db`` waits, holding nothing, until the window ends; the
+    window's reads all succeed; the migration then completes."""
+    import logging
+    import time
+    from services.snapshot_memo import certification_window
+    now = datetime.now(tz=timezone.utc)
+    done: dict = {}
+    with caplog.at_level(logging.INFO):
+        with certification_window() as scope:
+            assert scope is not None
+            first = _mart(now=now)
+            deploy = _init_db_in_another_session(done)
+            time.sleep(2.5)            # past deadlock_timeout (1 s)
+            leads = _read_legacy_leads()
+            country = _mart(view="country", now=now)
+            settled = _mart(now=now, settled=True)
+            assert "ok" not in done and "error" not in done, \
+                "init_db must wait for the window, not run inside it"
+            closed_at = time.monotonic()
+        deploy.join(60)
+    assert not deploy.is_alive()
+    assert done.get("ok") is True, done
+    assert done["at"] >= closed_at
+    assert not [r for r in caplog.records if "init_db failed" in r.getMessage()]
+    assert leads >= 2
+    for payload in (first, country, settled):
+        assert payload["cohort"]["sql_status"] == "published"
+    assert country["summary"]["sqls"] == first["summary"]["sqls"]
+
+
+def test_08_b_a_window_longer_than_the_bound_makes_init_db_fail_loudly(
+        ready, monkeypatch, caplog):
+    """The bound: a window held past ``SCHEMA_LOCK_WAIT_SECONDS`` makes
+    ``init_db`` RAISE (``SchemaMigrationBlocked`` — the lifespan hook fails
+    and the new release does not start) and log at ERROR. It never returns
+    as if the schema were applied, and never takes a lock inside the window."""
+    import logging
+    import time
+    import db.schema as schema
+    from services.snapshot_memo import certification_window
+    monkeypatch.setattr(schema, "SCHEMA_LOCK_WAIT_SECONDS", 1)
+    now = datetime.now(tz=timezone.utc)
+    done: dict = {}
+    with caplog.at_level(logging.WARNING, logger="db.schema"):
+        with certification_window():
+            before = _mart(now=now)
+            deploy = _init_db_in_another_session(done)
+            deploy.join(30)
+            assert not deploy.is_alive()
+            assert _read_legacy_leads() >= 2
+            assert _mart(view="country", now=now)["cohort"]["sql_status"] == "published"
+    assert isinstance(done.get("error"), schema.SchemaMigrationBlocked), done
+    assert "ok" not in done
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors and "certification" in errors[-1].getMessage()
+    assert before["cohort"]["sql_status"] == "published"
+    schema.init_db()                     # no window: the migration applies
+    time.sleep(0)
+
+
+def test_08_c_a_window_waits_for_a_running_migration_then_runs_unpinned(
+        ready, monkeypatch, caplog):
+    """The other side: a window that would start while a migration holds the
+    schema lock waits for it (bounded), and past the bound runs exactly as
+    before 179A — unpinned, nothing cached — rather than read mid-DDL."""
+    import logging
+    import db.connection as connection
+    from services.snapshot_memo import certification_window
+    monkeypatch.setattr(connection, "WINDOW_SCHEMA_LOCK_WAIT_SECONDS", 1)
+    holder = ready.connect()
+    try:
+        with holder.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (connection.SCHEMA_LOCK_KEY,))
+        with caplog.at_level(logging.WARNING):
+            with certification_window() as scope:
+                assert scope is None
+                assert _count_contacts_via_reader() > 0
+        assert any("unpinned" in r.getMessage() for r in caplog.records)
+    finally:
+        holder.rollback()
+        holder.close()
+    with certification_window() as scope:
+        assert scope is not None
+
+
+def test_09_a_reader_that_swallows_its_own_error_does_not_poison_the_window(ready):
+    """F1 item 2. A reader catches its failed statement and returns None — as
+    every reader may outside a window, where ``get_conn``'s commit quietly
+    rolls an aborted transaction back. Inside a window the reader's
+    savepoint is rolled back the same way; the next read succeeds."""
+    import psycopg2
+    from db.connection import current_read_snapshot, get_conn
+    from services.snapshot_memo import certification_window
+
+    def swallowing_reader():
+        with get_conn() as conn, conn.cursor() as cur:
+            try:
+                cur.execute("SELECT * FROM no_such_table_179a")
+            except psycopg2.Error:
+                return None
+        return "unreachable"
+
+    now = datetime.now(tz=timezone.utc)
+    with certification_window() as scope:
+        assert swallowing_reader() is None
+        assert _count_contacts_via_reader() > 0
+        assert _mart(now=now)["cohort"]["sql_status"] == "published"
+        assert current_read_snapshot().violations == []
+    assert scope is not None
+
+
+def test_10_a_a_refused_statement_a_reader_swallowed_still_fails_the_window(ready):
+    """F1 item 3. A reader that catches EVERY exception would turn a refused
+    statement into "unavailable" — a withheld surface the audit would pass.
+    The refusal is recorded on the snapshot itself. A statement that ENDS the
+    pinned transaction (in a multi-statement string, as bytes, through
+    ``executemany``) is caught when it runs, and every later read in the
+    window is refused — never silently run outside the snapshot."""
+    from psycopg2 import sql
+    from db.connection import PinnedSnapshotError, current_read_snapshot, get_conn
+    from services.snapshot_memo import certification_window
+
+    def swallowed(statement, many=False):
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                (cur.executemany(statement, [()]) if many else cur.execute(statement))
+        except Exception:  # noqa: BLE001 — the reader under test swallows all
+            return "unavailable"
+        return "ran"
+
+    with certification_window():
+        pin = current_read_snapshot()
+        assert swallowed(sql.SQL("SET TRANSACTION ISOLATION LEVEL {}").format(
+            sql.SQL("READ COMMITTED"))) == "unavailable"
+        assert swallowed(b"COMMIT") == "unavailable"
+        assert swallowed("COMMIT", many=True) == "unavailable"
+        assert len(pin.violations) == 3, pin.violations
+        assert _count_contacts_via_reader() > 0          # the snapshot is intact
+
+        ran_outside = []
+
+        def same_block_after_commit():
+            with get_conn() as conn, conn.cursor() as cur:
+                try:
+                    cur.execute("SELECT 1; COMMIT")
+                except Exception:  # noqa: BLE001 — swallowed
+                    pass
+                cur.execute("SELECT current_setting('transaction_isolation')")
+                ran_outside.append(cur.fetchone()[0])
+        # The read after the COMMIT, in the SAME block, would run in a new READ
+        # COMMITTED transaction — outside the snapshot. It is refused when it
+        # is sent, not only when the block's savepoint fails to release.
+        with pytest.raises(PinnedSnapshotError):
+            same_block_after_commit()
+        assert ran_outside == [], f"a read ran outside the snapshot: {ran_outside}"
+        assert pin.broken and len(pin.violations) >= 4, pin.violations
+        with pytest.raises(PinnedSnapshotError):
+            _count_contacts_via_reader()                 # nothing runs after that
+
+
+def test_10_b_every_audit_reports_a_swallowed_refusal_as_cannot_check(ready, monkeypatch):
+    """The audits read the snapshot's record: a refusal any reader swallowed
+    makes the window ``cannot_check`` (exit 2) — named as the snapshot's —
+    while the window's other reads still succeed."""
+    from analysis.business_windows import WINDOW_KEYS
+    from psycopg2 import sql
+    from db import revenue_repository as repo
+    from db.connection import current_read_snapshot, get_conn
+    from scripts import audit_campaigns_page_certification as camp
+    from scripts import audit_customer_revenue_reader_cutover as reader
+    from scripts import audit_marketing_outcome_cohorts as cohorts
+    real = repo.fetch_campaign_country_spend
+
+    def poisoned(*a, **k):
+        if current_read_snapshot() is not None:
+            try:
+                with get_conn() as conn, conn.cursor() as cur:
+                    cur.execute(sql.SQL("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            except Exception:  # noqa: BLE001 — swallowed, as a careless reader would
+                pass
+        return real(*a, **k)
+    monkeypatch.setattr(repo, "fetch_campaign_country_spend", poisoned)
+    now = datetime.now(tz=timezone.utc)
+
+    a, report = cohorts.run(now)
+    assert a.violations == [] and a.exit_code == 2
+    # Every window is unavailable for that reason — and for nothing else.
+    assert {u.split("]")[0] + "]" for u in a.unavailable} == \
+        {f"[business:{w}]" for w in WINDOW_KEYS}, a.unavailable
+    assert all("pinned snapshot" in u for u in a.unavailable)
+    assert all(set(w["surfaces"]) == MARKETING_PAYLOADS for w in report["business_windows"])
+
+    _, rep = reader.run(now)
+    assert rep["exit_code"] == 2 and rep["violations"] == []
+    assert {p["page"] for p in rep["pages_not_run"]} == {"pinned_snapshot"}
+    assert {p["window"] for p in rep["pages_not_run"]} >= set(WINDOW_KEYS)
+
+    f, per_window = camp.run(tuple(WINDOW_KEYS), now=now)
+    assert f.exit_code == 2 and f.violations == []
+    assert {u.split(":")[0] for u in f.unavailable} == \
+        {f"pinned_snapshot[{w}]" for w in WINDOW_KEYS}, f.unavailable
+    assert all(per_window[w]["available"] for w in WINDOW_KEYS)

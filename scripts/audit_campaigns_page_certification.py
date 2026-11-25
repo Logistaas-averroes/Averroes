@@ -679,16 +679,26 @@ def run(windows, *, now=None) -> tuple[Findings, dict]:
     # the wall clock on its own), and each window read inside ONE snapshot
     # (``services.snapshot_memo.certification_window``): the settled view,
     # Dashboard → Campaigns, Overview, the through-today view and the drawers
-    # see the database at one instant, and the inputs they share are built
-    # once per window. Nothing is carried from one window to the next.
+    # read the database as of one instant, and the inputs they share are
+    # built once per window. Nothing is carried from one window to the next.
+    # PR-ADS-179A-F1: that certifies a snapshot-consistent build of each page;
+    # a web request reads per statement (READ COMMITTED), so a torn read inside
+    # one request is invisible here by construction. A read the snapshot
+    # refused, even one a reader swallowed, makes the window unavailable.
     from datetime import datetime, timezone  # noqa: PLC0415
 
-    from services.snapshot_memo import certification_window  # noqa: PLC0415
+    from services.snapshot_memo import (  # noqa: PLC0415
+        certification_window, refused_reads,
+    )
     now = now or datetime.now(tz=timezone.utc)
     per_window = {}
     for w in windows:
-        with certification_window():
+        with certification_window() as scope:
             per_window[w] = audit_window(w, f, now=now)
+        for refusal in refused_reads(scope):
+            f.unavailable_now(f"pinned_snapshot[{w}]",
+                              f"a read in this window was refused by its pinned "
+                              f"snapshot: {refusal}"[:300])
     return f, per_window
 
 

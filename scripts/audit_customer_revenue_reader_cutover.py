@@ -1667,7 +1667,9 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
     from analysis.business_windows import WINDOW_KEYS  # noqa: PLC0415
     from services import canonical_customer_revenue_service as svc  # noqa: PLC0415
     from services import canonical_revenue_service as crs  # noqa: PLC0415
-    from services.snapshot_memo import certification_window  # noqa: PLC0415
+    from services.snapshot_memo import (  # noqa: PLC0415
+        certification_window, refused_reads,
+    )
 
     now = now or datetime.now(tz=timezone.utc)
     a = Audit()
@@ -1700,13 +1702,18 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
         before = _write_fingerprint()
         # PR-ADS-179A: each window is read inside ONE snapshot
         # (``services.snapshot_memo.certification_window``): its pages, its
-        # reader-contract read and its settled publication see the database at
-        # one instant — what a request at that instant would have served — and
-        # the inputs the pages share (the mart core, the won-deal population)
-        # are built once per window. The closed-won universe is still the one
-        # read above, shared with the truth service (the outer one_snapshot).
+        # reader-contract read and its settled publication read the database
+        # as of one instant, and the inputs the pages share (the mart core, the
+        # won-deal population) are built once per window. The closed-won
+        # universe is NOT read in that snapshot: it is the one read above,
+        # outside every window, and shared with the truth service (the outer
+        # one_snapshot) — as before 179A.
+        # PR-ADS-179A-F1: this certifies a snapshot-consistent build of each
+        # page; a web request reads per statement (READ COMMITTED), so a torn
+        # read inside one request is invisible here by construction. A read the
+        # snapshot refused, even one a reader swallowed, is a page not run.
         for key in WINDOW_KEYS:
-            with certification_window():
+            with certification_window() as scope:
                 base = crs.load_won_deals(key, now=now)
                 mart, built = None, {}
                 if pages:
@@ -1732,13 +1739,17 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                     checked["campaign_settled"] = settled_mart_checks(
                         a, key, now, built["revenue_decision_mart_campaign_settled"])
                 report["windows"].append(checked)
+            report["pages_not_run"] += [
+                {"window": key, "page": "pinned_snapshot",
+                 "detail": f"a read in this window was refused by its pinned "
+                           f"snapshot: {r}"[:300]} for r in refused_reads(scope)]
         # PR-ADS-168A — the evidence windows (Channels page outcomes).
         ev_truth = svc.get_closed_won_truth(
             [("evidence", k) for k in EVIDENCE_PASS_WINDOWS], now=now,
             universe=universe)
         ev_by_key = {w["window"]["window_key"]: w for w in ev_truth["windows"]}
         for key in EVIDENCE_PASS_WINDOWS:
-            with certification_window():
+            with certification_window() as scope:
                 base = crs.load_won_deals(key, window_type="evidence", now=now)
                 built = {}
                 if pages:
@@ -1757,6 +1768,10 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                     page_pubs={n: settled_pub for n in built} if built else None)
                 checked["window"] = f"evidence/{key}"
                 report["evidence_windows"].append(checked)
+            report["pages_not_run"] += [
+                {"window": f"evidence/{key}", "page": "pinned_snapshot",
+                 "detail": f"a read in this window was refused by its pinned "
+                           f"snapshot: {r}"[:300]} for r in refused_reads(scope)]
         after = _write_fingerprint()
     # 16 — measured, not declared: the closed-won tables are byte-identical.
     report["database_writes_performed"] = (

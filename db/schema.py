@@ -2651,11 +2651,63 @@ CREATE INDEX IF NOT EXISTS idx_meta_adset_coverage_range
 """
 
 
+#: PR-ADS-179A-F1 — how long ``init_db`` waits for running certification
+#: windows to end before the migration gives up LOUDLY (see
+#: ``db.connection.SCHEMA_LOCK_KEY``). Audits run one at a time and a window is
+#: seconds long (the longest measured on the production-sized fixture: about
+#: 6 s; about 40 s at production's measured slowdown), so a waiting deploy is
+#: normally delayed by at most one window. The bound keeps the lifespan hook
+#: well inside Render's deploy health-check window, which fails a deploy whose
+#: new instance does not become healthy in time and keeps the old release.
+SCHEMA_LOCK_WAIT_SECONDS = 180
+
+
+class SchemaMigrationBlocked(RuntimeError):
+    """``init_db`` could not take the schema lock within its bound. Raised —
+    never logged and swallowed — so the lifespan hook fails and the release
+    does not start without its schema migration."""
+
+
+def _take_schema_lock(cur) -> None:
+    """The EXCLUSIVE schema lock, before any table lock (the first statement
+    of the DDL transaction; released when it commits or rolls back).
+
+    Waits, bounded, for certification windows already open — holding no table
+    lock while it waits, so it can neither deadlock with a window nor stall a
+    window's reads. Raises ``SchemaMigrationBlocked`` past the bound."""
+    import psycopg2  # noqa: PLC0415
+    from db.connection import SCHEMA_LOCK_KEY  # noqa: PLC0415
+
+    cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
+    if cur.fetchone()[0] is True:
+        return
+    log.warning("init_db: a certification window holds the schema lock; waiting up "
+                "to %ss for it to end before migrating", SCHEMA_LOCK_WAIT_SECONDS)
+    cur.execute("SET LOCAL lock_timeout = %s",
+                (f"{int(SCHEMA_LOCK_WAIT_SECONDS * 1000)}ms",))
+    try:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
+    except psycopg2.errors.LockNotAvailable:
+        message = (f"init_db: the schema migration did NOT run — certification "
+                   f"window(s) held the schema lock for over "
+                   f"{SCHEMA_LOCK_WAIT_SECONDS}s. Startup is aborted so this "
+                   f"release does not run without its schema.")
+        log.error(message)
+        raise SchemaMigrationBlocked(message) from None
+    # The DDL itself waits for ordinary locks exactly as before.
+    cur.execute("SET LOCAL lock_timeout TO DEFAULT")
+
+
 def init_db() -> None:
     """Create all tables and indexes if they do not already exist.
 
     Idempotent — safe to call on every application startup.
     Non-fatal — logs and returns if the database is unavailable.
+
+    PR-ADS-179A-F1: takes the schema lock first (``_take_schema_lock``). If a
+    certification window holds it past ``SCHEMA_LOCK_WAIT_SECONDS`` this
+    RAISES ``SchemaMigrationBlocked`` (logged at ERROR): a migration that did
+    not run is never reported as an applied schema.
     """
     try:
         with get_conn() as conn:
@@ -2663,7 +2715,10 @@ def init_db() -> None:
                 log.warning("init_db skipped — database unavailable")
                 return
             with conn.cursor() as cur:
+                _take_schema_lock(cur)
                 cur.execute(_DDL)
         log.info("Schema OK — all tables initialised")
+    except SchemaMigrationBlocked:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.error("init_db failed: %s", exc)
