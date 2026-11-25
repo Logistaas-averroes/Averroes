@@ -227,10 +227,15 @@ def test_frontend_renders_unavailable_scope_as_dash_never_zero():
     operational = _APP_JS.split("async function leadsRenderOperational(")[1].split("\n}\n")[0]
     assert "leadsCount(" in operational
     # The funnel's stage counts: null/undefined is the word, never 0 (178B).
-    funnel = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\n}\n")[0]
-    assert "(count === null || count === undefined)" in funnel
-    assert '"Unavailable"' in funnel
-    assert "|| 0" not in funnel
+    # PR-ADS-180A: the Pipeline adapter (pipelineFunnelModel) hands each count
+    # to funnelCountMetric — null/undefined is an "unavailable" verdict that
+    # the shared block renders as the word through canonicalMetricHtml.
+    funnel = _APP_JS.split("function pipelineFunnelModel(")[1].split("\n}\n")[0]
+    assert "funnelCountMetric(count," in funnel
+    metric = _APP_JS.split("function funnelCountMetric(")[1].split("\n}\n")[0]
+    assert "value !== null && value !== undefined" in metric and '"unavailable"' in metric
+    assert '"Unavailable"' in _APP_JS.split("function canonicalMetricHtml(")[1].split("\n}\n")[0]
+    assert "|| 0" not in funnel and "|| 0" not in metric
 
 
 # =============================================================================
@@ -379,7 +384,8 @@ def test_mismatch_withholds_the_count():
 
 
 def test_frontend_withholds_counts_on_mismatch():
-    strip = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\nfunction ")[0]
+    # PR-ADS-180A: the Pipeline funnel's model (the shared block's adapter).
+    strip = _APP_JS.split("function pipelineFunnelModel(")[1].split("\nfunction ")[0]
     assert 'reconciliation || {}).status === "mismatch"' in strip
     assert "(!available || mismatch) ? null : block.count" in strip
 
@@ -399,9 +405,14 @@ def test_incomplete_bootstrap_is_surfaced_and_all_time_is_qualified():
 
 
 def test_conversions_render_only_when_cohort_safe():
-    strip = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\nfunction ")[0]
-    assert 'conv.basis === "cohort"' in strip
-    assert "conv.available" in strip
+    # PR-ADS-180A: the Pipeline adapter builds each connector with
+    # stageEntryConversion (shared with Overview's activity block), which
+    # returns a rate only for an available, cohort-basis conversion.
+    strip = _APP_JS.split("function pipelineFunnelModel(")[1].split("\nfunction ")[0]
+    assert "stageEntryConversion(conv," in strip
+    conv = _APP_JS.split("function stageEntryConversion(")[1].split("\nfunction ")[0]
+    assert 'conv.basis === "cohort"' in conv
+    assert "conv.available" in conv
 
 
 def test_dashboard_conversion_helper_requires_cohort_basis():
@@ -422,10 +433,12 @@ def test_dashboard_conversion_helper_requires_cohort_basis():
     assert "function dashConversion(" not in _APP_JS
     assert "BASIS_COHORT" in (
         _ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
-    block = _APP_JS.split("function renderDashLifecycleCohort(")[1].split(
+    # PR-ADS-180A: the cohort's model (the shared block's adapter) reads the
+    # service's percentages; the doc comment above it is not counted.
+    block = _APP_JS.split("function dashCohortFunnelModel(")[1].split(
         "\nfunction ")[0]
-    assert "previous_stage_conversion_pct" in block
-    assert "rate_from_anchor_pct" in block
+    assert "s.previous_stage_conversion_pct" in block
+    assert "s.rate_from_anchor_pct" in block
 
 
 # =============================================================================

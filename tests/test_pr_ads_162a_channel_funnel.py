@@ -7,7 +7,6 @@ and when the cohort is not published it carries no counts at all.
 """
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -199,17 +198,11 @@ def test_12_the_module_publishes_no_deals_revenue_customers_or_spend():
 
 
 def _render(payload_js: str) -> str:
-    """Evaluate the real renderChannelFunnel from static/app.js in node."""
-    src = (ROOT / "static/app.js").read_text()
-    start = src.index("const CHANNEL_FUNNEL_REASON_LABELS = {")
-    end = src.index("async function loadChannels()")
-    esc_start = src.index("function escapeHtml(str) {")
-    esc_end = src.index("\n}\n", esc_start) + 3
-    script = (src[esc_start:esc_end] + src[start:end]
-              + f"\nprocess.stdout.write(renderChannelFunnel({payload_js}));")
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    return out.stdout
+    """Evaluate the real renderChannelFunnel from static/app.js in node.
+    PR-ADS-180A: the page's funnel is the shared block, defined outside the
+    Channels span, so the real app.js is evaluated whole (the 161B vm harness)."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app(f"renderChannelFunnel({payload_js})")
 
 
 def test_13_the_page_renders_channels_stages_and_shares():

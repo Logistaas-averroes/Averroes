@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -76,16 +75,12 @@ def _payload(**over):
 
 
 def _node(expr: str) -> str:
-    src = (ROOT / "static/app.js").read_text()
-    start = src.index("const CHANNEL_FUNNEL_REASON_LABELS = {")
-    end = src.index("async function loadChannels()")
-    esc_start = src.index("function escapeHtml(str) {")
-    esc_end = src.index("\n}\n", esc_start) + 3
-    script = (src[esc_start:esc_end] + src[start:end]
-              + f"\nprocess.stdout.write(String({expr}));")
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    return out.stdout
+    """PR-ADS-180A: the page's funnel is the shared block (funnelBlockHtml,
+    rendered through canonicalMetricHtml), defined outside the Channels span,
+    so the real app.js is evaluated WHOLE (the 161B vm harness) instead of the
+    Channels span plus escapeHtml. Same expression, same string result."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app(f"String({expr})")
 
 
 def _render(payload, view=None) -> str:
@@ -240,7 +235,9 @@ def test_10_a_count_the_payload_does_not_carry_is_a_dash_never_zero():
     html = _render(_payload(totals=totals, channels=channels))
     assert "NaN" not in html and "undefined" not in html and "null" not in html
     text = _text(html)
-    assert "Reached Opportunity — share unknown" in text
+    # PR-ADS-180A: the totals are the shared funnel block, whose rule is the
+    # word and its reason, never a dash (the table below keeps its "—").
+    assert "Reached Opportunity Unavailable the server sent no count for this stage share unknown" in text
     table = _text(html[html.index("<table"):html.index("</table>")])
     assert "Paid Social 40 30 (75.0%) 5 (12.5%) — —" in table
     assert "All channels 40 30 (75.0%) 5 (12.5%) — 0 (0.0%)" in table

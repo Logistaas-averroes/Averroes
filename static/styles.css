@@ -5798,22 +5798,36 @@ body.is-revenue-page #monitoring-banner {
 }
 .dash-signal--empty .dash-signal__line { color: var(--text-muted); }
 
-/* ── Pipeline funnel strip ───────────────────────────────────────────────── */
-.dash-funnel-panel { margin-top: var(--space-5); }
+/* ── PR-ADS-180A: the ONE lifecycle funnel block (docs/63) ──────────────────
+   Every funnel on every page — Overview (Lifecycle Activity, Lifecycle
+   Cohort), Pipeline and Channels — is this block, emitted only by
+   funnelBlockHtml. Five equal stage columns and the four connectors between
+   them in ONE grid row: a wrapping flex line put a connector at the end of one
+   line and its stage at the start of the next (PR-ADS-155-F2). Equal widths and
+   one accent weight per column: nothing in the layout implies a narrowing
+   shape the counts may not have — five stage-entry populations may rise. */
+.dash-activity-panel, .dash-cohort-panel { margin-top: var(--space-5); }
+.funnel-block { min-width: 0; }
+.funnel-block__family { font-size: 11px; color: var(--text-muted); margin: 0 0 var(--space-3); line-height: 1.4; }
+.funnel-block__family-label { font-weight: 600; color: var(--text-secondary); }
+.funnel-block__verdict { font-size: 13px; color: var(--text-secondary); margin: 0 0 var(--space-3); }
 .dash-funnel {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr) auto) minmax(0, 1fr);
   align-items: stretch;
   gap: var(--space-2);
-  flex-wrap: wrap;
 }
 .dash-funnel__stage {
-  flex: 1 1 150px;
-  min-width: 150px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   background: var(--surface-alt);
   border: 1px solid var(--border);
   border-top: 3px solid var(--funnel-accent, var(--brand-sky-accent));
   border-radius: var(--radius-md);
   padding: 10px 14px;
+  text-align: left;
 }
 .dash-funnel__stage-label {
   font-size: 10px;
@@ -5826,41 +5840,67 @@ body.is-revenue-page #monitoring-banner {
   font-size: 22px;
   font-weight: 700;
   color: var(--text-primary);
-  margin-top: 2px;
 }
 .dash-funnel__stage-value .dash-unavailable { font-size: 15px; }
-.dash-funnel__stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-
-/* PR-ADS-166A — the Customer stage's help text (the Pipeline funnel's last
-   stage). PR-ADS-178C: the retired Leads page's two-figure cards and its
-   folded won-customers list are deleted with that page. */
-.leads-customer-figure__help { font-size: 12px; color: var(--text-muted); margin: 6px 0 0; line-height: 1.4; }
-.leads-customer-figure__help .metric-reason { display: inline; }
-.leads-names-note { text-transform: none; letter-spacing: 0; }
-.dash-funnel__conv {
+.dash-funnel__stage-value .metric-reason { display: block; font-size: 11px; font-weight: 500; color: var(--text-muted); line-height: 1.3; }
+.dash-funnel__stage-sub { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+.dash-funnel__stage-sub:empty { display: none; }
+/* Notes live INSIDE the stage: a period trend, a share of the cohort, an
+   exclusion or a lower bound is never placed between two stages, where a
+   reader would take it for a conversion. */
+.dash-funnel__note { font-size: 10px; font-weight: 600; color: var(--text-secondary); margin-top: 3px; }
+.dash-funnel__note--share { font-size: 11px; }
+.dash-funnel__note--gap, .dash-funnel__note--bound { color: var(--warning-fg, #b45309); cursor: help; }
+.dash-funnel__note--none { color: var(--text-muted); font-weight: 500; }
+.dash-funnel__note--up { color: var(--success-fg, #15803d); }
+.dash-funnel__note--down { color: var(--warning-fg, #b45309); }
+.dash-funnel__help { font-size: 12px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+/* The connector carries its denominator on a second line, never a bare %. */
+.dash-funnel__link {
   align-self: center;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
   padding: 0 2px;
+  max-width: 108px;
+  text-align: center;
 }
-.dash-funnel__conv--muted { color: var(--text-muted); }
+.dash-funnel__arrow { font-size: 12px; color: var(--text-muted); }
+.dash-funnel__conv { font-size: 12px; font-weight: 700; color: var(--text-secondary); white-space: nowrap; }
+.dash-funnel__conv--muted { color: var(--text-muted); font-weight: 600; }
+.dash-funnel__basis { font-size: 10px; color: var(--text-muted); line-height: 1.25; }
+/* Pipeline: a stage is a button that opens the leads list. */
+button.dash-funnel__stage--selectable { font: inherit; color: inherit; cursor: pointer; }
+button.dash-funnel__stage--selectable:hover { border-color: var(--brand-sky-accent); }
+button.dash-funnel__stage--selectable:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: 2px; }
+button.dash-funnel__stage--selectable.is-active { background: var(--surface); box-shadow: 0 0 0 2px var(--brand-sky-accent) inset; }
+/* PR-ADS-178B-F1: a lower-bound stage count. */
+.dash-lower-bound { font-weight: 600; }
+.lifecycle-legend { font-size: 11px; color: var(--text-muted); margin-top: var(--space-3); }
+/* Narrow viewports: one column, and each connector spans the full width
+   between the two stages it joins, so the reading order stays stage →
+   conversion → stage. 900px rather than 720: nine cells in a row are cramped
+   well before a phone. */
+@media (max-width: 900px) {
+  .dash-funnel { grid-template-columns: minmax(0, 1fr); }
+  .dash-funnel__stage { width: 100%; }
+  .dash-funnel__link {
+    align-self: stretch;
+    max-width: none;
+    flex-direction: row;
+    justify-content: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+}
 
-/* ── PR-ADS-155 §1/§3: lifecycle cohort share, coverage badge + disclosure ── */
-.dash-funnel__stage-share {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-top: 4px;
-}
-.dash-funnel__stage-gap {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--warning-fg, #b45309);
-  margin-top: 3px;
-  cursor: help;
-}
+/* PR-ADS-178C: the retired Leads page's two-figure cards and its folded
+   won-customers list are deleted with that page. PR-ADS-180A: the Customer
+   stage's help text is the block's .dash-funnel__help. */
+.leads-names-note { text-transform: none; letter-spacing: 0; }
+
+/* ── PR-ADS-155 §1/§3: coverage badge + disclosure ── */
 .dash-badge {
   display: inline-flex;
   align-items: center;
@@ -5901,104 +5941,6 @@ body.is-revenue-page #monitoring-banner {
 .dash-coverage__reason { font-weight: 600; color: var(--text-secondary); }
 .dash-coverage__detail { color: var(--text-muted); }
 .dash-coverage__note { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
-
-/* ── PR-ADS-155-F2 §1/§2: lifecycle ACTIVITY (five independent populations) ─
-   Deliberately NOT the funnel strip above. The stage cells are equal-width and
-   share one accent weight, so nothing in the layout implies a narrowing shape
-   that the counts do not have — MQL above Lead is normal here. The connector
-   carries its own denominator on a second line rather than a bare percentage.  */
-.dash-activity-panel { margin-top: var(--space-5); }
-/* Five stages and the four connectors between them, in ONE row: a grid rather
-   than a wrapping flex line, because a wrapped row puts a connector at the end
-   of one line and the stage it belongs to at the start of the next, which is
-   exactly the reading-order confusion this panel exists to remove. */
-.dash-activity {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr) auto) minmax(0, 1fr);
-  align-items: stretch;
-  gap: var(--space-2);
-}
-.dash-activity__stage {
-  min-width: 0;
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  border-top: 3px solid var(--funnel-accent, var(--brand-sky-accent));
-  border-radius: var(--radius-md);
-  padding: 10px 14px;
-}
-.dash-activity__stage-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-}
-.dash-activity__stage-value {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-top: 2px;
-}
-.dash-activity__stage-value .dash-unavailable { font-size: 15px; }
-.dash-activity__stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.dash-activity__gap {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--warning-fg, #b45309);
-  margin-top: 3px;
-  cursor: help;
-}
-/* A trend sits INSIDE the card. It is never placed between two cards, where a
-   reader would take a period-over-period change for a conversion. */
-.dash-activity__trend {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-top: 5px;
-}
-.dash-activity__trend--none { color: var(--text-muted); font-weight: 500; }
-.dash-activity__trend--up { color: var(--success-fg, #15803d); }
-.dash-activity__trend--down { color: var(--warning-fg, #b45309); }
-.dash-activity__conv {
-  align-self: center;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-  padding: 0 2px;
-  max-width: 108px;
-  text-align: center;
-}
-.dash-activity__conv-rate {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.dash-activity__conv-basis { font-size: 10px; color: var(--text-muted); line-height: 1.25; }
-.dash-activity__conv--muted .dash-activity__conv-rate { color: var(--text-muted); font-weight: 600; }
-.dash-activity__legend {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: var(--space-3);
-}
-/* Narrow viewports: one column, and each connector spans the full width between
-   the two cards it joins so the reading order stays stage → conversion → stage
-   rather than collapsing into ambiguity. The breakpoint is 900px rather than the
-   usual 720 because nine cells in a row are cramped well before a phone. */
-@media (max-width: 900px) {
-  .dash-activity { grid-template-columns: minmax(0, 1fr); }
-  .dash-activity__stage { width: 100%; }
-  .dash-activity__conv {
-    align-self: stretch;
-    max-width: none;
-    flex-direction: row;
-    justify-content: center;
-    gap: 8px;
-    padding: 2px 0;
-  }
-}
 
 /* ── PR-ADS-155 §2/§5: commercial outcomes, separate from the funnel ─────── */
 .dash-outcomes-panel { margin-top: var(--space-5); }
@@ -6243,7 +6185,6 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 /* PR-ADS-134: the freshness strip is diagnostic chrome — off the Executive
    Overview only (its truth footer owns freshness there). */
 #data-freshness-bar.is-dash-hidden { display: none; }
-.dash-funnel__stage-delta { margin-top: 4px; }
 .dash-donut__center--blocked strong { font-size: 12px; color: var(--c-warning); }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -7120,10 +7061,7 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .channel-funnel-seg__btn:focus-visible, .channel-funnel-sort:focus-visible, .channel-funnel-toggle:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: 2px; }
 .channel-funnel-seg__btn.is-active { background: var(--brand-midnight); color: #fff; }
 .channel-funnel-context { color: var(--text-secondary); font-size: 13px; margin: 0 0 var(--space-4); }
-.channel-funnel-totals { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: var(--space-5); }
-.channel-funnel-totals .dash-outcomes__cell { background: var(--surface-card); box-shadow: var(--shadow-sm); padding: 14px 16px; border-top: 3px solid var(--border-strong); }
-.channel-funnel-totals .dash-outcomes__value { font-size: 28px; line-height: 1.15; }
-.channel-funnel-totals .dash-outcomes__sub { font-size: 12px; }
+.channel-funnel-block-panel { margin-bottom: var(--space-5); }
 .channel-funnel-compare { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
 .channel-funnel-compare__label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .channel-funnel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--space-5); margin-bottom: var(--space-5); align-items: start; }
@@ -7192,18 +7130,10 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .pipeline-lead-filters { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2);
   padding: 2px var(--space-2); border: 1px dashed var(--border); border-radius: var(--radius-md); }
 #page-pipeline .roas-window-range { white-space: normal; }
-button.pipeline-funnel__stage { font: inherit; color: inherit; text-align: left; cursor: pointer;
-  display: flex; flex-direction: column; gap: 2px; }
-button.pipeline-funnel__stage:hover { border-color: var(--brand-sky-accent); }
-button.pipeline-funnel__stage:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: 2px; }
-button.pipeline-funnel__stage.is-active { background: var(--surface); box-shadow: 0 0 0 2px var(--brand-sky-accent) inset; }
-.pipeline-funnel .leads-customer-figure__help { margin-top: 4px; }
-/* PR-ADS-178B-F1: a lower-bound stage count and the SQL card's population note. */
-.dash-lower-bound { font-weight: 600; }
-.pipeline-funnel__bound { color: var(--c-warning); }
+/* PR-ADS-178B-F1: the SQL card's population note. PR-ADS-180A: the funnel
+   stage buttons and the lower bound are the shared block's rules. */
 .pipeline-kpi-grid .dash-kpi-card__note { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 .pipeline-other-view { margin-top: var(--space-3); }
-.pipeline-funnel .dash-funnel__stage-sub { overflow-wrap: anywhere; }
 #pipeline-leads [hidden] { display: none !important; }
 .pipeline-deal-controls { margin: 0 0 var(--space-3); }
 .pipeline-leads-panel .data-table { min-width: 900px; }

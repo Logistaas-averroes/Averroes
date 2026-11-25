@@ -209,12 +209,20 @@ class TestBuildEmptyStateIntegration:
         bootstrap) plus per-view empty copy, so it no longer calls
         buildEmptyState(). The stronger requirement is that it never renders a
         missing count as zero. PR-ADS-178B: the leads list is on the Pipeline
-        page; its funnel renders a missing stage count as "Unavailable"."""
+        page; its funnel renders a missing stage count as "Unavailable".
+        PR-ADS-180A: the funnel is the shared block — the Pipeline adapter
+        hands each stage count to funnelCountMetric, which makes a missing one
+        an "unavailable" verdict, and the block renders that verdict through
+        canonicalMetricHtml as the word "Unavailable"."""
         fn = self._get_function_slice("async function loadPipeline()", window=2200)
         assert "leadsRenderActiveView" in fn
-        funnel = APP_JS.split("function pipelineFunnelHtml(")[1].split("\n}\n")[0]
-        assert "(count === null || count === undefined)" in funnel
-        assert '"Unavailable"' in funnel
+        model = APP_JS.split("function pipelineFunnelModel(")[1].split("\n}\n")[0]
+        assert "funnelCountMetric(count," in model
+        metric = APP_JS.split("function funnelCountMetric(")[1].split("\n}\n")[0]
+        assert "value !== null && value !== undefined" in metric
+        assert '"unavailable"' in metric
+        verdict = APP_JS.split("function canonicalMetricHtml(")[1].split("\n}\n")[0]
+        assert '"Unavailable"' in verdict
 
     def test_build_empty_state_called_in_backfill(self):
         body = self._get_function_slice("function renderBackfillSummary(", window=2000)
