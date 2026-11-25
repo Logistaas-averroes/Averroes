@@ -446,15 +446,33 @@ Fail-before:
   channel). That is a backend addition and is left for the owner to
   approve.
 * **Lead cohort bounds from the backend.** With the presentation rule in
-  §4.3, one anchorless contact anywhere turns every cohort rate into "—".
-  There are two durable options:
-  * `lead_cohort_progression` publishes a per-stage bound: which stages each
-    exclusion can affect, and by how many contacts;
-  * narrow the anchorless set to contacts that could belong to the window.
-    A contact whose Lead date is missing but whose later stages all fall
-    before the window cannot be in it.
+  §4.3, one anchorless contact in the window's fetched population turns
+  every cohort rate into "—".
+
+  **"0 anchorless" does NOT prove a Lead count exact** (F1 re-audit).
+  `fetch_funnel_contacts` returns only contacts with some dated stage in the
+  window, so the anchorless and `stage_reached_without_entry_date` counts
+  never see an undated contact outside it. Examples: one that reached Lead
+  undated and whose MQL date falls after the window, or one at stage lead
+  with no dates at all. In production this is masked today: about 60% of
+  MQLs lack a Lead date, so any window with an MQL entry has in-population
+  anchorless contacts. It can surface on short or quiet windows.
+
+  The durable fix is a backend per-stage bound over every contact that
+  could belong to the window: widened to undated contacts outside the
+  fetched rows, and narrowed only where a contact provably cannot belong
+  (all of its later stages fall before the window). Narrowing alone would
+  move toward false exactness.
+
+  **The previous-period trend** (F1 re-audit, pre-existing, open).
+  `dashboard_overview_service._lifecycle_previous_period` keeps `partial`
+  counts. So an exact "+X% vs prior" can print against a lower-bound
+  baseline, and the sign can flip. The current-period side is closed
+  (minor 2). The baseline side is carried to PR-ADS-180B.
 
   Both are semantic changes to the cohort contract and are not built here.
+  PR-ADS-180B replaces the Overview Lead cohort with the acquisition cohort,
+  windowed on `contact_created_at`, which needs no stage-entry date.
 
 ## 9. Not verified
 

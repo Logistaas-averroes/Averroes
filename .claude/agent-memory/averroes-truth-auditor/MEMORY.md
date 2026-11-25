@@ -885,4 +885,24 @@ truncated list. Verified by execution on exported copies of both commits.
 - Channels (channel_funnel_service.reached) stage counts are CUMULATIVE, not a
   partition by furthest stage.
 - 161e test_26 needs a git checkout (fails in archive copies).
-- F1 fixed Major 1 and minors 2–5.
+
+## PR-ADS-180A-F1 re-audit (a528ae3, 2026-11-25) — merge with minors
+- dashCohortStageBounds verified on real producers: anchorless>0 bounds every
+  stage; any earlier excluded_contacts>0 bounds later stages (silent path);
+  own missing_stage_entry_date/prior_stage_entry_unproven bounds stage k.
+  Bounds are monotone, so cumulative == FROM-bound (a non-cumulative mutant
+  is equivalent, not a test gap). 07_a/c/d/e fail on d48b6b7 and on the
+  matching mutants.
+- Minor 2 is closed for the CURRENT period only. _lifecycle_previous_period
+  keeps "partial" counts; an exact "+X% vs prior" is printed against a
+  lower-bound baseline (probe: +20% where the truth is -25%..+20%). Open.
+- The anchorless / stage_reached_without_entry_date counts cover only
+  fetch_funnel_contacts' window population (contacts with ANY dated stage in
+  the window). Undated contacts outside it are invisible, so "0 anchorless"
+  does NOT prove a Lead count exact. Masked in production (about 60% of MQLs
+  lack a Lead date). Any "narrow the anchorless set" proposal must also widen
+  it.
+- Production (owner query, 25 Nov): about 9,000 contacts at MQL+ have no
+  date_entered_lead (6,105 of 10,285 MQLs). Anchorless is always > 0, so every
+  Overview cohort stage reads "at least N" and every cohort rate reads "—".
+  This is intended.
