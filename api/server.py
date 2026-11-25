@@ -5555,9 +5555,14 @@ async def get_revenue_deals(
 async def get_revenue_performance(
     view: str = Query(default="campaign"),
     window: str = Query(default="current_quarter"),
+    settled: bool = Query(default=False),
     _user=Depends(require_auth),
 ):
     """Canonical Revenue Decision Mart (PR-ADS-125).
+
+    PR-ADS-177B: ``settled=true`` asks for the campaign view over SETTLED days
+    (an open window ends yesterday — the Campaigns page). Never the default;
+    a settled deal view is a 400.
 
     ONE backend contract that every Revenue & Attribution page reads from.
     ``view`` selects the grain — campaign | country | deal — while the
@@ -5573,7 +5578,7 @@ async def get_revenue_performance(
     from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
 
     try:
-        return build_revenue_decision_mart(view=view, window=window)
+        return build_revenue_decision_mart(view=view, window=window, settled=settled)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -5587,6 +5592,7 @@ async def get_revenue_performance(
 async def get_revenue_performance_campaign_detail(
     window: str = Query(default="current_quarter"),
     campaign: str = Query(..., description="Canonical campaign name"),
+    settled: bool = Query(default=False),
     _user=Depends(require_auth),
 ):
     """Clients / deals behind ONE canonical campaign (PR-ADS-130).
@@ -5599,13 +5605,42 @@ async def get_revenue_performance_campaign_detail(
     from services.revenue_attribution_service import build_campaign_deal_details  # noqa: PLC0415
 
     try:
-        return build_campaign_deal_details(window, campaign)
+        # PR-ADS-177B: the Campaigns page's rows are the settled campaign
+        # view; its drawer reads the same days (``settled=true``).
+        return build_campaign_deal_details(window, campaign, settled_days=settled)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         log.error("Campaign deal detail failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Campaign deal detail computation failed"
+        ) from exc
+
+
+@app.get("/api/meta-ads/adsets")
+async def get_meta_ads_adsets(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """The Campaigns page's "Meta Ads — ad sets" table (PR-ADS-177B).
+
+    Read-only. One row per Meta ad set (joined on ids, never names) over the
+    business window's SETTLED days, each Meta account in its own time zone:
+    spend in the account currency and USD, impressions, clicks and
+    Meta-reported leads. SQL, deal and revenue cells are ``not_linked``. Its
+    totals are its own and are never added to a Google Ads figure. Unverified
+    or unsettled days withhold the table with a reason. No call to Meta.
+    """
+    from services.meta_ads_adset_table_service import build_meta_adset_table  # noqa: PLC0415
+
+    try:
+        return build_meta_adset_table(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Meta ad-set table failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Meta ad-set table computation failed"
         ) from exc
 
 

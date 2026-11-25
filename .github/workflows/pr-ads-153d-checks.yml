@@ -137,6 +137,8 @@ jobs:
             tests/test_pr_ads_176b_countries_pg_integration.py \
             tests/test_pr_ads_176c_country_feed_retired_pg_integration.py \
             tests/test_pr_ads_177a_one_sql_count_pg_integration.py \
+            tests/test_pr_ads_177b_campaigns_pg_integration.py \
+            tests/test_pr_ads_177b_meta_adsets_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -288,6 +290,19 @@ jobs:
                            # exposes no count and judges no verdict on it;
                            # parity with Campaign Evidence over the same days.
                            "tests.test_pr_ads_177a_one_sql_count_pg_integration",
+                           # PR-ADS-177B. The one Campaigns page: the mart's
+                           # SETTLED campaign view (ends yesterday; campaign
+                           # spend under the settle rule), a deal closed today
+                           # on Overview / Deals but not on Campaigns, the
+                           # drawer = the row's deal_ids, the residual row,
+                           # Dashboard → Campaigns on the same view, parity's
+                           # settled group.
+                           "tests.test_pr_ads_177b_campaigns_pg_integration",
+                           # PR-ADS-177B. The Meta Ads — ad sets table over the
+                           # fake Graph API synced into a real schema: ids,
+                           # own totals, never a partial sum, each account in
+                           # its own zone, unverified days withhold.
+                           "tests.test_pr_ads_177b_meta_adsets_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

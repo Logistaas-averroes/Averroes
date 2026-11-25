@@ -950,7 +950,8 @@ def test_19_the_ui_depends_on_no_dataset_the_endpoint_no_longer_reports():
     assert "google_ads_api/campaigns" not in JS
     deps = JS.split("const PAGE_DEPENDENCIES = {")[1].split("\n};")[0]
     # PR-ADS-165A: '"unit-economics"' was the fourth page here; it is deleted.
-    for page in ("dashboard", '"roas-campaigns"', "campaigns"):
+    # PR-ADS-177B: '"roas-campaigns"' is deleted; Campaigns is its page.
+    for page in ("dashboard", "campaigns"):
         line = next(ln for ln in deps.splitlines()
                     if ln.strip().startswith(f"{page}:"))
         assert '"google_ads_api/canonical_spend"' in line, line

@@ -337,7 +337,12 @@ def test_06e_every_mart_and_dashboard_sql_cell_goes_through_the_gate():
     from tests.test_pr_ads_161b_marketing_outcome_cohorts import _js_function
     js = APP_JS.read_text()
     for fn in ("renderRoasCountryTable", "renderCountryDrawer", "renderCountriesResidualPanel",
-               "renderRoasCampaignTable", "renderMartSummaryStrip", "renderCampLeaderboard",
+               # PR-ADS-177B: the one Campaigns page replaced Campaign
+               # Revenue & Spend's renderRoasCampaignTable.
+               "renderCampaignsPageTable", "renderCampaignsPageSummary",
+               "renderCampaignsResidualRow", "renderCampaignsPageDrawer",
+               "renderCampLeaderboardResidual",
+               "renderMartSummaryStrip", "renderCampLeaderboard",
                "renderCtryLeaderboard", "renderCtryResidualPanel", "renderDealCampaignPipeline"):
         body = _js_function(js, fn)
         for bad in ("dashValue(r.sqls", "dashValue(r.leads", "fmtCount(r.sqls)",

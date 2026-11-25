@@ -309,6 +309,31 @@ def _payloads(**overrides):
                 ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
                 ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
+        # PR-ADS-177B: the mart's SETTLED campaign view — the Campaigns page
+        # and Dashboard → Campaigns read it, and it is the reference the
+        # `*__settled_days` identities compare Dashboard → Campaigns with.
+        # (Shaped for a window the settle rule leaves whole, so its window is
+        # the others'.)
+        "revenue_decision_mart/campaign_settled": {
+            "window": dict(_WIN), "settled_days": True,
+            "spend_truth": {"campaign_spend_status": "verified",
+                            "fx_status": "verified",
+                            "country_spend_status": "reconciled_with_residual"},
+            "readiness": {"lead_metrics_ready": True, "lead_metrics_status": "db"},
+            "summary": {"spend_usd": 13000.0, "revenue_available": True,
+                        "attributed_won_revenue_usd": 29000.0,
+                        "attributed_closed_won_deals": 2,
+                        "attributed_customers": 2, "sqls": 25, "leads": 105},
+            "campaign_totals": {"spend": 13000.0},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
+                ("campaign_attributed_won_revenue_usd", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_closed_won_deals", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_customers", _MART,
+                 "campaign_attributable_revenue"),
+                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
         "revenue_decision_mart": {
             "window": dict(_WIN),
             # Coverage proof is per metric: campaign spend needs campaign AND FX
@@ -1085,10 +1110,13 @@ def test_f1_9_every_real_audited_payload_publishes_its_metric_contracts():
             entry = built.get(consumer_name) or {}
             assert entry.get("error") is None, f"{consumer_name}: {entry.get('error')}"
             payload = entry["payload"]
-            block = (payload.get(contract_mod.METRIC_TRUTH_KEY) or {}).get(metric_key)
+            # PR-ADS-177B: a `*__settled_days` identity reads the contract its
+            # consumers file under the through-today key (`contract_metric`).
+            contract_key = spec.get("contract_metric") or metric_key
+            block = (payload.get(contract_mod.METRIC_TRUTH_KEY) or {}).get(contract_key)
             assert isinstance(block, dict), (
                 f"{consumer_name} publishes no contract for {metric_key}")
-            assert block["metric"] == metric_key
+            assert block["metric"] == contract_key
             assert block["data_source"] == expected_source(spec, consumer_name)
             assert block["scope"] == spec["scope"]
             assert block["fallback_used"] is False
@@ -1485,7 +1513,10 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
     assert len(payload["uncertified_consumers"]) == 2
     # PR-ADS-161E: 20 — closed-won deals and customers are now separate
     # identities (all-source and campaign-attributable).
-    assert len(payload["results"][0]["metrics"]) == 20
+    # PR-ADS-177B: 25 — Dashboard → Campaigns reads the SETTLED campaign view,
+    # so its five figures are five `*__settled_days` identities compared with
+    # the settled campaign reference, not with the through-today pages.
+    assert len(payload["results"][0]["metrics"]) == 25
     assert all(c["certified"] for c in payload["results"][0]["consumer_certification"])
 
 
@@ -1515,15 +1546,22 @@ def test_f2_7b_the_cli_exits_nonzero_against_an_inconsistent_fixture(monkeypatch
     assert "consumer_values_differ" in payload["violation_codes"]
 
 
-@pytest.mark.parametrize("consumer,path", [
-    ("dashboard/overview", "kpis.sqls"),
-    ("dashboard/revenue", "kpis.sqls"),
-    ("dashboard/campaigns", "kpis.sqls"),
-    ("dashboard/deals", "kpis.sqls"),
-    ("revenue_decision_mart", "summary.sqls"),
+# PR-ADS-177B: Dashboard → Campaigns reads the SETTLED campaign view, so its
+# SQLs are compared in `google_ads_cohort_sqls__settled_days` with the settled
+# reference — every consumer is still compared, in the identity of its days.
+_SETTLED_SQLS = "google_ads_cohort_sqls__settled_days"
+
+
+@pytest.mark.parametrize("consumer,path,identity", [
+    ("dashboard/overview", "kpis.sqls", "google_ads_cohort_sqls"),
+    ("dashboard/revenue", "kpis.sqls", "google_ads_cohort_sqls"),
+    ("dashboard/campaigns", "kpis.sqls", _SETTLED_SQLS),
+    ("revenue_decision_mart/campaign_settled", "summary.sqls", _SETTLED_SQLS),
+    ("dashboard/deals", "kpis.sqls", "google_ads_cohort_sqls"),
+    ("revenue_decision_mart", "summary.sqls", "google_ads_cohort_sqls"),
 ])
 def test_f2_8_one_sql_identity_is_compared_across_every_consumer(
-        monkeypatch, consumer, path):
+        monkeypatch, consumer, path, identity):
     """Registering a consumer is not the same as comparing it.
 
     Every page that renders the campaign-attributable SQL count is parametrised
@@ -1534,27 +1572,29 @@ def test_f2_8_one_sql_identity_is_compared_across_every_consumer(
         **{consumer.replace("/", "__"): {path: 26}}))
     assert out["ok"] is False
     assert parity.V_VALUE_MISMATCH in out["violation_codes"]
-    entry = next(m for m in out["metrics"]
-                 if m["metric"] == "google_ads_cohort_sqls")
+    entry = next(m for m in out["metrics"] if m["metric"] == identity)
     assert entry["status"] == "mismatch"
     assert {r["consumer"] for r in entry["readings"]} == {
-        c for c, _ in parity.METRIC_IDENTITIES["google_ads_cohort_sqls"]["consumers"]}
+        c for c, _ in parity.METRIC_IDENTITIES[identity]["consumers"]}
 
 
-@pytest.mark.parametrize("consumer,path", [
-    ("dashboard/overview", "kpis.google_ads_spend_usd"),
-    ("dashboard/campaigns", "kpis.verified_spend_usd"),
-    ("revenue_decision_mart", "summary.spend_usd"),
+@pytest.mark.parametrize("consumer,path,identity", [
+    ("dashboard/overview", "kpis.google_ads_spend_usd", "google_ads_spend_usd"),
+    # PR-ADS-177B: the settled campaign view's days (see test_f2_8).
+    ("dashboard/campaigns", "kpis.verified_spend_usd", "google_ads_spend_usd__settled_days"),
+    ("revenue_decision_mart/campaign_settled", "campaign_totals.spend",
+     "google_ads_spend_usd__settled_days"),
+    ("revenue_decision_mart", "summary.spend_usd", "google_ads_spend_usd"),
 ])
 def test_f2_8b_full_account_spend_is_compared_across_every_consumer(
-        monkeypatch, consumer, path):
+        monkeypatch, consumer, path, identity):
     """The same for the full-account denominator — and Countries is NOT among
     them, because its KPI sums the per-country rows."""
     out = _audit_with(monkeypatch, _payloads(
         **{consumer.replace("/", "__"): {path: 13000.5}}))
     assert out["ok"] is False
     assert parity.V_VALUE_MISMATCH in out["violation_codes"]
-    entry = next(m for m in out["metrics"] if m["metric"] == "google_ads_spend_usd")
+    entry = next(m for m in out["metrics"] if m["metric"] == identity)
     assert entry["status"] == "mismatch"
     assert "dashboard/countries" not in {r["consumer"] for r in entry["readings"]}
     # Country-attributed spend is a different identity and is untouched by this.

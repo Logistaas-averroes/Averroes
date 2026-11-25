@@ -639,7 +639,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
                      + (f" ({reason})" if reason else "")
                      + ", so no campaign is named as a repeat producer."),
             "reason": reason,
-            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns", "target_label": "Open Campaigns",
         })
     elif multi:
         top = multi[0]
@@ -656,14 +656,14 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "type": "scale", "title": "Scale",
             "headline": f"{top['campaign']} won {top['deals']} deals",
             "body": body,
-            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns", "target_label": "Open Campaigns",
         })
     else:
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": "No repeat won-deal producer yet",
             "body": "No campaign won more than one deal in this window.",
-            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns", "target_label": "Open Campaigns",
         })
 
     # Watch — revenue concentration.
@@ -856,14 +856,14 @@ def build_dashboard_revenue(window: str = "current_quarter",
     ledger_for_breakdown = deal_rows if revenue_ready else []
     grouped_campaign = _group_deals(ledger_for_breakdown, "campaign_name",
                                     unknown_label=UNCLASSIFIED_LABEL,
-                                    target_page="roas-campaigns",
+                                    target_page="campaigns",
                                     revenue_total_published=revenue_total_published)
     grouped_country = _group_deals(ledger_for_breakdown, "country",
                                    unknown_label=UNATTRIBUTED_LABEL,
                                    target_page="roas-countries",
                                    revenue_total_published=revenue_total_published)
     by_campaign = _breakdown_rows(grouped_campaign, name_key="campaign",
-                                  target_page="roas-campaigns")
+                                  target_page="campaigns")
     by_country = _breakdown_rows(grouped_country, name_key="country",
                                  target_page="roas-countries")
     # PR-ADS-161E: each breakdown row is a subset of the window and carries the

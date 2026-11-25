@@ -321,7 +321,8 @@ def test_n3_a_run_audits_every_business_window_and_every_payload(monkeypatch):
             return {"cohort": _cohort(), "summary": {"leads": 9, "sqls": 4}}
         return build
     monkeypatch.setattr(mart, "build_revenue_decision_mart",
-                        lambda **k: _payload("mart/" + k["view"])(**k))
+                        lambda **k: _payload("mart/" + k["view"]
+                                             + ("_settled" if k.get("settled") else ""))(**k))
     monkeypatch.setattr(dov, "build_dashboard_overview", _payload("dashboard/overview"))
     monkeypatch.setattr(dcs, "build_dashboard_campaigns", _payload("dashboard/campaigns"))
     monkeypatch.setattr(dco, "build_dashboard_countries", _payload("dashboard/countries"))
@@ -330,7 +331,9 @@ def test_n3_a_run_audits_every_business_window_and_every_payload(monkeypatch):
     monkeypatch.setattr(audit, "independent_counts", lambda *a, **k: None)
     monkeypatch.setattr(audit, "global_population_split", lambda: None)
     _a, report = audit.run(now=datetime(2026, 11, 24, 12, tzinfo=timezone.utc))
-    surfaces = {"mart/campaign", "mart/country", "dashboard/overview",
+    # PR-ADS-177B: the Campaigns page's settled campaign view is audited too.
+    surfaces = {"mart/campaign", "mart/country", "mart/campaign_settled",
+                "dashboard/overview",
                 "dashboard/campaigns", "dashboard/countries", "dashboard/revenue",
                 "dashboard/deals"}
     assert [w["window"] for w in report["business_windows"]] == list(WINDOW_KEYS)

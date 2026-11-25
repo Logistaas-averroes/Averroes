@@ -521,7 +521,7 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
             "closed_won_deals": best_campaign.get("closed_won_deals"),
             "period_revenue_per_ad_spend":
                 best_campaign.get("period_revenue_per_ad_spend"),
-            "target_page": "roas-campaigns",
+            "target_page": "campaigns",
         }
 
     best_country = _best_row(
@@ -578,7 +578,7 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
                 # The #/waste page is ad-window search-term waste and cannot
                 # evidence this campaign-level signal; the Investigate decision
                 # card routes to the same page as this signal.
-                "target_page": "roas-campaigns",
+                "target_page": "campaigns",
             }
 
     fastest_improving = None
@@ -683,8 +683,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 f"{'s' if (best['closed_won_deals'] or 0) != 1 else ''} and "
                 f"{_fmt_usd_short(best['revenue_usd'])} closed-won revenue in this window."
             ),
-            "target_page": "roas-campaigns",
-            "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns",
+            "target_label": "Open Campaigns",
         })
     elif withheld:
         cards.append({
@@ -694,8 +694,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "body": (f"Closed-won deals are withheld for {len(withheld)} "
                      f"campaign{'s' if len(withheld) != 1 else ''} in this window, "
                      "so won-deal production is not claimed either way."),
-            "target_page": "roas-campaigns",
-            "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns",
+            "target_label": "Open Campaigns",
         })
     else:
         cards.append({
@@ -703,8 +703,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "title": "Scale",
             "headline": "No verified won-deal producers yet",
             "body": "No campaign has a closed-won deal in this window.",
-            "target_page": "roas-campaigns",
-            "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns",
+            "target_label": "Open Campaigns",
         })
 
     if sqls_available:
@@ -724,8 +724,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                     f"{'s' if (top_watch.get('sqls') or 0) != 1 else ''} without "
                     "closed-won proof — promising, not yet verified."
                 ),
-                "target_page": "roas-campaigns",
-                "target_label": "Open Campaign Revenue & Spend",
+                "target_page": "campaigns",
+                "target_label": "Open Campaigns",
             })
         elif any((r.get("sqls") or 0) > 0 for r in withheld):
             cards.append({
@@ -734,8 +734,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 "headline": "SQL pipelines cannot be judged",
                 "body": ("Closed-won deals are withheld for campaigns with SQLs in "
                          "this window, so unproven pipelines are not claimed."),
-                "target_page": "roas-campaigns",
-                "target_label": "Open Campaign Revenue & Spend",
+                "target_page": "campaigns",
+                "target_label": "Open Campaigns",
             })
         else:
             cards.append({
@@ -773,8 +773,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             ),
             # PR-ADS-162G: this card restates the biggest_waste signal, so it
             # opens the page that signal names as its evidence.
-            "target_page": "roas-campaigns",
-            "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns",
+            "target_label": "Open Campaigns",
         })
     elif not sqls_available:
         cards.append({
@@ -793,8 +793,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "headline": "Paid spend cannot be fully judged",
             "body": ("Closed-won deals are withheld for campaigns with spend and no "
                      "SQLs, so unexplained spend is neither claimed nor ruled out."),
-            "target_page": "roas-campaigns",
-            "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns",
+            "target_label": "Open Campaigns",
         })
     elif spend_truth.get("campaign_spend_status") != "verified":
         # PR-ADS-176C-F3 (R2-1): "no unexplained spend" is a claim ABOUT spend.
@@ -817,8 +817,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             "title": "Investigate",
             "headline": "No unexplained paid spend",
             "body": "Every campaign with spend has SQL or won-deal evidence in this window.",
-            "target_page": "roas-campaigns",
-            "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns",
+            "target_label": "Open Campaigns",
         })
 
     blockers = []

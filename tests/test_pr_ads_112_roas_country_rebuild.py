@@ -59,13 +59,15 @@ def test_country_filter_state_and_attribute_exist():
 
 def test_campaign_page_not_modified():
     # Campaign keeps its own filter + renderers; country must not reach into them.
-    assert "let roasCampaignFilter" in JS
-    assert "function renderRoasCampaignsPage" in JS
-    assert "function renderRoasCampaignTable" in JS
+    # PR-ADS-177B: the campaign page is the one Campaigns page; its own
+    # filter and renderers, never reached into by the country page.
+    assert 'let campaignsPageFilter = "all"' in JS
+    assert "function renderCampaignsPage()" in JS
+    assert "function renderCampaignsPageTable" in JS
     country = _country_region()
-    assert "roasCampaignFilter" not in country
-    assert "renderRoasCampaignTable" not in country
-    assert "renderRoasCampaignSummary" not in country
+    assert "campaignsPageFilter" not in country
+    assert "renderCampaignsPageTable" not in country
+    assert "renderCampaignsPageSummary" not in country
 
 
 # ── 3. Country readiness requires shared truth + geo spend ───────────────────

@@ -45,7 +45,8 @@ def test_revenue_pages_constant_includes_both_roas_pages():
     # windows, revenue truth), so it joined the clean revenue chrome as well.
     # PR-ADS-153C: Leads is a CRM/business page and joined the clean revenue chrome.
     # PR-ADS-168B: Revenue by Source is deleted (its hash redirects to Channels).
-    assert 'REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"]' in JS
+    # PR-ADS-177B: Campaign Revenue & Spend merged into the Campaigns page.
+    assert 'REVENUE_PAGES = ["dashboard", "campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -57,7 +58,7 @@ def test_navigate_hides_global_window_bar_on_revenue_pages():
 
 
 def test_roas_selects_have_no_ad_windows():
-    for select_id in ("roas-campaigns-window", "roas-countries-window"):
+    for select_id in ("campaigns-window", "roas-countries-window"):
         m = re.search(rf'<select[^>]*id="{select_id}"[^>]*>.*?</select>', HTML, re.DOTALL)
         assert m
         block = m.group(0)
@@ -76,8 +77,8 @@ def test_audit_button_removed_from_business_pages():
     # The ROAS business decision pages must not call the audit endpoint. (The
     # admin-only Revenue Health diagnostics page added in PR-ADS-113 legitimately
     # uses it via loadRevenueHealth — assert the ROAS renderers stay clean.)
-    for fn_name in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
-                    "function loadRoasCampaigns", "function loadRoasCountries"):
+    for fn_name in ("function renderCampaignsPage()", "function renderRoasCountriesPage",
+                    "function loadCampaignsPage", "function loadRoasCountries"):
         body = _fn(fn_name, span=2600)
         assert "/api/revenue-attribution/audit" not in body
 
@@ -148,9 +149,9 @@ def test_blocked_decision_logic():
 
 
 def test_blocked_state_returns_before_table_campaign():
-    body = _fn("function renderRoasCampaignsPage", span=2600)
+    body = _fn("function renderCampaignsPage()", span=3400)
     i_block = body.find("renderRevenueBlockedState")
-    i_table = body.find("renderRoasCampaignTable")
+    i_table = body.find("renderCampaignsPageTable")
     assert i_block != -1 and i_table != -1
     assert i_block < i_table, "blocked card must render before (and instead of) the table"
 
@@ -181,8 +182,9 @@ def test_render_flow_blocked_then_empty_then_table():
     # ROAS by Campaign (PR-ADS-111) and ROAS by Country (PR-ADS-112) were each
     # rebuilt with page-specific blocked + safe-empty renderers.
     for fn_name, block_fn, empty_fn, table_fn in (
-        ("function renderRoasCampaignsPage", "renderRevenueBlockedState",
-         "renderRoasCampaignSafeEmptyState", "renderRoasCampaignTable"),
+        # PR-ADS-177B: the one Campaigns page (blocked → spend gate → empty → table).
+        ("function renderCampaignsPage()", "renderRevenueBlockedState",
+         "renderCampaignsSafeEmptyState", "renderCampaignsPageTable"),
         ("function renderRoasCountriesPage", "renderCountryRevenueBlockedState",
          "renderRoasCountrySafeEmptyState", "renderRoasCountryTable"),
     ):
@@ -199,10 +201,12 @@ def test_render_flow_blocked_then_empty_then_table():
 def test_both_pages_simple_decision_table():
     # PR-ADS-126: the Decision column lives in the dedicated table renderers; the
     # page render functions compose the mart strips + table and stay clutter-free.
-    for tbl_name in ("function renderRoasCampaignTable", "function renderRoasCountryTable"):
+    # PR-ADS-177B: the Campaigns table names its verdict column "Status".
+    for tbl_name, col in (("function renderCampaignsPageTable", ">Status<"),
+                          ("function renderRoasCountryTable", ">Decision<")):
         body = _fn(tbl_name, span=2600)
-        assert ">Decision<" in body
-    for fn_name in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage"):
+        assert col in body
+    for fn_name in ("function renderCampaignsPage()", "function renderRoasCountriesPage"):
         body = _fn(fn_name, span=2600)
         for clutter in (">CAC<", ">Confidence<", ">Notes<"):
             assert clutter not in body
@@ -231,4 +235,5 @@ def test_revenue_pages_list():
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert names == ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"]
+    # PR-ADS-177B: roas-campaigns merged into campaigns (business windows).
+    assert names == ["dashboard", "campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"]

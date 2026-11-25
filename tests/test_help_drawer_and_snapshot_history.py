@@ -56,7 +56,7 @@ REQUIRED_HELP_PAGES = [
     "leads",
     "opportunities",
     "deals",
-    "roas-campaigns",
+    # PR-ADS-177B: "roas-campaigns" was merged into "campaigns" (above).
     "roas-countries",
     "gclid-attribution",
     # PR-ADS-165A: "unit-economics" was deleted with its page.
@@ -115,13 +115,14 @@ def test_help_content_has_all_fields():
 # ── Critical Help Copy Assertions ──────────────────────────────────────────
 
 def test_roas_campaigns_help_mentions_hubspot_revenue():
-    """ROAS by Campaign help must mention HubSpot revenue."""
-    # Find the roas-campaigns help block
+    """The campaign revenue help must mention HubSpot revenue. PR-ADS-177B:
+    Campaign Revenue & Spend's help is the one Campaigns page's (`campaigns`)."""
     assert "HubSpot" in JS
-    roas_start = JS.find('"roas-campaigns"', JS.find("PAGE_HELP_CONTENT"))
-    assert roas_start != -1, "roas-campaigns key not found in PAGE_HELP_CONTENT"
-    roas_section = JS[roas_start:]
-    roas_end = roas_section.find('"roas-countries"')
+    help_block = JS[JS.find("const PAGE_HELP_CONTENT"):]
+    roas_start = help_block.find("\n  campaigns: {")
+    assert roas_start != -1, "campaigns key not found in PAGE_HELP_CONTENT"
+    roas_section = help_block[roas_start:]
+    roas_end = roas_section.find('"search-terms"')
     if roas_end != -1:
         roas_section = roas_section[:roas_end]
     assert "HubSpot" in roas_section, "ROAS by Campaign help must mention HubSpot"

@@ -32,10 +32,14 @@ def _fn(marker, span=1800):
 
 
 def test_campaign_table_uses_revenue_table_scroll():
-    fn = _fn("function renderRoasCampaignTable", span=4800)  # PR-ADS-161E: canonical cells
-    assert "revenue-table-shell" in fn
-    assert "revenue-table-scroll" in fn
-    assert "revenue-decision-table" in fn
+    # PR-ADS-177B: the one Campaigns page uses the Dashboard's campaign table
+    # (the 176B Countries precedent) — the same containment: a horizontal
+    # scroll wrapper around the table, never a page overflow.
+    fn = _fn("function renderCampaignsPageTable", span=4800)
+    assert '<div class="camp-scroll">' in fn
+    assert '<table class="camp-table camp-page-table">' in fn
+    assert "overflow-x: auto" in CSS.split(".camp-scroll {")[1].split("}")[0]
+    assert ".campaigns-page .dash-panel { min-width: 0; }" in CSS
 
 
 def test_country_table_uses_revenue_table_scroll():
@@ -86,10 +90,10 @@ def test_campaign_name_column_wraps_normally():
 
 
 def test_spend_summary_is_styled_strip():
-    fn = _fn("function renderRoasCampaignSummary", span=2200)
-    assert "revenue-spend-summary" in fn
-    assert "revenue-spend-summary__grid" in fn
-    # The old unstyled raw-text block is gone.
+    # PR-ADS-177B: the campaign summary is the Dashboard KPI card grid (styled
+    # markup), over the server's campaign_totals.
+    fn = _fn("function renderCampaignsPageSummary", span=4200)
+    assert "dash-kpi-grid" in fn and "dash-kpi-card__value" in fn
     assert "revenue-spend-currency__native" not in fn
     # And the styled strip has real CSS (it previously had none).
     assert ".revenue-spend-summary {" in CSS
@@ -108,20 +112,19 @@ def test_compact_currency_formatter_exists():
 
 
 def test_kpi_spend_uses_compact_not_full_precision():
-    fn = _fn("function renderRoasCampaignSummary", span=2200)
-    # Native + reporting magnitudes shown compactly in the summary strip.
-    assert "fmtCompactCurrency(native, nativeCur)" in fn
-    assert 'fmtCompactCurrency(usd, "USD")' in fn
-    # The visible KPI strip Spend cell uses the compact magnitude form (e.g.
-    # "$93.9k"), not the full-precision "$93,875.53 USD" that wrapped badly.
-    assert "? fmtMoney(usd)" in fn
+    # PR-ADS-177B: the Campaign Spend card is USD reporting spend in the
+    # compact magnitude form (fmtMoney: "$93.9k"), never the full-precision
+    # "$93,875.53 USD" that wrapped badly.
+    fn = _fn("function renderCampaignsPageSummary", span=4200)
+    assert 'rowMetricHtml(t, "spend", fmtMoney, opts)' in fn
 
 
 def test_exact_values_preserved_on_hover_and_in_modal():
     # Exact full-precision native/USD stay available (hover title), not lost.
-    fn = _fn("function renderRoasCampaignSummary", span=2200)
-    assert 'title="${fmtCurrency(native, nativeCur)}"' in fn
-    # The spend proof modal still carries exact per-total figures.
+    # PR-ADS-177B: the exact per-campaign native / USD figures are in the spend
+    # proof modal, opened from the campaign's drawer.
+    fn = _fn("function renderCampaignsPageDrawer", span=2200)
+    assert "spendProofButton(r.campaign_id, r.campaign_name)" in fn
     assert "renderSpendProof" in JS
 
 

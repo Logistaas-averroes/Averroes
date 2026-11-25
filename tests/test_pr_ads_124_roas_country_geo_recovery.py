@@ -87,7 +87,8 @@ def test_roas_countries_is_a_revenue_page():
     i = JS.find("const REVENUE_PAGES")
     line = JS[i:i + 200]
     assert "roas-countries" in line
-    assert "roas-campaigns" in line
+    # PR-ADS-177B: the campaign page is "campaigns" (roas-campaigns merged).
+    assert '"campaigns"' in line and "roas-campaigns" not in line
 
 
 def test_css_failsafe_hides_chrome_on_revenue_pages():

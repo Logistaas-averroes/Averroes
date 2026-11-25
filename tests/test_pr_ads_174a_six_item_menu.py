@@ -35,7 +35,9 @@ CSS = (ROOT / "static/styles.css").read_text(encoding="utf-8")
 EXPECTED_ITEMS = [
     ("overview", "Overview", ["dashboard"]),
     ("channels", "Channels", ["channels"]),
-    ("campaigns", "Campaigns", ["campaigns", "roas-campaigns", "keywords", "search-terms"]),
+    # PR-ADS-177B: one Campaigns page (#/roas-campaigns is retired into it);
+    # Keywords and Search Terms stay until PR-ADS-177D merges them.
+    ("campaigns", "Campaigns", ["campaigns", "keywords", "search-terms"]),
     # PR-ADS-176B: Countries is one page (#/geo is retired into it), so it is
     # a single-page item with no strip.
     ("countries", "Countries", ["roas-countries"]),
@@ -278,7 +280,7 @@ def test_06_the_strip_labels_are_the_old_sidebar_labels():
     labels = {p: l.replace("&amp;", "&") for tabs in _strips().values()
               for _, p, _, l in tabs}
     assert labels == {
-        "campaigns": "Campaigns", "roas-campaigns": "Campaign Revenue & Spend",
+        "campaigns": "Campaigns",
         "keywords": "Keyword Evidence", "search-terms": "Search Terms",
         "leads": "Leads", "deals": "Deals",
         "system": "System", "scheduler": "Data Runs", "health": "System Status",
@@ -293,8 +295,11 @@ def test_07_every_dashboard_target_page_and_redirect_target_is_in_the_menu():
         src = f.read_text(encoding="utf-8")
         targets |= set(re.findall(r'"target_page":\s*"([a-z0-9-]+)"', src))
         targets |= set(re.findall(r'target_page="([a-z0-9-]+)"', src))
-    assert {"channels", "deals", "leads", "revenue-health", "roas-campaigns",
+    # PR-ADS-177B: the campaign cards open "campaigns"; none opens the
+    # retired "roas-campaigns".
+    assert {"channels", "deals", "leads", "revenue-health", "campaigns",
             "roas-countries", "search-terms"} <= targets
+    assert "roas-campaigns" not in targets
     redirects = json.loads(_node(_menu_js() + "\nprocess.stdout.write(JSON.stringify("
                                  "Object.values(RETIRED_PAGE_REDIRECTS).map((r) => r.page)));"))
     in_menu = {p for _, _, ps in EXPECTED_ITEMS for p in ps}

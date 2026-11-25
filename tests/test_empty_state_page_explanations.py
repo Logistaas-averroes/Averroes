@@ -363,8 +363,11 @@ class TestPageExplanationContainers:
         # so the page carries no inline explanation container (same precedent
         # as "deals" above and the ROAS pages in PR-ADS-110).
         # "action-queue" and "reports" were deleted outright in PR-ADS-162G.
+        # PR-ADS-177B: "campaigns" is the one Campaigns page — a clean
+        # business-window revenue page without an inline explanation
+        # container (the ROAS / Countries precedent).
         key_pages = [
-            "dashboard", "campaigns",
+            "dashboard",
             "keywords",   # PR-ADS-176B: "geo" deleted (roas-countries is clean)
             "gclid-attribution",
             "scheduler", "health", "backfill",

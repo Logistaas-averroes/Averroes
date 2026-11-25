@@ -55,12 +55,15 @@ def test_campaign_page_uses_mart():
     # The canonical mart URL is built once in the shared loader helper.
     assert "/api/revenue-performance?view=" in JS
     assert "async function fetchRevenuePerformance" in JS
-    loader = _slice("async function loadRoasCampaigns")
-    assert 'fetchRevenuePerformance("campaign"' in loader
-    # The campaign page no longer fetches its own page endpoint as primary truth.
+    # PR-ADS-177B: the one Campaigns page reads the mart's SETTLED campaign
+    # view (owner decision 2026-11-24, 2) — still the mart, never a page
+    # endpoint, and its rows are the mart's rows.
+    loader = _slice("async function loadCampaignsPage", span=2400)
+    assert "/api/revenue-performance?view=campaign&settled=true" in loader
     assert "/api/revenue-attribution?" not in loader
-    # Campaign rows come from the mart's rows.
-    assert "roasCampaignsData = data.rows" in loader
+    assert "campaignsPageMart = data" in loader
+    page = _slice("function renderCampaignsPage()", span=4000)
+    assert "data.rows" in page
 
 
 # ── 2. ROAS by Country uses the mart ────────────────────────────────────────
@@ -97,12 +100,25 @@ def test_all_revenue_pages_share_mart_renderers():
     assert "function renderMartSummaryStrip" in JS
     assert "function renderMartDiagnostics" in JS
     for page in (
-        "function renderRoasCampaignsPage",
+        "function renderCampaignsPage()",
         "function renderRoasCountriesPage",
         # PR-ADS-168B: renderRevenueBySourcePage is deleted with its page.
         "function renderRevenueDealsPage",
     ):
         body = _slice(page, span=3000)
+        if page == "function renderCampaignsPage()":
+            # PR-ADS-177B: the one Campaigns page, in the Dashboard's language
+            # (the Countries precedent): KPI cards from the mart's
+            # campaign_totals, a STRICT spend gate instead of the diagnostic
+            # spend card, and a truth footer from the mart's spend_truth.
+            own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
+            assert "renderCampaignsTruthFooter(data)" in own
+            footer = _slice("function renderCampaignsTruthFooter", span=900)
+            assert "data.spend_truth" in footer
+            assert "renderCampaignsPageSummary(data)" in own
+            assert "campaign_totals" in _slice("function renderCampaignsPageSummary", span=600)
+            assert "renderCampaignSpendGateState(data)" in own
+            continue
         if page == "function renderRoasCountriesPage":
             # PR-ADS-176B: the one Countries page, in the Dashboard's language.
             # The spend card and the summary strip are the account's
@@ -228,7 +244,7 @@ def test_no_silent_old_endpoint_fallback_on_business_pages():
     # that renderRevenueDealsPage maps to renderMartUnavailable(). Never a silent
     # call to the legacy page endpoint.
     cases = [
-        ("async function loadRoasCampaigns", "/api/revenue-attribution?"),
+        ("async function loadCampaignsPage", "/api/revenue-attribution?"),
         ("async function loadRoasCountries", "/api/revenue-attribution?"),
         # PR-ADS-168B: loadRevenueBySource is deleted with its page.
         ("async function loadDeals", "/api/revenue-deals?"),

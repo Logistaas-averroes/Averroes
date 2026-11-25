@@ -969,7 +969,7 @@ def test_18f_attribution_views_disclose_their_narrower_revenue_scope():
     # It must say the attributed figure is a SUBSET, not the business total.
     assert "subset" in disclosure.lower()
     # And it must actually be rendered on the ROAS by Campaign page.
-    page = _js_function("function renderRoasCampaignsPage", span=4000)
+    page = _js_function("function renderCampaignsPage()", span=4000)
     assert "renderRevenueScopeDisclosure(data)" in page
 
 

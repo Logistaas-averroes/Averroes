@@ -37,7 +37,8 @@ JS = (ROOT / "static/app.js").read_text(encoding="utf-8")
 EXPECTED = [
     ("Overview", ["dashboard"]),
     ("Channels", ["channels"]),
-    ("Campaigns", ["campaigns", "roas-campaigns", "keywords", "search-terms"]),
+    # PR-ADS-177B: Campaign Revenue & Spend merged into Campaigns.
+    ("Campaigns", ["campaigns", "keywords", "search-terms"]),
     # PR-ADS-176B: one Countries page (#/geo retired into it), no strip.
     ("Countries", ["roas-countries"]),
     ("Pipeline", ["leads", "deals"]),
@@ -83,7 +84,8 @@ def test_03_no_page_was_added_or_lost_and_every_one_still_routes():
     # PR-ADS-168B: 17 until the Revenue by Source page was deleted.
     # PR-ADS-174A: still 16 pages, now under six items.
     # PR-ADS-176B: 15 — the Countries evidence page (#/geo) was deleted.
-    assert len(nav) == len(set(nav)) == 15
+    # PR-ADS-177B: 14 — Campaign Revenue & Spend merged into Campaigns.
+    assert len(nav) == len(set(nav)) == 14
     assert set(nav) <= pages
     for page in nav:
         assert f'id="page-{page}"' in HTML, page

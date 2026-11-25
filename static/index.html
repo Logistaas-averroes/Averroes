@@ -182,7 +182,6 @@
       <div id="section-tabs-bar" class="section-tabs-bar" hidden>
         <nav class="dashboard-tabs section-tabs" data-section="campaigns" aria-label="Campaigns pages" hidden>
           <a class="section-tab dashboard-tab" data-page="campaigns" href="#/campaigns">Campaigns</a>
-          <a class="section-tab dashboard-tab" data-page="roas-campaigns" href="#/roas-campaigns">Campaign Revenue &amp; Spend</a>
           <a class="section-tab dashboard-tab" data-page="keywords" href="#/keywords">Keyword Evidence</a>
           <a class="section-tab dashboard-tab" data-page="search-terms" href="#/search-terms" title="Search terms and pattern analysis">Search Terms</a>
         </nav>
@@ -213,7 +212,7 @@
           <button type="button" class="dashboard-tab is-active" data-dash-tab="overview" aria-current="page">Overview</button>
           <button type="button" class="dashboard-tab" data-dash-tab="revenue">Revenue</button>
           <button type="button" class="dashboard-tab" data-dash-tab="channels">Channels</button>
-          <button type="button" class="dashboard-tab" data-dash-tab="campaigns">Campaigns &amp; Keywords</button>
+          <button type="button" class="dashboard-tab" data-dash-tab="campaigns">Campaigns</button>
           <button type="button" class="dashboard-tab" data-dash-tab="countries">Countries</button>
           <button type="button" class="dashboard-tab" data-dash-tab="deals">Deals</button>
         </nav>
@@ -260,16 +259,38 @@
         </div>
       </section>
 
-      <!-- Campaigns -->
+      <!-- Campaigns — the one campaign page (PR-ADS-177B). Campaign Evidence and
+           Campaign Revenue & Spend are merged here, in the Dashboard's visual
+           language (KPI cards, campaign table, drawer, truth footer), with the
+           separate Meta Ads ad-set table. It reads the mart's SETTLED campaign
+           view on business windows. -->
       <section id="page-campaigns" class="page page--wide" hidden>
-        <!-- PR-ADS-143: Campaign Evidence page — GENUINE selected-window totals
-             (canonical Google Ads spend reconciled with deduplicated HubSpot lead
-             outcomes), a compact KPI strip, one clean full-width decision table,
-             and a factual outcome status. Rendered by loadCampaignEvidence().
-             Source/methodology live in the Help drawer, not a strip above the table. -->
-        <div id="page-explanation-campaigns" hidden></div>
-        <p id="run-meta-campaigns" class="run-meta" data-section="campaigns"></p>
-        <div id="campaign-evidence-shell"></div>
+        <header class="page-header">
+          <h1 class="page-title">Campaigns</h1>
+          <p class="page-subtitle">Google Ads campaign spend, leads and SQLs, closed-won deals, customers and revenue, plus one residual row for contacts with no campaign label. A window that includes today ends yesterday, for revenue and spend alike. Meta ad sets are a separate table, never added to Google Ads.</p>
+        </header>
+        <div class="dash-command-bar">
+          <div class="dash-command-bar__truth">
+            <span class="dash-chip dash-chip--readonly">Read-only</span>
+            <span class="dash-chip">Spend: Google Ads campaign spend</span>
+            <span class="dash-chip">Revenue: HubSpot Closed-Won · campaign-attributable</span>
+          </div>
+          <div class="roas-window-controls dash-window-controls">
+            <label class="roas-window-label" for="campaigns-window">Window:</label>
+            <select id="campaigns-window" class="waste-filter-select" data-business-window-select aria-label="Business window">
+              <option value="current_quarter" selected>Current Quarter</option>
+              <option value="last_quarter">Last Quarter</option>
+              <option value="last_6_months">Last 6 Months</option>
+              <option value="ytd">YTD</option>
+              <option value="all_time">All Time</option>
+            </select>
+            <button id="campaigns-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+            <span class="roas-window-range" id="campaigns-range" aria-live="polite"></span>
+          </div>
+        </div>
+        <div id="campaigns-page-body" class="dashboard-overview campaigns-page">
+          <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
+        </div>
       </section>
 
       <!-- Search Terms + Patterns evidence page (PR-ADS-144) -->
@@ -716,31 +737,6 @@
       </section>
 
 
-      <!-- Campaign Revenue &amp; Spend -->
-      <section id="page-roas-campaigns" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Campaign Revenue &amp; Spend</h1>
-          <p class="page-subtitle">Campaign-level Google Ads spend compared with HubSpot closed-won revenue.</p>
-        </header>
-        <div class="roas-window-controls">
-          <label class="roas-window-label">Window:</label>
-          <select id="roas-campaigns-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
-            <option value="current_quarter" selected>Current Quarter</option>
-            <option value="last_quarter">Last Quarter</option>
-            <option value="last_6_months">Last 6 Months</option>
-            <option value="ytd">YTD</option>
-            <option value="all_time">All Time</option>
-          </select>
-          <button id="roas-campaigns-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
-          <span class="roas-window-range" id="roas-campaigns-range" aria-live="polite"></span>
-        </div>
-        <div id="roas-campaigns-kpis" class="kpi-grid"></div>
-        <div class="panel">
-          <div class="panel__body panel__body--flush" id="roas-campaigns-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
-          </div>
-        </div>
-      </section>
 
       <!-- Countries — the one country page (PR-ADS-176B). The Countries
            evidence page (#/geo) and Country Revenue & Spend are merged here, in

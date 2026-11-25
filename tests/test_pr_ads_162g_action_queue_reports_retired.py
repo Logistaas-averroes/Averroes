@@ -196,7 +196,9 @@ def test_05_no_dashboard_card_or_signal_targets_a_page_that_does_not_exist():
         assert unresolved == [], unresolved
         assert literals <= pages, (path.name, sorted(literals - pages))
         seen |= literals
-    assert "roas-campaigns" in seen and "revenue-health" in seen   # it read them
+    # PR-ADS-177B: the campaign cards open the one Campaigns page.
+    assert "campaigns" in seen and "revenue-health" in seen   # it read them
+    assert "roas-campaigns" not in seen
     assert not {"action-queue", "reports"} & seen
     # No other service emits a card target this test does not read.
     for path in (ROOT / "services").glob("*.py"):
@@ -230,16 +232,17 @@ def test_06_the_target_check_fails_on_a_deleted_or_unreadable_target():
 
 def test_07_the_investigate_cards_open_the_page_that_holds_their_evidence():
     """Both cards are about CAMPAIGNS with spend and no SQL or won-deal proof —
-    the biggest_waste signal, whose own target is Campaign Revenue & Spend."""
+    the biggest_waste signal, whose own target is the Campaigns page
+    (PR-ADS-177B: Campaign Revenue & Spend merged into it)."""
     service = (ROOT / "services/dashboard_overview_service.py").read_text(
         encoding="utf-8")
     assert "Action Queue" not in service and "action-queue" not in service
     for headline in ("Paid spend without SQL proof", "No unexplained paid spend"):
         card = service.split(f'"headline": "{headline}"')[1].split("})")[0]
-        assert '"target_page": "roas-campaigns"' in card, headline
-        assert '"target_label": "Open Campaign Revenue & Spend"' in card, headline
+        assert '"target_page": "campaigns"' in card, headline
+        assert '"target_label": "Open Campaigns"' in card, headline
     signal = service.split('"label": "Spend with no SQL or won-deal proof"')[1]
-    assert '"target_page": "roas-campaigns"' in signal.split("}")[0]
+    assert '"target_page": "campaigns"' in signal.split("}")[0]
 
 
 def test_08_an_old_bookmark_lands_on_the_dashboard():
@@ -257,11 +260,14 @@ def test_08_an_old_bookmark_lands_on_the_dashboard():
         "\nprocess.stdout.write(JSON.stringify(out));")
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
+    # PR-ADS-177B: roas-campaigns is no page either — it is a retired key
+    # whose redirect lands on Campaigns (asserted below).
     assert out.stdout == ('{"action-queue":false,"reports":false,'
-                          '"search-terms":true,"roas-campaigns":true}')
+                          '"search-terms":true,"roas-campaigns":false}')
     # Neither key was kept as a redirect: there is no equivalent page to send it to.
     redirects = JS.split("const RETIRED_PAGE_REDIRECTS")[1].split("};")[0]
     assert "action-queue" not in redirects and "reports" not in redirects
+    assert '"roas-campaigns": { page: "campaigns" }' in redirects
 
 
 def test_09_every_remaining_sidebar_page_still_routes():
@@ -276,7 +282,8 @@ def test_09_every_remaining_sidebar_page_still_routes():
     # PR-ADS-165A: 18 until the Unit Economics page was deleted.
     # PR-ADS-168B: 17 until the Revenue by Source page was deleted.
     # PR-ADS-176B: 16 until the Countries evidence page (#/geo) was deleted.
-    assert len(nav) == 15
+    # PR-ADS-177B: 15 until Campaign Revenue & Spend merged into Campaigns.
+    assert len(nav) == 14
     assert set(nav) <= pages, sorted(set(nav) - pages)
     for page in sorted(nav):
         assert f'id="page-{page}"' in HTML, page
@@ -289,7 +296,7 @@ def test_09_every_remaining_sidebar_page_still_routes():
     # (PR-ADS-174A)
     group = HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
     assert re.findall(r'data-page="([a-z0-9-]+)"', group) == [
-        "campaigns", "roas-campaigns", "keywords", "search-terms"]
+        "campaigns", "keywords", "search-terms"]
 
 
 def test_10_the_doctrine_registry_holds_no_entry_for_the_deleted_surfaces():

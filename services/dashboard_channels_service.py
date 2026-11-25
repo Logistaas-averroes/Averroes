@@ -665,7 +665,7 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                      f"{'s' if google['closed_won_deals'] != 1 else ''} and "
                      f"{_fmt_usd_short(google['won_revenue_usd'])} closed-won revenue "
                      "with verified spend."),
-            "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+            "target_page": "campaigns", "target_label": "Open Campaigns",
         })
     else:
         # Highlight the top revenue-only customer producer instead.
@@ -690,14 +690,14 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
                 "headline": "Channel closed-won outcomes are withheld",
                 "body": ("Closed-won deals are withheld for this window, so no "
                          "channel is claimed to have produced none."),
-                "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+                "target_page": "campaigns", "target_label": "Open Campaigns",
             })
         else:
             cards.append({
                 "type": "scale", "title": "Scale",
                 "headline": "No spend-connected won-deal source yet",
                 "body": "No channel has both verified spend and closed-won deals in this window.",
-                "target_page": "roas-campaigns", "target_label": "Open Campaign Revenue & Spend",
+                "target_page": "campaigns", "target_label": "Open Campaigns",
             })
 
     # Watch — a revenue-only channel with SQLs but no connected spend.

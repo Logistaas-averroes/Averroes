@@ -1190,6 +1190,14 @@ def _build_db_rows(spend_rows: list, cohort_slots: dict | None, revenue_rows: li
         if group_field == "campaign_name":
             finalized["campaign_id"] = key
             finalized["campaign_name"] = bucket["display"] or "unknown"
+            # PR-ADS-177B: the row's own deal population, so the Campaigns
+            # drawer lists exactly the deals this row counts (as the country
+            # rows do since PR-ADS-176A). A withheld deal count has no proof
+            # list: None, never [] (which reads as "no deals").
+            finalized["deal_ids"] = (
+                None if finalized.get("closed_won_deals") is None
+                else sorted({str(d.get("deal_id")) for d in bucket.get("deal_rows") or []
+                             if d.get("deal_id")}))
         else:
             # PR-ADS-153F: identity comes from the shared contract, so the code
             # is the one that produced the key rather than a second, independent
@@ -1432,9 +1440,20 @@ def _apply_identity_map(rows: list, mapping: dict, applied_log: list) -> list:
     return out
 
 
-def canonical_campaign_spend_block(start_date, end_date, customer_id) -> dict:
+def canonical_campaign_spend_block(start_date, end_date, customer_id, *,
+                                   settled: bool = False,
+                                   now: datetime | None = None) -> dict:
     """THE canonical Google Ads campaign-spend, coverage and FX state of
     ``[start_date, end_date]`` (inclusive account days), for one account scope.
+
+    ``settled`` (PR-ADS-177B, the Campaigns page's settled campaign view): the
+    coverage must also hold every day COMPLETELY — the PR-ADS-167A settle rule
+    (``google_ads_spend_service.analyze_settled_coverage``) over the same
+    ledger chunks, in the account time zone on record, exactly as
+    ``revenue_spend_truth_service.build_google_ads_spend_truth_for_days(
+    settled=True)`` applies it. Yesterday's spend is published only once the
+    morning sync has re-read it; until then the coverage is incomplete with
+    ``spend_unsettled_reason``. False (every other caller) changes nothing.
 
     PR-ADS-168A: extracted unchanged from :func:`_build_from_db` so the
     business-window contract and the Channels page's evidence-day spend
@@ -1453,6 +1472,17 @@ def canonical_campaign_spend_block(start_date, end_date, customer_id) -> dict:
     coverage = repo.fetch_spend_coverage(start_date, end_date, customer_id)
     _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
     coverage_complete = bool(_cov.get("complete"))
+    unsettled_reason = None
+    if settled and coverage_complete:
+        from services.revenue_spend_truth_service import (  # noqa: PLC0415
+            _settled_verdict,
+        )
+        _settle = _settled_verdict(start_date, end_date,
+                                   coverage.get("chunks", []), now)
+        if not _settle.get("complete"):
+            coverage_complete = False
+            unsettled_reason = (_settle.get("unsettled_reason")
+                                or "spend_days_not_settled")
     # PR-ADS-129: classify the coverage REASON from the durable ledger so ROAS
     # availability is auditable — a window whose first spend row starts after
     # the window start is coverage-COMPLETE when the earlier period was fetched
@@ -1463,6 +1493,11 @@ def canonical_campaign_spend_block(start_date, end_date, customer_id) -> dict:
     _last_spend = _ce if (isinstance(_ce, str) or _ce is None) else _ce.isoformat()
     coverage_detail = _classify_cov(
         start_date, end_date, coverage.get("chunks", []), _first_spend)
+    if unsettled_reason:
+        # Every day was fetched, but not every day is held completely: the
+        # newest one has not been re-read since it ended.
+        coverage_detail = {**coverage_detail, "status": "incomplete",
+                           "reason": unsettled_reason}
     canonical_total = round(float(canonical.get("total_spend") or 0), 2)
     # PR-ADS-119: HubSpot revenue is USD, so the ROAS denominator must be USD.
     # Convert via daily FX (already done in the repo). fx_complete is None when
@@ -1491,6 +1526,8 @@ def canonical_campaign_spend_block(start_date, end_date, customer_id) -> dict:
         "coverage_detail": coverage_detail,
         "campaign_spend_coverage_status": coverage_detail["status"],
         "campaign_spend_coverage_reason": coverage_detail["reason"],
+        "settled_rule_applied": bool(settled),
+        "spend_unsettled_reason": unsettled_reason,
         "spend_source": "canonical_google_ads_api",
         "canonical_rows": canonical.get("rows") or [],
         "canonical_total": canonical_total,
@@ -1714,7 +1751,8 @@ def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
     }
 
 
-def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dict | None:
+def _build_from_db(resolved, start_date, end_date, window=None, now=None, *,
+                   settled_spend: bool = False) -> dict | None:
     """Build the contract from durable DB sources.
 
     Returns the full contract dict, or None when the database is unavailable
@@ -1789,7 +1827,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # Channels page's spend over evidence days, so one state machine decides
     # every Google Ads spend verdict.
     _spend_block = canonical_campaign_spend_block(start_date, end_date,
-                                                  _scope_customer_id)
+                                                  _scope_customer_id,
+                                                  settled=settled_spend, now=now)
     canonical = _spend_block["canonical"]
     canonical_access = _spend_block["canonical_access"]
     if canonical_access:
@@ -2366,6 +2405,11 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # never a Campaign/Country ROAS denominator.
         "spend_source": spend_source,
         "spend_coverage_status": spend_coverage_status,
+        # PR-ADS-177B: the settle rule over campaign spend (the Campaigns
+        # page's settled campaign view only) and, when it withholds, why.
+        "spend_settled_rule_applied": bool(settled_spend),
+        "spend_unsettled_reason": (_spend_block.get("spend_unsettled_reason")
+                                   if canonical_access else None),
         # PR-ADS-129: auditable coverage classification. campaign_spend_coverage_status
         # is "complete" even when the first spend row starts after the window start,
         # provided the earlier period was fetched and VERIFIED as zero spend.
@@ -2674,7 +2718,8 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
 
 @_canonical_snapshot.single_snapshot
 def build_revenue_attribution(window: str, now: datetime | None = None, *,
-                              settled_days: bool = False) -> dict:
+                              settled_days: bool = False,
+                              settled_spend: bool = False) -> dict:
     """Build the shared revenue-attribution contract for a business window.
 
     Durable-source strategy (PR-ADS-108):
@@ -2700,6 +2745,11 @@ def build_revenue_attribution(window: str, now: datetime | None = None, *,
             leads and spend alike; ``window.window_range`` says so. False (the
             default, every other caller including ``/api/revenue-attribution``)
             leaves the window unchanged.
+        settled_spend: PR-ADS-177B. With ``settled_days``, campaign spend is
+            published only when every day is held completely (the settle rule:
+            yesterday after its morning re-read). True only for the mart's
+            settled CAMPAIGN view (the Campaigns page and Dashboard →
+            Campaigns); the country view keeps its geo settle gate.
 
     Returns:
         Dict with window, summary, campaigns, countries, and source_health.
@@ -2710,7 +2760,8 @@ def build_revenue_attribution(window: str, now: datetime | None = None, *,
     resolved, start_date, end_date = _window_date_bounds(
         window, now, settled_days=settled_days)
 
-    db_result = _build_from_db(resolved, start_date, end_date, window=window, now=now)
+    db_result = _build_from_db(resolved, start_date, end_date, window=window, now=now,
+                               settled_spend=bool(settled_days and settled_spend))
     if db_result is not None:
         return db_result
 
@@ -2851,28 +2902,40 @@ def _deal_detail_row(r: dict) -> dict:
 
 @_canonical_snapshot.single_snapshot
 def build_campaign_deal_details(window: str, campaign: str,
-                                now: datetime | None = None) -> dict:
+                                now: datetime | None = None, *,
+                                settled_days: bool = False) -> dict:
     """Closed-won client/deal detail rows behind ONE canonical campaign (PR-ADS-130).
 
-    Read-only drilldown for the Campaign Revenue & Spend drawer. Fetches closed-won deals
-    from the durable gclid_attribution table (windowed by deal_close_date), applies
-    the SAME canonical identity map the ROAS rows use so a deal's raw campaign label
-    groups onto its canonical campaign, then returns the deals for the requested
-    canonical campaign. Never writes anything; never fabricates company/contact ids.
+    Read-only drilldown for the Campaigns drawer. Reads the canonical ledger at
+    ``campaign_attributable`` scope, applies the SAME identity rule the
+    campaign rows use — the configured account's approved mappings, its "not
+    Google Ads" exclusions (PR-ADS-120b) and exact-normalised auto-links — and
+    returns the deals of the requested canonical campaign. Never writes
+    anything; never fabricates company/contact ids.
+
+    ``settled_days`` (PR-ADS-177B): the row's window is the settled campaign
+    view's — an open window ends yesterday — so the drawer reads the same
+    account-local days through ``settled_revenue_bounds``, the instants the
+    row's deals were read over. The drawer of a settled row then lists exactly
+    the row's ``deal_ids``. False keeps the window through today.
 
     Raises ValueError for an unsupported window.
     """
-    resolved, start_date, end_date = _window_date_bounds(window, now)
+    resolved, start_date, end_date = _window_date_bounds(
+        window, now, settled_days=settled_days)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     # PR-ADS-153E-B: the deals proving a campaign row come from the canonical
-    # ledger at `campaign_attributable` scope — the SAME scope the ROAS row was
+    # ledger at `campaign_attributable` scope — the SAME scope the row was
     # aggregated at, so the drawer can never list a different set of deals from
     # the number it is opened from.
-    base = canonical_revenue.load_won_deals(window, now=now)
+    base = canonical_revenue.load_won_deals(
+        window, now=now,
+        bounds=settled_revenue_bounds(resolved) if settled_days else None)
     if not base.get("available"):
         return {
             "window": resolved, "campaign": campaign, "details": [],
+            "settled_days": bool(settled_days),
             "revenue_source": canonical_revenue.CANONICAL_SOURCE,
             "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
             "revenue_available": False,
@@ -2884,12 +2947,25 @@ def build_campaign_deal_details(window: str, campaign: str,
 
     rows = canonical_revenue.canonical_deal_rows(
         base, revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE)
-    # Apply the canonical identity map (exact-normalized auto-links + approved
-    # manual mappings) so raw deal labels resolve to the canonical campaign name.
-    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
+    # PR-ADS-177B: the SAME account scope and exclusions as the row
+    # (`_build_from_db`), as the country drawer has since PR-ADS-176A. Unscoped,
+    # the read's customer_id is MIN(customer_id) over every account, and a label
+    # an admin marked "not Google Ads" (dropped from every campaign row) was
+    # still listed under the campaign it names.
+    from services.google_ads_spend_service import (  # noqa: PLC0415
+        configured_customer_id as _configured_customer_id,
+    )
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date,
+                                                    _configured_customer_id())
     canonical_access = bool(canonical.get("available"))
     approved = (repo.fetch_campaign_identity(canonical.get("customer_id")).get("mappings", [])
                 if canonical_access else [])
+    _excluded = {
+        _ident_norm(m.get("external_campaign_label")) for m in approved
+        if m.get("match_method") == "not_google_ads" and m.get("approved_at")
+        and m.get("external_campaign_label")}
+    if _excluded:
+        rows = [r for r in rows if _ident_norm(r.get("campaign_name")) not in _excluded]
     resolution_map = (_build_resolution_map(canonical.get("rows") or [], approved)
                       if canonical_access else {})
     mapped = _apply_identity_map(rows, resolution_map, []) if resolution_map else rows
@@ -2904,6 +2980,9 @@ def build_campaign_deal_details(window: str, campaign: str,
         "window": resolved,
         "campaign": campaign,
         "details": details,
+        "deal_ids": sorted({str(d["deal_record_id"]) for d in details
+                            if d.get("deal_record_id")}),
+        "settled_days": bool(settled_days),
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
         "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
         "revenue_available": True,

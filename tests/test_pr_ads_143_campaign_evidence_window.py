@@ -816,7 +816,10 @@ def test_campaign_freshness_uses_canonical_spend_and_hubspot():
     # The campaigns PAGE freshness now reflects BOTH canonical spend AND HubSpot
     # contacts (worst-of); it no longer tracks only the snapshot `campaigns` table.
     assert 'campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"]' in APP_JS
-    assert 'campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"]' in APP_JS
+    # PR-ADS-177B: the one Campaigns page's canonical-status dependencies are
+    # its deals, its campaign spend and its acquisition cohort.
+    assert ('campaigns:               ["hubspot/deals", "google_ads_api/canonical_spend", '
+            '"hubspot/contact_funnel"]') in APP_JS
     # No campaigns-page mapping still points at the snapshot campaigns dataset alone.
     assert 'campaigns:         ["google_ads_api/campaigns"]' not in APP_JS
     assert 'campaigns:               ["google_ads_api/campaigns"]' not in APP_JS
@@ -974,8 +977,11 @@ def test_help_content_has_no_verdict_instructions():
     help_block = _region(help_content, "campaigns: {", "  \"search-terms\": {")
     for v in ("SCALE", "HOLD", "FIX", "CUT"):
         assert v not in help_block, f"stale verdict term {v} in campaigns help"
-    assert "Outcome Status" in help_block
-    assert "campaign-identity" in help_block or "Mapping Review" in help_block
+    # PR-ADS-177B: the help is the one Campaigns page's. It states what is
+    # never inferred (withheld is not zero, customers never summed, Meta
+    # never added to Google) instead of Campaign Evidence's outcome statuses.
+    assert "never zero" in help_block and "never summed" in help_block
+    assert "never added to Google Ads" in help_block
 
 
 def test_no_windsor_label_in_campaign_evidence():

@@ -24,7 +24,10 @@
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
-const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-campaigns", "roas-countries", "revenue-health", "channels", "system"];
+// PR-ADS-177B: "roas-campaigns" (Campaign Revenue & Spend) is deleted; it is
+// one page with Campaign Evidence under "campaigns" and survives only as a
+// redirect below.
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-countries", "revenue-health", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -45,6 +48,11 @@ const RETIRED_PAGE_REDIRECTS = {
   // as the Revenue by Source key: it is NOT in PAGES and survives only here, so
   // an old #/geo bookmark lands on Countries instead of the Dashboard.
   geo: { page: "roas-countries" },
+  // PR-ADS-177B: Campaign Revenue & Spend is deleted; Campaigns is one page
+  // (the mart's settled campaign view, business windows, strict spend gate).
+  // Same rule: NOT in PAGES, it survives only here, so an old
+  // #/roas-campaigns bookmark lands on Campaigns instead of the Dashboard.
+  "roas-campaigns": { page: "campaigns" },
 };
 
 // PR-ADS-174A: the six-item menu. Every page id in PAGES belongs to exactly one
@@ -56,7 +64,9 @@ const RETIRED_PAGE_REDIRECTS = {
 const NAV_ITEMS = [
   { id: "overview", label: "Overview", pages: ["dashboard"] },
   { id: "channels", label: "Channels", pages: ["channels"] },
-  { id: "campaigns", label: "Campaigns", pages: ["campaigns", "roas-campaigns", "keywords", "search-terms"] },
+  // PR-ADS-177B: one Campaigns page; Keywords and Search Terms stay until
+  // PR-ADS-177D merges them.
+  { id: "campaigns", label: "Campaigns", pages: ["campaigns", "keywords", "search-terms"] },
   // PR-ADS-176B: one page, so no tab strip.
   { id: "countries", label: "Countries", pages: ["roas-countries"] },
   { id: "pipeline", label: "Pipeline", pages: ["leads", "deals"] },
@@ -87,7 +97,7 @@ function navItemForPage(page) {
 // CHANNELS_LINK_LABEL). Channels does not reproduce those figures.
 const CHANNELS_LINK_LABEL = "Open Channels (different windows and grouping)";
 
-const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"];
+const REVENUE_PAGES = ["dashboard", "campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -213,12 +223,12 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Open Revenue Health to check spend, FX, and revenue truth status."
   },
   campaigns: {
-    title: "Campaign Evidence",
-    purpose: "Selected-window campaign evidence — genuine window totals for spend, leads, SQLs, junk and CPQL, with a factual outcome status per campaign.",
-    source: "Canonical Google Ads campaign spend (native GBP + FX-safe USD) reconciled with deduplicated HubSpot lead-quality outcomes for the selected window. All-time returns genuine cumulative totals, not a scheduler snapshot.",
-    dependsOn: ["canonical_spend", "leads"],
-    emptyMeans: "No canonical spend or HubSpot lead evidence exists for the selected window. Run the daily incremental sync or check System Status.",
-    nextAction: "Check System Status → Google Ads API / Campaigns."
+    title: "Campaigns",
+    purpose: "Google Ads campaigns over business windows — spend, leads and SQLs (the acquisition cohort), closed-won deals, customers and revenue — plus a separate Meta Ads ad-set table.",
+    source: "Canonical Revenue Decision Mart, settled campaign view: Google Ads API campaign spend, HubSpot closed-won revenue, the HubSpot acquisition cohort. Meta ad sets from the Meta ad-set ledger.",
+    dependsOn: ["hubspot/deals", "google_ads_api/canonical_spend", "hubspot/contact_funnel"],
+    emptyMeans: "No campaign has spend, contacts or closed-won deals in this business window.",
+    nextAction: "Check Revenue Health for spend coverage and the deal-ledger sync."
   },
   "search-terms": {
     title: "Search Terms",
@@ -292,14 +302,6 @@ const PAGE_EXPLANATIONS = {
     emptyMeans: "No backfill run selected. Run a dry-run first to preview the ingestion plan.",
     nextAction: "Select a date range and run dry-run. Dry-run does not write to the database or modify Google Ads/HubSpot. Read-only."
   },
-  "roas-campaigns": {
-    title: "Campaign Revenue & Spend",
-    purpose: "Revenue attribution by campaign over business windows — which campaigns produce SQLs, customers, and closed-won revenue.",
-    source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
-    dependsOn: ["hubspot/deals", "google_ads_api/canonical_spend"],
-    emptyMeans: "No attributed revenue found for this business window. Spend may exist without a HubSpot closed-won match, or SQL/customer data may not be mapped to campaigns yet.",
-    nextAction: "Check that HubSpot deals are synced and campaigns have Google Ads API spend data for the selected window."
-  },
   "roas-countries": {
     title: "Countries",
     purpose: "Revenue attribution by country over business windows — where SQLs, customers, and closed-won revenue come from.",
@@ -319,16 +321,16 @@ const PAGE_HELP_CONTENT = {
   dashboard: {
     what: "Executive overview of Google Ads spend, HubSpot closed-won revenue, pipeline conversion, source mix, and computed action signals for one business window.",
     source: "Canonical Revenue Decision Mart (Google Ads spend truth + HubSpot closed-won revenue truth), the source-group breakdown, and the closed-won deal ledger.",
-    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaign Revenue & Spend, Channels) to drill down.",
+    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (Campaigns, Channels) to drill down.",
     doNotAssume: "'Unavailable' means the truth layer withheld a metric (FX, coverage, or lead-date safety) — it is never a $0. Period Revenue / Ad Spend (a non-cohort operational ratio) applies to Google Ads only; other sources are revenue-only.",
-    checkNext: "Revenue Health for truth blockers, or Campaign Revenue & Spend for the campaigns behind a decision card."
+    checkNext: "Revenue Health for truth blockers, or Campaigns for the campaigns behind a decision card."
   },
   campaigns: {
-    what: "Campaign Evidence — genuine selected-window totals for spend, leads, SQLs, junk and CPQL, with a factual Outcome Status per campaign (SQL producer · Junk-heavy · Spend without SQL proof · Mapping review · No outcome evidence · Data unavailable). Outcome Status is a description of the window's evidence, not a scale/cut recommendation.",
-    source: "Canonical daily Google Ads API spend (native GBP + FX-safe USD — the same source as the Revenue Decision Mart) reconciled with deduplicated HubSpot lead outcomes on the HubSpot event date (contact_created_at). Lead labels are mapped to canonical Google Ads campaigns through the approved campaign-identity table; unmatched labels appear as Mapping Review rows.",
-    howToUse: "Pick an Evidence Window (7d…All time; All time is genuine cumulative totals). Filter by status/outcome and sort. Click a row to open the drawer — its lead evidence aggregates across the campaign's approved aliases and reconciles exactly with the row.",
-    doNotAssume: "Read-only — no Google Ads or HubSpot changes are made. Spend is canonical Google Ads truth, never a snapshot; overall CPQL uses mapped Google Ads SQLs only (unmatched / Not-Google-Ads SQLs are disclosed, never fold into it).",
-    checkNext: "Campaign detail drawer for drill-down, or Campaign Revenue & Spend for revenue attribution."
+    what: "Campaigns — which Google Ads campaigns produce SQLs, closed-won deals, customers and revenue against their spend, over a business window that ends yesterday. Leads and SQLs are the acquisition cohort (Google Ads contacts created in the window); contacts with no campaign label are one residual row. Meta ad sets are a separate table with their own totals.",
+    source: "The Revenue Decision Mart's settled campaign view: Google Ads API campaign spend (published once the morning sync has re-read yesterday), HubSpot closed-won deals (campaign-attributable), the HubSpot acquisition cohort. This does NOT use Google Ads conversion value.",
+    howToUse: "Pick a business window. The cards and the table are the server's figures; click a campaign for the closed-won deals behind it. Period Revenue / Ad Spend is a non-cohort operational ratio.",
+    doNotAssume: "Withheld and Unavailable are never zero. Customers are distinct companies and are never summed across campaigns. Meta ad-set figures are never added to Google Ads; their SQL, deal and revenue cells are not linked yet. Deals closed today are counted on Deals and Overview, not here, until tomorrow.",
+    checkNext: "Keywords and Search Terms for query-level evidence, or Revenue Health for blockers."
   },
   "search-terms": {
     what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = durable flag OR safely-confirmed waste evidence · Reviewed clean = every row stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
@@ -364,21 +366,14 @@ const PAGE_HELP_CONTENT = {
     source: "HubSpot CRM deals synced via the HubSpot connector.",
     howToUse: "Review deal values by campaign to understand revenue attribution. Filter by stage or time window.",
     doNotAssume: "Deal attribution uses HubSpot's native campaign field. It does not re-attribute deals using click-level GCLID data (that requires GCLID bridge).",
-    checkNext: "Campaign Revenue & Spend for campaign-level profitability."
-  },
-  "roas-campaigns": {
-    what: "Campaign revenue and spend — shows which campaigns win closed-won deals and revenue (HubSpot) against Google Ads API spend in the same window. Period Revenue / Ad Spend is a non-cohort operational ratio: closed-won outcomes may originate from earlier advertising periods. Customers are distinct proven HubSpot companies, never a deal count.",
-    source: "HubSpot closed-won deal revenue + Google Ads API campaign spend. This does NOT use Google Ads conversion value.",
-    howToUse: "Compare campaigns by won revenue, Period Revenue / Ad Spend, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
-    doNotAssume: "This is HubSpot revenue truth, not Google Ads conversion tracking. Revenue comes from actual closed-won deals, not estimated conversion values. INSUFFICIENT_DATA means not enough signal to judge.",
-    checkNext: "Countries for geographic breakdown."
+    checkNext: "Campaigns for campaign-level profitability."
   },
   "roas-countries": {
     what: "Country-level revenue and spend — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
     source: "HubSpot closed-won deal revenue + Google Ads API geo spend. Country Period Revenue / Ad Spend is an estimate because deal-to-country mapping is approximate without full GCLID coverage.",
     howToUse: "Use for directional diagnosis — identify countries that are clearly profitable or clearly losing money. Do not use for precise budget allocation until GCLID attribution is fully wired.",
     doNotAssume: "These are estimates, not exact figures. Country attribution precision will improve as GCLID coverage increases. Do not make final budget decisions based solely on these numbers.",
-    checkNext: "GCLID Attribution page to check coverage readiness, or Campaign Revenue & Spend for campaign-level precision."
+    checkNext: "GCLID Attribution page to check coverage readiness, or Campaigns for campaign-level precision."
   },
   "gclid-attribution": {
     what: "GCLID click-to-lead matching — a readiness and confidence audit showing how well Google Ads clicks can be traced to HubSpot leads.",
@@ -421,7 +416,9 @@ const PAGE_HELP_CONTENT = {
 
 const PAGE_DEPENDENCIES = {
   dashboard:               ["google_ads_api/canonical_spend", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
-  campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
+  // PR-ADS-177B: the one Campaigns page — deals, campaign spend and the
+  // acquisition cohort (the contact funnel).
+  campaigns:               ["hubspot/deals", "google_ads_api/canonical_spend", "hubspot/contact_funnel"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
   keywords:                ["google_ads_api/keyword_facts"],
@@ -432,7 +429,6 @@ const PAGE_DEPENDENCIES = {
   scheduler:               [],
   health:                  [],
   backfill:                [],
-  "roas-campaigns":          ["hubspot/deals", "google_ads_api/canonical_spend"],
   "roas-countries":          ["hubspot/deals", "google_ads_api/canonical_geo"],
 };
 
@@ -467,8 +463,9 @@ const DEFAULT_EVIDENCE_WINDOW = "30d";
 // not leave a second window implementation behind.
 // PR-ADS-176B: Countries left this list with the #/geo page — it is on
 // business windows now; the 7/14/30/60/180-day evidence windows are gone from it.
+// PR-ADS-177B: Campaigns left this list — it is on business windows now.
 const EVIDENCE_PAGES = [
-  "campaigns", "search-terms", "ngrams", "keywords",
+  "search-terms", "ngrams", "keywords",
 ];
 
 function isEvidencePage(page) {
@@ -1481,7 +1478,6 @@ function loadPage(page) {
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
     case "backfill":      loadBackfillStatus(); break;
-    case "roas-campaigns":  loadRoasCampaigns();  break;
     case "roas-countries":  loadRoasCountries();  break;
     case "revenue-health":  loadRevenueHealth();  break;
     case "channels":        loadChannels();        break;
@@ -3892,7 +3888,7 @@ function renderRevBreakdowns(d) {
   return `
     <div class="rev-breakdown-grid">
       ${renderRevBreakdownPanel("Revenue by Campaign", "Top 5 by closed-won revenue",
-        b.by_campaign, "campaign", "roas-campaigns", common)}
+        b.by_campaign, "campaign", "campaigns", common)}
       ${renderRevBreakdownPanel("Closed-won by source group · this window", "Top 5 · Google Ads spend-connected only",
         b.by_source, "source_group", "channels",
         // PR-ADS-168B review: Channels uses evidence windows grouped by HubSpot
@@ -4855,6 +4851,8 @@ const CAMP_STATUS_META = {
   "Closed-won outcome withheld": { color: "#8896a6", dot: "camp-dot--muted" },
   // PR-ADS-177A: the acquisition cohort is withheld — not judged on SQLs.
   "SQLs withheld": { color: "#8896a6", dot: "camp-dot--muted" },
+  // PR-ADS-177B: the window's spend is not held completely yet.
+  "Spend not settled": { color: "#8896a6", dot: "camp-dot--muted" },
 };
 function campStatusColor(status) {
   return (CAMP_STATUS_META[status] || { color: "#b6bfca" }).color;
@@ -4908,7 +4906,7 @@ function renderDashboardCampaigns() {
       : "Next step: retry with Refresh, or contact your administrator.";
     root.innerHTML = `
       <div class="revenue-blocked-card dash-error-card">
-        <h3 class="revenue-blocked-card__title">Campaigns &amp; Keywords unavailable</h3>
+        <h3 class="revenue-blocked-card__title">Campaigns unavailable</h3>
         <p>The dashboard campaigns service could not be reached. Nothing is shown
         because nothing safe could be computed — metrics are never fabricated.</p>
         <p class="revenue-blocked-card__next">${nextStep}</p>
@@ -4917,10 +4915,17 @@ function renderDashboardCampaigns() {
   }
 
   const d = dashCampaigns;
+  // PR-ADS-177B: the settled campaign view — no completed day yet means
+  // nothing was measured: the disclosure only.
+  if (windowHasNoSettledDay(d.window)) {
+    root.innerHTML = renderNoSettledDayCard(d.window);
+    return;
+  }
+  const through = windowThroughNote(d.window);
   root.innerHTML = `
     <div class="dash-tab-intro dash-anim">
-      <h2 class="dash-tab-intro__title">Campaigns &amp; Keywords</h2>
-      <p class="dash-tab-intro__sub">Which Google Ads campaigns and keyword themes produce SQLs, customers and closed-won revenue — and which spend without proof. Spend is Google Ads (native GBP); revenue is HubSpot closed-won (USD).</p>
+      <h2 class="dash-tab-intro__title">Campaigns</h2>
+      <p class="dash-tab-intro__sub">Which Google Ads campaigns produce SQLs, customers and closed-won revenue — and which spend without proof. Spend is Google Ads (native GBP); revenue is HubSpot closed-won (USD).${through ? ` ${escapeHtml(through)}` : ""}</p>
     </div>
     ${renderCampKpiRow(d)}
     <section class="dash-panel dash-chart-panel dash-anim camp-map-panel" aria-label="Campaign performance map">
@@ -4929,14 +4934,9 @@ function renderDashboardCampaigns() {
     <section class="dash-panel dash-anim camp-leaderboard-panel" aria-label="Campaign leaderboard">
       ${renderCampLeaderboard(d)}
     </section>
-    <div class="dash-main-grid">
-      <section class="dash-panel dash-anim camp-keyword-panel" aria-label="Keyword theme intelligence">
-        ${renderCampKeywordThemes(d)}
-      </section>
-      <aside class="dash-panel dash-anim camp-search-panel" aria-label="Search term signals">
-        ${renderCampSearchSignals(d)}
-      </aside>
-    </div>
+    <section class="dash-panel dash-anim camp-search-panel" aria-label="Search term signals">
+      ${renderCampSearchSignals(d)}
+    </section>
     <section class="dash-decisions dash-anim" aria-label="Campaign decision cards">
       ${renderDashDecisionCards(d)}
     </section>
@@ -4949,7 +4949,9 @@ function renderDashboardCampaigns() {
 // Native GBP spend cell (never a "$"), with USD appended only when FX-safe.
 function campSpendCell(row) {
   if (row.spend_native === null || row.spend_native === undefined) {
-    return '<span class="dash-unavailable">Unavailable</span>';
+    // PR-ADS-177B: a spend the settle rule withholds names its gap.
+    const why = canonicalReasonLabel(row.spend_reason);
+    return `<span class="dash-unavailable"${why ? ` title="${escapeHtml(why)}"` : ""}>Unavailable</span>${why ? ` <small class="metric-reason">${escapeHtml(why)}</small>` : ""}`;
   }
   const native = escapeHtml(fmtCompactCurrency(row.spend_native, row.native_currency || "GBP"));
   if (row.spend_usd !== null && row.spend_usd !== undefined) {
@@ -5034,13 +5036,15 @@ function renderCampKpiRow(d) {
     },
     {
       key: "period_revenue_per_ad_spend", label: PERIOD_RATIO_LABEL,
-      value: (k.period_revenue_per_ad_spend !== null && k.period_revenue_per_ad_spend !== undefined)
-        ? escapeHtml(fmtPeriodRatio(k.period_revenue_per_ad_spend))
-        : '<span class="dash-unavailable">Unavailable</span>',
+      // PR-ADS-177B: the mart's campaign-attributable revenue over campaign
+      // spend (derive_period_revenue_per_ad_spend) — never recomputed here.
+      value: (k.metrics || {}).period_revenue_per_ad_spend
+        ? canonicalMetricHtml(k.metrics.period_revenue_per_ad_spend, fmtPeriodRatio, campBlockerOpts(d))
+        : canonicalValueHtml(k.period_revenue_per_ad_spend, null, fmtPeriodRatio),
       // Plain-text sub (the card template escapes it) — never embed dashValue HTML.
       sub: `${(k.campaigns_with_spend === null || k.campaigns_with_spend === undefined) ? "—" : fmtCount(k.campaigns_with_spend)} campaigns with spend · ${PERIOD_RATIO_DISCLOSURE}`,
       delta: dashDeltaChip("period_revenue_per_ad_spend", pc),
-      source: "Revenue closed this window ÷ this window's verified USD spend",
+      source: "Campaign-attributable revenue closed this window ÷ campaign spend, same days",
       ok: k.period_revenue_per_ad_spend !== null && k.period_revenue_per_ad_spend !== undefined,
     },
   ];
@@ -5219,7 +5223,7 @@ function wireCampBubbleHover(root, d) {
 }
 
 const CAMP_NEXT_ACTION = {
-  "Revenue proven": "Scale — open Campaign Revenue & Spend",
+  "Revenue proven": "Scale — open Campaigns",
   "SQL producer": "Review SQL quality",
   "Spend without SQL / customer proof": "Review — spend without proof",
   "Revenue attribution missing": "Open Revenue Health",
@@ -5239,9 +5243,8 @@ function renderCampLeaderboard(d) {
   const head = ["Campaign", "Spend", COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort), "Won deals", "Customers", "Revenue", PERIOD_RATIO_LABEL + " / Status", "Next action"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r, i) => {
-    const isUnattributed = r.attribution_status === "unattributed";
     return `
-    <tr class="camp-row ${isUnattributed ? "camp-row--unattributed" : ""}" data-camp-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.campaign_name || "campaign")} detail">
+    <tr class="camp-row" data-camp-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.campaign_name || "campaign")} detail">
       <td class="camp-td camp-td--name">
         <span class="camp-dot ${(CAMP_STATUS_META[r.status] || {}).dot || "camp-dot--muted"}"></span>${escapeHtml(r.campaign_name || "—")}
       </td>
@@ -5251,9 +5254,9 @@ function renderCampLeaderboard(d) {
       <td class="camp-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="camp-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
       <td>${campRoasCell(r)}</td>
-      <td class="camp-next">${escapeHtml(CAMP_NEXT_ACTION[r.status] || "Open Campaign Revenue & Spend")}</td>
+      <td class="camp-next">${escapeHtml(CAMP_NEXT_ACTION[r.status] || "Open Campaigns")}</td>
     </tr>`;
-  }).join("");
+  }).join("") + renderCampLeaderboardResidual(d);
   return `
     <div class="dash-panel__header">
       <div>
@@ -5269,33 +5272,24 @@ function renderCampLeaderboard(d) {
     </div>`;
 }
 
-function renderCampKeywordThemes(d) {
-  const kt = d.keyword_themes || {};
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Keyword Theme Intelligence</h3>
-        <p class="dash-panel__sub">Recent Google Ads keyword spend by theme · read-only evidence</p>
-      </div>
-    </div>`;
-  if (kt.status !== "ready" || !(kt.themes || []).length) {
-    // Role-gate the Keywords link consistently with the tab's other navigation.
-    const kwLink = dashCanNavigate("keywords")
-      ? 'Open the <a href="#/keywords">Keywords</a> page for current keyword detail.'
-      : "The Keywords page has current keyword detail.";
-    return `${header}
-      <p class="camp-keyword-note">Keyword themes are unavailable${kt.reason ? ` — ${escapeHtml(kt.reason)}` : ""}. ${kwLink}</p>`;
-  }
-  const note = `<p class="camp-keyword-note">Recent keyword snapshot${kt.run_date ? ` (as of ${escapeHtml(kt.run_date)})` : ""} — not window-scoped, and keyword-level SQLs / customers / revenue / spend ratios have no durable attribution.</p>`;
-  const rows = kt.themes.map((t) => `
-    <li class="camp-theme-row">
-      <span class="camp-theme-row__name">${escapeHtml(t.theme_label || "—")}</span>
-      <span class="camp-theme-row__spend">${dashValue(t.spend_usd, fmtMoney)}</span>
-      <span class="camp-theme-row__clicks">${dashValue(t.clicks, fmtCount)} clicks</span>
-      <span class="camp-theme-row__kw">${dashValue(t.keywords, fmtCount)} kw</span>
-      <span class="camp-theme-row__out">SQLs / revenue <span class="dash-unavailable">Unavailable</span></span>
-    </li>`).join("");
-  return `${header}${note}<ul class="camp-theme-list">${rows}</ul>`;
+// PR-ADS-177B: the cohort's contacts on no campaign row, pinned last. Leads and
+// SQLs only; every other cell is not campaign-attributable (never 0, never
+// "—", never in a KPI). The keyword-theme panel (the legacy, non-windowed
+// `keywords` snapshot) is dropped.
+function renderCampLeaderboardResidual(d) {
+  const res = d.campaign_residual_row;
+  if (!res) return "";
+  return `
+    <tr class="camp-row--residual revenue-residual-row" aria-label="${escapeHtml(res.label || "No campaign label")} (not a campaign)">
+      <td class="camp-td camp-td--name"><span class="camp-dot camp-dot--muted"></span>${escapeHtml(res.label || "No campaign label")} <span class="revenue-residual-badge">Residual</span></td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td class="camp-num">${cohortCountHtml(res.sqls, d.cohort, res)}</td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td>${campaignNotAttributableHtml()}</td>
+      <td class="camp-next">Contacts with no campaign label</td>
+    </tr>`;
 }
 
 function renderCampSignalList(title, terms, kind) {
@@ -5351,7 +5345,6 @@ function campDealCell(deal, key) {
 
 function wireCampDrawers(root, d) {
   const rows = d.campaigns || [];
-  const kt = d.keyword_themes || {};
   const open = (i) => {
     const r = rows[i];
     if (!r) return;
@@ -5378,7 +5371,7 @@ function wireCampDrawers(root, d) {
         : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
 
     const links = [
-      ["roas-campaigns", "Open Campaign Revenue & Spend"],
+      ["campaigns", "Open Campaigns"],
       ["keywords", "Open Keywords"],
       ["search-terms", "Open Search Terms"],
       ["revenue-health", "Open Revenue Health"],
@@ -5413,12 +5406,6 @@ function wireCampDrawers(root, d) {
           <table class="camp-deal-table"><thead><tr>${dealHead}</tr></thead><tbody>${dealBody}</tbody></table>
         </div>
       </div>
-      <div class="camp-drawer__section">
-        <h4 class="camp-drawer__h">Keyword themes</h4>
-        <p class="camp-keyword-note">${kt.status === "ready"
-          ? "Recent keyword themes are account-wide (not per-campaign) — open Keywords for campaign detail."
-          : "Keyword themes are unavailable for this window."}</p>
-      </div>
       <div class="camp-drawer__actions">${links}</div>`;
     drawer.querySelector(".camp-drawer__close").addEventListener("click", () => drawer.remove());
     drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -5446,10 +5433,9 @@ function renderCampTruthFooter(d) {
       ${chip("Revenue", ts.revenue)}
       ${chip("Campaign attr.", ts.campaign_attribution)}
       ${chip("Deal proof", ts.deal_proof)}
-      ${chip("Keyword attr.", ts.keyword_attribution)}
       <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
       ${allGood
-        ? '<span class="dash-footer-note">Campaign truth verified — keyword/search-term panels are read-only evidence.</span>'
+        ? '<span class="dash-footer-note">Campaign truth verified — search-term panels are read-only evidence.</span>'
         : (dashCanNavigate("revenue-health")
           ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
           : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
@@ -6497,8 +6483,8 @@ function renderDealCampaignPipeline(d) {
   const rows = d.campaign_breakdown || [];
   const linkCampaigns = dashCanNavigate("dashboard")
     ? '<a class="deal-link" href="#/dashboard?tab=campaigns">Open Campaigns tab →</a>' : "";
-  const linkRoas = dashCanNavigate("roas-campaigns")
-    ? '<a class="deal-link" href="#/roas-campaigns">Open Campaign Revenue & Spend →</a>' : "";
+  const linkRoas = dashCanNavigate("campaigns")
+    ? '<a class="deal-link" href="#/campaigns">Open Campaigns →</a>' : "";
   const header = `
     <div class="dash-panel__header">
       <div>
@@ -6598,7 +6584,7 @@ function wireDealDrawers(root, d) {
     const tiles = DEAL_DRAWER_FIELDS.map(([key, label]) =>
       `<div><dt>${escapeHtml(label)}</dt><dd>${dealDrawerCell(r, key)}</dd></div>`).join("");
     const links = [
-      ["roas-campaigns", "Open Campaign Revenue & Spend"],
+      ["campaigns", "Open Campaigns"],
       ["deals", "Open Deals ledger"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
@@ -7043,8 +7029,11 @@ async function loadCampaignEvidence() {
       </div>`;
   }
 }
-// Router entry (kept for compatibility).
-function loadCampaigns() { return loadCampaignEvidence(); }
+// Router entry. PR-ADS-177B: the Campaigns page is the one campaign page
+// (loadCampaignsPage). Campaign Evidence's renderers above draw nothing on any
+// page now; they stay, with /api/campaigns and build_campaign_evidence (which
+// the parity and certification audits read), until PR-ADS-177C retires them.
+function loadCampaigns() { return loadCampaignsPage(); }
 
 /**
  * PR-ADS-157 §2/§7 — the compact reconciliation disclosure beside the KPI strip.
@@ -10880,7 +10869,7 @@ async function saveCampaignMapping(label, campaignId, campaignName, customerId) 
       setCampaignMappingNotice("error", "Mapping could not be saved.");
       return;
     }
-    campaignMappingNotice = { type: "ok", msg: `Mapped "${label}" → ${campaignName}. Refresh Campaign Revenue & Spend to see it applied.` };
+    campaignMappingNotice = { type: "ok", msg: `Mapped "${label}" → ${campaignName}. Refresh Campaigns to see it applied.` };
   } catch (err) {
     console.error("[saveCampaignMapping]", err);
     setCampaignMappingNotice("error", "Mapping request failed.");
@@ -16411,13 +16400,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-  // Wire up Campaign Revenue & Spend controls (business windows — PR-ADS-107A)
-  const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
-  const roasCampWindow  = document.getElementById("roas-campaigns-window");
-  if (roasCampRefresh) roasCampRefresh.addEventListener("click", loadRoasCampaigns);
-  if (roasCampWindow) {
-    roasCampWindow.value = getRoasBusinessWindow();
-    roasCampWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  // Wire up the Campaigns page controls (business windows — PR-ADS-177B)
+  const campaignsRefresh = document.getElementById("campaigns-refresh-btn");
+  const campaignsWindow  = document.getElementById("campaigns-window");
+  if (campaignsRefresh) campaignsRefresh.addEventListener("click", loadCampaignsPage);
+  if (campaignsWindow) {
+    campaignsWindow.value = getRoasBusinessWindow();
+    campaignsWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
   // Wire up Country Revenue & Spend controls (business windows — PR-ADS-107A)
@@ -16757,7 +16746,8 @@ function handleBusinessWindowSelectChange(e) {
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
-    default:                loadRoasCampaigns();
+    case "campaigns":       loadCampaignsPage(); break;
+    default:                break;
   }
 }
 
@@ -16795,9 +16785,6 @@ const BUSINESS_VERDICT_ORDER = { winner: 0, watch: 1, waste: 2, learning: 3 };
 
 // PR-ADS-116: every revenue page keeps its OWN window/summary/source-health so a
 // Current-Quarter payload can never bleed into another page or another window.
-let roasCampaignWindow = null;
-let roasCampaignSummary = null;
-let roasCampaignSourceHealth = null;
 let roasCountryWindow = null;
 
 // Per-page request sequence tokens guard against stale-response races: only the
@@ -16958,7 +16945,6 @@ function renderRevenueEmptyState(scope) {
 
 // Holds the latest mart response per business page so filter-chip re-renders and
 // blocked/ready gating read the SAME canonical payload the loader fetched.
-let roasCampaignMart = null;
 let roasCountryMart = null;
 let revenueDealsMart = null;
 // PR-ADS-130: geo reconciliation root-cause for the blocked Country Revenue & Spend card.
@@ -17129,174 +17115,37 @@ function martCountrySourceHealth(data) {
   };
 }
 
-// ── Campaign Revenue & Spend (PR-ADS-111) ─────────────────────────────────────────
-// Executive decision page: "Which Google Ads campaigns are producing qualified
-// pipeline, customers, and closed-won revenue?" — not a diagnostics page.
-// Blocked card when the truth layer is unsafe; otherwise a summary strip,
-// decision filter chips, and a single clean decision table. No debug clutter.
+// ── Campaigns — the one campaign page (PR-ADS-177B) ──────────────────────────
+//
+// Campaign Evidence (`campaigns`) and Campaign Revenue & Spend (`roas-campaigns`)
+// are one page, `campaigns`, built in the Dashboard's visual language (the
+// PR-ADS-176B Countries precedent): command bar, KPI cards, campaign table, a
+// drawer, the separate "Meta Ads — ad sets" table and a truth footer. It reads
+// the mart's SETTLED campaign view
+// (`/api/revenue-performance?view=campaign&settled=true`, owner decision
+// 2026-11-24, 2): a window that includes today ends yesterday, for revenue and
+// spend alike. It decides nothing: the strict spend gate, every total
+// (`campaign_totals`), the residual row (`campaign_residual_row`) and every row
+// figure come from the server. A figure that is not published reads its
+// withholding word with the reason — never "—", never 0. The page sums nothing.
 
-let roasCampaignsData = [];
-let roasCampaignsStatus = "idle";
-
-// Frontend-only decision-bucket filter (does not affect Country Revenue & Spend).
-let roasCampaignFilter = "all";
+let campaignsPageMart = null;
+let campaignsPageMeta = null;
+let campaignsPageStatus = "idle";
+// Frontend-only decision filter.
+let campaignsPageFilter = "all";
+// The campaign rows the table last rendered, in order: a row's drawer opens by
+// its index here (data-campaign-page-row).
+let campaignsPageRenderedRows = [];
+// Bumped by every load: a deal list read for an older response is dropped.
+let campaignsDrilldownGen = 0;
+let campaignsDrilldownCache = {};
 
 // Period Revenue / Ad Spend notation: a multiple (2.20x), not a percent.
 // "Unavailable" when null. Never called ROAS (PR-ADS-161E).
 function fmtPeriodRatio(v) {
   if (v === null || v === undefined) return "Unavailable";
   return v.toFixed(2) + "x";
-}
-
-function campaignDecisionLabel(verdict) {
-  const labels = {
-    winner: "Winner",
-    watch: "Watch",
-    waste: "Waste",
-    learning: "Learning",
-  };
-  return labels[verdict] || "Learning";
-}
-
-function filterRoasCampaignRows(rows, filter) {
-  if (!filter || filter === "all") return rows;
-  return rows.filter((r) => r.verdict === filter);
-}
-
-// Business-value sort: a campaign with won deals and revenue matters more than
-// a prettier verdict label, so we sort by outcome, not by verdict bucket.
-function sortRoasCampaignRows(rows) {
-  return [...rows].sort((a, b) =>
-    (b.closed_won_deals || 0) - (a.closed_won_deals || 0) ||
-    (b.won_revenue || 0) - (a.won_revenue || 0) ||
-    (b.sqls || 0) - (a.sqls || 0) ||
-    (b.spend || 0) - (a.spend || 0)
-  );
-}
-
-function renderRoasCampaignSummary(summary, spendIncomplete, cohort) {
-  const s = summary || {};
-  const sh = roasCampaignSourceHealth || {};
-  const ratioCell = spendIncomplete ? "Unavailable" : fmtPeriodRatio(s.period_revenue_per_ad_spend);
-  // PR-ADS-119: Google Ads native spend is GBP; the USD period ratio uses
-  // daily-FX reporting spend. Never render native GBP with "$".
-  const native = sh.spend_native_total;
-  const usd = sh.spend_usd_total;
-  const nativeCur = sh.spend_native_currency || "GBP";
-  const fxComplete = sh.fx_coverage_status === "complete";
-  const hasNative = native !== null && native !== undefined;
-  // PR-ADS-123: a compact, contained summary strip. Exact full-precision values
-  // live in the spend proof modal; this card shows magnitudes so it fits cleanly
-  // and never wraps a "$93,875.53" onto a stray "USD" line.
-  const spendBlock = hasNative ? `
-    <div class="revenue-spend-summary">
-      <div class="revenue-spend-summary__title">Google Ads Spend</div>
-      <div class="revenue-spend-summary__grid">
-        <div><span>Native</span><strong title="${fmtCurrency(native, nativeCur)}">${fmtCompactCurrency(native, nativeCur)}</strong></div>
-        <div><span>Reporting</span><strong title="${usd === null || usd === undefined ? "" : fmtUSD(usd)}">${usd === null || usd === undefined ? "FX incomplete" : fmtCompactCurrency(usd, "USD")}</strong></div>
-        <div><span>FX</span><strong>${fxComplete ? "Verified" : "Incomplete"}</strong></div>
-        <div><span>Period ratio basis</span><strong>${spendIncomplete ? "Unavailable" : "USD reporting spend"}</strong></div>
-      </div>
-    </div>` : "";
-  // KPI strip Spend cell: compact USD reporting when FX complete; otherwise a
-  // compact native diagnostic (never "$" on native GBP).
-  const spendCell = (usd !== null && usd !== undefined)
-    ? fmtMoney(usd)
-    : (hasNative ? fmtCompactCurrency(native, nativeCur) : fmtMoney(s.spend));
-  return `
-    ${spendBlock}
-    <div class="revenue-summary-strip">
-      <div><span>Spend</span><strong>${spendCell}</strong></div>
-      <div><span>Leads<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</small></span><strong>${cohortCountHtml(s.leads, cohort, null)}</strong></div>
-      <div><span>SQLs<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</small></span><strong>${cohortCountHtml(s.sqls, cohort, null)}</strong></div>
-      <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount, businessBlockerOpts())}</strong></div>
-      <div><span>Customers</span><strong>${rowMetricHtml(s, "customers", fmtCount, businessBlockerOpts())}</strong></div>
-      <div><span>Won Revenue</span><strong>${rowMetricHtml(s, "won_revenue", fmtMoney, businessBlockerOpts())}</strong></div>
-      <div><span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</span><strong>${spendIncomplete ? ratioCell : rowMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts())}</strong></div>
-      <div><span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_SPEND_PER_CUSTOMER_LABEL}</span><strong>${rowMetricHtml(s, "period_spend_per_customer_won", fmtMoney, businessBlockerOpts())}</strong></div>
-      <div><span>${CERTIFIED_RATIO_LABELS.cac}</span><strong>${rowMetricHtml(s, "cac", fmtMoney, businessBlockerOpts())}</strong></div>
-    </div>
-  `;
-}
-
-function renderRoasCampaignFilters() {
-  const filters = [
-    ["all", "All"],
-    ["winner", "Winners"],
-    ["watch", "Watch"],
-    ["waste", "Waste"],
-    ["learning", "Learning"],
-  ];
-  return `
-    <div class="revenue-filter-chips" id="roas-campaign-filter-chips">
-      ${filters.map(([key, label]) => `
-        <button
-          type="button"
-          class="revenue-filter-chip ${roasCampaignFilter === key ? "is-active" : ""}"
-          data-roas-campaign-filter="${key}"
-        >${label}</button>
-      `).join("")}
-    </div>
-  `;
-}
-
-function renderRoasCampaignSafeEmptyState() {
-  return `
-    <div class="revenue-blocked-card revenue-empty-card">
-      <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
-      <h3>No campaign revenue found for this window</h3>
-      <p>Spend and revenue sources are ready, but no HubSpot closed-won deals are attributed to campaigns in this business window.</p>
-    </div>`;
-}
-
-async function loadRoasCampaigns() {
-  const window_ = getRoasBusinessWindow();
-  const token = ++_revReqSeq.campaigns;
-  setWindowRangeLoading("roas-campaigns-range");
-
-  roasCampaignsStatus = "loading";
-  const body = document.getElementById("roas-campaigns-table-body");
-  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution by campaign…</p>';
-
-  try {
-    // PR-ADS-126: PRIMARY truth is the canonical mart, not /api/revenue-attribution.
-    const data = await fetchRevenuePerformance("campaign", window_);
-    // Drop stale responses: a newer selection (or page reload) supersedes this.
-    if (token !== _revReqSeq.campaigns) return;
-    if (!data) {
-      // Mart endpoint failed — NO silent fallback to old endpoints (page drift).
-      roasCampaignMart = null;
-      roasCampaignsStatus = "error";
-      if (body) body.innerHTML = renderMartUnavailable();
-      return;
-    }
-    if (!_revResponseIsCurrent("campaigns", token, data)) return;
-    roasCampaignMart = data;
-    roasCampaignWindow = data.window || null;
-    roasCampaignSummary = data.summary || null;
-    roasCampaignSourceHealth = martCampaignSourceHealth(data);
-    roasCampaignsData = data.rows || [];
-    roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
-    renderWindowRange("roas-campaigns-range", roasCampaignWindow);
-    renderRoasCampaignsPage();
-  } catch (err) {
-    console.error("[loadRoasCampaigns]", err);
-    if (token !== _revReqSeq.campaigns) return;
-    roasCampaignMart = null;
-    roasCampaignsStatus = "error";
-    if (body) body.innerHTML = renderMartUnavailable();
-  }
-}
-
-// PR-ADS-118 spend-coverage helpers. Campaign ROAS is available ONLY when the
-// backend confirms a complete canonical denominator; geo-fallback and any
-// incomplete coverage block ROAS (it is never derived from a partial/geo total).
-function spendCoverageIncomplete(sh) {
-  const h = sh || {};
-  if (h.campaign_roas_available === true) return false;
-  if (h.campaign_roas_available === false) return true;
-  // Backward-compatible fallback when the explicit flag is absent.
-  return h.spend_coverage_status !== "complete";
 }
 
 // PR-ADS-120: compact secondary spend-status label under the spend amount.
@@ -17310,95 +17159,82 @@ function spendStatusLabel(state) {
 }
 
 // PR-ADS-120b: when multiple HubSpot labels map to one Google Ads campaign, the
-// canonical campaign is shown once (spend never duplicated) with its aliases
-// listed underneath.
+// canonical campaign is shown once (spend never duplicated) with its aliases.
 function campaignAliasHtml(aliases) {
   if (!aliases || !aliases.length) return "";
   return `<div class="campaign-aliases">Aliases: ${escapeHtml(aliases.join("; "))}</div>`;
 }
 
-function renderSpendCoverageNotice(sh) {
-  const h = sh || {};
-  // PR-ADS-119: when spend coverage is complete but FX coverage is not, the
-  // blocker is currency conversion — be explicit so it isn't mistaken for a
-  // missing-spend problem.
-  if (h.spend_coverage_status === "complete" && h.fx_coverage_status === "incomplete") {
-    return `
-    <div class="revenue-blocked-card revenue-empty-card">
-      <div class="revenue-blocked-card__eyebrow">Currency normalization</div>
-      <h3>FX coverage incomplete — Period Revenue / Ad Spend unavailable</h3>
-      <p>Google Ads native spend is GBP and HubSpot revenue is USD. One or more spend dates have no daily FX rate, so USD reporting spend cannot be computed for the whole window. Run the FX backfill in System Status → Revenue Health. Native spend is shown for diagnostics only.</p>
-    </div>`;
+// The residual's non-cohort cells: the campaign view counts campaign-
+// attributable deals and campaign spend only, so contacts with no campaign
+// label have none of either. Never "—", never 0, never in a total.
+const CAMPAIGN_NOT_ATTRIBUTABLE_REASON = "contacts with no campaign label have no campaign spend or campaign deals";
+function campaignNotAttributableHtml() {
+  return `<span class="dash-unavailable camp-not-attributable" title="${escapeHtml(CAMPAIGN_NOT_ATTRIBUTABLE_REASON)}">Not campaign-attributable</span>`
+    + ` <small class="metric-reason">${escapeHtml(CAMPAIGN_NOT_ATTRIBUTABLE_REASON)}</small>`;
+}
+
+function campaignsPageWindowKey() {
+  return ((campaignsPageMart || {}).window || {}).key || getRoasBusinessWindow();
+}
+
+async function loadCampaignsPage() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.campaigns;
+  setWindowRangeLoading("campaigns-range");
+  campaignsDrilldownCache = {};
+  campaignsDrilldownGen += 1;
+  campaignsPageStatus = "loading";
+  const body = document.getElementById("campaigns-page-body");
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading campaigns…</p>';
+  try {
+    const [data, meta] = await Promise.all([
+      fetch(`/api/revenue-performance?view=campaign&settled=true&window=${encodeURIComponent(window_)}`,
+        { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)),
+      fetch(`/api/meta-ads/adsets?window=${encodeURIComponent(window_)}`,
+        { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    if (token !== _revReqSeq.campaigns) return;
+    if (!data) {
+      campaignsPageMart = null;
+      campaignsPageStatus = "error";
+      if (body) body.innerHTML = renderMartUnavailable();
+      return;
+    }
+    if (!_revResponseIsCurrent("campaigns", token, data)) return;
+    campaignsPageMart = data;
+    campaignsPageMeta = meta;
+    campaignsPageStatus = (data.rows || []).length ? "ok" : "empty";
+    renderWindowRange("campaigns-range", data.window || null);
+    renderCampaignsPage();
+  } catch (err) {
+    console.error("[loadCampaignsPage]", err);
+    if (token !== _revReqSeq.campaigns) return;
+    campaignsPageMart = null;
+    campaignsPageStatus = "error";
+    if (body) body.innerHTML = renderMartUnavailable();
   }
+}
+
+// Business-value sort: outcomes (won deals, revenue) outrank verdict labels.
+function sortCampaignsPageRows(rows) {
+  return [...rows].sort((a, b) =>
+    (b.closed_won_deals || 0) - (a.closed_won_deals || 0) ||
+    (b.won_revenue || 0) - (a.won_revenue || 0) ||
+    (b.sqls || 0) - (a.sqls || 0) ||
+    (b.spend || 0) - (a.spend || 0)
+  );
+}
+
+function renderCampaignsPageFilters() {
+  const filters = [["all", "All"], ["winner", "Winners"], ["watch", "Watch"],
+    ["waste", "Waste"], ["learning", "Learning"]];
   return `
-    <div class="revenue-blocked-card revenue-empty-card">
-      <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
-      <h3>Spend coverage incomplete — Period Revenue / Ad Spend unavailable</h3>
-      <p>Canonical Google Ads spend for this window has missing or unverified date chunks, so the period ratio would use a partial denominator. Run the Google Ads spend backfill in System Status → Revenue Health. Observed partial spend is shown below for diagnostics only.</p>
+    <div class="revenue-filter-chips" id="campaigns-page-filter-chips">
+      ${filters.map(([key, label]) => `
+        <button type="button" class="revenue-filter-chip ${campaignsPageFilter === key ? "is-active" : ""}"
+          data-campaigns-page-filter="${key}">${label}</button>`).join("")}
     </div>`;
-}
-
-// PR-ADS-153E-B: an ADVERTISING view must say which population its revenue was
-// measured over, and must not read as the company total. The mart carries both:
-// `summary.revenue_scope` is the all-source business scope, and
-// `summary.attributed_revenue_scope` is the narrower scope the ROAS numerator
-// used. Showing them together is what stops attributed revenue being mistaken
-// for total business revenue.
-function renderRevenueScopeDisclosure(data) {
-  const summary = (data && data.summary) || {};
-  const attributed = summary.attributed_revenue_scope;
-  if (!attributed) return "";
-  const business = summary.revenue_scope || "all_source";
-  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtMoney(v));
-  return `<p class="grace-note" data-revenue-scope="${escapeHtml(attributed)}">
-      Revenue scope: <strong>${escapeHtml(attributed)}</strong> —
-      ${money(summary.attributed_won_revenue_usd)} attributed to campaigns, out of
-      ${money(summary.won_revenue_usd)} across <strong>${escapeHtml(business)}</strong>.
-      Attributed revenue is a subset of total business revenue, not the same figure.
-    </p>`;
-}
-
-function renderRoasCampaignsPage() {
-  const kpiGrid = document.getElementById("roas-campaigns-kpis");
-  const tableBody = document.getElementById("roas-campaigns-table-body");
-  if (kpiGrid) kpiGrid.innerHTML = "";
-  if (!tableBody) return;
-
-  // PR-ADS-126: the mart is the only truth. No mart payload → say so, never fall
-  // back to a page-specific interpretation.
-  const data = roasCampaignMart;
-  if (!data) { tableBody.innerHTML = renderMartUnavailable(); return; }
-
-  // Blocked: the MART says revenue truth is not decision-ready (lead grain unsafe
-  // or revenue integration not connected). The frontend does not decide this.
-  if (!data.readiness || data.readiness.revenue_decision_ready !== true) {
-    tableBody.innerHTML = renderRevenueBlockedState(roasCampaignSourceHealth);
-    return;
-  }
-
-  // Safe but no closed-won revenue rows attributed to campaigns.
-  if (!roasCampaignsData.length) {
-    tableBody.innerHTML = renderRoasCampaignSafeEmptyState();
-    return;
-  }
-
-  const sorted = sortRoasCampaignRows(roasCampaignsData);
-  const filtered = filterRoasCampaignRows(sorted, roasCampaignFilter);
-  // Spend safety is the mart's verdict: when the canonical denominator is unsafe
-  // (incomplete coverage / incomplete FX), per-row ROAS is already null and the
-  // table renders "Unavailable" — never a partial/geo denominator.
-  const spendIncomplete = !martSpendReady(data);
-
-  tableBody.innerHTML = `
-    ${renderMartSpendTruth(data)}
-    ${renderMartCampaignCoverage(data)}
-    ${renderMartSummaryStrip(data)}
-    ${renderMartDiagnostics(data)}
-    ${renderRoasCampaignFilters()}
-    ${renderRoasCampaignTable(filtered, spendIncomplete, data.cohort)}
-    ${renderRevenueScopeDisclosure(data)}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend is the denominator of Period Revenue / Ad Spend; HubSpot closed-won deals provide revenue. ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}.</p>
-  `;
 }
 
 // PR-ADS-129: campaign spend-coverage diagnostic. Reads ONLY the mart's coverage
@@ -17448,123 +17284,263 @@ function renderMartCampaignCoverage(data) {
   return "";
 }
 
-function renderRoasCampaignTable(rows, spendIncomplete, cohort) {
-  if (!rows.length) {
-    return `
-      <div class="revenue-empty-inline">
-        No campaigns match this decision filter.
+// The strict spend gate (as on Countries): the mart's `spend_decision_ready`.
+// A window whose campaign spend is not held completely — yesterday not yet
+// re-read since it ended, a missing or failed range, FX incomplete — shows
+// this card and NO figure: never the number with a warning.
+function renderCampaignSpendGateState(data) {
+  const st = (data && data.spend_truth) || {};
+  const code = st.campaign_spend_unsettled_reason
+    || (st.fx_status !== "verified" && st.spend_coverage_status === "complete" ? "fx_coverage_incomplete" : null)
+    || st.campaign_spend_coverage_reason || "google_ads_spend_coverage_or_fx_unverified";
+  const why = canonicalReasonLabel(code) || "campaign spend is not verified for this window";
+  const next = COUNTRY_GAP_NEXT_STEP[code]
+    || "Open Revenue Health and review Google Ads spend coverage and FX for this window.";
+  const chip = (label, value, ok) =>
+    `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
+       <span>${label}</span><strong>${escapeHtml(value)}</strong>
+     </div>`;
+  return `
+    <div class="revenue-blocked-card" data-campaign-spend-gate="${escapeHtml(code)}">
+      <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
+      <h3>Campaign figures are withheld for this window</h3>
+      <p>Campaign spend is not verified: ${escapeHtml(why)}. No campaign figure is shown until it is — never a partial spend with a warning.</p>
+      <div class="revenue-status-grid">
+        ${chip("Campaign spend", labelizeStatus(st.campaign_spend_status), st.campaign_spend_status === "verified")}
+        ${chip("FX coverage", labelizeStatus(st.fx_status), st.fx_status === "verified")}
       </div>
-    `;
-  }
+      <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(next)}</div>
+    </div>
+    ${st.campaign_spend_unsettled_reason ? "" : renderMartCampaignCoverage(data)}`;
+}
 
-  const headerRow = `
+// The Dashboard KPI cards, over the server's `campaign_totals`: the mart's own
+// campaign-attributable verdicts, each {value, status, reason}. Leads and SQLs
+// are the cohort total — the campaign rows plus the residual row. Customers are
+// the canonical distinct companies of the campaign-attributable deals, never a
+// sum of rows.
+function renderCampaignsPageSummary(data) {
+  const t = (data && data.campaign_totals) || {};
+  const opts = campBlockerOpts(data);
+  const cohort = data && data.cohort;
+  const residual = (data && data.campaign_residual_row) || null;
+  const through = cohortThroughSuffix(cohort);
+  const known = (key) => t[key] !== null && t[key] !== undefined;
+  const residualNote = (field) => residual && cohortCountPublication(cohort).publish
+    && residual[field] !== null && residual[field] !== undefined
+    ? ` · incl. ${fmtCount(residual[field])} with no campaign label` : "";
+  const cards = [
+    { key: "spend", label: "Campaign Spend", value: rowMetricHtml(t, "spend", fmtMoney, opts),
+      sub: "USD · Google Ads campaign spend · settled days", source: "Google Ads API", ok: known("spend") },
+    { key: "leads", label: COHORT_LEADS_LABEL, value: cohortCountHtml(t.leads, cohort, null),
+      sub: `Google Ads contacts${residualNote("leads")}${through}`, source: "HubSpot acquisition cohort",
+      ok: cohortCountPublication(cohort).publish && known("leads") },
+    { key: "sqls", label: COHORT_SQLS_LABEL, value: cohortCountHtml(t.sqls, cohort, null),
+      sub: `Google Ads contacts${residualNote("sqls")}${through}`, source: "HubSpot acquisition cohort",
+      ok: cohortCountPublication(cohort).publish && known("sqls") },
+    { key: "deals", label: "Won Deals", value: rowMetricHtml(t, "closed_won_deals", fmtCount, opts),
+      sub: "Campaign-attributable · closed this window", source: "HubSpot Closed-Won", ok: known("closed_won_deals") },
+    { key: "customers", label: "Customers", value: rowMetricHtml(t, "customers", fmtCount, opts),
+      sub: "Distinct companies · not a sum of the rows", source: "HubSpot companies on closed-won deals", ok: known("customers") },
+    { key: "revenue", label: "Won Revenue", value: rowMetricHtml(t, "won_revenue", fmtMoney, opts),
+      sub: "USD · campaign-attributable", source: "HubSpot Closed-Won", ok: known("won_revenue") },
+    { key: "period_revenue_per_ad_spend", label: PERIOD_RATIO_LABEL,
+      value: rowMetricHtml(t, "period_revenue_per_ad_spend", fmtPeriodRatio, opts),
+      // The value carries the non-cohort disclosure (canonicalMetricHtml).
+      sub: "Campaign-attributable won revenue ÷ campaign spend · same settled days",
+      source: "Revenue closed this window over the same window's spend",
+      ok: known("period_revenue_per_ad_spend") },
+  ];
+  return `
+    <div class="dash-kpi-grid camp-page-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>`;
+}
+
+function campaignsPageSpendCell(r) {
+  if (r.spend_state === "unmapped" || r.spend_mapping === "unavailable") {
+    return '<span class="dash-unavailable" title="Spend mapping required">Unavailable</span>'
+      + ' <small class="metric-reason">spend mapping required</small>';
+  }
+  if (r.spend === null || r.spend === undefined) {
+    return '<span class="dash-unavailable">Unavailable</span> <small class="metric-reason">campaign spend is not verified</small>';
+  }
+  return `${escapeHtml(fmtMoney(r.spend))}${spendStatusLabel(r.spend_state)}`;
+}
+
+function renderCampaignsResidualRow(res, cohort) {
+  if (!res) return "";
+  return `
+    <tr class="camp-row camp-row--residual revenue-residual-row" aria-label="${escapeHtml(res.label || "No campaign label")} (not a campaign)">
+      <td class="camp-td camp-td--name"><span class="camp-dot camp-dot--muted"></span><span class="revenue-residual-name">${escapeHtml(res.label || "No campaign label")}</span> <span class="revenue-residual-badge">Residual</span>
+        <div class="camp-residual-def">${escapeHtml(res.definition || "")}</div></td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td class="camp-num">${cohortCountHtml(res.leads, cohort, res)}</td>
+      <td class="camp-num">${cohortCountHtml(res.sqls, cohort, res)}</td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td class="camp-num">${campaignNotAttributableHtml()}</td>
+      <td>${campaignNotAttributableHtml()}</td>
+      <td><span class="decision-badge decision-badge--unattributed">Not a campaign</span></td>
+    </tr>`;
+}
+
+function renderCampaignsPageTable(rows, data) {
+  const opts = campBlockerOpts(data);
+  const cohort = opts.cohort;
+  const through = cohortThroughSuffix(cohort);
+  const head = `
     <tr>
       <th>Campaign</th>
       <th>Spend</th>
-      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<span class="th-sub"> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</span></th>
-      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<span class="th-sub"> · contacts acquired in window${escapeHtml(cohortThroughSuffix(cohort))}</span></th>
+      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<span class="th-sub"> · contacts acquired in window${escapeHtml(through)}</span></th>
+      <th title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<span class="th-sub"> · contacts acquired in window${escapeHtml(through)}</span></th>
       <th>Won Deals</th>
       <th title="Distinct proven HubSpot companies — not additive across campaigns">Customers</th>
       <th>Won Revenue</th>
       <th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th>
-      <th>Decision</th>
-    </tr>
-  `;
-
-  // PR-ADS-120: the spend cell shows actual spend (USD when FX complete, else
-  // native GBP — never $ for native), with a compact spend-status label. An
-  // unmapped campaign is "Unavailable" (never $0) with Decision "Mapping required".
-  const sh = roasCampaignSourceHealth || {};
-  const usdReady = sh.campaign_roas_available === true;
-  const nativeCur = sh.spend_native_currency || "GBP";
-
-  const bodyRows = rows.map((r, i) => {
-    const state = r.spend_state;
-    const unmapped = state === "unmapped" || r.spend_mapping === "unavailable";
-    let spendCell;
-    let roasCell;
-    let decisionCell;
-    if (unmapped) {
-      spendCell = '<span class="spend-unavailable" title="Spend mapping required">Unavailable</span>'
-                + '<div class="spend-status spend-status--unmapped">Spend mapping required</div>';
-      roasCell = "Unavailable";
-      decisionCell = getBusinessVerdictBadge("mapping_required");
-    } else {
-      const amt = usdReady ? fmtMoney(r.spend) : fmtCurrency(r.spend, nativeCur);
-      spendCell = `${amt}${spendStatusLabel(state)}`;
-      // PR-ADS-161E: a withheld period ratio says why (revenue withheld, a deal
-      // with no campaign), never a bare "Unavailable".
-      roasCell = spendIncomplete ? "Unavailable" : rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, businessBlockerOpts());
-      decisionCell = getBusinessVerdictBadge(r.verdict);
-    }
-    // PR-ADS-130: an expand control opens a per-campaign drawer of the closed-won
-    // clients/deals behind the revenue (lazy-loaded on first open).
-    const expandLabel = `Show clients / deals behind ${r.campaign_name || "this campaign"}`;
-    const expandBtn = `<button type="button" class="campaign-expand-btn" data-campaign-expand-idx="${i}" data-campaign-name="${encodeURIComponent(r.campaign_name || "")}" aria-expanded="false" aria-label="${escapeHtml(expandLabel)}" title="${escapeHtml(expandLabel)}">▸</button>`;
-    return `
-    <tr>
-      <td>${expandBtn}${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}${unmapped ? "" : spendProofButton(r.campaign_id, r.campaign_name)}</td>
-      <td>${spendCell}</td>
-      <td>${cohortCountHtml(r.leads, cohort, r)}</td>
-      <td>${cohortCountHtml(r.sqls, cohort, r)}</td>
-      <td>${rowMetricHtml(r, "closed_won_deals", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "customers", fmtCount, businessBlockerOpts())}</td>
-      <td>${rowMetricHtml(r, "won_revenue", fmtMoney, businessBlockerOpts())}</td>
-      <td>${roasCell}</td>
-      <td>${decisionCell}</td>
-    </tr>
-    <tr class="campaign-drilldown-row" data-drilldown-idx="${i}" hidden>
-      <td colspan="9"><div class="campaign-drilldown"></div></td>
-    </tr>
-  `;
-  }).join("");
-
-  // PR-ADS-123: a real horizontal-scroll shell so the Decision column is never
-  // clipped on desktop; the table keeps a min-width and scrolls only if needed.
+      <th>Status</th>
+    </tr>`;
+  const body = rows.length ? rows.map((r, i) => `
+    <tr class="camp-row" data-campaign-page-row="${i}" tabindex="0" role="button" aria-label="${escapeHtml(`Open ${r.campaign_name || "campaign"} detail`)}">
+      <td class="camp-td camp-td--name">${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}</td>
+      <td class="camp-num">${campaignsPageSpendCell(r)}</td>
+      <td class="camp-num">${cohortCountHtml(r.leads, cohort, r)}</td>
+      <td class="camp-num">${cohortCountHtml(r.sqls, cohort, r)}</td>
+      <td class="camp-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</td>
+      <td class="camp-num">${rowMetricHtml(r, "customers", fmtCount, opts)}</td>
+      <td class="camp-num">${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</td>
+      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</td>
+      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+    </tr>`).join("")
+    : `<tr><td colspan="9" class="rev-breakdown-empty">No campaigns match this decision filter.</td></tr>`;
   return `
-    <div class="revenue-table-shell">
-      <div class="revenue-table-scroll">
-        <table class="data-table roas-table revenue-decision-table">
-          ${headerRow}
-          <tbody>${bodyRows}</tbody>
-        </table>
-      </div>
-    </div>
-  `;
+    <div class="camp-scroll">
+      <table class="camp-table camp-page-table">
+        <thead>${head}</thead>
+        <tbody>${body}${renderCampaignsResidualRow((data || {}).campaign_residual_row, cohort)}</tbody>
+      </table>
+    </div>`;
 }
 
-// Decision-bucket filter chips (campaign page only) — event delegation so the
-// chips work after every re-render. Scoped via the data attribute so the
-// Country Revenue & Spend page is unaffected.
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-roas-campaign-filter]");
-  if (!btn) return;
-  roasCampaignFilter = btn.dataset.roasCampaignFilter || "all";
-  renderRoasCampaignsPage();
-});
+// PR-ADS-153E-B: an ADVERTISING view must say which population its revenue was
+// measured over, and must not read as the company total. The mart carries both:
+// `summary.revenue_scope` is the all-source business scope, and
+// `summary.attributed_revenue_scope` is the narrower scope the period ratio's
+// numerator used. Showing them together stops attributed revenue being mistaken
+// for total business revenue (kept by PR-ADS-177B on the one Campaigns page).
+function renderRevenueScopeDisclosure(data) {
+  const summary = (data && data.summary) || {};
+  const attributed = summary.attributed_revenue_scope;
+  if (!attributed) return "";
+  const business = summary.revenue_scope || "all_source";
+  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtMoney(v));
+  return `<p class="grace-note" data-revenue-scope="${escapeHtml(attributed)}">
+      Revenue scope: <strong>${escapeHtml(attributed)}</strong> —
+      ${money(summary.attributed_won_revenue_usd)} attributed to campaigns, out of
+      ${money(summary.won_revenue_usd)} across <strong>${escapeHtml(business)}</strong>.
+      Attributed revenue is a subset of total business revenue, not the same figure.
+    </p>`;
+}
 
-// ── PR-ADS-130: Campaign Revenue & Spend row drilldown (clients / deals behind revenue) ──
-// Expand control toggles a per-campaign drawer that lazily fetches the closed-won
-// client/deal detail from the read-only campaign-detail endpoint. Details are
-// rendered exactly as the backend provides them — missing company/contact ids
-// show "unavailable", never a fabricated value, and the deal is never hidden.
+function renderCampaignsTruthFooter(data) {
+  const st = (data && data.spend_truth) || {};
+  const ok = (v) => v === "verified" || v === "complete";
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${labelizeStatus(status)}`)}">
+      <span class="dash-dot ${ok(status) ? "dash-dot--ok" : "dash-dot--warn"}"></span>${escapeHtml(label)} · ${escapeHtml(labelizeStatus(status))}
+    </span>`;
+  return `
+    <footer class="dash-truth-footer">
+      ${chip("Campaign spend (settled days)", st.campaign_spend_status)}
+      ${chip("FX", st.fx_status)}
+      <span class="dash-footer-chip">Revenue: HubSpot closed-won · campaign-attributable</span>
+      <span class="dash-footer-chip">Meta ad sets: separate table · never summed with Google Ads</span>
+    </footer>`;
+}
 
-// Format a possibly-missing value: real value or an explicit "unavailable" chip.
-function drilldownValue(v) {
-  if (v === null || v === undefined || v === "") {
-    return '<span class="detail-unavailable">unavailable</span>';
+function renderCampaignsSafeEmptyState() {
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Campaigns</div>
+      <h3>No campaign activity in this window</h3>
+      <p>Google Ads spend and HubSpot are ready, but no campaign has spend, contacts or closed-won deals in this business window.</p>
+    </div>`;
+}
+
+function renderCampaignsPage() {
+  const body = document.getElementById("campaigns-page-body");
+  if (!body) return;
+  campaignsPageRenderedRows = [];
+  const data = campaignsPageMart;
+  if (!data) { body.innerHTML = renderMartUnavailable(); return; }
+  // PR-ADS-167A: no completed day in the window yet — nothing was measured, so
+  // no card and no table: the disclosure only (the Meta table too).
+  if (windowHasNoSettledDay(data.window)) {
+    body.innerHTML = renderNoSettledDayCard(data.window);
+    return;
   }
-  return escapeHtml(String(v));
+  const meta = renderMetaAdsetPanel(campaignsPageMeta);
+  if (!data.readiness || data.readiness.revenue_decision_ready !== true) {
+    body.innerHTML = renderRevenueBlockedState(martCampaignSourceHealth(data)) + meta;
+    return;
+  }
+  if (data.readiness.spend_decision_ready !== true) {
+    body.innerHTML = renderCampaignSpendGateState(data) + meta;
+    return;
+  }
+  const rows = sortCampaignsPageRows((data.rows || []).filter((r) => r && !r.is_residual));
+  // Ready, and nothing in this window: no campaign and no contact on the
+  // residual. A safe empty state — not a block, and not a table of zeros.
+  if (!rows.length && !data.campaign_residual_row) {
+    body.innerHTML = renderCampaignsSafeEmptyState() + meta;
+    return;
+  }
+  const filtered = campaignsPageFilter === "all" ? rows
+    : rows.filter((r) => r.verdict === campaignsPageFilter);
+  campaignsPageRenderedRows = filtered;
+  body.innerHTML = `
+    ${renderMartCampaignCoverage(data)}
+    ${renderCampaignsPageSummary(data)}
+    <section class="dash-panel dash-anim camp-leaderboard-panel camp-page-panel" aria-label="Google Ads campaigns">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Google Ads campaigns</h3>
+          <p class="dash-panel__sub">Every campaign with spend, contacts or closed-won deals, then the contacts with no campaign label · click a campaign for its closed-won deals · ${escapeHtml(PERIOD_RATIO_LABEL)}: ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
+        </div>
+      </div>
+      ${renderCampaignsPageFilters()}
+      ${renderCampaignsPageTable(filtered, data)}
+      ${renderRevenueScopeDisclosure(data)}
+    </section>
+    ${meta}
+    ${renderCampaignsTruthFooter(data)}`;
 }
 
-function renderCampaignDrilldown(data) {
+// ── The drawer: the row's figures, then the closed-won deals behind it ──────
+// Read lazily from `/api/revenue-performance/campaign-detail?settled=true`, the
+// row's own population over the same settled days. Its deal ids must EQUAL the
+// row's `deal_ids`: a list that differs is not shown (fail closed). A row whose
+// deal count is withheld reads nothing and says so.
+function renderCampaignDrilldown(data, row) {
   const status = (data && data.source_health && data.source_health.status) || "available";
-  if (status === "database_unavailable") {
-    return `<p class="revenue-footnote">Client/deal detail is temporarily unavailable (durable ledger unreachable).</p>`;
+  if (status === "database_unavailable" || (data && data.revenue_available === false)) {
+    return `<p class="revenue-footnote">Client/deal detail is unavailable${data && data.revenue_unavailable_reason ? ` — ${escapeHtml(canonicalReasonLabel(data.revenue_unavailable_reason))}` : ""}.</p>`;
   }
   const details = (data && data.details) || [];
+  const want = (row && Array.isArray(row.deal_ids)) ? [...row.deal_ids].map(String).sort() : null;
+  const got = details.map((d) => String(d.deal_record_id)).filter((v) => v && v !== "null").sort();
+  if (want && JSON.stringify(want) !== JSON.stringify(got)) {
+    return `<p class="dash-unavailable">The deal list does not match this row's ${escapeHtml(fmtCount(want.length))} closed-won deal(s), so it is not shown.</p>`;
+  }
   if (!details.length) {
-    return `<p class="revenue-footnote">No attributed closed-won client detail found for this campaign.</p>`;
+    return `<p class="revenue-footnote">No closed-won deals for this campaign in this window.</p>`;
   }
   const header = `
     <tr>
@@ -17584,7 +17560,7 @@ function renderCampaignDrilldown(data) {
       <td>${drilldownValue(d.match_method)}</td>
     </tr>`).join("");
   return `
-    <div class="campaign-drilldown__title">Clients / Deals Behind This Campaign</div>
+    <div class="campaign-drilldown__title">Closed-won deals behind this campaign</div>
     <div class="table-scroll campaign-drilldown__scroll">
       <table class="data-table revenue-decision-table campaign-drilldown-table">
         ${header}
@@ -17593,49 +17569,220 @@ function renderCampaignDrilldown(data) {
     </div>`;
 }
 
-async function loadCampaignDrilldown(campaignName, drawerRow) {
-  const container = drawerRow.querySelector(".campaign-drilldown");
+// Format a possibly-missing value: real value or an explicit "unavailable" chip.
+function drilldownValue(v) {
+  if (v === null || v === undefined || v === "") {
+    return '<span class="detail-unavailable">unavailable</span>';
+  }
+  return escapeHtml(String(v));
+}
+
+function renderCampaignsPageDrawer(r, data) {
+  const opts = campBlockerOpts(data);
+  const cohort = (data || {}).cohort;
+  const links = [["deals", "Open Deals"], ["keywords", "Open Keywords"],
+    ["search-terms", "Open Search Terms"], ["revenue-health", "Open Revenue Health"]]
+    .filter(([page]) => dashCanNavigate(page))
+    .map(([page, label]) => `<a class="camp-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
+  const dealsWithheld = r.closed_won_deals === null || r.closed_won_deals === undefined;
+  return `
+    <div class="camp-drawer__head">
+      <strong>${escapeHtml(r.campaign_name || "Campaign")}</strong>
+      ${getBusinessVerdictBadge(r.verdict)}
+      ${r.campaign_id ? spendProofButton(r.campaign_id, r.campaign_name) : ""}
+      <button type="button" class="camp-drawer__close" data-campaigns-drawer-close aria-label="Close">×</button>
+    </div>
+    <dl class="camp-drawer__summary">
+      <div><dt>Spend</dt><dd>${campaignsPageSpendCell(r)}</dd></div>
+      <div><dt>${escapeHtml(COHORT_LEADS_LABEL + cohortThroughSuffix(cohort))}</dt><dd>${cohortCountHtml(r.leads, cohort, r)}</dd></div>
+      <div><dt>${escapeHtml(COHORT_SQLS_LABEL + cohortThroughSuffix(cohort))}</dt><dd>${cohortCountHtml(r.sqls, cohort, r)}</dd></div>
+      <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</dd></div>
+      <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, opts)}</dd></div>
+      <div><dt>Won revenue</dt><dd>${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</dd></div>
+      <div><dt>${escapeHtml(PERIOD_RATIO_LABEL)}</dt><dd>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</dd></div>
+    </dl>
+    <div class="camp-drawer__section">
+      <div class="campaign-drilldown">${dealsWithheld
+        ? `<p class="dash-unavailable">Closed-won deals are withheld for this campaign in this window.</p>`
+        : ""}</div>
+    </div>
+    <div class="camp-drawer__actions">${links}</div>`;
+}
+
+async function loadCampaignsPageDrilldown(r, drawer, windowKey) {
+  const container = drawer.querySelector(".campaign-drilldown");
   if (!container) return;
-  container.innerHTML = '<p class="revenue-footnote">Loading clients / deals…</p>';
+  const gen = campaignsDrilldownGen;
+  const key = `${windowKey}:${r.campaign_name || ""}`;
+  if (campaignsDrilldownCache[key]) {
+    container.innerHTML = renderCampaignDrilldown(campaignsDrilldownCache[key], r);
+    return;
+  }
+  container.innerHTML = '<p class="revenue-footnote">Loading closed-won deals…</p>';
   try {
-    const window_ = getRoasBusinessWindow();
     const res = await fetch(
-      `/api/revenue-performance/campaign-detail?window=${encodeURIComponent(window_)}&campaign=${encodeURIComponent(campaignName)}`,
-      { credentials: "same-origin" }
-    );
+      `/api/revenue-performance/campaign-detail?settled=true&window=${encodeURIComponent(windowKey)}&campaign=${encodeURIComponent(r.campaign_name || "")}`,
+      { credentials: "same-origin" });
     if (!res.ok) {
-      container.innerHTML = `<p class="revenue-footnote">Could not load client/deal detail for this campaign.</p>`;
+      container.innerHTML = `<p class="revenue-footnote">Could not load the closed-won deals for this campaign.</p>`;
       return;
     }
-    container.innerHTML = renderCampaignDrilldown(await res.json());
+    const data = await res.json();
+    if (gen !== campaignsDrilldownGen) return;   // the page reloaded meanwhile
+    campaignsDrilldownCache[key] = data;
+    container.innerHTML = renderCampaignDrilldown(data, r);
   } catch (err) {
-    console.error("[loadCampaignDrilldown]", err);
-    container.innerHTML = `<p class="revenue-footnote">Error loading client/deal detail.</p>`;
+    console.error("[loadCampaignsPageDrilldown]", err);
+    container.innerHTML = `<p class="revenue-footnote">Error loading the closed-won deals.</p>`;
   }
 }
 
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-campaign-expand-idx]");
-  if (!btn) return;
-  const idx = btn.getAttribute("data-campaign-expand-idx");
-  const name = decodeURIComponent(btn.getAttribute("data-campaign-name") || "");
-  const drawer = document.querySelector(`.campaign-drilldown-row[data-drilldown-idx="${idx}"]`);
-  if (!drawer) return;
-  if (drawer.hasAttribute("hidden")) {
-    drawer.removeAttribute("hidden");
-    btn.setAttribute("aria-expanded", "true");
-    btn.textContent = "▾";
-    // Lazy-load once; a loaded drawer keeps its content when re-opened.
-    if (!drawer.dataset.loaded) {
-      drawer.dataset.loaded = "1";
-      loadCampaignDrilldown(name, drawer);
-    }
-  } else {
-    drawer.setAttribute("hidden", "");
-    btn.setAttribute("aria-expanded", "false");
-    btn.textContent = "▸";
+function openCampaignsPageDrawer(idx) {
+  const r = campaignsPageRenderedRows[idx];
+  const panel = document.querySelector("#campaigns-page-body .camp-page-panel");
+  if (!r || !panel) return;
+  let drawer = panel.querySelector(".camp-drawer");
+  if (!drawer) {
+    drawer = document.createElement("div");
+    drawer.className = "camp-drawer";
+    panel.appendChild(drawer);
   }
+  const data = campaignsPageMart;
+  drawer.innerHTML = renderCampaignsPageDrawer(r, data);
+  if (r.closed_won_deals !== null && r.closed_won_deals !== undefined) {
+    loadCampaignsPageDrilldown(r, drawer, ((data || {}).window || {}).key || getRoasBusinessWindow());
+  }
+  if (drawer.scrollIntoView) drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+document.addEventListener("click", (e) => {
+  const close = e.target.closest("[data-campaigns-drawer-close]");
+  if (close) {
+    const drawer = close.closest(".camp-drawer");
+    if (drawer) drawer.remove();
+    return;
+  }
+  const chip = e.target.closest("[data-campaigns-page-filter]");
+  if (chip) {
+    campaignsPageFilter = chip.dataset.campaignsPageFilter || "all";
+    renderCampaignsPage();
+    return;
+  }
+  const row = e.target.closest("#campaigns-page-body [data-campaign-page-row]");
+  if (!row || e.target.closest("a") || e.target.closest("button")) return;
+  openCampaignsPageDrawer(Number(row.getAttribute("data-campaign-page-row")));
 });
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const row = e.target.closest && e.target.closest("#campaigns-page-body [data-campaign-page-row]");
+  if (!row) return;
+  e.preventDefault();
+  openCampaignsPageDrawer(Number(row.getAttribute("data-campaign-page-row")));
+});
+
+// ── Meta Ads — ad sets (owner decision 2026-11-24, 4) ───────────────────────
+// A separate table: each Meta ad set is its own row, with its own totals,
+// never summed with a Google Ads figure. Spend in the account's currency and
+// USD, impressions, clicks and Meta-reported leads (Meta's own attributed
+// count — not contacts, not CRM leads). The SQL, deal and revenue cells read
+// "Not linked yet": no ad set is joined to HubSpot. The ONE gate every figure
+// goes through: a table that is not published, or rests on the owner's
+// retirement declaration without its disclosure, shows no figure.
+const META_ADSET_NOT_LINKED_TEXT = "No Meta ad set is joined to a HubSpot contact or deal yet";
+function metaAdsetTableGate(data) {
+  if (!data) return { ok: false, reason: "meta_adset_source_unavailable", detail: null };
+  if (data.status !== "published") {
+    return { ok: false, reason: data.reason || "meta_adset_source_unavailable", detail: data.detail || null };
+  }
+  if ((data.owner_declared_retired || []).length && !data.owner_declared_retired_disclosure) {
+    return { ok: false, reason: "meta_retired_disclosure_missing", detail: null };
+  }
+  return { ok: true, reason: null, detail: null };
+}
+
+function metaFigureHtml(m, formatter) {
+  const x = m || {};
+  if (x.status === "published" && x.value !== null && x.value !== undefined) {
+    return escapeHtml(formatter(x.value, x.currency));
+  }
+  const why = canonicalReasonLabel(x.reason);
+  return `<span class="dash-unavailable" title="${escapeHtml(why)}">Unavailable</span>${why ? ` <small class="metric-reason">${escapeHtml(why)}</small>` : ""}`;
+}
+
+function metaNotLinkedHtml() {
+  return `<span class="dash-unavailable meta-not-linked" title="${escapeHtml(META_ADSET_NOT_LINKED_TEXT)}">Not linked yet</span>`;
+}
+
+function renderMetaAdsetTable(data) {
+  const gate = metaAdsetTableGate(data);
+  if (!gate.ok) {
+    const why = canonicalReasonLabel(gate.reason) || "the ad-set figures are not verified";
+    return `<p class="dash-unavailable meta-adset-withheld">${data && data.status === "unavailable" ? "Unavailable" : "Withheld"} — ${escapeHtml(why)}</p>`
+      + (gate.detail ? `<p class="camp-keyword-note">${escapeHtml(gate.detail)}</p>` : "");
+  }
+  // Full amounts with the currency code: Meta spend is small, and a compact
+  // "$0" or "$6.0k" would hide or round what the ledger holds.
+  const native = (v, cur) => fmtCurrency(v, cur || "");
+  const usd = (v) => fmtCurrency(v, "USD");
+  const count = (v) => fmtCount(v);
+  const rows = data.rows || [];
+  const head = ["Ad set", "Spend (account currency)", "Spend (USD)", "Impressions", "Clicks",
+    "Meta-reported leads", "SQLs", "Won deals", "Won revenue"].map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = rows.map((r) => `
+    <tr class="meta-adset-row">
+      <td class="camp-td camp-td--name">${escapeHtml(r.adset_name || r.adset_id || "Ad set")}
+        <div class="camp-residual-def">${escapeHtml(r.campaign_name || r.campaign_id || "")} · ${escapeHtml(r.account_name || r.account_id || "")}${r.time_zone ? ` · ${escapeHtml(r.time_zone)}` : ""}</div></td>
+      <td class="camp-num">${metaFigureHtml(r.spend, native)}</td>
+      <td class="camp-num">${metaFigureHtml(r.spend_usd, usd)}</td>
+      <td class="camp-num">${metaFigureHtml(r.impressions, count)}</td>
+      <td class="camp-num">${metaFigureHtml(r.clicks, count)}</td>
+      <td class="camp-num">${metaFigureHtml(r.meta_reported_leads, count)}</td>
+      <td class="camp-num">${metaNotLinkedHtml()}</td>
+      <td class="camp-num">${metaNotLinkedHtml()}</td>
+      <td class="camp-num">${metaNotLinkedHtml()}</td>
+    </tr>`).join("") || `<tr><td colspan="9" class="rev-breakdown-empty">No Meta ad set delivered in this window.</td></tr>`;
+  const t = data.totals || {};
+  const totalRow = rows.length ? `
+    <tr class="meta-adset-total">
+      <td class="camp-td camp-td--name"><strong>Meta ad sets — total</strong><div class="camp-residual-def">This table only · never added to Google Ads</div></td>
+      <td class="camp-num">${metaFigureHtml(t.spend, native)}</td>
+      <td class="camp-num">${metaFigureHtml(t.spend_usd, usd)}</td>
+      <td class="camp-num">${metaFigureHtml(t.impressions, count)}</td>
+      <td class="camp-num">${metaFigureHtml(t.clicks, count)}</td>
+      <td class="camp-num">${metaFigureHtml(t.meta_reported_leads, count)}</td>
+      <td class="camp-num">${metaNotLinkedHtml()}</td>
+      <td class="camp-num">${metaNotLinkedHtml()}</td>
+      <td class="camp-num">${metaNotLinkedHtml()}</td>
+    </tr>` : "";
+  const notes = [
+    data.meta_reported_leads_disclosure,
+    `SQLs, won deals and won revenue: not linked yet — ${META_ADSET_NOT_LINKED_TEXT}.`,
+    data.mixed_time_zones ? "Each Meta account is read in its own time zone." : null,
+    data.owner_declared_retired_disclosure || null,
+  ].filter(Boolean);
+  return `
+    <div class="camp-scroll">
+      <table class="camp-table meta-adset-table">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}${totalRow}</tbody>
+      </table>
+    </div>
+    ${notes.map((n) => `<p class="camp-keyword-note">${escapeHtml(n)}</p>`).join("")}`;
+}
+
+function renderMetaAdsetPanel(data) {
+  return `
+    <section class="dash-panel dash-anim meta-adset-panel" aria-label="Meta Ads — ad sets">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Meta Ads — ad sets</h3>
+          <p class="dash-panel__sub">Each ad set is its own row with its own totals · never summed with Google Ads · settled days in each account's own time zone</p>
+        </div>
+      </div>
+      ${renderMetaAdsetTable(data)}
+    </section>`;
+}
 
 // ── PR-ADS-122: Campaign spend reconciliation drilldown ("View spend proof") ──
 // A compact modal that proves a ROAS campaign row's spend: local canonical DB

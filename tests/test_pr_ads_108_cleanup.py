@@ -43,7 +43,9 @@ def test_navigate_hides_global_time_range_bar_on_roas_pages():
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert "roas-campaigns" in names and "roas-countries" in names
+    # PR-ADS-177B: the campaign one is "campaigns" (roas-campaigns merged).
+    assert "campaigns" in names and "roas-countries" in names
+    assert "roas-campaigns" not in names
 
 
 def test_global_time_range_bar_uses_ad_windows_only():
@@ -55,7 +57,7 @@ def test_global_time_range_bar_uses_ad_windows_only():
 
 
 def test_roas_window_selects_are_business_windows_not_ad_windows():
-    for select_id in ("roas-campaigns-window", "roas-countries-window"):
+    for select_id in ("campaigns-window", "roas-countries-window"):
         m = re.search(rf'<select[^>]*id="{select_id}"[^>]*>.*?</select>', HTML, re.DOTALL)
         assert m, f"{select_id} not found"
         block = m.group(0)
@@ -88,7 +90,7 @@ def test_frontend_only_uses_revenue_attribution_for_roas():
 
 
 def test_no_windsor_on_roas_pages():
-    for page_id in ("page-roas-campaigns", "page-roas-countries"):
+    for page_id in ("page-campaigns", "page-roas-countries"):
         m = re.search(rf'id="{page_id}".*?</section>', HTML, re.DOTALL)
         assert m, f"{page_id} not found"
         assert "windsor" not in m.group(0).lower()

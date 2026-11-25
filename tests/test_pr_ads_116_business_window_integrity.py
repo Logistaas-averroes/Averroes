@@ -218,13 +218,13 @@ def test_audit_window_includes_label_and_closed_flag(monkeypatch):
 
 
 def test_window_range_elements_present():
-    for el in ("roas-campaigns-range", "roas-countries-range",
+    for el in ("campaigns-range", "roas-countries-range",
                "revenue-deals-range", "revenue-health-range"):
         assert f'id="{el}"' in HTML, f"missing range element {el}"
     assert "function renderWindowRange" in JS
     assert "function formatWindowRange" in JS
     # Each loader renders its range from the response window.
-    assert 'renderWindowRange("roas-campaigns-range"' in JS
+    assert 'renderWindowRange("campaigns-range"' in JS
     assert 'renderWindowRange("roas-countries-range"' in JS
     assert 'renderWindowRange("revenue-deals-range"' in JS
     assert 'renderWindowRange("revenue-health-range"' in JS
@@ -239,7 +239,7 @@ def test_stale_response_guard_present():
     # Guard compares the response window key to the CURRENT selection.
     guard = _fn("function _revResponseIsCurrent", span=300)
     assert "getRoasBusinessWindow()" in guard
-    for loader in ("function loadRoasCampaigns", "function loadRoasCountries",
+    for loader in ("function loadCampaignsPage", "function loadRoasCountries",
                    "function loadDeals", "function loadRevenueHealth"):
         body = _fn(loader, span=1600)
         assert "++_revReqSeq" in body, f"{loader} must take a request token"
@@ -278,14 +278,16 @@ def test_selector_change_clears_previous_range_immediately():
     assert "function setWindowRangeLoading" in JS
     assert '"Loading…"' in _fn("function setWindowRangeLoading", span=200)
     for loader, el in (
-        ("function loadRoasCampaigns", "roas-campaigns-range"),
+        ("function loadCampaignsPage", "campaigns-range"),
         ("function loadRoasCountries", "roas-countries-range"),
         ("function loadDeals", "revenue-deals-range"),
         ("function loadRevenueHealth", "revenue-health-range"),
     ):
         body = _fn(loader, span=1600)
         i_loading = body.find(f'setWindowRangeLoading("{el}")')
-        i_await = body.find("await fetch")
+        # PR-ADS-177B: the Campaigns loader awaits two reads together
+        # (Promise.all) — the first await of any kind is the boundary.
+        i_await = body.find("await ")
         assert i_loading != -1, f"{loader} must clear its range chip"
         assert i_loading < i_await, f"{loader} must clear the range BEFORE awaiting"
 
@@ -299,14 +301,15 @@ def test_pages_use_own_window_state():
     assert "roasRevenueSummary" not in JS
     # PR-ADS-126: each page keeps its OWN per-page mart payload + source health, so
     # one window's response can never bleed into another page.
-    campaign = _fn("function renderRoasCampaignsPage", span=1600)
-    assert "roasCampaignSourceHealth" in campaign
-    assert "roasCampaignMart" in campaign
+    # PR-ADS-177B: the Campaigns page keeps its own payload and source health.
+    campaign = _fn("function renderCampaignsPage()", span=1600)
+    assert "martCampaignSourceHealth(data)" in campaign
+    assert "campaignsPageMart" in campaign
     country = _fn("function renderRoasCountriesPage", span=1600)
     assert "roasCountrySourceHealth" in country
     assert "roasCountryMart" in country
     # Each loader fetches its own window and stores a page-specific window object.
-    assert "roasCampaignWindow" in JS
+    assert "campaignsPageMart = data" in JS and "data.window" in _fn("async function loadCampaignsPage", span=1800)
     assert "roasCountryWindow" in JS
 
 
@@ -315,8 +318,9 @@ def test_pages_use_own_window_state():
 
 def test_safe_empty_distinct_from_blocked():
     # Completed empty period → safe empty copy, never blocked / fake-zero ROAS.
-    assert "No campaign revenue found for this window" in JS
+    # PR-ADS-177B: the Campaigns page's own safe empty state.
+    assert "No campaign activity in this window" in JS
     assert "No country revenue found for this window" in JS
-    camp_empty = _fn("function renderRoasCampaignSafeEmptyState", span=600)
+    camp_empty = _fn("function renderCampaignsSafeEmptyState", span=600)
     assert "not ready" not in camp_empty.lower()
     assert "0.00x" not in camp_empty

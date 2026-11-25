@@ -21,7 +21,9 @@ REQUIRED_ROUTE_KEYS = [
     "keywords",
     "leads",
     "deals",
-        "roas-campaigns",
+    # PR-ADS-177B: "roas-campaigns" (Campaign Revenue & Spend) was merged into
+    # "campaigns"; #/roas-campaigns redirects there. See
+    # tests/test_pr_ads_177b_campaigns_one_page.py.
     "roas-countries",
     # PR-ADS-165A: "unit-economics" was deleted (page, route, endpoint and
     # service); see tests/test_pr_ads_165a_weekly_job_and_unit_economics_retired.py.
@@ -34,7 +36,10 @@ REQUIRED_ROUTE_KEYS = [
 ]
 
 NEW_VISIBLE_LABELS = [
-    "Keywords",
+    # PR-ADS-177B: the Keywords page's own label. "Keywords" alone survived
+    # only in the Dashboard tab "Campaigns & Keywords", whose keyword panel
+    # is deleted (the tab is "Campaigns").
+    "Keyword Evidence",
     "Countries",
     "Search Terms",
     "Data Runs",
@@ -42,7 +47,8 @@ NEW_VISIBLE_LABELS = [
     "Admin Backfill",
     # PR-ADS-161E: renamed from "ROAS by Campaign" / "ROAS by Country" — a
     # close-date ratio is never called ROAS.
-    "Campaign Revenue &amp; Spend",
+    # PR-ADS-177B: "Campaign Revenue &amp; Spend" is merged into the one page
+    # titled "Campaigns".
     # PR-ADS-176B: "Country Revenue &amp; Spend" is merged into the one page
     # titled "Countries" (already listed above).
 ]
@@ -137,14 +143,20 @@ def test_revenue_attribution_section_exists():
     Revenue & Spend page in the strip of the item it is about. PR-ADS-176B:
     the country one IS the Countries item — one page, no strip."""
     assert 'data-section="campaigns"' in HTML
-    assert 'data-page="roas-campaigns"' in HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
+    # PR-ADS-177B: the campaign one is the Campaigns page itself, the
+    # strip's first tab.
+    strip = HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
+    assert re.findall(r'data-page="([a-z0-9-]+)"', strip) == ["campaigns", "keywords", "search-terms"]
+    assert 'data-page="roas-campaigns"' not in HTML
     assert 'data-section="countries"' not in HTML
     assert 'data-page="roas-countries" data-nav-item="countries"' in HTML
 
 
 def test_roas_pages_exist():
-    """ROAS by Campaign and ROAS by Country pages must have containers."""
-    assert 'id="page-roas-campaigns"' in HTML
+    """The campaign and country revenue pages must have containers.
+    PR-ADS-177B: the campaign one is `page-campaigns` (Campaign Revenue &
+    Spend's `page-roas-campaigns` is merged into it)."""
+    assert 'id="page-campaigns"' in HTML and 'id="page-roas-campaigns"' not in HTML
     assert 'id="page-roas-countries"' in HTML
 
 
