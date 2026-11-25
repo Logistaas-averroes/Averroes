@@ -801,3 +801,24 @@ truncated list. Verified by execution on exported copies of both commits.
 - Runs: 426 tests (178c, 166a, 178b*, 154c*, 113, 126, 139, 161e, 165a) plus 942
   tests (funnel, freshness, system-status, doctrine, certification) all passed.
   PG ran, with no skips (python3.11; postgres 16 + sudo -n available).
+
+## PR-ADS-179A review (91290f7 on ea6a7ae, 2026-11-25; F1 fea87ac)
+
+- Verdict: merge with minors. Base vs head reports IDENTICAL (cohorts 107 checks,
+  reader_cutover, campaigns 44) on one seeded cluster.
+- The pin (`db/connection.py` `_PINNED`) and the memo scope are ContextVars. Only
+  the three audits open `certification_window()`, and they run in
+  `scripts.certification_child` subprocesses (scheduled and Render-shell
+  paths), so web requests and syncs never see a pin.
+- A pinned window holds AccessShareLock on every table it reads until it ends.
+  On 91290f7 that deadlocked with `init_db()`'s startup DDL. F1 orders both
+  sides on an advisory lock (`SCHEMA_LOCK_KEY`): windows take it shared,
+  init_db takes it exclusive (180 s bound, then `SchemaMigrationBlocked`).
+- On 91290f7, a reader that swallowed a psycopg2 error inside a pinned
+  `get_conn()` poisoned the window (InFailedSqlTransaction). F1 adds
+  ROLLBACK TO SAVEPOINT.
+- Fail-closed claims need checking against reader-level `except Exception`.
+  F1 records refusals on the pin, and the audits read `refused_reads`.
+- Certification checks a snapshot-consistent build of each page. A torn read
+  within one web request (the 161E/173A class) is invisible to it by
+  construction.
