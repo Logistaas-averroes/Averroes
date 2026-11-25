@@ -62,7 +62,8 @@ Protected endpoints (require authenticated session):
   GET  /api/dashboard/channels     — Read-only Dashboard Channels & Platforms contract by business window (PR-ADS-136).
   GET  /api/dashboard/campaigns    — Read-only Dashboard Campaigns & Keywords contract by business window (PR-ADS-137).
   GET  /api/dashboard/countries    — Read-only Dashboard Countries & Geo Intelligence contract by business window (PR-ADS-138).
-  GET  /api/dashboard/deals        — Read-only Dashboard Deals & Pipeline Intelligence contract by business window (PR-ADS-139).
+  GET  /api/dashboard/deals        — Read-only Dashboard → Deals contract by business window: the Pipeline builder's figures (PR-ADS-139; PR-ADS-178B).
+  GET  /api/pipeline               — Read-only Pipeline page contract by business window: acquisition-cohort SQLs, lifecycle funnel, closed-won deals, customers won (PR-ADS-178B).
   GET  /api/mailchimp/status        — Mailchimp connection + dataset status (read-only; never returns credentials; PR-ADS-151).
   GET  /api/mailchimp/audit         — Attribution feasibility audit vs HubSpot (admin; privacy-preserving; PR-ADS-151).
   GET  /api/mailchimp/campaigns     — Stored Mailchimp campaigns + report metrics (read-only; PR-ADS-151).
@@ -5933,6 +5934,43 @@ async def get_dashboard_deals(
         log.error("Dashboard deals failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Dashboard deals computation failed"
+        ) from exc
+
+
+@app.get("/api/pipeline")
+async def get_pipeline(
+    window: str = Query(default="current_quarter"),
+    scope: str = Query(default="all_source"),
+    acquisition_group: str | None = Query(default=None),
+    _user=Depends(require_auth),
+):
+    """The one Pipeline page (PR-ADS-178B, docs/61). Read-only.
+
+    ONE builder, ``services.pipeline_service.build_pipeline``, inside one
+    closed-won snapshot: SQLs (the Google Ads acquisition cohort, with its
+    ``cohort`` block), closed-won deals, customers (distinct HubSpot
+    companies, never summed), won revenue and average deal value (the mart
+    deal view's reader contract, as ``{value, status, reason}``), the
+    lifecycle funnel ("Entered stage in window"), the closed-won deal list and
+    customers won — each list only when its count is published and the list
+    numbers exactly that count. Withheld means absent, with the reason.
+
+    ``scope`` / ``acquisition_group`` are LEAD filters: they narrow the funnel
+    only; under either, customers won is unavailable with the reason, and no
+    deal figure changes. Paged contact rows stay on
+    ``/api/crm-funnel/contacts``. Business windows only. No write anywhere.
+    """
+    from services.pipeline_service import build_pipeline  # noqa: PLC0415
+
+    try:
+        return build_pipeline(window=window, scope=scope,
+                              acquisition_group=acquisition_group or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Pipeline failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Pipeline computation failed"
         ) from exc
 
 

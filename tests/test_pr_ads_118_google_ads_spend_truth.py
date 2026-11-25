@@ -568,7 +568,8 @@ def test_revenue_pages_hide_global_chrome():
     m = JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 200]
     # PR-ADS-168B: Revenue by Source is deleted, so it is no longer listed.
     # PR-ADS-177B: Campaign Revenue & Spend merged into "campaigns".
-    for p in ("campaigns", "roas-countries", "deals", "revenue-health"):
+    # PR-ADS-178B: Deals (and Leads) merged into "pipeline".
+    for p in ("campaigns", "roas-countries", "pipeline", "revenue-health"):
         assert f'"{p}"' in m
     assert '"roas-campaigns"' not in m
     nav = JS[JS.find("function navigate(page, options)"):JS.find("function navigate(page, options)") + 3400]

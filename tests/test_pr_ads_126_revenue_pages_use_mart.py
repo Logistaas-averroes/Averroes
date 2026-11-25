@@ -80,17 +80,22 @@ def test_country_page_uses_mart():
 # ── 4. Deals uses the mart ──────────────────────────────────────────────────
 
 def test_deals_page_uses_mart():
-    loader = _slice("async function loadDeals", span=2000)
-    assert 'fetchRevenuePerformance("deal"' in loader
-    assert "revenueDealsData = data.rows" in loader
+    # PR-ADS-178B: the deal list is the Pipeline page's; it reads ONE builder,
+    # whose deal rows are the mart deal view's rows.
+    loader = _slice("async function loadPipeline", span=2000)
+    assert "/api/pipeline?" in loader
     assert "/api/revenue-deals?" not in loader
-    # PR-ADS-127: the deal summary (count / Won Revenue / average / GCLID) all come
-    # from the mart's deal-LEDGER summary — the same source as the deal rows — so it
-    # reconciles with the table and never mixes the canonical attribution total.
-    assert "revenueDealsSummary = data.ledger_summary" in loader
-    summary = _slice("function martDealLedgerSummary", span=900)
-    assert "data.ledger_summary" in summary
-    assert "won_revenue_usd" not in summary
+    svc = open(os.path.join(ROOT, "services", "pipeline_service.py"), encoding="utf-8").read()
+    assert 'build_revenue_decision_mart(view="deal", window=window, now=now)' in svc
+    assert '_deal_list(mart.get("rows") or [], deals_m,' in svc
+    # PR-ADS-127: the deal summary reconciles with the table and never mixes the
+    # canonical ATTRIBUTION total. PR-ADS-178B: the count, Won Revenue and
+    # customers are the mart deal view's all-source summary metrics; the list
+    # is shown only when it numbers that count, and the average only when the
+    # deal-LEDGER summary (the same source as the rows) counted the same deals.
+    assert 'deals_m = _verdict(summary_metrics.get("closed_won_deals"))' in svc
+    assert 'ledger = mart.get("ledger_summary") or {}' in svc
+    assert "attributed" not in svc
 
 
 # ── 5. Shared spend-truth / summary / diagnostics across every view ─────────
@@ -103,7 +108,8 @@ def test_all_revenue_pages_share_mart_renderers():
         "function renderCampaignsPage()",
         "function renderRoasCountriesPage",
         # PR-ADS-168B: renderRevenueBySourcePage is deleted with its page.
-        "function renderRevenueDealsPage",
+        # PR-ADS-178B: renderRevenueDealsPage is deleted with its page; the
+        # Pipeline page shows no spend (asserted below).
     ):
         body = _slice(page, span=3000)
         if page == "function renderCampaignsPage()":
@@ -143,6 +149,9 @@ def test_all_revenue_pages_share_mart_renderers():
             assert "renderMartSpendTruth(" in body, f"{page} must render the shared spend truth strip"
         assert "renderMartDiagnostics(" in body, f"{page} must render shared diagnostics"
     # The shared strip reads spend_truth + summary; the summary strip reads summary.
+    pipeline = JS[JS.find("function renderPipelinePage()"):
+                  JS.find("\n}\n", JS.find("function renderPipelinePage()")) + 3]
+    assert "renderMartSpendTruth(" not in pipeline and "spend" not in pipeline.lower()
     st = _slice("function renderMartSpendTruth", span=900)
     assert "spend_truth" in st and "usd_spend" in st and "fx_status" in st
     strip = _slice("function renderMartSummaryStrip", span=900)
@@ -247,16 +256,20 @@ def test_no_silent_old_endpoint_fallback_on_business_pages():
         ("async function loadCampaignsPage", "/api/revenue-attribution?"),
         ("async function loadRoasCountries", "/api/revenue-attribution?"),
         # PR-ADS-168B: loadRevenueBySource is deleted with its page.
-        ("async function loadDeals", "/api/revenue-deals?"),
     ]
     for loader, old_url in cases:
         body = _slice(loader, span=1500)
         surfaces = "renderMartUnavailable()" in body or '"mart_unavailable"' in body
         assert surfaces, f"{loader} must surface mart unavailability"
         assert old_url not in body, f"{loader} must not call the legacy endpoint {old_url}"
-    # Deals routes its mart_unavailable status to the canonical unavailable card.
-    deals_page = _slice("function renderRevenueDealsPage", span=900)
-    assert '"mart_unavailable"' in deals_page and "renderMartUnavailable()" in deals_page
+    # PR-ADS-178B: the Pipeline loader (the deal list's) never calls the legacy
+    # endpoint, and a failed read renders the unavailable card, no figure.
+    loader = _slice("async function loadPipeline", span=1500)
+    assert "/api/revenue-deals?" not in loader
+    assert 'pipelineStatus = data ? "ok" : "error";' in loader
+    page = _slice("function renderPipelinePage()", span=900)
+    assert 'if (pipelineStatus !== "ok" || !pipelineData)' in page
+    assert "Pipeline unavailable" in page and 'outcomes.innerHTML = "";' in page
 
 
 # ── 10. No backend writes (Google Ads / HubSpot / budgets / OCT) ────────────

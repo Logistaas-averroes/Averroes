@@ -159,9 +159,10 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "blocks": [],
     },
-    # PR-ADS-163B: this is the legacy GCLID-contact deal snapshot. The Deals
-    # page reads the canonical deal ledger (`/api/dashboard/deals`) and no
-    # code reads the `deals` table, so this pipeline names no page.
+    # PR-ADS-163B: this is the legacy GCLID-contact deal snapshot. The deal
+    # pages read the canonical deal ledger (PR-ADS-178B: the Pipeline page,
+    # `/api/pipeline`, which Dashboard → Deals republishes) and no code reads
+    # the `deals` table, so this pipeline names no page.
     "deals": {
         "label": "Deals (legacy GCLID snapshot)",
         "source": "hubspot",

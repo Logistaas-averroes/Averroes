@@ -48,9 +48,11 @@ def _fn(name, span=2600):
 
 
 def _deals_region():
-    start = JS.find("let revenueDealsData")
+    # PR-ADS-178B: the Closed-Won Deals page is the Pipeline page's deal list
+    # (and Dashboard → Deals renders the same renderer).
+    start = JS.find("// ── The closed-won deal list")
     assert start != -1
-    end = JS.find("// ── Revenue Attribution Health", start)
+    end = JS.find("// ── Customers won", start)
     assert end != -1
     return JS[start:end]
 
@@ -255,26 +257,32 @@ def test_endpoint_registered_business_window_only():
 
 
 def test_deals_uses_business_windows_not_day_windows():
-    section = _section("page-deals")
-    assert "Closed-Won Deals" in section
+    # PR-ADS-178B: the deal list is the Pipeline page's "Closed-won deals"
+    # section (#/deals redirects there).
+    section = _section("page-pipeline")
+    assert "Deals: HubSpot Closed-Won · every source" in section
     # PR-ADS-164A: the page lists EVERY closed-won deal (all_source scope), so
     # the subtitle no longer says "attributed to Google Ads".
-    assert ("Every HubSpot closed-won deal, from every source — not only Google "
-            "Ads — by deal close date.") in section
+    assert ("Every HubSpot closed-won deal closed in this window, from every "
+            "source") in _deals_region()
     for win in ("current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"):
         assert f'value="{win}"' in section
     for ad in ('value="7d"', 'value="14d"', 'value="30d"', 'value="60d"'):
         assert ad not in section
-    # Deals is a revenue page so the global ad-window bar is suppressed.
-    assert '"deals"' in JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 120]
+    # The page is a revenue page so the global ad-window bar is suppressed.
+    assert '"pipeline"' in JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 120]
 
 
 def test_deals_loader_uses_mart_deal_view():
     # PR-ADS-126: the Deals page reads the canonical mart deal view as PRIMARY
     # truth (fetchRevenuePerformance("deal", ...)) — never /api/deals?days=, and
     # no silent fallback to the legacy /api/revenue-deals page endpoint.
-    region = _deals_region()
-    assert 'fetchRevenuePerformance("deal"' in region
+    # PR-ADS-178B: the page reads /api/pipeline, whose builder reads the mart
+    # deal view (its rows and its reader-contract summary).
+    region = _deals_region() + _fn("async function loadPipeline", span=2200)
+    assert "/api/pipeline?" in region
+    svc = open(os.path.join(ROOT, "services", "pipeline_service.py"), encoding="utf-8").read()
+    assert 'build_revenue_decision_mart(view="deal", window=window, now=now)' in svc
     assert "/api/deals?days=" not in region
     assert "/api/revenue-deals?window=" not in region
 
@@ -290,20 +298,20 @@ def test_old_funnel_removed():
 
 def test_deals_states_differ():
     region = _deals_region()
-    assert "function renderRevenueDealsUnavailable" in region
-    assert "function renderRevenueDealsSafeEmptyState" in region
+    # PR-ADS-178B: the three states are drawn by pipelineDealsHtml.
+    assert "function pipelineDealsHtml" in region
     # PR-ADS-164A: the unavailable card states the canonical word and reason
     # (rendered by the shared helper), and the empty card is reached only on a
     # published zero — so its wording says the ledger was read.
-    assert "renderClosedWonBlocked(verdict)" in region
+    assert "closedWonBlockedHtml(pipelineDealListVerdict(d))" in region
+    assert "return closedWonPopulation(data);" in region
     assert "No closed-won deals closed in this period" in region
     assert "The deal ledger was read and is current." in region
-    # Render flow: unavailable -> safe-empty -> table. (Span widened from 1200:
-    # the verdict lines moved the table call to ~1230 characters in.)
-    page = _fn("function renderRevenueDealsPage", span=1600)
-    i_unavail = page.find("renderRevenueDealsUnavailable")
-    i_empty = page.find("renderRevenueDealsSafeEmptyState")
-    i_table = page.find("renderRevenueDealsTable")
+    # Render flow: unavailable -> safe-empty -> table.
+    page = _fn("function pipelineDealsHtml", span=6000)
+    i_unavail = page.find("closedWonBlockedHtml")
+    i_empty = page.find("No closed-won deals closed in this period")
+    i_table = page.find("pipeline-deal-table")
     assert -1 < i_unavail < i_empty < i_table
 
 
@@ -316,7 +324,8 @@ def test_deals_no_fake_zero_or_roas():
 
 
 def test_deals_table_columns_and_attribution_labels():
-    table = _fn("function renderRevenueDealsTable", span=1400)
+    # PR-ADS-178B: the table is the Pipeline page's deal list.
+    table = _fn("function pipelineDealsHtml", span=4200)
     # PR-ADS-164A: the table shows only fields the canonical deal row carries.
     # "Company" was hard-coded None by the server (the ledger stores the deal's
     # name, not an employer) and "Attribution" read `match_source`, which the

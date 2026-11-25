@@ -283,7 +283,8 @@ def test_09_every_remaining_sidebar_page_still_routes():
     # PR-ADS-168B: 17 until the Revenue by Source page was deleted.
     # PR-ADS-176B: 16 until the Countries evidence page (#/geo) was deleted.
     # PR-ADS-177B: 15 until Campaign Revenue & Spend merged into Campaigns.
-    assert len(nav) == 14
+    # PR-ADS-178B: 14 until Leads and Deals merged into Pipeline.
+    assert len(nav) == 13
     assert set(nav) <= pages, sorted(set(nav) - pages)
     for page in sorted(nav):
         assert f'id="page-{page}"' in HTML, page

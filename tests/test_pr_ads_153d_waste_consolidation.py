@@ -207,8 +207,11 @@ def test_gclid_attribution_moves_to_admin():
     # Pipeline item's.
     admin = _INDEX_HTML.split('data-section="system"')[1].split("</nav>")[0]
     assert 'data-page="gclid-attribution"' in admin
-    crm = _INDEX_HTML.split('data-section="pipeline"')[1].split("</nav>")[0]
+    # PR-ADS-178B: Pipeline is one page with no strip; GCLID Attribution is
+    # not on it.
+    crm = _INDEX_HTML.split('id="page-pipeline"')[1].split("</section>")[0]
     assert 'data-page="gclid-attribution"' not in crm
+    assert 'data-section="pipeline"' not in _INDEX_HTML
 
 
 def test_no_standalone_ngrams_navigation_item():

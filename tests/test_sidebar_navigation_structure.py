@@ -19,8 +19,10 @@ REQUIRED_ROUTE_KEYS = [
     # redirects to "roas-countries", the one Countries page. See
     # tests/test_pr_ads_176b_countries_one_page.py.
     "keywords",
-    "leads",
-    "deals",
+    # PR-ADS-178B: "leads" and "deals" were merged into "pipeline"; #/leads and
+    # #/deals redirect to its sections. See
+    # tests/test_pr_ads_178b_pipeline_one_page.py.
+    "pipeline",
     # PR-ADS-177B: "roas-campaigns" (Campaign Revenue & Spend) was merged into
     # "campaigns"; #/roas-campaigns redirects there. See
     # tests/test_pr_ads_177b_campaigns_one_page.py.

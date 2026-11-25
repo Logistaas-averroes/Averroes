@@ -326,18 +326,20 @@ def test_13_sql_to_customer_rate_is_unavailable_across_two_cohorts():
     deals a close-date cohort at all-source scope. No canonical service
     supplies both over one cohort and scope, so the rate is unavailable with
     the reason — on every page that used to compute it."""
-    from services import dashboard_deals_service as deals_svc
     from services import dashboard_revenue_service as rev_svc
+    from services import pipeline_service as pipeline_svc
     summary = {"sqls": 40, "closed_won_deals": 4, "customers": 3,
                "customers_status": cwt.PUBLISHED, "won_revenue_usd": 1000.0,
                "revenue_total_available": True, "metrics": {}}
-    d = deals_svc._build_kpis(summary, True, 0, False)
     r = rev_svc._build_kpis(summary, [], revenue_connected=True,
                             amounts_complete=True)
-    for kpis in (d, r):
-        assert kpis["sql_to_customer_rate"] is None
-        assert kpis["sql_to_customer_rate_reason"] == \
-            cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE
+    assert r["sql_to_customer_rate"] is None
+    assert r["sql_to_customer_rate_reason"] == cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE
+    # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder, whose
+    # one named rate is the unavailable verdict with the reason.
+    d = pipeline_svc._rates()["sql_to_customer_rate"]
+    assert (d["value"], d["status"], d["reason"]) == (
+        None, cwt.UNAVAILABLE, cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE)
     a = audit.Audit()
     audit.structural_checks(a)
     assert a.checks["sql_to_customer_not_mixed"] is True

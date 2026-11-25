@@ -674,7 +674,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "headline": f"Top 3 deals drove {pct}% of revenue",
             "body": (f"Revenue is {concentration['label'].lower()} across "
                      f"{concentration['deals']} deals — validate repeatability before scaling."),
-            "target_page": "deals", "target_label": "Open Deals",
+            "target_page": "pipeline", "target_label": "Open Pipeline",
         })
     else:
         cards.append({
@@ -683,7 +683,7 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "body": ("No single deal dominates this window's revenue." if concentration
                      else "Deal concentration is unavailable — it needs closed-won "
                           "revenue with every deal amount known."),
-            "target_page": "deals", "target_label": "Open Deals",
+            "target_page": "pipeline", "target_label": "Open Pipeline",
         })
 
     # Investigate — unclassified / unattributed revenue.

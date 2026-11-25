@@ -189,7 +189,9 @@ def test_03c_no_sql_note_is_written_beside_a_withheld_count():
     ("services.dashboard_countries_service", "_country_status",
      dict(native_spend=100.0, usd_spend=125.0, fx_complete=True, sqls=None,
           customers=0, won_revenue=0.0, attribution_status="mapped")),
-    ("services.dashboard_deals_service", "_source_status", dict(sqls=None, deals=0, won=0.0)),
+    # PR-ADS-178B: ("services.dashboard_deals_service", "_source_status") is
+    # deleted — Dashboard → Deals republishes the Pipeline builder and judges
+    # no row on SQLs (its source-group rows carried the legacy count).
 ])
 def test_03d_every_dashboard_status_says_sqls_withheld_never_a_claim(module, fn, kwargs):
     import importlib
@@ -207,13 +209,15 @@ def test_03e_a_won_deal_still_decides_the_status_under_withheld_sqls():
 
 
 def test_03f_the_deals_campaign_breakdown_keeps_a_withheld_row_instead_of_dropping_it():
-    """`(sqls or 0) == 0` skipped a row as noise on a count nobody published."""
+    """`(sqls or 0) == 0` skipped a row as noise on a count nobody published.
+    PR-ADS-178B: the Deals tab's campaign breakdown is deleted (a second
+    build of the Campaigns page's figures); no Deals row drops a withheld
+    count because no Deals row carries one."""
     from services import dashboard_deals_service as dd
-    out = dd._build_campaign_breakdown(
-        [{"campaign_name": "Brand", "sqls": None, "sqls_status": "withheld",
-          "closed_won_deals": 0, "won_revenue": 0.0}], True, set())
-    assert [r["campaign_name"] for r in out] == ["Brand"]
-    assert out[0]["status"] == "SQLs withheld"
+    assert not hasattr(dd, "_build_campaign_breakdown")
+    src = (ROOT / "services" / "pipeline_service.py").read_text()
+    assert "campaign_breakdown" not in src and "sqls" not in src.split(
+        "def _deal_row")[1].split("def _source_breakdown")[0]
 
 
 # ── 4. the JSON fallback publishes no lead or SQL count ─────────────────────
@@ -343,7 +347,9 @@ def test_06e_every_mart_and_dashboard_sql_cell_goes_through_the_gate():
                "renderCampaignsResidualRow", "renderCampaignsPageDrawer",
                "renderCampLeaderboardResidual",
                "renderMartSummaryStrip", "renderCampLeaderboard",
-               "renderCtryLeaderboard", "renderCtryResidualPanel", "renderDealCampaignPipeline"):
+               # PR-ADS-178B: the Deals tab's campaign table is deleted; its
+               # one SQL figure is the Pipeline KPI card.
+               "renderCtryLeaderboard", "renderCtryResidualPanel", "pipelineKpiCardsHtml"):
         body = _js_function(js, fn)
         for bad in ("dashValue(r.sqls", "dashValue(r.leads", "fmtCount(r.sqls)",
                     "fmtCount(r.leads)", "dashValue(res.sqls", "fmtCount(s.sqls)",
@@ -354,7 +360,10 @@ def test_06e_every_mart_and_dashboard_sql_cell_goes_through_the_gate():
 
 def test_06f_the_new_statuses_have_a_colour_and_a_next_action():
     js = APP_JS.read_text()
-    for table in ("CAMP_STATUS_META", "CTRY_STATUS_META", "DEAL_STATUS_META",
+    # PR-ADS-178B: DEAL_STATUS_META went with the Deals tab's status column
+    # (no Deals row is judged on SQLs any more).
+    assert "DEAL_STATUS_META" not in js
+    for table in ("CAMP_STATUS_META", "CTRY_STATUS_META",
                   "CAMP_NEXT_ACTION", "CTRY_NEXT_ACTION"):
         start = js.index(f"const {table} = {{")
         assert '"SQLs withheld"' in js[start:js.index("};", start)], table

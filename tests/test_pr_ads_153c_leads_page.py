@@ -35,6 +35,13 @@ from services import canonical_crm_funnel_service as funnel  # noqa: E402
 
 _APP_JS = (_ROOT / "static" / "app.js").read_text()
 _INDEX_HTML = (_ROOT / "static" / "index.html").read_text()
+
+
+def _leads_module():
+    """PR-ADS-178B: the leads code is the Pipeline page's module (leads and
+    deals on one page), from its header to the next page's."""
+    start = _APP_JS.index("// ── Pipeline — leads and deals on one page")
+    return _APP_JS[start:_APP_JS.index("// ── Revenue Attribution Health", start)]
 _SERVER_PY = (_ROOT / "api" / "server.py").read_text()
 
 
@@ -208,11 +215,22 @@ def test_scope_allowlists_are_resolved_from_the_canonical_classifiers():
 
 
 def test_frontend_renders_unavailable_scope_as_dash_never_zero():
+    # The working-status breakdown renders its counts through leadsCount, which
+    # maps null/undefined to an unavailable marker, never 0. PR-ADS-178B-F1:
+    # restored after 178B deleted it while leadsRenderOperational still called
+    # it; the marker is the word "Unavailable" (never a dash, docs/48).
     assert "leadsCount" in _APP_JS
-    # The count helper maps null/undefined to an em dash, never 0.
-    helper = _APP_JS.split("function leadsCount(")[1].split("}")[0]
-    assert '"—"' in helper
+    helper = _APP_JS.split("function leadsCount(")[1].split("\n}\n")[0]
+    assert "(value === null || value === undefined)" in helper
+    assert "Unavailable" in helper
     assert "|| 0" not in helper
+    operational = _APP_JS.split("async function leadsRenderOperational(")[1].split("\n}\n")[0]
+    assert "leadsCount(" in operational
+    # The funnel's stage counts: null/undefined is the word, never 0 (178B).
+    funnel = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\n}\n")[0]
+    assert "(count === null || count === undefined)" in funnel
+    assert '"Unavailable"' in funnel
+    assert "|| 0" not in funnel
 
 
 # =============================================================================
@@ -226,10 +244,11 @@ def test_leads_nav_item_exists_under_crm_and_revenue():
     # PR-ADS-162F renamed the group "CRM & Revenue" to "Sales Results";
     # PR-ADS-174A made it the Pipeline menu item. The rule is unchanged: Leads
     # sits in the CRM/sales group (now its first page), apart from System.
-    assert 'data-page="leads" data-nav-item="pipeline"' in _INDEX_HTML
-    crm_section = _INDEX_HTML.split('data-section="pipeline"')[1].split("</nav>")[0]
-    assert 'data-page="leads"' in crm_section
-    assert ">Leads<" in crm_section
+    # PR-ADS-178B: Leads is the Pipeline page (leads and deals), the item
+    # itself — no strip.
+    assert 'data-page="pipeline" data-nav-item="pipeline"' in _INDEX_HTML
+    assert 'data-section="pipeline"' not in _INDEX_HTML
+    assert '<span class="nav-item__label">Pipeline</span>' in _INDEX_HTML
 
 
 def test_lead_quality_and_in_progress_nav_items_are_gone():
@@ -252,9 +271,11 @@ def test_retired_route_redirects_to_leads_with_filter_intent():
 
 
 def test_old_lead_quality_url_lands_on_the_canonical_leads_page():
-    """The `leads` route key is retained, so #/leads resolves to the new page."""
-    assert '"leads"' in _APP_JS.split("const PAGES = [")[1].split("]")[0]
-    assert "case \"leads\":         loadLeads();" in _APP_JS
+    """The `leads` route key is retained, so #/leads resolves to the new page.
+    PR-ADS-178B: as a redirect to the Pipeline page's leads section."""
+    assert '"leads"' not in _APP_JS.split("const PAGES = [")[1].split("]")[0]
+    assert 'leads: { page: "pipeline", section: "leads" },' in _APP_JS
+    assert "case \"pipeline\":      loadPipeline();" in _APP_JS
 
 
 def test_retired_loader_is_gone():
@@ -275,9 +296,10 @@ def test_action_queue_has_no_links_to_retired_pages():
 
 def test_leads_uses_business_windows_not_evidence_windows():
     revenue_pages = _APP_JS.split("const REVENUE_PAGES = [")[1].split("]")[0]
-    assert '"leads"' in revenue_pages
+    # PR-ADS-178B: the leads list is on the Pipeline page.
+    assert '"pipeline"' in revenue_pages
     evidence_pages = _APP_JS.split("const EVIDENCE_PAGES = [")[1].split("]")[0]
-    assert '"leads"' not in evidence_pages
+    assert '"leads"' not in evidence_pages and '"pipeline"' not in evidence_pages
     assert '"opportunities"' not in evidence_pages
 
 
@@ -357,7 +379,7 @@ def test_mismatch_withholds_the_count():
 
 
 def test_frontend_withholds_counts_on_mismatch():
-    strip = _APP_JS.split("function leadsFunnelStripHtml(")[1].split("\nfunction ")[0]
+    strip = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\nfunction ")[0]
     assert 'reconciliation || {}).status === "mismatch"' in strip
     assert "(!available || mismatch) ? null : block.count" in strip
 
@@ -377,7 +399,7 @@ def test_incomplete_bootstrap_is_surfaced_and_all_time_is_qualified():
 
 
 def test_conversions_render_only_when_cohort_safe():
-    strip = _APP_JS.split("function leadsFunnelStripHtml(")[1].split("\nfunction ")[0]
+    strip = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\nfunction ")[0]
     assert 'conv.basis === "cohort"' in strip
     assert "conv.available" in strip
 
@@ -516,16 +538,14 @@ def _strip_js_comments(source: str) -> str:
 
 
 def test_leads_ui_does_not_render_an_email_field():
-    page = _APP_JS.split("// ── Leads — canonical HubSpot CRM funnel explorer")[1]
-    page = page.split("\n// ── ")[0]
+    page = _leads_module()
     assert "email" not in _strip_js_comments(page).lower()
 
 
 def test_no_leads_code_path_reads_an_email_field():
     """Belt-and-braces: no email property access anywhere in the page module,
     comment-stripped or not."""
-    page = _APP_JS.split("// ── Leads — canonical HubSpot CRM funnel explorer")[1]
-    page = page.split("\n// ── ")[0].lower()
+    page = _leads_module().lower()
     for accessor in (".email", '"email"', "'email'", "[email]", "email:"):
         assert accessor not in page
 
@@ -587,15 +607,15 @@ def test_no_competing_lead_api_was_introduced():
 
 
 def test_leads_page_consumes_only_the_canonical_crm_funnel_family():
-    page = _APP_JS.split("// ── Leads — canonical HubSpot CRM funnel explorer")[1]
-    page = page.split("\n// ── ")[0]
+    page = _leads_module()
     endpoints = set(re.findall(r"/api/[a-z0-9/\-]+", page))
+    # PR-ADS-178B: the Pipeline page reads ONE builder (/api/pipeline: the
+    # funnel, the cohort and the deal figures) and keeps the canonical
+    # family's paged rows; it no longer reads /api/crm-funnel or
+    # /api/crm-funnel/customers-won itself.
     assert endpoints <= {
-        "/api/crm-funnel", "/api/crm-funnel/contacts",
+        "/api/pipeline", "/api/crm-funnel/contacts",
         "/api/crm-funnel/operational-status",
-        # PR-ADS-166A: "Customers won" beside the stage-move count — the
-        # closed-won reader contract, republished under the same family.
-        "/api/crm-funnel/customers-won",
     }, endpoints
 
 
@@ -617,7 +637,7 @@ def test_leads_reuses_the_shared_business_window_resolver():
 
 
 def test_leads_window_selector_offers_the_business_vocabulary():
-    section = _INDEX_HTML.split('id="page-leads"')[1].split("</section>")[0]
+    section = _INDEX_HTML.split('id="page-pipeline"')[1].split("\n      </section>")[0]
     for key in ("current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"):
         assert key in section
     assert "data-business-window-select" in section
@@ -629,26 +649,28 @@ def test_leads_window_selector_is_actually_wired_to_the_shared_handler():
     ``data-business-window-select`` only keeps the select's *value* in sync
     when some other surface changes the window; on its own it never listens.
     """
-    assert 'const leadsWindow = document.getElementById("leads-window");' in _APP_JS
-    block = _APP_JS.split('const leadsWindow = document.getElementById("leads-window");')[1]
+    # PR-ADS-178B: the window select is the Pipeline page's.
+    assert 'const pipelineWindow  = document.getElementById("pipeline-window");' in _APP_JS
+    block = _APP_JS.split('const pipelineWindow  = document.getElementById("pipeline-window");')[1]
     block = block.split("\n\n")[0]
-    assert "leadsWindow.value = getRoasBusinessWindow();" in block
-    assert 'leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);' in block
+    assert "pipelineWindow.value = getRoasBusinessWindow();" in block
+    assert 'pipelineWindow.addEventListener("change", handleBusinessWindowSelectChange);' in block
 
 
 def test_business_window_change_reloads_leads_not_the_default_branch():
     """Leads must not fall through to the switch's loadRoasCampaigns default."""
     handler = _APP_JS.split("function handleBusinessWindowSelectChange(")[1].split("\n}")[0]
-    assert 'case "leads":' in handler
-    leads_case = handler.split('case "leads":')[1].split("break;")[0]
-    assert "loadLeads()" in leads_case
+    # PR-ADS-178B: the leads list is on the Pipeline page.
+    assert 'case "pipeline":' in handler
+    leads_case = handler.split('case "pipeline":')[1].split("break;")[0]
+    assert "loadPipeline()" in leads_case
     # A new window is a new cohort — paging must restart, never carry an
     # offset that belonged to the previous window.
     assert "_leadsPage = 1" in leads_case
 
 
 def test_no_bespoke_date_control_was_added():
-    section = _INDEX_HTML.split('id="page-leads"')[1].split("</section>")[0]
+    section = _INDEX_HTML.split('id="page-pipeline"')[1].split("\n      </section>")[0]
     assert 'type="date"' not in section
 
 
@@ -656,8 +678,7 @@ def test_no_bespoke_date_control_was_added():
 # §28 — No vanity metrics
 # =============================================================================
 def test_no_vanity_metrics_on_the_leads_page():
-    page = _APP_JS.split("// ── Leads — canonical HubSpot CRM funnel explorer")[1]
-    page = page.split("\n// ── ")[0].lower()
+    page = _leads_module().lower()
     for banned in ("engagement score", "health score", "lead score",
                    "propensity", "ai score"):
         assert banned not in page
@@ -740,8 +761,10 @@ def test_aggregate_endpoint_exposes_acquisition_group():
 
 
 def test_frontend_sends_the_source_filter_to_the_funnel_not_just_the_rows():
-    load_funnel = _APP_JS.split("async function leadsLoadFunnel(")[1].split("\n}")[0]
-    assert "/api/crm-funnel?" in load_funnel
+    # PR-ADS-178B: the funnel is built by the Pipeline builder, which the
+    # page asks with the Source filter — one population for funnel and rows.
+    load_funnel = _APP_JS.split("async function loadPipeline(")[1].split("\n}")[0]
+    assert "/api/pipeline?" in load_funnel
     assert 'params.set("acquisition_group", _leadsSourceGroup)' in load_funnel
 
 
@@ -749,11 +772,12 @@ def test_source_selector_reloads_the_funnel():
     controls = _APP_JS.split("function leadsRenderControls(")[1].split("\nfunction ")[0]
     source_handler = controls.split('document.getElementById("leads-source")')[1]
     source_handler = source_handler.split("statusSel")[0]
-    assert "leadsLoadFunnel()" in source_handler
+    # PR-ADS-178B: loadPipeline() rebuilds the funnel (and the list).
+    assert "loadPipeline()" in source_handler
 
 
 def test_funnel_strip_discloses_the_active_source_filter():
-    strip = _APP_JS.split("function leadsFunnelStripHtml(")[1].split("\nfunction ")[0]
+    strip = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\nfunction ")[0]
     assert "acquisition_group_label" in strip
     assert "Source:" in strip
 
@@ -963,7 +987,7 @@ def test_control_visibility_runs_on_every_view_switch():
 
 
 def test_each_leads_filter_is_wrapped_so_it_can_be_hidden_with_its_label():
-    section = _INDEX_HTML.split('id="page-leads"')[1].split("</section>")[0]
+    section = _INDEX_HTML.split('id="page-pipeline"')[1].split("\n      </section>")[0]
     for control_id in ("leads-status-control", "leads-search-control"):
         assert control_id in section
     controls = section.split('id="leads-table-controls"')[1].split("</div>")[0]
@@ -1022,8 +1046,9 @@ def test_scope_change_reloads_the_operational_view_too():
     controls = _APP_JS.split("function leadsRenderControls(")[1].split("\nfunction ")[0]
     scope_handler = controls.split('document.getElementById("leads-scope")')[1]
     scope_handler = scope_handler.split("sourceSel")[0]
-    # loadLeads() reloads the funnel AND re-renders whichever view is active.
-    assert "loadLeads()" in scope_handler
+    # loadPipeline() reloads the funnel AND re-renders whichever view is
+    # active (PR-ADS-178B: it was loadLeads()).
+    assert "loadPipeline()" in scope_handler
     active = _APP_JS.split("async function leadsRenderActiveView(")[1].split("\n}")[0]
     assert "leadsRenderOperational()" in active
 

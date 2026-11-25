@@ -85,12 +85,14 @@ def test_loaddeals_maps_outage_to_unavailable_card_in_ui():
     # unreachable and an outage rendered as "No closed-won deals found". The
     # outage is now driven by the canonical verdict the mart passes through,
     # and anything but a published verdict renders the unavailable card.
-    page = _fn("function renderRevenueDealsPage")
-    assert "closedWonPopulation(revenueDealsMart)" in page
-    assert 'state === "blocked"' in page
-    assert "renderRevenueDealsUnavailable(verdict)" in page
+    # PR-ADS-178B: the deal list is the Pipeline page's (pipelineDealsHtml).
+    page = _fn("function pipelineDealsHtml")
+    rows = _fn("function pipelineDealRows")
+    assert "closedWonPopulation(data)" in rows
+    assert 'closedWonPopulationState(pop, data.deals.length) === "blocked"' in rows
+    assert "closedWonBlockedHtml(pipelineDealListVerdict(d))" in page
     assert '"database_unavailable"' not in page
-    loader = _fn("async function loadDeals")
+    loader = _fn("async function loadPipeline")
     assert '|| "available"' not in loader, "a missing status must never default to available"
 
 
@@ -111,16 +113,19 @@ def test_mart_deal_ledger_summary_matches_rows(monkeypatch):
 
 
 def test_ui_deal_summary_sourced_from_ledger_summary():
-    fn = _slice("function martDealLedgerSummary", span=900)
-    # Prefer the backend deal-ledger summary; never the canonical attribution total.
-    assert "data.ledger_summary" in fn
-    assert "won_revenue_usd" not in fn
+    # PR-ADS-178B: the Pipeline builder reads the deal KPIs from the backend
+    # (the mart deal view's all-source summary metrics), never the canonical
+    # ATTRIBUTION total, and shows the list only when it numbers that count.
+    svc = open(os.path.join(ROOT, "services", "pipeline_service.py"), encoding="utf-8").read()
+    assert 'revenue_m = _verdict(summary_metrics.get("revenue_usd"))' in svc
+    assert "attributed" not in svc
+    assert "len(rows) != deals[\"value\"]" in svc
     # PR-ADS-164A: the client-side fallback is gone. It re-added the rows with
     # `Number(r.deal_amount_usd) || 0`, which counts a deal with no proven
     # amount as zero and publishes the priced remainder as "Won Revenue" — a
-    # partial presented as the total. Without the server's ledger summary the
-    # strip now says Unavailable.
-    own = _fn("function martDealLedgerSummary")
+    # partial presented as the total. The KPI cards render the server's
+    # verdicts only.
+    own = _fn("function pipelineKpiCardsHtml")
     assert "deal_amount_usd" not in own and ".reduce(" not in own
 
 

@@ -58,14 +58,17 @@ _REVENUE_PATHS = {
     "dashboard/channels": "kpis.closed_won_revenue_usd",
     "dashboard/campaigns": "kpis.won_revenue_usd",
     "dashboard/countries": "kpis.won_revenue_usd",
-    "dashboard/deals": "kpis.closed_won_revenue_usd",
+    # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder, whose
+    # KPIs are {value, status, reason}; the Pipeline page is an eighth consumer.
+    "dashboard/deals": "kpis.won_revenue_usd.value",
+    "pipeline": "kpis.won_revenue_usd.value",
     "revenue_decision_mart": "summary.won_revenue_usd",
 }
 _ALL_CONSUMERS = tuple(_REVENUE_PATHS)
 
 #: The subset of those that publish the ALL-SOURCE business total.
 _ALL_SOURCE_CONSUMERS = ("dashboard/overview", "dashboard/revenue",
-                         "dashboard/channels", "dashboard/deals",
+                         "dashboard/channels", "dashboard/deals", "pipeline",
                          "revenue_decision_mart")
 
 
@@ -108,7 +111,10 @@ def _customers_of(built: dict) -> dict:
                 else (entry.get("payload") or {}).get("kpis")) or {}
         for key in ("closed_won_deals", "total_closed_won_deals"):
             if key in node:
-                out[name] = node[key]
+                # PR-ADS-178B: the Pipeline builder's KPIs are
+                # {value, status, reason}; the count is its value.
+                v = node[key]
+                out[name] = v.get("value") if isinstance(v, dict) else v
                 break
     return out
 
@@ -139,8 +145,9 @@ def test_f3_2_countries_is_out_of_the_full_campaign_attributable_comparison():
     assert "dashboard/countries" not in consumers
     # PR-ADS-177B: Dashboard → Campaigns reads the settled campaign view; it
     # is compared over its own days, in the settled identity.
+    # PR-ADS-178B: the Pipeline page joins (Dashboard → Deals republishes it).
     assert consumers == {"dashboard/overview", "dashboard/revenue",
-                         "dashboard/deals", "revenue_decision_mart"}
+                         "dashboard/deals", "pipeline", "revenue_decision_mart"}
     settled = {c for c, _ in parity.METRIC_IDENTITIES[
         "google_ads_cohort_sqls__settled_days"]["consumers"]}
     assert settled == {"dashboard/campaigns", "revenue_decision_mart/campaign_settled"}
@@ -1022,7 +1029,7 @@ def test_f3f1_9_every_withheld_revenue_contract_carries_reason_and_codes(
 
     checked = 0
     for name in ("dashboard/overview", "dashboard/revenue", "dashboard/deals",
-                 "revenue_decision_mart"):
+                 "pipeline", "revenue_decision_mart"):
         blocks = ((built[name].get("payload") or {})
                   .get(contract_mod.METRIC_TRUTH_KEY) or {})
         block = blocks.get("closed_won_revenue_usd")
@@ -1033,7 +1040,7 @@ def test_f3f1_9_every_withheld_revenue_contract_carries_reason_and_codes(
         assert (block.get("violation_codes")
                 == [canonical_revenue.V_CURRENCY_UNPROVEN_DEALS]), name
         checked += 1
-    assert checked == 4
+    assert checked == 5          # PR-ADS-178B: + the Pipeline page
 
 
 def test_f3f1_10_the_contract_helper_normalizes_violation_codes():

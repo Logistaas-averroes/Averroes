@@ -47,7 +47,8 @@ def _fn(marker):
 
 # PR-ADS-168B: "revenue-by-source" is deleted (its hash redirects to Channels).
 # PR-ADS-177B: "roas-campaigns" is merged into "campaigns" (business windows).
-REVENUE_PAGES_MIN = ["campaigns", "roas-countries", "deals", "revenue-health"]
+# PR-ADS-178B: "deals" is the Pipeline page.
+REVENUE_PAGES_MIN = ["campaigns", "roas-countries", "pipeline", "revenue-health"]
 
 
 # ── Test 1 — Revenue pages hide the global day-window bar ────────────────────
@@ -187,12 +188,17 @@ def test_no_old_endpoint_fallback():
         ("async function loadCampaignsPage", "campaign", "/api/revenue-attribution?"),
         ("async function loadRoasCountries", "country", "/api/revenue-attribution?"),
         # PR-ADS-168B: loadRevenueBySource and the mart `source` view are deleted.
-        ("async function loadDeals", "deal", "/api/revenue-deals?"),
+        # PR-ADS-178B: the deal list is the Pipeline page's; its one builder
+        # reads the mart deal view (asserted on the service below).
+        ("async function loadPipeline", "deal", "/api/revenue-deals?"),
     ]
+    svc = open(os.path.join(ROOT, "services", "pipeline_service.py"), encoding="utf-8").read()
     for loader, view, old_url in cases:
         body = _slice(loader, span=2000)
         reads_mart = (f'fetchRevenuePerformance("{view}"' in body
-                      or f"/api/revenue-performance?view={view}&settled=true" in body)
+                      or f"/api/revenue-performance?view={view}&settled=true" in body
+                      or ("/api/pipeline?" in body
+                          and 'build_revenue_decision_mart(view="deal"' in svc))
         assert reads_mart, f"{loader} must read the mart"
         assert old_url not in body, f"{loader} must not call the legacy endpoint {old_url}"
     assert "function renderMartUnavailable" in JS

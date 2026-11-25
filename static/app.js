@@ -18,22 +18,30 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-// PR-ADS-153C: "opportunities" (In Progress Leads) is retired as a page but is
-// kept in the registry so its old URL resolves to a redirect rather than a dead
-// route. "leads" is now the canonical CRM funnel page.
+// PR-ADS-153C: "opportunities" (In Progress Leads) is retired as a page; its
+// old URL resolves to a redirect rather than a dead route (PR-ADS-178B: to the
+// Pipeline page's leads list, filtered to open_working).
 // PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
 // and its loader are deleted, and the key survives ONLY so #/waste resolves to
 // the redirect below instead of 404-ing an existing bookmark.
 // PR-ADS-177B: "roas-campaigns" (Campaign Revenue & Spend) is deleted; it is
 // one page with Campaign Evidence under "campaigns" and survives only as a
 // redirect below.
-const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "backfill", "roas-countries", "revenue-health", "channels", "system"];
+// PR-ADS-178B: "leads" and "deals" are one page, "pipeline"; they and the
+// older "opportunities" key survive only as redirects below.
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "keywords", "pipeline", "gclid-attribution", "scheduler", "health", "backfill", "roas-countries", "revenue-health", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
 const RETIRED_PAGE_REDIRECTS = {
-  // In Progress Leads == the open_working operational filter on Leads.
-  opportunities: { page: "leads", status: "open_working" },
+  // In Progress Leads == the open_working operational filter on the leads
+  // list (PR-ADS-178B: on the Pipeline page, opened at its leads section).
+  opportunities: { page: "pipeline", section: "leads", status: "open_working" },
+  // PR-ADS-178B: Leads and Closed-Won Deals are one page, Pipeline. Neither
+  // key is in PAGES; each survives only here and carries its intent — the
+  // section of the Pipeline page the old page was.
+  leads: { page: "pipeline", section: "leads" },
+  deals: { page: "pipeline", section: "deals" },
   // PR-ADS-153D: Flagged Waste Terms == the Flagged view of Search Terms.
   // The old page is deleted, not hidden — the redirect carries its INTENT
   // (land on the flagged terms), which is what an old bookmark actually wanted.
@@ -69,7 +77,8 @@ const NAV_ITEMS = [
   { id: "campaigns", label: "Campaigns", pages: ["campaigns", "keywords", "search-terms"] },
   // PR-ADS-176B: one page, so no tab strip.
   { id: "countries", label: "Countries", pages: ["roas-countries"] },
-  { id: "pipeline", label: "Pipeline", pages: ["leads", "deals"] },
+  // PR-ADS-178B: one Pipeline page (leads and deals), so no tab strip.
+  { id: "pipeline", label: "Pipeline", pages: ["pipeline"] },
   { id: "system", label: "System", pages: ["system", "scheduler", "health", "revenue-health", "backfill", "gclid-attribution"] },
 ];
 
@@ -97,7 +106,8 @@ function navItemForPage(page) {
 // CHANNELS_LINK_LABEL). Channels does not reproduce those figures.
 const CHANNELS_LINK_LABEL = "Open Channels (different windows and grouping)";
 
-const REVENUE_PAGES = ["dashboard", "campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"];
+// PR-ADS-178B: "pipeline" replaces "leads" and "deals".
+const REVENUE_PAGES = ["dashboard", "campaigns", "roas-countries", "pipeline", "revenue-health", "channels", "system"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -197,9 +207,9 @@ const PAGE_DATASET_MAP = {
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
   keywords:          ["google_ads_api/keyword_facts"],
-  // PR-ADS-153C: the canonical Leads page reads the CRM funnel spine.
-  leads:             ["hubspot/contact_funnel", "hubspot/lifecycle_events"],
-  deals:             ["hubspot/deals"],
+  // PR-ADS-178B: the Pipeline page reads the CRM funnel spine (leads) and
+  // the deal ledger (deals).
+  pipeline:          ["hubspot/contact_funnel", "hubspot/lifecycle_events", "hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
 };
 
@@ -254,21 +264,13 @@ const PAGE_EXPLANATIONS = {
     emptyMeans: "No reported keyword activity for this window. A blank Quality Score does not mean poor quality, and no keyword rows does not mean the account has no targeting or spend.",
     nextAction: "Check System Status → Google Ads API / Keywords."
   },
-  leads: {
-    title: "Leads",
-    purpose: "HubSpot CRM funnel. Each stage counts contacts that ENTERED that lifecycle stage in the window, dated by its own HubSpot stage-entry timestamp.",
-    source: "HubSpot lifecycle truth (hubspot_contact_funnel).",
-    dependsOn: ["contact_funnel"],
-    emptyMeans: "No contacts entered this stage in the selected window.",
+  pipeline: {
+    title: "Pipeline",
+    purpose: "Leads and closed-won deals together: SQLs (the Google Ads acquisition cohort), the lifecycle funnel (contacts that entered each stage in the window), the closed-won deal list and the customers won.",
+    source: "HubSpot lifecycle truth (hubspot_contact_funnel) and the canonical HubSpot closed-won deal ledger.",
+    dependsOn: ["contact_funnel", "deals"],
+    emptyMeans: "No contact entered a stage and no deal closed-won in the selected window.",
     nextAction: "Check System Status → HubSpot CRM, or run the canonical contact sync."
-  },
-  deals: {
-    title: "Deals",
-    purpose: "HubSpot deal pipeline — stages, values, and campaign attribution.",
-    source: "HubSpot CRM deals.",
-    dependsOn: ["deals"],
-    emptyMeans: "No deal rows found for this window. HubSpot deals may not have synced.",
-    nextAction: "Check System Status → HubSpot CRM."
   },
   "gclid-attribution": {
     title: "GCLID Attribution",
@@ -347,26 +349,12 @@ const PAGE_HELP_CONTENT = {
     doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Attributed SQLs are HubSpot-confirmed qualified contacts on their created date, uniquely tied to one keyword criterion; a blank ('—') means the SQL could not be uniquely attributed (ambiguous keyword text or unresolved campaign), never zero, and a genuine 0 means uniquely attributable with no matching contact. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
     checkNext: "Search Terms to see which queries matched a keyword, or Campaign Evidence for canonical spend and lead outcomes."
   },
-  leads: {
-    what: "HubSpot lead-quality breakdown — lifecycle stages, junk rate, campaign attribution, and quality scoring.",
-    source: "HubSpot CRM contacts synced via the HubSpot connector.",
-    howToUse: "Review junk rate by campaign. Identify which campaigns produce MQLs vs. junk. Use time window to track quality trends.",
-    doNotAssume: "Lead quality labels come from HubSpot lifecycle stages. The system does not modify lead statuses in HubSpot.",
-    checkNext: "Campaigns page to correlate lead quality with campaign spend and verdicts."
-  },
-  opportunities: {
-    what: "Leads currently in active pipeline stages — not yet closed-won or lost. Shows in-progress pipeline activity.",
-    source: "HubSpot CRM contacts filtered to active lifecycle stages.",
-    howToUse: "Monitor pipeline velocity. Identify leads that are stuck in early stages or progressing toward conversion.",
-    doNotAssume: "This is a snapshot of current pipeline state. It does not predict conversion probability.",
-    checkNext: "Deals page for closed-won revenue, or Lead Quality for quality breakdown."
-  },
-  deals: {
-    what: "HubSpot deal pipeline — stages, values, and campaign attribution for closed-won and in-progress deals.",
-    source: "HubSpot CRM deals synced via the HubSpot connector.",
-    howToUse: "Review deal values by campaign to understand revenue attribution. Filter by stage or time window.",
-    doNotAssume: "Deal attribution uses HubSpot's native campaign field. It does not re-attribute deals using click-level GCLID data (that requires GCLID bridge).",
-    checkNext: "Campaigns for campaign-level profitability."
+  pipeline: {
+    what: "Pipeline — leads and closed-won deals for one business window through today. SQLs are the Google Ads acquisition cohort (the same count as Overview and Campaigns). The funnel counts contacts that entered each lifecycle stage in the window; click a stage for its contacts. The deal list is every closed-won deal; customers are distinct companies.",
+    source: "One builder (/api/pipeline): the Revenue Decision Mart's deal view and acquisition cohort, the canonical HubSpot contact funnel, the closed-won deal ledger. This does NOT use Google Ads conversion value.",
+    howToUse: "Pick a business window. The Scope and Source selectors filter leads only — the funnel and the leads list; deal figures never change with them. Filter the deal list by each deal's own source group.",
+    doNotAssume: "Withheld and Unavailable are never zero. Customers are never summed and are not the contacts moved to the Customer stage. Open and lost deals are not in the deal ledger.",
+    checkNext: "Campaigns for spend against these outcomes, or Revenue Health for blockers."
   },
   "roas-countries": {
     what: "Country-level revenue and spend — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
@@ -422,10 +410,9 @@ const PAGE_DEPENDENCIES = {
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
   keywords:                ["google_ads_api/keyword_facts"],
-  leads:                   ["hubspot/contacts"],
-  deals:                   ["hubspot/deals"],
+  // PR-ADS-178B: the one Pipeline page — the contact funnel and the deal ledger.
+  pipeline:                ["hubspot/contact_funnel", "hubspot/deals"],
   "gclid-attribution":     ["gclid/matches"],
-  opportunities:           ["hubspot/contacts"],
   scheduler:               [],
   health:                  [],
   backfill:                [],
@@ -1353,6 +1340,7 @@ function navigate(page, options) {
   const retired = RETIRED_PAGE_REDIRECTS[page];
   if (retired) {
     if (retired.status) leadsSetPendingStatus(retired.status);
+    if (retired.section) pipelineSetPendingSection(retired.section);
     if (retired.tab) stSetPendingTab(retired.tab);
     navigate(retired.page, options);
     return;
@@ -1462,8 +1450,7 @@ function loadPage(page) {
     case "campaigns":     loadCampaigns();                          break;
     case "search-terms":  loadSearchTermsEvidence();                break;
     case "keywords":      loadKeywords();      break;
-    case "leads":         loadLeads();         break;
-    case "deals":         loadDeals();         break;
+    case "pipeline":      loadPipeline();      break;
     case "gclid-attribution":
       if (gclidAttributionPrefill) {
         const campaignInput = document.getElementById("gclid-filter-campaign");
@@ -2152,6 +2139,13 @@ const CANONICAL_REASON_LABELS = {
   // the verdict it was sent (see closedWonBlockedMetric).
   closed_won_verdict_missing: "the server sent no usable publication verdict for these deals",
   closed_won_rows_do_not_match_count: "the deal rows received do not match the published count",
+  // PR-ADS-178B-F1: the Pipeline page's own reasons, in plain words.
+  no_closed_won_deals_in_window: "no closed-won deals in this window, so there is no average",
+  average_deal_value_population_mismatch:
+    "the average was computed over a different deal count or revenue than the figures beside it",
+  lifecycle_funnel_unreadable: "the lifecycle funnel could not be read",
+  missing_stage_entry_date: "some contacts reached a stage with no entry date recorded in HubSpot",
+  unknown_lifecycle_stage: "some contacts hold a lifecycle stage this funnel does not recognise",
   sql_to_customer_rate_needs_one_acquisition_cohort_and_scope:
     "SQLs and won deals are different populations and cohorts",
   revenue_per_sql_needs_one_acquisition_cohort_and_scope:
@@ -2338,15 +2332,6 @@ function closedWonBlockedMetric(verdict) {
 
 function closedWonBlockedHtml(verdict) {
   return canonicalMetricHtml(closedWonBlockedMetric(verdict), null, businessBlockerOpts());
-}
-
-function renderClosedWonBlocked(verdict) {
-  return `
-    <div class="revenue-blocked-card">
-      <div class="revenue-blocked-card__eyebrow">Closed-won deals</div>
-      <h3>${closedWonBlockedHtml(verdict)}</h3>
-      <p>Closed-won deals for this period are not published, so no deal, customer or revenue figure is shown. This does not mean that no deals closed.</p>
-    </div>`;
 }
 
 // Plain-text deal-count sub-line (escaped by the KPI template): the count, or
@@ -6036,7 +6021,7 @@ function wireCtryDrawers(root, d) {
 
     const links = [
       ["roas-countries", "Open Countries"],
-      ["deals", "Open Deals"],
+      ["pipeline", "Open Pipeline"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
       .map(([page, label]) => `<a class="ctry-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
@@ -6134,59 +6119,19 @@ function renderCtryTruthFooter(d) {
     </footer>`;
 }
 
-// ── Dashboard — Deals, Opportunities & Pipeline Intelligence tab (PR-ADS-139) ─
+// ── Dashboard — Deals tab (PR-ADS-139; one builder since PR-ADS-178B) ──────
 //
-// Sixth and final dashboard tab. Reuses the PR-134/135/136/137/138 design system
-// end to end (KPI cards, funnel, decision cards, truth footer, drawers, loading/
-// refetch/unavailable states) — NO new visual language. It answers: what happens
-// after an SQL — opportunity creation, closed-won revenue, and which SQLs have not
-// yet become customers. Truth doctrine: HubSpot closed-won is revenue truth (USD);
-// open pipeline is NOT revenue; opportunities are NOT customers; NO ROAS here. The
-// durable ledger stores closed-won ONLY, so open pipeline / aging / closed-lost /
-// opportunity rates render "Unavailable" — never invented.
+// The tab reads `/api/dashboard/deals`, which republishes the Pipeline
+// builder's figures (services/pipeline_service.build_pipeline) for the
+// window, plus a previous-period comparison built by the same builder. It
+// renders them with the Pipeline page's own renderers: the KPI cards, the
+// closed-won deals by source, the deal list and customers won. Nothing here is
+// a second computation: the always-Unavailable opportunity cards, the aging
+// panel, the legacy lead-status backlog and the decision cards are gone with
+// the composition that produced them (docs/61).
 
 let dashDeals = null;
 let dashDealsStatus = "loading";
-
-const DEAL_STATUS_META = {
-  "Revenue proven": { color: "#22b07d", dot: "deal-dot--proven" },
-  "SQL producer": { color: "#129ef5", dot: "deal-dot--sql" },
-  // PR-ADS-177A-F1 (truth audit MAJOR 2): lead-status rows are never "SQL".
-  "Qualified-lead producer": { color: "#129ef5", dot: "deal-dot--sql" },
-  "Qualified-lead count withheld": { color: "#8896a6", dot: "deal-dot--muted" },
-  "Qualified (lead status) — no won deal yet": { color: "#ff8a3d", dot: "deal-dot--pending" },
-  "Aging qualified lead — needs sales review": { color: "#e0564e", dot: "deal-dot--aging" },
-  "Amount unavailable": { color: "#8896a6", dot: "deal-dot--muted" },
-  "Attribution needs review": { color: "#7c5cff", dot: "deal-dot--attr" },
-  "Stage unavailable": { color: "#b6bfca", dot: "deal-dot--muted" },
-  "No activity in window": { color: "#b6bfca", dot: "deal-dot--muted" },
-  "Closed-won outcome withheld": { color: "#8896a6", dot: "deal-dot--muted" },
-  // PR-ADS-177A: the acquisition cohort is withheld — not judged on SQLs.
-  "SQLs withheld": { color: "#8896a6", dot: "deal-dot--muted" },
-};
-function dealStatusColor(status) {
-  return (DEAL_STATUS_META[status] || { color: "#b6bfca" }).color;
-}
-function dealStatusDot(status) {
-  return (DEAL_STATUS_META[status] || {}).dot || "deal-dot--muted";
-}
-
-// Conversion rate (fraction 0..1) → "%", or Unavailable — never a fabricated 0%.
-function dealRateCell(r) {
-  // PR-ADS-161E: SQL → customer is unavailable with its reason — SQLs are an
-  // acquisition cohort, won deals a close-date one.
-  const v = (r || {}).sql_to_customer_rate;
-  if (v === null || v === undefined) {
-    return canonicalMetricHtml({ value: null, status: "unavailable",
-      reason: (r || {}).sql_to_customer_rate_reason });
-  }
-  return dealRate(v);
-}
-
-function dealRate(v) {
-  if (v === null || v === undefined) return '<span class="dash-unavailable">Unavailable</span>';
-  return escapeHtml((v * 100).toFixed(1) + "%");
-}
 
 async function loadDashboardDeals() {
   const window_ = getRoasBusinessWindow();
@@ -6245,435 +6190,32 @@ function renderDashboardDeals() {
   }
 
   const d = dashDeals;
-  root.innerHTML = `
-    <div class="dash-tab-intro dash-anim">
-      <h2 class="dash-tab-intro__title">Deals &amp; Pipeline</h2>
-      <p class="dash-tab-intro__sub">What happens after SQL: opportunity creation, open pipeline, closed-won revenue, lost deals, and stuck opportunities. Open pipeline is not revenue.</p>
-    </div>
-    ${renderDealKpiRow(d)}
-    <section class="dash-panel dash-anim deal-funnel-panel" aria-label="Pipeline funnel">
-      ${renderDealFunnel(d)}
-    </section>
-    <section class="dash-panel dash-anim deal-backlog-panel" aria-label="Qualified (lead status) backlog">
-      ${renderDealLeadStatusBacklog(d)}
-    </section>
-    <div class="dash-main-grid deal-mid-grid">
-      <section class="dash-panel dash-anim deal-source-panel" aria-label="Source to pipeline">
-        ${renderDealSourcePipeline(d)}
-      </section>
-      <aside class="dash-panel dash-anim deal-aging-panel" aria-label="Opportunity aging">
-        ${renderDealAging(d)}
-      </aside>
-    </div>
-    <section class="dash-panel dash-anim deal-campaign-panel" aria-label="Campaign to pipeline">
-      ${renderDealCampaignPipeline(d)}
-    </section>
-    <section class="dash-panel dash-anim deal-table-panel" aria-label="Closed-won deals">
-      ${renderDealTable(d)}
-    </section>
-    <section class="dash-panel dash-anim deal-sql-panel" aria-label="Qualified (lead status) contacts not yet closed-won">
-      ${renderDealSqlNoDeal(d)}
-    </section>
-    <section class="dash-decisions dash-anim" aria-label="Pipeline decision cards">
-      ${renderDashDecisionCards(d)}
-    </section>
-    ${renderDealTruthFooter(d)}
-  `;
-  wireDealDrawers(root, d);
-}
-
-function renderDealKpiRow(d) {
-  const k = d.kpis || {};
   const pc = d.period_change || {};
-  const cards = [
-    // PR-ADS-177A: the acquisition cohort, gated on THIS response's cohort.
-    { key: "sqls", label: COHORT_SQLS_LABEL, value: cohortCountHtml(k.sqls, d.cohort, null),
-      sub: `Google Ads contacts · this window${cohortThroughSuffix(d.cohort)}`,
-      delta: cohortDeltaChip("sqls", pc, d),
-      source: "HubSpot acquisition cohort",
-      ok: cohortCountPublication(d.cohort).publish && k.sqls !== null && k.sqls !== undefined },
-    { key: "opps", label: "Opportunities Created",
-      value: '<span class="dash-unavailable">Unavailable</span>',
-      sub: "Open opportunity stage not in ledger", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
-      source: "HubSpot deal ledger", ok: false },
-    { key: "open", label: "Open Pipeline",
-      value: '<span class="dash-unavailable">Unavailable</span>',
-      sub: "Open deals only — not revenue", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
-      source: "HubSpot deal ledger", ok: false },
-    { key: "revenue", label: "Closed-Won Revenue", value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }),
-      sub: "HubSpot closed-won USD", delta: dashDeltaChip("closed_won_revenue_usd", pc),
-      source: "HubSpot Closed-Won", ok: k.closed_won_revenue_usd !== null && k.closed_won_revenue_usd !== undefined },
-    // PR-ADS-161E: closed-won DEALS and customers (distinct proven HubSpot
-    // companies) are separate cards; customers carry the canonical verdict.
-    { key: "deals", label: "Closed-Won Deals", value: dashValue(k.closed_won_deals, fmtCount),
-      sub: "Close date in this window", delta: dashDeltaChip("closed_won_deals", pc),
-      source: "HubSpot Closed-Won", ok: k.closed_won_deals !== null && k.closed_won_deals !== undefined },
-    { key: "customers", label: "Customers",
-      value: canonicalMetricHtml(
-        { value: k.closed_won_customers, status: k.closed_won_customers_status,
-          reason: k.closed_won_customers_reason },
-        fmtCount, { windowType: "business", windowKey: (d.window || {}).key }),
-      sub: "Distinct HubSpot companies · closed-won", delta: dashDeltaChip("closed_won_customers", pc),
-      source: "HubSpot companies on closed-won deals", ok: k.closed_won_customers_status === "published" },
-    { key: "sql2cust", label: "SQL → Customer Rate",
-      value: canonicalMetricHtml(
-        { value: k.sql_to_customer_rate, status: k.sql_to_customer_rate_status || "unavailable",
-          reason: k.sql_to_customer_rate_reason }, (v) => `${(v * 100).toFixed(1)}%`),
-      sub: "Needs one acquisition cohort and scope", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
-      source: "HubSpot", ok: k.sql_to_customer_rate_status === "published" },
-    { key: "opp2cust", label: "Opportunity → Customer Rate",
-      value: '<span class="dash-unavailable">Unavailable</span>',
-      sub: "Opportunity stage not in ledger", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
-      source: "HubSpot deal ledger", ok: false },
-    // PR-ADS-177A: NOT a subset of the SQLs card — the legacy lead-status
-    // population (leads.status_category = 'qualified'), labelled as such.
-    { key: "notwon", label: "Qualified (lead status) · no won deal", value: dashValue(k.lead_status_qualified_no_won_deal, fmtCount),
-      sub: "Lead-status population · not the cohort card's count", delta: '<span class="dash-delta dash-delta--none">Sales gap</span>',
-      source: "Open/lost pipeline not visible", ok: k.lead_status_qualified_no_won_deal !== null && k.lead_status_qualified_no_won_deal !== undefined },
-  ];
-
   const compareNote = pc.available
     ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
     : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
-
-  return `
-    <div class="dash-kpi-grid deal-kpi-grid">
-      ${cards.map((c) => `
-        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
-          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
-          <div class="dash-kpi-card__value">${c.value}</div>
-          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
-          <div class="dash-kpi-card__meta">${c.delta}</div>
-          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
-        </div>`).join("")}
+  const openPipeline = dashCanNavigate("pipeline")
+    ? '<a class="deal-link" href="#/pipeline">Open Pipeline — leads, funnel and deals →</a>' : "";
+  root.innerHTML = `
+    <div class="dash-tab-intro dash-anim">
+      <h2 class="dash-tab-intro__title">Deals</h2>
+      <p class="dash-tab-intro__sub">Closed-won deals, customers and won revenue for this window — the Pipeline page's figures, from the same builder. Open and lost deals are not in the deal ledger.</p>
     </div>
-    ${compareNote}`;
-}
-
-function renderDealFunnel(d) {
-  const stages = d.funnel || [];
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Pipeline Funnel</h3>
-        <p class="dash-panel__sub">SQLs (acquisition cohort) → Opportunities → Open Pipeline → Closed Won → Closed Lost · open pipeline is not revenue</p>
-      </div>
-    </div>`;
-  if (!stages.length) {
-    return `${header}<p class="rev-breakdown-empty">No pipeline activity in this window.</p>`;
-  }
-  const cells = stages.map((s, i) => {
-    // PR-ADS-177A-F1 (truth audit MAJOR 2): the SQL stage is the acquisition
-    // cohort and goes through the ONE gate with THIS response's cohort — a
-    // withheld cohort reads "Withheld" and the reason, never "Unavailable /
-    // Stage unavailable" (which says the pipeline has no such stage).
-    const isCohortStage = s.stage === "SQLs";
-    const unavailable = !isCohortStage && s.status === "Stage unavailable";
-    const countHtml = isCohortStage
-      ? cohortCountHtml(s.count, d.cohort, null)
-      : unavailable
-        ? '<span class="dash-unavailable">Unavailable</span>'
-        : dashValue(s.count, fmtCount);
-    const stageLabel = isCohortStage
-      ? COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort)
-      : s.stage;
-    const amount = (s.amount_usd !== null && s.amount_usd !== undefined)
-      ? `<div class="deal-funnel__amt">${escapeHtml(fmtMoney(s.amount_usd))}</div>` : "";
-    const rate = (s.rate_from_previous !== null && s.rate_from_previous !== undefined)
-      ? `<span class="deal-funnel__conv">→ ${dealRate(s.rate_from_previous)}</span>` : "";
-    const arrowFallback = '<span aria-hidden="true">→</span>';
-    const conv = i > 0 ? `<div class="deal-funnel__arrow">${rate || arrowFallback}</div>` : "";
-    return `
-      ${conv}
-      <div class="deal-funnel__stage ${unavailable ? "deal-funnel__stage--unavailable" : ""}" style="--deal-accent:${dealStatusColor(s.status)}">
-        <div class="deal-funnel__label">${escapeHtml(stageLabel)}</div>
-        <div class="deal-funnel__value">${countHtml}</div>
-        ${amount}
-        <div class="deal-funnel__status"><span class="deal-dot ${dealStatusDot(s.status)}"></span>${escapeHtml(s.status)}</div>
-      </div>`;
-  }).join("");
-  const note = d.pipeline_stage_data_available === false
-    ? `<p class="deal-stage-note">${escapeHtml(d.pipeline_stage_reason || "Open opportunity stage data is unavailable from the durable HubSpot deal ledger.")}</p>`
-    : "";
-  return `${header}<div class="deal-funnel">${cells}</div>${note}`;
-}
-
-// PR-ADS-177A-F1 (truth audit MAJOR 2): the legacy lead-status backlog, OUT
-// of the funnel. It was the funnel's last stage ("SQLs Not Yet Closed-Won")
-// and read as the cohort SQL stage's continuation; it is a different metric.
-function renderDealLeadStatusBacklog(d) {
-  const b = d.lead_status_backlog || {};
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">${escapeHtml(b.label || "Qualified (lead status) · no won deal")}</h3>
-        <p class="dash-panel__sub">A different metric from the funnel above: HubSpot lead status, not the acquisition cohort · not a funnel stage</p>
-      </div>
-    </div>`;
-  const value = (b.count === null || b.count === undefined)
-    ? `<span class="dash-unavailable">Unavailable</span>${b.reason ? ` <small class="metric-reason">${escapeHtml(b.reason)}</small>` : ""}`
-    : escapeHtml(fmtCount(b.count));
-  return `${header}
-    <div class="deal-backlog" role="note">
-      <div class="deal-backlog__value">${value}</div>
-      ${b.definition ? `<p class="deal-stage-note">${escapeHtml(b.definition)}</p>` : ""}
-    </div>`;
-}
-
-function renderDealAging(d) {
-  const buckets = d.aging_buckets || [];
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Opportunity Aging</h3>
-        <p class="dash-panel__sub">Open opportunities by age</p>
-      </div>
-    </div>`;
-  const rows = buckets.map((b) => `
-    <li class="deal-aging-row">
-      <span class="deal-aging-row__bucket">${escapeHtml(b.bucket)}</span>
-      <span class="deal-aging-row__count">${b.open_opportunities === null || b.open_opportunities === undefined ? '<span class="dash-unavailable">Unavailable</span>' : dashValue(b.open_opportunities, fmtCount)}</span>
-      <span class="deal-aging-row__amt">${b.open_pipeline_usd === null || b.open_pipeline_usd === undefined ? '<span class="dash-unavailable">Unavailable</span>' : escapeHtml(fmtMoney(b.open_pipeline_usd))}</span>
-    </li>`).join("");
-  const note = `<p class="deal-stage-note">Opportunity aging needs open deals and deal create dates, which are not stored in the durable HubSpot deal ledger — shown as Unavailable, never fabricated.</p>`;
-  return `${header}<ul class="deal-aging-list">${rows}</ul>${note}`;
-}
-
-function dealPipelineCell(row) {
-  // Open pipeline is structurally unavailable on this tab.
-  return '<span class="dash-unavailable">Unavailable</span>';
-}
-
-function renderDealSourcePipeline(d) {
-  const rows = d.source_breakdown || [];
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Source → Pipeline</h3>
-        <p class="dash-panel__sub">Which source wins deals &amp; revenue · no spend ratio here</p>
-      </div>
-    </div>`;
-  if (!rows.length) {
-    return `${header}<p class="rev-breakdown-empty">No source activity in this window.</p>`;
-  }
-  // PR-ADS-177A: source groups count the legacy lead-status population
-  // (build_revenue_by_source), not the acquisition cohort — said so.
-  // PR-ADS-177A-F1: the row's count is lead status, so its rate column is
-  // "Qualified → Customer" (unavailable: two cohorts), never "SQL → Customer".
-  const head = ["Source", "Qualified (lead status)", "Open Pipeline", "Won deals", "Customers", "Revenue", "Qualified → Customer", "Status"]
-    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-  const body = rows.map((r) => `
-    <tr>
-      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${escapeHtml(r.source_detail || "—")}</td>
-      <td class="deal-num">${dashValue(r.sqls, fmtCount)}</td>
-      <td class="deal-num">${dealPipelineCell(r)}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_customers", fmtCount, campBlockerOpts(d))}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
-      <td class="deal-num">${dealRateCell(r)}</td>
-      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
-    </tr>`).join("");
-  return `${header}
-    <div class="deal-scroll">
-      <table class="deal-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
-    </div>`;
-}
-
-function renderDealCampaignPipeline(d) {
-  const rows = d.campaign_breakdown || [];
-  const linkCampaigns = dashCanNavigate("dashboard")
-    ? '<a class="deal-link" href="#/dashboard?tab=campaigns">Open Campaigns tab →</a>' : "";
-  const linkRoas = dashCanNavigate("campaigns")
-    ? '<a class="deal-link" href="#/campaigns">Open Campaigns →</a>' : "";
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Campaign → Pipeline</h3>
-        <p class="dash-panel__sub">Google Ads campaigns · SQLs → closed-won deals → revenue · spend ratios live on the spend pages</p>
-      </div>
-    </div>`;
-  if (!rows.length) {
-    return `${header}<p class="rev-breakdown-empty">No campaign pipeline activity in this window.</p>`;
-  }
-  const head = ["Campaign", COHORT_SQLS_LABEL + cohortThroughSuffix(d.cohort), "Open Pipeline", "Won deals", "Customers", "Revenue", "SQL → Customer", "Status"]
-    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-  const body = rows.map((r) => `
-    <tr>
-      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${escapeHtml(r.campaign_name || "—")}</td>
-      <td class="deal-num">${cohortCountHtml(r.sqls, d.cohort, r)}</td>
-      <td class="deal-num">${dealPipelineCell(r)}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_customers", fmtCount, campBlockerOpts(d))}</td>
-      <td class="deal-num">${rowMetricHtml(r, "closed_won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
-      <td class="deal-num">${dealRateCell(r)}</td>
-      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
-    </tr>`).join("");
-  return `${header}
-    <div class="deal-scroll">
-      <table class="deal-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
-    </div>
-    <div class="deal-panel-foot">${linkCampaigns}${linkRoas}</div>`;
-}
-
-function renderDealTable(d) {
-  const rows = d.deals || [];
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Closed-Won Deals</h3>
-        <p class="dash-panel__sub">Revenue proof · click a deal for detail · open / lost deals are not in the durable ledger</p>
-      </div>
-    </div>`;
-  if (d.deal_proof_available === false) {
-    return `${header}<p class="deal-stage-note">Closed-won deal proof is unavailable — ${d.truth_status && d.truth_status.deals === "blocked" ? "the revenue integration is disconnected" : "the deal ledger could not be read"}.</p>`;
-  }
-  if (!rows.length) {
-    return `${header}<p class="rev-breakdown-empty">No closed-won deals in this window.</p>`;
-  }
-  const head = ["Deal / Company", "Stage", "Amount", "Age", "Close Date", "Campaign", "Country", "Status"]
-    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-  const body = rows.map((r, i) => `
-    <tr class="deal-row" data-deal-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.deal_name || r.company || "deal")} detail">
-      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${dashValue(r.deal_name || r.company)}</td>
-      <td>${dashValue(r.stage)}</td>
-      <td class="deal-num">${dashValue(r.amount_usd, fmtMoney)}</td>
-      <td class="deal-num">${dashValue(r.age_days, fmtCount)}</td>
-      <td>${dashValue(r.close_date)}</td>
-      <td>${dashValue(r.campaign_name)}</td>
-      <td>${dashValue(r.country)}</td>
-      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
-    </tr>`).join("");
-  return `${header}
-    <div class="deal-scroll">
-      <table class="deal-table deal-table--rows"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
-    </div>`;
-}
-
-const DEAL_DRAWER_FIELDS = [
-  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
-  ["contact_id", "Contact ID"], ["deal_name", "Deal"], ["deal_id", "Deal ID"],
-  ["amount_usd", "Amount"], ["stage", "Stage"], ["stage_group", "Stage group"],
-  ["created_date", "Created date"], ["close_date", "Close date"], ["age_days", "Age (days)"],
-  ["days_to_close", "Days to close"], ["source_group", "Source group"], ["source_detail", "Source detail"],
-  ["campaign_name", "Campaign / source"], ["country", "Country"], ["attribution_status", "Attribution"],
-];
-
-function dealDrawerCell(deal, key) {
-  if (key === "amount_usd") return dashValue(deal.amount_usd, fmtMoney); // null → Unavailable, never $0
-  if (key === "age_days" || key === "days_to_close") return dashValue(deal[key], fmtCount);
-  return dashValue(deal[key]);
-}
-
-function dealRecommendedReview(deal) {
-  if (deal.amount_usd === null || deal.amount_usd === undefined)
-    return "Amount missing — pipeline value unavailable for this deal.";
-  return "Closed won — revenue proof. Open pipeline / aging is not tracked in the durable ledger.";
-}
-
-function wireDealDrawers(root, d) {
-  const rows = d.deals || [];
-  const open = (i) => {
-    const r = rows[i];
-    if (!r) return;
-    let drawer = root.querySelector(".deal-drawer");
-    if (!drawer) {
-      drawer = document.createElement("div");
-      drawer.className = "deal-drawer";
-      root.querySelector(".deal-table-panel").appendChild(drawer);
-    }
-    const tiles = DEAL_DRAWER_FIELDS.map(([key, label]) =>
-      `<div><dt>${escapeHtml(label)}</dt><dd>${dealDrawerCell(r, key)}</dd></div>`).join("");
-    const links = [
-      ["campaigns", "Open Campaigns"],
-      ["deals", "Open Deals ledger"],
-      ["revenue-health", "Open Revenue Health"],
-    ].filter(([page]) => dashCanNavigate(page))
-      .map(([page, label]) => `<a class="deal-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
-    drawer.innerHTML = `
-      <div class="deal-drawer__head">
-        <strong>${escapeHtml(r.deal_name || r.company || "Deal")}</strong>
-        <span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "")}</span>
-        <button type="button" class="deal-drawer__close" aria-label="Close">×</button>
-      </div>
-      <div class="deal-drawer__section">
-        <h4 class="deal-drawer__h">Deal &amp; attribution proof</h4>
-        <dl class="deal-drawer__grid">${tiles}</dl>
-      </div>
-      <div class="deal-drawer__section">
-        <h4 class="deal-drawer__h">Recommended review</h4>
-        <p class="deal-review-note">${escapeHtml(dealRecommendedReview(r))}</p>
-      </div>
-      <div class="deal-drawer__actions">${links}</div>`;
-    drawer.querySelector(".deal-drawer__close").addEventListener("click", () => drawer.remove());
-    drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  };
-  root.querySelectorAll(".deal-row").forEach((tr) => {
-    tr.addEventListener("click", () => open(Number(tr.dataset.dealRow)));
-    tr.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(Number(tr.dataset.dealRow)); }
-    });
-  });
-}
-
-function renderDealSqlNoDeal(d) {
-  const rows = d.sql_no_deal || [];
-  const total = d.sql_no_deal_total || 0;
-  const header = `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Qualified Leads (lead status) Not Yet Closed-Won</h3>
-        <p class="dash-panel__sub">Leads whose HubSpot lead status is qualified, with no closed-won deal · a different population from the acquisition-cohort card · <strong>read-only</strong> — open / lost pipeline is not visible</p>
-      </div>
-    </div>`;
-  if (d.sql_no_deal_available === false) {
-    return `${header}<p class="deal-stage-note">Per-contact linkage is unavailable — the qualified-lead source could not be read for this window.</p>`;
-  }
-  if (!rows.length) {
-    return `${header}<p class="rev-breakdown-empty">Every qualified (lead status) contact has a closed-won deal in this window.</p>`;
-  }
-  // PR-ADS-177A-F1: the row's date is the contact's CREATION date (the
-  // reader windows on contact_created_at) — never called an SQL date.
-  const head = ["Company / Contact", "Contact Created", "Days Since Created", "Campaign", "Country", "Status"]
-    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-  const body = rows.map((r) => `
-    <tr>
-      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${dashValue(r.company)}</td>
-      <td>${dashValue(r.sql_date)}</td>
-      <td class="deal-num">${dashValue(r.days_since_sql, fmtCount)}</td>
-      <td>${dashValue(r.campaign_name)}</td>
-      <td>${dashValue(r.country)}</td>
-      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
-    </tr>`).join("");
-  const more = total > rows.length
-    ? `<p class="deal-stage-note">Showing ${escapeHtml(fmtCount(rows.length))} of ${escapeHtml(fmtCount(total))} qualified (lead status) contacts with no closed-won deal.</p>` : "";
-  return `${header}
-    <div class="deal-scroll">
-      <table class="deal-table deal-table--rows"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
-    </div>${more}`;
-}
-
-function renderDealTruthFooter(d) {
-  const ts = d.truth_status || {};
-  const chip = (label, status) => `
-    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
-      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
-    </span>`;
-  const allGood = ts.sqls === "ready" && ts.deals === "ready"
-    && ts.amounts === "ready" && ts.attribution === "ready";
-  return `
-    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
-      ${chip("SQLs", ts.sqls)}
-      ${chip("Deals", ts.deals)}
-      ${chip("Stages", ts.stages)}
-      ${chip("Amounts", ts.amounts)}
-      ${chip("Attribution", ts.attribution)}
-      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
-      ${allGood
-        ? '<span class="dash-footer-note">Pipeline truth verified — open pipeline is separate from closed-won revenue.</span>'
-        : (dashCanNavigate("revenue-health")
-          ? '<a class="dash-footer-note" href="#/revenue-health">Some pipeline proof needs review — open Revenue Health</a>'
-          : '<span class="dash-footer-note">Some pipeline proof needs review — contact your administrator.</span>')}
-    </footer>`;
+    ${pipelineKpiCardsHtml(d, pc)}
+    ${compareNote}
+    <section class="dash-panel dash-anim deal-source-panel" aria-label="Closed-won deals by source">
+      ${pipelineSourceBreakdownHtml(d)}
+    </section>
+    <section class="dash-panel dash-anim deal-table-panel" aria-label="Closed-won deals" data-pipeline-deals>
+      ${pipelineDealsHtml(d)}
+    </section>
+    <section class="dash-panel dash-anim pipeline-customers-panel" aria-label="Customers won">
+      ${pipelineCustomersWonHtml(d)}
+    </section>
+    <div class="deal-panel-foot">${openPipeline}</div>
+    ${pipelineTruthFooterHtml(d)}
+  `;
+  pipelineWireDeals(root, d);
 }
 
 // ── Campaigns page ─────────────────────────────────────────────────────────
@@ -7502,16 +7044,27 @@ function wireCampaignEvidenceControls() {
 // `search_terms` facts instead. Nothing here is preserved for compatibility —
 // keeping a hidden page alive purely for a URL is exactly what §5 forbids.
 
-// ── Lead Quality page ──────────────────────────────────────────────────────
+// ── Pipeline — leads and deals on one page (PR-ADS-178B, docs/61) ──────────
+// The Leads page (#/leads) and the Closed-Won Deals page (#/deals) are one
+// page, `pipeline`, in the Dashboard design. It reads ONE builder,
+// `/api/pipeline` (services/pipeline_service.build_pipeline, one closed-won
+// snapshot); the paged contact rows stay on `/api/crm-funnel/contacts`.
+// Sections, in order: command bar, KPI cards, the lifecycle funnel, the leads
+// list (opened from a funnel stage), the closed-won deal list, customers won,
+// a one-line truth footer. Every figure is the server's {value, status,
+// reason}; the page decides no publication and sums nothing.
+//
+// Two "SQL" ideas, never one word: the KPI is the Google Ads ACQUISITION
+// COHORT (gated by cohortCountHtml on THIS response's cohort block, as on
+// Overview, Campaigns and Dashboard → Deals); the funnel counts contacts that
+// ENTERED each lifecycle stage in the window, labelled so.
+//
+// The Scope and Source selectors are LEAD filters: they narrow the funnel and
+// the leads list. They never blank a deal figure; under either, Customers won
+// is unavailable with the reason (the filter classifies contacts, not deals).
 
-// ── Leads — canonical HubSpot CRM funnel explorer (PR-ADS-153C) ────────────
-// ONE page replaces Lead Quality + In Progress Leads. Every number is a HubSpot
-// lifecycle stage-ENTRY event on its own event date; nothing here is derived
-// from legacy `status_category`, and contact-creation date is never a fallback.
-
-// PR-ADS-166A — the two "customer" figures on this page, each under its own
-// name. They are different metrics and are never added, subtracted or shown as
-// one another.
+// PR-ADS-166A — the two "customer" figures, each under its own name. They are
+// different metrics and are never added, subtracted or shown as one another.
 const LEADS_STAGE_MOVE_LABEL = "Moved to Customer stage in HubSpot";
 const LEADS_STAGE_MOVE_HELP =
   "Counts contacts whose HubSpot lifecycle stage changed to Customer in this period, "
@@ -7519,7 +7072,6 @@ const LEADS_STAGE_MOVE_HELP =
 const LEADS_CUSTOMERS_WON_LABEL = "Customers won";
 const LEADS_CUSTOMERS_WON_HELP =
   "Distinct companies with a closed-won deal closed in this period.";
-const LEADS_CUSTOMERS_WON_FAMILY = "closed_won_customers";
 // Four different claims about a contact with no name shown, never merged:
 //   not_recorded    — HubSpot was asked and holds no name for this contact;
 //   not_displayable — HubSpot holds a value in the name field (an email, or
@@ -7547,21 +7099,20 @@ const LEADS_COMPANY_NAME_LABELS = {
 };
 const LEADS_COMPANY_NOT_RECORDED = "Company not recorded";
 
+// The funnel's stages. Each counts contacts that ENTERED the stage in the
+// window on its own HubSpot date — the label says so ("Entered SQL"), never a
+// bare "SQLs", which on this page is the acquisition cohort's KPI.
+const PIPELINE_FUNNEL_LABEL = "Entered stage in window";
 const LEADS_STAGES = [
-  { event: "lead",        label: "Leads",              tab: "Leads" },
-  { event: "mql",         label: "MQLs",               tab: "MQLs" },
-  { event: "sql",         label: "SQLs",               tab: "SQLs" },
-  { event: "opportunity", label: "Opportunities",      tab: "Opportunities" },
-  // PR-ADS-166A: this stage is named for what it counts — contacts whose
-  // lifecycle stage was changed to Customer — on the strip, the tab and the
-  // table. It was "Lifecycle Customers" under a tab reading "Customers", and
-  // was read as customers won (219 stage moves against 8 won deals in Q3 2026).
-  // Customers won is a separate figure: see leadsCustomerFiguresHtml.
-  { event: "customer",    label: LEADS_STAGE_MOVE_LABEL, tab: "Moved to Customer stage" },
+  { event: "lead",        label: "Entered Lead",        stage: "Lead" },
+  { event: "mql",         label: "Entered MQL",         stage: "MQL" },
+  { event: "sql",         label: "Entered SQL",         stage: "SQL" },
+  { event: "opportunity", label: "Entered Opportunity", stage: "Opportunity" },
+  // PR-ADS-166A: named for what it counts — contacts whose lifecycle stage was
+  // changed to Customer — with its help text. Customers won is a separate
+  // figure (pipelineCustomersWonHtml), never derived from this one.
+  { event: "customer",    label: LEADS_STAGE_MOVE_LABEL, stage: "Customer" },
 ];
-
-const LEADS_VIEW_OVERVIEW = "overview";
-const LEADS_VIEW_OTHER = "other";
 
 const LEADS_SCOPES = [
   { key: "all_source",            label: "All Sources" },
@@ -7594,179 +7145,560 @@ const LEADS_STATUS_LABELS = {
   unmapped: "Unmapped value",
 };
 
-const LEADS_PAGE_SIZE = 50;
+// The working-status breakdown (operational, not a funnel stage) — the
+// Leads page's "Disqualified / Other" view, opened from its own button below
+// the funnel, never one of the funnel's stages.
+const LEADS_VIEW_OTHER = "other";
 
-let _leadsView = LEADS_VIEW_OVERVIEW;
+const LEADS_PAGE_SIZE = 50;
+const PIPELINE_TRUTH_FOOTER = "Open and lost deals are not in the deal ledger: only closed-won "
+  + "deals are synced, so open pipeline, lost deals and opportunity aging are not shown here.";
+
+// The stage whose contacts the leads list shows; null until a funnel stage is
+// clicked (owner decision 3: the list opens on a stage click).
+let _leadsView = null;
 let _leadsScope = "all_source";
 let _leadsSourceGroup = "";
 let _leadsStatus = "";
 let _leadsQuery = "";
 let _leadsPage = 1;
-let _leadsFunnel = null;
-let _leadsCustomersWon = null;
 let _leadsPendingStatus = null;
+// The /api/pipeline response being rendered, and the deal list's own filter
+// (the deal's HubSpot source group — never a lead filter).
+let pipelineData = null;
+let pipelineStatus = "idle";
+let _pipelineDealSource = "";
+let _pipelinePendingSection = null;
 
-/** Carry a retired page's filter intent into Leads (e.g. In Progress Leads). */
+/** Carry a retired page's filter intent into the leads list (In Progress Leads). */
 function leadsSetPendingStatus(status) {
   _leadsPendingStatus = status || null;
 }
 
+/** Carry a retired page's section intent (#/leads, #/deals) into Pipeline. */
+function pipelineSetPendingSection(section) {
+  _pipelinePendingSection = section || null;
+}
+
 function leadsStageFor(event) {
-  return LEADS_STAGES.find((s) => s.event === event) || LEADS_STAGES[2];
+  return LEADS_STAGES.find((s) => s.event === event) || null;
 }
 
-/** Render a canonical count. null/undefined is Unavailable — NEVER 0. */
-function leadsCount(value) {
-  return (value === null || value === undefined) ? "—" : Number(value).toLocaleString();
-}
-
-async function loadLeads() {
-  // A retired route may have requested a filter (In Progress Leads).
+async function loadPipeline() {
+  // A retired route may have requested a filter (In Progress Leads): the
+  // leads list opens on the Lead stage, filtered to that working status.
   if (_leadsPendingStatus) {
     _leadsStatus = _leadsPendingStatus;
     _leadsView = "lead";
     _leadsPendingStatus = null;
+    if (!_pipelinePendingSection) _pipelinePendingSection = "leads";
   }
   leadsRenderControls();
-  await leadsLoadFunnel();
-  leadsRenderTabs();
-  await leadsRenderActiveView();
-}
-
-async function leadsLoadFunnel() {
-  const strip = document.getElementById("leads-funnel-strip");
-  const truth = document.getElementById("leads-truth-state");
-  if (strip) strip.innerHTML = `<p class="empty-state">Loading funnel…</p>`;
-
-  // The funnel headline and the contact rows MUST describe one population, so
-  // the Source selector is sent to the aggregate contract too. A page that
-  // showed "Source: Organic" above an all-source funnel would be lying.
-  const params = new URLSearchParams({
-    window: getRoasBusinessWindow(),
-    window_type: "business",
-    scope: _leadsScope,
-  });
-  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
-  // Customers won is asked for the SAME window and filters, from its own
-  // contract. A failed read is null here and renders as Unavailable with a
-  // reason — it never falls back to the stage-move count.
-  const [funnel, won] = await Promise.all([
-    fetchJSON(`/api/crm-funnel?${params.toString()}`).catch(() => null),
-    fetchJSON(`/api/crm-funnel/customers-won?${params.toString()}`).catch(() => null),
-  ]);
-  _leadsFunnel = funnel;
-  _leadsCustomersWon = won;
-
-  const rangeEl = document.getElementById("leads-range");
-  if (rangeEl && _leadsFunnel && _leadsFunnel.window) {
-    const w = _leadsFunnel.window;
-    rangeEl.textContent = w.start_date ? `${w.start_date} → ${w.end_date}` : `→ ${w.end_date}`;
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.pipeline;
+  setWindowRangeLoading("pipeline-range");
+  const summary = document.getElementById("pipeline-summary");
+  if (summary && !(pipelineData && pipelineStatus === "ok")) {
+    summary.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading pipeline…</p>';
   }
-
-  if (truth) truth.innerHTML = leadsTruthStateHtml(_leadsFunnel);
-  if (strip) strip.innerHTML = leadsFunnelStripHtml(_leadsFunnel);
-  const figures = document.getElementById("leads-customer-figures");
-  if (figures) figures.innerHTML = leadsCustomerFiguresHtml(_leadsFunnel, _leadsCustomersWon);
+  const params = new URLSearchParams({ window: window_, scope: _leadsScope });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
+  let data = null;
+  try {
+    data = await fetchJSON(`/api/pipeline?${params.toString()}`);
+  } catch (err) {
+    console.error("[loadPipeline]", err);
+    data = null;
+  }
+  if (token !== _revReqSeq.pipeline) return;            // superseded
+  if (data && !_revResponseIsCurrent("pipeline", token, data)) return;
+  pipelineData = data;
+  pipelineStatus = data ? "ok" : "error";
+  renderWindowRange("pipeline-range", data ? data.window : null);
+  renderPipelinePage();
+  await leadsRenderActiveView();
+  pipelineScrollToPendingSection();
 }
 
-/**
- * PR-ADS-166A — the stage-move count and customers won, side by side.
- *
- * Two metrics from two contracts:
- *   - `funnel.events.customer` — lifecycle_stage_events, by date_entered_customer;
- *   - `won.customers`          — closed_won_customers, by deal close date,
- *                                the reader contract's {value, status, reason}.
- * Neither is ever computed from the other. A customers-won payload that is
- * missing, is not that metric family, or answers a different window than the
- * funnel beside it is rendered Unavailable with the reason.
- */
-function leadsCustomersWonMetrics(funnel, won) {
-  const blocked = (reason) => {
-    const m = { value: null, status: "unavailable", reason };
-    return { customers: m, deals: m };
-  };
-  if (!won) return blocked("customers_won_unreadable");
-  if (won.metric_family !== LEADS_CUSTOMERS_WON_FAMILY) return blocked("closed_won_verdict_missing");
-  const asked = (won.requested || {}).window_key;
-  const shown = ((funnel || {}).window || {}).window_key;
-  if (funnel && shown && asked !== shown) return blocked("customers_won_window_mismatch");
-  const usable = (m) => (m && m.status) ? m : blocked("closed_won_verdict_missing").customers;
-  return { customers: usable(won.customers), deals: usable(won.closed_won_deals) };
+function pipelineScrollToPendingSection() {
+  const section = _pipelinePendingSection;
+  _pipelinePendingSection = null;
+  if (!section) return;
+  const el = document.getElementById(`pipeline-${section}`);
+  if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "start" });
 }
 
-function leadsCustomerFiguresHtml(funnel, won) {
-  const available = funnel && funnel.available !== false;
-  const mismatch = ((funnel || {}).reconciliation || {}).status === "mismatch";
-  const block = ((funnel && funnel.events) || {}).customer || {};
-  const moves = (!available || mismatch) ? null : block.count;
-  // dashValue: null is "Unavailable", a real 0 is "0".
-  const movesHtml = dashValue(moves === undefined ? null : moves, fmtCount);
+function renderPipelinePage() {
+  const summary = document.getElementById("pipeline-summary");
+  const outcomes = document.getElementById("pipeline-outcomes");
+  if (!summary || !outcomes) return;
+  if (pipelineStatus !== "ok" || !pipelineData) {
+    summary.innerHTML = `
+      <div class="revenue-blocked-card dash-error-card">
+        <h3 class="revenue-blocked-card__title">Pipeline unavailable</h3>
+        <p>The pipeline service could not be reached. Nothing is shown because nothing
+        safe could be computed — figures are never fabricated.</p>
+      </div>`;
+    outcomes.innerHTML = "";
+    return;
+  }
+  const d = pipelineData;
+  summary.innerHTML = `
+    ${pipelineKpiCardsHtml(d, null)}
+    <section class="dash-panel dash-anim pipeline-funnel-panel" id="pipeline-funnel" aria-label="Lifecycle funnel">
+      ${pipelineFunnelHtml(d)}
+    </section>`;
+  outcomes.innerHTML = `
+    <section class="dash-panel dash-anim deal-table-panel" id="pipeline-deals" aria-label="Closed-won deals" data-pipeline-deals>
+      ${pipelineDealsHtml(d)}
+    </section>
+    <section class="dash-panel dash-anim pipeline-customers-panel" id="pipeline-customers" aria-label="Customers won">
+      ${pipelineCustomersWonHtml(d)}
+    </section>
+    ${pipelineTruthFooterHtml(d)}`;
+  pipelineWireFunnel(summary);
+  pipelineWireDeals(outcomes, d);
+}
 
-  const m = leadsCustomersWonMetrics(funnel, won);
-  const opts = { windowType: "business", windowKey: ((won || {}).requested || {}).window_key };
-  return `<div class="leads-customer-figures" role="group" aria-label="Customer figures for this period">
-      <div class="leads-customer-figure" data-leads-figure="stage_moves">
-        <div class="dash-funnel__stage-label">${escapeHtml(LEADS_STAGE_MOVE_LABEL)}</div>
-        <div class="dash-funnel__stage-value">${movesHtml}</div>
-        <p class="leads-customer-figure__help">${escapeHtml(LEADS_STAGE_MOVE_HELP)}</p>
-      </div>
-      <div class="leads-customer-figure" data-leads-figure="customers_won">
-        <div class="dash-funnel__stage-label">${escapeHtml(LEADS_CUSTOMERS_WON_LABEL)}</div>
-        <div class="dash-funnel__stage-value">${canonicalMetricHtml(m.customers, fmtCount, opts)}</div>
-        <p class="leads-customer-figure__help">${escapeHtml(LEADS_CUSTOMERS_WON_HELP)}
-          Closed-won deals in this period: ${canonicalMetricHtml(m.deals, fmtCount, opts)}</p>
-        ${leadsWonCustomersHtml(won, m.customers)}
-      </div>
+// ── KPI cards: one source each ──────────────────────────────────────────────
+function pipelineMetricPublished(m) {
+  return !!m && m.status === "published" && m.value !== null && m.value !== undefined;
+}
+
+/** The five KPI cards. `pc` (Dashboard → Deals only) adds the deltas. */
+function pipelineKpiCardsHtml(d, pc) {
+  const k = (d && d.kpis) || {};
+  const opts = campBlockerOpts(d);
+  const sqls = k.sqls || {};
+  const delta = (key) => (pc ? dashDeltaChip(key, pc) : "");
+  const cards = [
+    // The acquisition cohort, gated on THIS response's cohort (docs/59).
+    { key: "sqls", label: COHORT_SQLS_LABEL,
+      value: cohortCountHtml(sqls.value, d.cohort, null),
+      sub: `Google Ads contacts · this window${cohortThroughSuffix(d.cohort)}`,
+      delta: pc ? cohortDeltaChip("sqls", pc, d) : "",
+      source: "HubSpot acquisition cohort",
+      // m5 (PR-ADS-178B-F1): the lead filters narrow the funnel and the
+      // lead list, never this card — say so where the card is read.
+      note: ((d.filters || {}).lead_filtered === true)
+        ? "Google Ads acquisition cohort — not narrowed by the lead filters (Scope, Source)." : "",
+      ok: cohortCountPublication(d.cohort).publish && sqls.value !== null && sqls.value !== undefined },
+    { key: "deals", label: "Closed-won deals",
+      value: canonicalMetricHtml(k.closed_won_deals, fmtCount, opts),
+      sub: "Close date in this window · every source", delta: delta("closed_won_deals"),
+      source: "HubSpot Closed-Won", ok: pipelineMetricPublished(k.closed_won_deals) },
+    // Customers are distinct HubSpot companies — never a deal count, never summed.
+    { key: "customers", label: "Customers",
+      value: canonicalMetricHtml(k.customers, fmtCount, opts),
+      sub: "Distinct HubSpot companies · never summed", delta: delta("closed_won_customers"),
+      source: "HubSpot companies on closed-won deals", ok: pipelineMetricPublished(k.customers) },
+    { key: "revenue", label: "Won revenue",
+      value: canonicalMetricHtml(k.won_revenue_usd, fmtMoney, opts),
+      sub: "HubSpot closed-won USD", delta: delta("closed_won_revenue_usd"),
+      source: "HubSpot Closed-Won", ok: pipelineMetricPublished(k.won_revenue_usd) },
+    { key: "average", label: "Average deal value",
+      value: canonicalMetricHtml(k.average_deal_value_usd, fmtMoney, opts),
+      sub: "Won revenue ÷ closed-won deals", delta: "",
+      source: "HubSpot Closed-Won", ok: pipelineMetricPublished(k.average_deal_value_usd) },
+  ];
+  return `
+    <div class="dash-kpi-grid pipeline-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          ${c.note ? `<div class="dash-kpi-card__note" data-kpi-note>${escapeHtml(c.note)}</div>` : ""}
+          ${c.delta ? `<div class="dash-kpi-card__meta">${c.delta}</div>` : ""}
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
     </div>`;
 }
 
+// ── The lifecycle funnel: stage ENTRIES in the window ───────────────────────
 /**
- * A contact's name from HubSpot, or the words saying why there is none.
- * Each status says its own words (LEADS_NAME_STATES). A status this page does
- * not know — or none — is the weakest claim: not loaded yet.
+ * Which stage counts are lower bounds, each with its reason in words.
+ *
+ * Under `reconciliation.status === "partial"` a stage some contacts reached
+ * with no recorded entry date counts only the dated entries: the undated ones
+ * may belong to this window. The payload's coverage names the stages; when it
+ * does not (no per-stage coverage), EVERY stage is a lower bound — never
+ * assume exactness the evidence does not carry.
  */
-function leadsNameState(row) {
-  const status = row ? row.contact_name_status : null;
-  return (typeof status === "string" && Object.prototype.hasOwnProperty.call(LEADS_NAME_STATES, status))
-    ? LEADS_NAME_STATES[status] : LEADS_NAME_STATES.not_loaded;
+function pipelineFunnelLowerBounds(f) {
+  const out = {};
+  const recon = (f && f.reconciliation) || {};
+  if (recon.status !== "partial") return out;
+  const missing = ((f.coverage || {}).stage_reached_without_entry_date);
+  const perStage = missing && typeof missing === "object";
+  LEADS_STAGES.forEach((stage) => {
+    if (!perStage) {
+      out[stage.event] = canonicalReasonLabel("missing_stage_entry_date")
+        + " (the evidence does not say which stages)";
+      return;
+    }
+    const n = missing[stage.event];
+    if (n === null || n === undefined) {
+      out[stage.event] = canonicalReasonLabel("missing_stage_entry_date")
+        + " (not reported for this stage)";
+    } else if (Number(n) > 0) {
+      out[stage.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot`;
+    }
+  });
+  return out;
 }
 
-function leadsContactNameHtml(row) {
-  const status = row ? row.contact_name_status : null;
-  const name = status === "recorded" ? String(row.contact_name || "").trim() : "";
-  if (name) return `<strong>${escapeHtml(name)}</strong>`;
-  const state = leadsNameState(row);
-  return `<span class="muted" title="${escapeHtml(state.title)}">${escapeHtml(state.text)}</span>`;
+function pipelineFunnelHtml(d) {
+  const f = (d && d.funnel) || {};
+  const events = f.events || {};
+  const available = f.available === true;
+  const mismatch = (f.reconciliation || {}).status === "mismatch";
+  const convByPair = {};
+  const lowerBound = pipelineFunnelLowerBounds(f);
+  (f.conversions || []).forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
+
+  const cells = LEADS_STAGES.map((stage, i) => {
+    const block = events[stage.event] || {};
+    const count = (!available || mismatch) ? null : block.count;
+    const prev = i > 0 ? LEADS_STAGES[i - 1] : null;
+    const conv = prev ? convByPair[`${prev.event}->${stage.event}`] : null;
+    let convChip = "";
+    if (prev) {
+      // Only a cohort-safe rate is ever shown. Otherwise "—".
+      const ok = conv && conv.available && conv.basis === "cohort" && conv.rate_pct !== null;
+      // PR-ADS-178B-F2: a rate beside a lower-bound stage is never shown as
+      // exact. An undated FROM stage leaves the cohort itself incomplete, so
+      // the rate is unknown ("—" with the reason). An undated TO stage only
+      // undercounts the converted contacts, so the rate is "at least X%".
+      const fromBound = lowerBound[prev.event];
+      const toBound = lowerBound[stage.event];
+      if (ok && fromBound) {
+        convChip = `<span class="dash-funnel__conv dash-funnel__conv--muted" data-conv-bound="unknown" title="${escapeHtml(`Conversion unknown: ${fromBound}`)}">—</span>`;
+      } else if (ok && toBound) {
+        convChip = `<span class="dash-funnel__conv" data-conv-bound="at_least" title="${escapeHtml(`Lower bound: ${toBound}`)}">at least ${conv.rate_pct}%</span>`;
+      } else {
+        convChip = ok
+          ? `<span class="dash-funnel__conv" title="Cohort-safe: of contacts entering ${escapeHtml(prev.stage)} in this window, the share that later entered ${escapeHtml(stage.stage)}">${conv.rate_pct}%</span>`
+          : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
+      }
+    }
+    const dateProp = block.event_date_property || "";
+    const bound = lowerBound[stage.event];
+    // o1 (PR-ADS-178B-F1): under partial evidence a stage with contacts that
+    // reached it with no entry date is a LOWER BOUND — "at least N", with
+    // the reason — never a plain, exact-looking number.
+    const value = (count === null || count === undefined)
+      ? `<span class="dash-unavailable">${mismatch ? "Reconciliation required" : "Unavailable"}</span>`
+      : (bound
+        ? `<span class="dash-lower-bound" data-lower-bound="${stage.event}" title="${escapeHtml(bound)}">at least ${escapeHtml(fmtCount(count))}</span>`
+        : escapeHtml(fmtCount(count)));
+    const boundNote = (bound && count !== null && count !== undefined)
+      ? `<span class="dash-funnel__stage-sub pipeline-funnel__bound">Lower bound: ${escapeHtml(bound)}</span>` : "";
+    const help = stage.event === "customer"
+      ? `<p class="leads-customer-figure__help">${escapeHtml(LEADS_STAGE_MOVE_HELP)}</p>` : "";
+    const active = _leadsView === stage.event;
+    return `
+      ${convChip}
+      <button type="button" class="dash-funnel__stage pipeline-funnel__stage${active ? " is-active" : ""}"
+        data-funnel-event="${stage.event}" aria-pressed="${active ? "true" : "false"}"
+        title="List the contacts that entered ${escapeHtml(stage.stage)} in this window">
+        <span class="dash-funnel__stage-label">${escapeHtml(stage.label)}</span>
+        <span class="dash-funnel__stage-value">${value}</span>
+        ${dateProp ? `<span class="dash-funnel__stage-sub" title="HubSpot property: ${escapeHtml(dateProp)}">HubSpot stage-entry date</span>` : ""}
+        ${boundNote}
+        ${help}
+      </button>`;
+  }).join("");
+
+  const scopeLabel = f.scope_label || "All Sources";
+  const groupLabel = f.acquisition_group_label || "All sources";
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Lifecycle funnel · ${escapeHtml(PIPELINE_FUNNEL_LABEL)}</h3>
+        <p class="dash-panel__sub">Contacts that entered each HubSpot lifecycle stage in this window, each on its own stage-entry date — a different metric and a different population (all sources, narrowed only by the lead filters) from the SQL card above (the Google Ads acquisition cohort). Click a stage to list its contacts.</p>
+      </div>
+    </div>
+    ${leadsTruthStateHtml(f.available === undefined ? null : f)}
+    <div class="dash-funnel pipeline-funnel" role="group" aria-label="${escapeHtml(PIPELINE_FUNNEL_LABEL)}">${cells}</div>
+    <div class="pipeline-other-view">
+      <button type="button" class="search-terms-tab search-terms-tab--muted${_leadsView === LEADS_VIEW_OTHER ? " active" : ""}"
+        data-leads-view="${LEADS_VIEW_OTHER}">Disqualified / Other — working status, not a funnel stage</button>
+    </div>
+    <p class="grace-note">Lead filters — Scope: ${escapeHtml(scopeLabel)} · Source: ${escapeHtml(groupLabel)} ·
+      A contact counts in every stage it entered; a current Customer still counts in the period it became an SQL.</p>`;
+}
+
+function pipelineWireFunnel(root) {
+  (root || document).querySelectorAll("[data-leads-view]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      _leadsView = LEADS_VIEW_OTHER;
+      _leadsPage = 1;
+      (root || document).querySelectorAll("[data-funnel-event]").forEach((b) => {
+        b.classList.remove("is-active");
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.classList.add("active");
+      await leadsRenderActiveView();
+      const leads = document.getElementById("pipeline-leads");
+      if (leads && typeof leads.scrollIntoView === "function") leads.scrollIntoView({ block: "start" });
+    });
+  });
+  (root || document).querySelectorAll("[data-funnel-event]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      _leadsView = btn.getAttribute("data-funnel-event");
+      _leadsPage = 1;
+      (root || document).querySelectorAll("[data-funnel-event]").forEach((b) => {
+        const on = b === btn;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      (root || document).querySelectorAll("[data-leads-view]").forEach((b) => b.classList.remove("active"));
+      await leadsRenderActiveView();
+      const leads = document.getElementById("pipeline-leads");
+      if (leads && typeof leads.scrollIntoView === "function") leads.scrollIntoView({ block: "start" });
+    });
+  });
+}
+
+// ── The closed-won deal list ────────────────────────────────────────────────
+// The deal's stored HubSpot source group. An identifier this map does not know
+// is shown as stored, never folded into another group.
+const DEAL_SOURCE_GROUP_LABELS = {
+  google_ads: "Google Ads",
+  other_paid: "Other Paid",
+  organic: "Organic",
+  offline: "Offline",
+  unclassified: "Unclassified",
+  ambiguous: "Ambiguous — contacts disagree",
+  not_recorded: "Source not recorded",
+};
+
+function dealSourceLabel(group) {
+  if (group === null || group === undefined || group === "") return DEAL_SOURCE_GROUP_LABELS.not_recorded;
+  return DEAL_SOURCE_GROUP_LABELS[group] || String(group).replace(/_/g, " ");
+}
+
+function dealSourceKey(row) {
+  return (row && row.acquisition_group) || "not_recorded";
+}
+
+// One deal's own USD amount. An unknown amount is never zero and never a dash.
+function dealAmountHtml(r) {
+  if (r.deal_amount_usd === null || r.deal_amount_usd === undefined) {
+    return `${dashValue(null)} <small class="metric-reason">no proven USD amount</small>`;
+  }
+  return escapeHtml(fmtMoney(r.deal_amount_usd));
 }
 
 /**
- * The note under the Contact column header while names are still loading.
- * Driven by the database counts in `names_progress`; shown for as long as any
- * stored contact has NEVER been asked for, however many already are. A contact
- * HubSpot was asked for and did not return is not "still loading", so the note
- * clears when the load is truly done. Unknown counts say so.
+ * The deal rows the page may show, or null. ONLY beside a published
+ * closed-won population, and only when the list numbers exactly that count —
+ * the server says so (`deals_status`) and the page checks it again: a list
+ * that disagrees with its own headline is never shown beside it.
  */
-function leadsNamesProgressNote(progress) {
-  const p = progress || {};
-  const known = p.available === true && Number.isFinite(p.read)
-    && Number.isFinite(p.total) && Number.isFinite(p.never_asked);
-  if (!known) return "Names are being loaded from HubSpot: progress is unavailable.";
-  if (p.never_asked <= 0) return "";
-  return `Names are being loaded from HubSpot: ${Number(p.read).toLocaleString()} of ${Number(p.total).toLocaleString()} contacts read so far.`;
+function pipelineDealRows(d) {
+  const data = d || {};
+  const pop = closedWonPopulation(data) || {};
+  const count = (data.kpis || {}).closed_won_deals || {};
+  if (data.deals_status !== "published" || !Array.isArray(data.deals)) return null;
+  // The PR-ADS-164A rule: published, and exactly that many deals arrived.
+  if (closedWonPopulationState(pop, data.deals.length) === "blocked") return null;
+  // The KPI card beside the list must state the same count.
+  if (count.status !== "published" || count.value !== pop.value) return null;
+  return data.deals;
 }
 
+/** Why the list is not shown: the server's own verdict for it, else the
+ *  population's (closedWonBlockedMetric reads a published one as "the rows
+ *  received do not match the published count"). */
+function pipelineDealListVerdict(d) {
+  const data = d || {};
+  if (data.deals_status && data.deals_status !== "published") {
+    return { value: null, status: data.deals_status, reason: data.deals_reason };
+  }
+  return closedWonPopulation(data);
+}
+
+// Close date newest first, then the larger amount (owner decision 7).
+function pipelineSortDeals(rows) {
+  return [...rows].sort((a, b) =>
+    String(b.deal_close_date || "").localeCompare(String(a.deal_close_date || "")) ||
+    (b.deal_amount_usd || 0) - (a.deal_amount_usd || 0));
+}
+
+/** The deal list filtered on the deal's OWN source group ("" = every deal). */
+function pipelineFilterDeals(rows, group) {
+  if (!group) return rows;
+  return rows.filter((r) => dealSourceKey(r) === group);
+}
+
+function pipelineDealsHtml(d) {
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Closed-won deals</h3>
+        <p class="dash-panel__sub">Every HubSpot closed-won deal closed in this window, from every source · newest close first · click a deal for detail</p>
+      </div>
+    </div>`;
+  const rows = pipelineDealRows(d);
+  if (!rows) {
+    // The PR-ADS-164A word and reason (closedWonBlockedHtml): the server's
+    // own verdict for the list, else the population's — a published count
+    // the list contradicts reads "the deal rows received do not match".
+    return `${header}
+      <div class="revenue-blocked-card">
+        <div class="revenue-blocked-card__eyebrow">Closed-won deals</div>
+        <h3>${closedWonBlockedHtml(pipelineDealListVerdict(d))}</h3>
+        <p>The deal list is shown only beside a published closed-won count, and only when it lists exactly that many deals. This does not mean that no deals closed.</p>
+      </div>`;
+  }
+  if (!rows.length) {
+    return `${header}
+      <div class="revenue-blocked-card revenue-empty-card">
+        <div class="revenue-blocked-card__eyebrow">Closed-won deals</div>
+        <h3>No closed-won deals closed in this period</h3>
+        <p>The deal ledger was read and is current. No HubSpot deal, from any source, was closed-won in this business window.</p>
+      </div>`;
+  }
+  const groups = [];
+  rows.forEach((r) => { const g = dealSourceKey(r); if (!groups.includes(g)) groups.push(g); });
+  groups.sort((a, b) => dealSourceLabel(a).localeCompare(dealSourceLabel(b)));
+  const active = groups.includes(_pipelineDealSource) ? _pipelineDealSource : "";
+  const options = [`<option value="">All deal sources (${fmtCount(rows.length)})</option>`]
+    .concat(groups.map((g) => {
+      const n = rows.filter((r) => dealSourceKey(r) === g).length;
+      return `<option value="${escapeHtml(g)}"${g === active ? " selected" : ""}>${escapeHtml(dealSourceLabel(g))} (${fmtCount(n)})</option>`;
+    })).join("");
+  const shown = pipelineSortDeals(pipelineFilterDeals(rows, active));
+  const body = shown.map((r) => `
+    <tr class="deal-row" data-pipeline-deal="${escapeHtml(String(r.deal_id))}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.deal_name || "deal")} detail">
+      <td class="deal-td--name">${escapeHtml(r.deal_name || "—")}</td>
+      <td>${escapeHtml(r.deal_close_date ? String(r.deal_close_date).slice(0, 10) : "—")}</td>
+      <td class="deal-num">${dealAmountHtml(r)}</td>
+      <td>${escapeHtml(dealSourceLabel(r.acquisition_group))}</td>
+      <td>${escapeHtml(r.campaign_name || "—")}</td>
+      <td>${escapeHtml(r.country || "—")}</td>
+    </tr>`).join("");
+  const note = active
+    ? `<p class="deal-stage-note" data-pipeline-deal-filter-note>Showing ${escapeHtml(fmtCount(shown.length))} of ${escapeHtml(fmtCount(rows.length))} closed-won deals — filtered by each deal's own HubSpot source group. The cards above count every deal.</p>`
+    : "";
+  return `${header}
+    <div class="roas-window-controls pipeline-deal-controls">
+      <label class="roas-window-label" for="pipeline-deal-source">Deal source:</label>
+      <select id="pipeline-deal-source" class="waste-filter-select" data-pipeline-deal-source aria-label="Filter deals by the deal's own source group">${options}</select>
+    </div>
+    <div class="deal-scroll">
+      <table class="deal-table deal-table--rows pipeline-deal-table">
+        <thead><tr><th>Deal</th><th>Closed</th><th>Won Revenue</th><th>Source</th><th>Campaign</th><th>Country</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+    ${note}`;
+}
+
+// The deal drawer shows only fields the ledger carries for a deal. Company,
+// company id, main contact, created date, age and days to close are not on
+// the ledger (they were always empty) and are not listed.
+const PIPELINE_DEAL_DRAWER_FIELDS = [
+  ["deal_name", "Deal"], ["deal_id", "HubSpot deal ID"],
+  ["deal_amount_usd", "Won revenue (USD)"], ["deal_close_date", "Close date"],
+  ["deal_stage_label", "Stage"], ["acquisition_group", "Source group"],
+  ["campaign_name", "Campaign label"], ["country", "Country"],
+  ["attribution_status", "Attribution"], ["attribution_scope", "Attribution scope"],
+];
+
+function pipelineDealDrawerCell(r, key) {
+  if (key === "deal_amount_usd") return dealAmountHtml(r);
+  if (key === "acquisition_group") return escapeHtml(dealSourceLabel(r.acquisition_group));
+  if (key === "deal_close_date" && r.deal_close_date) return escapeHtml(String(r.deal_close_date).slice(0, 10));
+  const v = r[key];
+  if (v === null || v === undefined || v === "") return '<span class="muted">Not recorded</span>';
+  return escapeHtml(String(v));
+}
+
+function pipelineDealDrawerHtml(r) {
+  const tiles = PIPELINE_DEAL_DRAWER_FIELDS.map(([key, label]) =>
+    `<div><dt>${escapeHtml(label)}</dt><dd>${pipelineDealDrawerCell(r, key)}</dd></div>`).join("");
+  return `
+    <div class="deal-drawer__head">
+      <strong>${escapeHtml(r.deal_name || "Deal")}</strong>
+      <button type="button" class="deal-drawer__close" aria-label="Close">×</button>
+    </div>
+    <div class="deal-drawer__section">
+      <h4 class="deal-drawer__h">Closed-won deal</h4>
+      <dl class="deal-drawer__grid">${tiles}</dl>
+    </div>`;
+}
+
+function pipelineWireDeals(root, d) {
+  const panel = (root || document).querySelector("[data-pipeline-deals]");
+  if (!panel) return;
+  const rows = pipelineDealRows(d) || [];
+  const sel = panel.querySelector("[data-pipeline-deal-source]");
+  if (sel) {
+    sel.addEventListener("change", (e) => {
+      _pipelineDealSource = e.target.value || "";
+      panel.innerHTML = pipelineDealsHtml(d);
+      pipelineWireDeals(root, d);
+    });
+  }
+  panel.querySelectorAll("[data-pipeline-deal]").forEach((tr) => {
+    const open = () => {
+      const r = rows.find((x) => String(x.deal_id) === tr.getAttribute("data-pipeline-deal"));
+      if (!r) return;
+      let drawer = panel.querySelector(".deal-drawer");
+      if (!drawer) {
+        drawer = document.createElement("div");
+        drawer.className = "deal-drawer";
+        panel.appendChild(drawer);
+      }
+      drawer.innerHTML = pipelineDealDrawerHtml(r);
+      const close = drawer.querySelector(".deal-drawer__close");
+      if (close) close.addEventListener("click", () => drawer.remove());
+      if (typeof drawer.scrollIntoView === "function") drawer.scrollIntoView({ block: "nearest" });
+    };
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
+}
+
+// ── Customers won ───────────────────────────────────────────────────────────
 /**
- * The won customers of the period, as a list — ONLY when the customer count is
- * published and the list has exactly that many entries. Withheld means absent:
- * no list, no partial list, no placeholder rows.
+ * The won customers, as a list — ONLY when the customer count is published and
+ * the list has exactly that many entries. Withheld means absent: no list, no
+ * partial list, no placeholder rows. Never merged with the deal list.
  */
-function leadsWonCustomersHtml(won, customers) {
-  const m = customers || {};
-  const rows = won && Array.isArray(won.won_customers) ? won.won_customers : null;
-  if (m.status !== "published" || !(m.value > 0)) return "";
-  if (!rows || rows.length !== m.value) {
-    // Published customers with no list that matches the count: say so.
-    return `<p class="leads-customer-figure__help">${escapeHtml(LEADS_WON_LIST_NOT_BUILT)}</p>`;
+function pipelineCustomersWonRows(d) {
+  const data = d || {};
+  const cw = data.customers_won || {};
+  const m = (data.kpis || {}).customers || {};
+  if (cw.status !== "published" || !Array.isArray(cw.rows)) return null;
+  if (m.status !== "published" || cw.rows.length !== m.value) return null;
+  return cw.rows;
+}
+
+function pipelineCustomersWonHtml(d) {
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">${escapeHtml(LEADS_CUSTOMERS_WON_LABEL)}</h3>
+        <p class="dash-panel__sub">${escapeHtml(LEADS_CUSTOMERS_WON_HELP)} Not the same as contacts moved to the Customer stage.</p>
+      </div>
+    </div>`;
+  const rows = pipelineCustomersWonRows(d);
+  if (!rows) {
+    const cw = (d && d.customers_won) || {};
+    const verdict = cw.status === "published"
+      ? { value: null, status: "withheld", reason: "closed_won_rows_do_not_match_count" }
+      : { value: null, status: cw.status || "unavailable", reason: cw.reason || "closed_won_verdict_missing" };
+    return `${header}<p class="deal-stage-note" data-customers-won-withheld>${canonicalMetricHtml(verdict, null, campBlockerOpts(d))}
+      — no list of customers is shown.</p>`;
+  }
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">No customer was won in this period.</p>`;
   }
   const body = rows.map((r) => {
     const name = r.company_name_status === "named" ? String(r.company_name || "").trim() : "";
@@ -7774,124 +7706,54 @@ function leadsWonCustomersHtml(won, customers) {
       ? `<strong>${escapeHtml(name)}</strong>`
       : `<span class="muted">${escapeHtml(LEADS_COMPANY_NAME_LABELS[r.company_name_status] || LEADS_COMPANY_NAME_LABELS.not_loaded)}</span>`;
     const closed = r.latest_close_date ? escapeHtml(String(r.latest_close_date).slice(0, 10)) : `<span class="muted">Unavailable</span>`;
-    return `<tr><td>${cell}</td><td>${dashValue(r.closed_won_deals, fmtCount)}</td><td>${closed}</td></tr>`;
+    return `<tr><td>${cell}</td><td class="deal-num">${dashValue(r.closed_won_deals, fmtCount)}</td><td>${closed}</td></tr>`;
   }).join("");
-  return `<details class="leads-won-customers">
-      <summary>Show the ${fmtCount(rows.length)} ${rows.length === 1 ? "customer" : "customers"} won</summary>
-      <table class="data-table">
+  return `${header}
+    <div class="deal-scroll">
+      <table class="deal-table pipeline-customers-table">
         <thead><tr><th title="The name of the HubSpot company on the won deal">Customer</th><th>Closed-won deals</th><th>Latest close date</th></tr></thead>
         <tbody>${body}</tbody>
       </table>
-    </details>`;
+    </div>`;
 }
 
-function leadsNamesNoteHtml(progress) {
-  const note = leadsNamesProgressNote(progress);
-  return note ? `<small class="metric-reason leads-names-note">${escapeHtml(note)}</small>` : "";
-}
-
-/** The Company field typed on the HubSpot contact — not a deal's company record. */
-function leadsCompanyHtml(row) {
-  const company = String((row && row.company) || "").trim();
-  return company
-    ? escapeHtml(company)
-    : `<span class="muted">${LEADS_COMPANY_NOT_RECORDED}</span>`;
-}
-
-/** Plain-text heading for a contact (drawer title): name, else company. */
-function leadsContactHeading(row) {
-  const status = row ? row.contact_name_status : null;
-  const name = status === "recorded" ? String(row.contact_name || "").trim() : "";
-  const company = String((row && row.company) || "").trim();
-  if (name && company) return `${name} — ${company}`;
-  return name || company || leadsNameState(row).text;
-}
-
-/**
- * Compact truth banner: reconciliation state + historical bootstrap readiness.
- * Truth state is visible but never blocks a usable page.
- */
-function leadsTruthStateHtml(payload) {
-  if (!payload) {
-    return `<div class="mapping-notice mapping-notice--info">CRM funnel truth is unavailable. Numbers are withheld rather than shown as zero.</div>`;
+// ── Dashboard → Deals only: the deal list by each deal's own source group ───
+function pipelineSourceBreakdownHtml(d) {
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Closed-won deals by source</h3>
+        <p class="dash-panel__sub">Each deal's own HubSpot source group · customers are distinct companies per source and are not added up</p>
+      </div>
+    </div>`;
+  const rows = (d && d.source_breakdown) || null;
+  if (!Array.isArray(rows)) {
+    return `${header}<p class="deal-stage-note">${canonicalMetricHtml(pipelineDealListVerdict(d), null, campBlockerOpts(d))}</p>`;
   }
-  const notes = [];
-  const recon = payload.reconciliation || {};
-  const sync = payload.sync || {};
-  const windowKey = (payload.window || {}).window_key;
-
-  if (payload.available === false) {
-    notes.push({ cls: "mapping-notice--info", text: "Canonical CRM contact store unavailable — counts are withheld, not zero." });
-  } else if (recon.status === "mismatch") {
-    notes.push({ cls: "mapping-notice--error", text: "Reconciliation required — funnel counts are withheld until the scope invariant holds." });
-  } else if (recon.status === "partial") {
-    const reasons = (recon.reasons || []).join(", ");
-    notes.push({ cls: "mapping-notice--info", text: `Partial evidence: ${escapeHtml(reasons || "some stage evidence is missing")}.` });
-  }
-
-  if (payload.campaign_identity_available === false) {
-    notes.push({ cls: "mapping-notice--info", text: "Google Ads campaign identity unavailable — campaign- and keyword-attributable scopes are unavailable (not zero)." });
-  }
-
-  const bootstrap = sync.bootstrap_status;
-  if (bootstrap && bootstrap !== "complete") {
-    const allTime = windowKey === "all_time";
-    notes.push({
-      cls: allTime ? "mapping-notice--error" : "mapping-notice--info",
-      text: `Historical CRM sync in progress (bootstrap: ${escapeHtml(bootstrap)}).` +
-            (allTime ? " All Time does not yet represent complete history." : ""),
-    });
-  }
-
-  if (!notes.length) return "";
-  return notes.map((n) => `<div class="mapping-notice ${n.cls}">${n.text}</div>`).join("");
+  if (!rows.length) return `${header}<p class="rev-breakdown-empty">No closed-won deals in this window.</p>`;
+  const opts = campBlockerOpts(d);
+  const body = rows.map((r) => `
+    <tr>
+      <td class="deal-td--name">${escapeHtml(dealSourceLabel(r.source_group === "not_recorded" ? null : r.source_group))}</td>
+      <td class="deal-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</td>
+      <td class="deal-num">${rowMetricHtml(r, "customers", fmtCount, opts)}</td>
+      <td class="deal-num">${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</td>
+    </tr>`).join("");
+  return `${header}
+    <div class="deal-scroll">
+      <table class="deal-table"><thead><tr><th>Source</th><th>Won deals</th><th>Customers</th><th>Won revenue</th></tr></thead><tbody>${body}</tbody></table>
+    </div>`;
 }
 
-function leadsFunnelStripHtml(payload) {
-  const events = (payload && payload.events) || {};
-  const available = payload && payload.available !== false;
-  const mismatch = ((payload || {}).reconciliation || {}).status === "mismatch";
-  const conversions = (payload && payload.conversions) || [];
-  const convByPair = {};
-  conversions.forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
-
-  const cells = LEADS_STAGES.map((stage, i) => {
-    const block = events[stage.event] || {};
-    const count = (!available || mismatch) ? null : block.count;
-    const prev = i > 0 ? LEADS_STAGES[i - 1] : null;
-    const conv = prev ? convByPair[`${prev.event}->${stage.event}`] : null;
-
-    let convChip = "";
-    if (prev) {
-      // Only a cohort-safe rate is ever shown. Otherwise "—".
-      const ok = conv && conv.available && conv.basis === "cohort" && conv.rate_pct !== null;
-      convChip = ok
-        ? `<span class="dash-funnel__conv" title="Cohort-safe: of contacts entering ${escapeHtml(prev.label)} in this window, the share that later entered ${escapeHtml(stage.label)}">${conv.rate_pct}%</span>`
-        : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
-    }
-
-    const dateProp = block.event_date_property || "";
-    const statusNote = mismatch ? "Reconciliation required"
-      : (count === null ? "Unavailable" : escapeHtml(dateProp));
-
-    return `
-      ${convChip}
-      <div class="dash-funnel__stage" data-funnel-event="${stage.event}">
-        <div class="dash-funnel__stage-label">${escapeHtml(stage.label)}</div>
-        <div class="dash-funnel__stage-value">${leadsCount(count)}</div>
-        <div class="dash-funnel__stage-sub" title="Event date: ${escapeHtml(dateProp)}">${statusNote}</div>
-      </div>`;
-  }).join("");
-
-  const scopeLabel = (payload && payload.scope_label) || "All Sources";
-  // The active source filter is disclosed on the headline itself, so the
-  // funnel can never read as all-source while a group is selected.
-  const groupLabel = (payload && payload.acquisition_group_label) || "All sources";
-  return `<div class="dash-funnel" role="group" aria-label="CRM funnel">${cells}</div>
-    <p class="grace-note">Scope: ${escapeHtml(scopeLabel)} · Source: ${escapeHtml(groupLabel)} ·
-      Counts are stage-entry events, each on its own HubSpot date.</p>`;
+function pipelineTruthFooterHtml(d) {
+  return `
+    <footer class="dash-truth-footer pipeline-truth-footer">
+      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
+      <span class="dash-footer-note">${escapeHtml((d && d.truth_footer) || PIPELINE_TRUTH_FOOTER)}</span>
+    </footer>`;
 }
 
+// ── The leads list (section 4): paged rows from /api/crm-funnel/contacts ───
 function leadsRenderControls() {
   const scopeSel = document.getElementById("leads-scope");
   if (scopeSel && !scopeSel.options.length) {
@@ -7899,8 +7761,9 @@ function leadsRenderControls() {
       (s) => `<option value="${s.key}">${escapeHtml(s.label)}</option>`).join("");
     scopeSel.value = _leadsScope;
     scopeSel.addEventListener("change", async (e) => {
+      // A lead filter: the funnel and the list. Deal figures do not change.
       _leadsScope = e.target.value; _leadsPage = 1;
-      await loadLeads();
+      await loadPipeline();
     });
   }
   const sourceSel = document.getElementById("leads-source");
@@ -7910,10 +7773,9 @@ function leadsRenderControls() {
     sourceSel.value = _leadsSourceGroup;
     sourceSel.addEventListener("change", async (e) => {
       // Reloads the FUNNEL as well as the rows — one selected source, one
-      // population, everywhere on the page.
+      // lead population, everywhere it applies.
       _leadsSourceGroup = e.target.value; _leadsPage = 1;
-      await leadsLoadFunnel();
-      await leadsRenderActiveView();
+      await loadPipeline();
     });
   }
   const statusSel = document.getElementById("leads-status");
@@ -7944,48 +7806,29 @@ function leadsRenderControls() {
   }
 }
 
-function leadsRenderTabs() {
-  const el = document.getElementById("leads-tabs");
-  if (!el) return;
-  el.className = "search-terms-tabs";
-  const tabs = [{ key: LEADS_VIEW_OVERVIEW, label: "Overview" }]
-    .concat(LEADS_STAGES.map((s) => ({ key: s.event, label: s.tab })))
-    .concat([{ key: LEADS_VIEW_OTHER, label: "Disqualified / Other" }]);
-
-  el.innerHTML = tabs.map((t) => {
-    const active = t.key === _leadsView ? " active" : "";
-    // The operational view is visually distinct from the five funnel stages.
-    const extra = t.key === LEADS_VIEW_OTHER ? " search-terms-tab--muted" : "";
-    return `<button type="button" class="search-terms-tab${active}${extra}" role="tab" data-leads-tab="${t.key}">${escapeHtml(t.label)}</button>`;
-  }).join("");
-
-  el.querySelectorAll("[data-leads-tab]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      _leadsView = btn.getAttribute("data-leads-tab");
-      _leadsPage = 1;
-      leadsRenderTabs();
-      await leadsRenderActiveView();
-    });
-  });
-}
-
 async function leadsRenderActiveView() {
   const controls = document.getElementById("leads-table-controls");
   const pager = document.getElementById("leads-pagination");
+  const header = document.getElementById("leads-table-header");
+  const body = document.getElementById("leads-table-body");
   leadsSyncControlVisibility();
-  if (_leadsView === LEADS_VIEW_OVERVIEW) {
-    if (controls) controls.hidden = true;
-    if (pager) pager.innerHTML = "";
-    leadsRenderOverview();
-    return;
-  }
-  if (controls) controls.hidden = false;
   if (_leadsView === LEADS_VIEW_OTHER) {
+    if (controls) controls.hidden = false;
     if (pager) pager.innerHTML = "";
     await leadsRenderOperational();
     return;
   }
-  await leadsRenderContacts(_leadsView);
+  const stage = leadsStageFor(_leadsView);
+  if (!stage) {
+    // Owner decision 3: the list opens on a click on a funnel stage.
+    if (controls) controls.hidden = true;
+    if (pager) pager.innerHTML = "";
+    if (header) header.textContent = "Leads";
+    if (body) body.innerHTML = '<p class="empty-state" style="padding: var(--space-5);">Click a stage in the funnel above to list the contacts that entered it in this window.</p>';
+    return;
+  }
+  if (controls) controls.hidden = false;
+  await leadsRenderContacts(stage.event);
 }
 
 /**
@@ -8011,29 +7854,15 @@ function leadsSyncControlVisibility() {
   }
 }
 
-function leadsRenderOverview() {
-  const header = document.getElementById("leads-table-header");
-  const body = document.getElementById("leads-table-body");
-  if (header) header.textContent = "Funnel definitions";
-  if (!body) return;
-
-  const events = (_leadsFunnel && _leadsFunnel.events) || {};
-  const rows = LEADS_STAGES.map((stage) => {
-    const block = events[stage.event] || {};
-    const disclosure = stage.event === "customer"
-      ? escapeHtml(LEADS_STAGE_MOVE_HELP)
-      : escapeHtml(block.definition || "");
-    return `<tr>
-      <td><strong>${escapeHtml(stage.label)}</strong></td>
-      <td>${leadsCount(block.count)}</td>
-      <td><code>${escapeHtml(block.event_date_property || "—")}</code></td>
-      <td>${disclosure}</td>
-    </tr>`;
-  }).join("");
-
-  body.innerHTML = `<table class="data-table">
-    <thead><tr><th>Stage</th><th>Count</th><th>Event date</th><th>Definition</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
+/**
+ * A working-status count: null/undefined is UNAVAILABLE — the word, never 0
+ * and never a dash (PR-ADS-178B-F1 MAJOR-1: restored; the operational view
+ * calls it).
+ */
+function leadsCount(value) {
+  return (value === null || value === undefined)
+    ? '<span class="dash-unavailable">Unavailable</span>'
+    : escapeHtml(Number(value).toLocaleString());
 }
 
 async function leadsRenderOperational() {
@@ -8083,103 +7912,102 @@ async function leadsRenderOperational() {
       Source: ${escapeHtml(payload.acquisition_group_label || "All sources")}.</p>`;
 }
 
-async function leadsRenderContacts(event) {
-  const stage = leadsStageFor(event);
-  const header = document.getElementById("leads-table-header");
-  const body = document.getElementById("leads-table-body");
-  const pager = document.getElementById("leads-pagination");
-  if (header) header.textContent = `${stage.label} — contacts that entered this stage in the window`;
-  if (!body) return;
-  body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Loading contacts…</p>`;
+/**
+ * A contact's name from HubSpot, or the words saying why there is none.
+ * Each status says its own words (LEADS_NAME_STATES). A status this page does
+ * not know — or none — is the weakest claim: not loaded yet.
+ */
+function leadsNameState(row) {
+  const status = row ? row.contact_name_status : null;
+  return (typeof status === "string" && Object.prototype.hasOwnProperty.call(LEADS_NAME_STATES, status))
+    ? LEADS_NAME_STATES[status] : LEADS_NAME_STATES.not_loaded;
+}
 
-  const params = new URLSearchParams({
-    window: getRoasBusinessWindow(),
-    window_type: "business",
-    event,
-    scope: _leadsScope,
-    page: String(_leadsPage),
-    page_size: String(LEADS_PAGE_SIZE),
-  });
-  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
-  if (_leadsStatus) params.set("operational_status", _leadsStatus);
-  if (_leadsQuery) params.set("q", _leadsQuery);
+function leadsContactNameHtml(row) {
+  const status = row ? row.contact_name_status : null;
+  const name = status === "recorded" ? String(row.contact_name || "").trim() : "";
+  if (name) return `<strong>${escapeHtml(name)}</strong>`;
+  const state = leadsNameState(row);
+  return `<span class="muted" title="${escapeHtml(state.title)}">${escapeHtml(state.text)}</span>`;
+}
 
-  let payload = null;
-  try {
-    payload = await fetchJSON(`/api/crm-funnel/contacts?${params.toString()}`);
-  } catch (_) { payload = null; }
+/**
+ * The note under the Contact column header while names are still loading.
+ * Driven by the database counts in `names_progress`; shown for as long as any
+ * stored contact has NEVER been asked for, however many already are. A contact
+ * HubSpot was asked for and did not return is not "still loading", so the note
+ * clears when the load is truly done. Unknown counts say so.
+ */
+function leadsNamesProgressNote(progress) {
+  const p = progress || {};
+  const known = p.available === true && Number.isFinite(p.read)
+    && Number.isFinite(p.total) && Number.isFinite(p.never_asked);
+  if (!known) return "Names are being loaded from HubSpot: progress is unavailable.";
+  if (p.never_asked <= 0) return "";
+  return `Names are being loaded from HubSpot: ${Number(p.read).toLocaleString()} of ${Number(p.total).toLocaleString()} contacts read so far.`;
+}
 
+function leadsNamesNoteHtml(progress) {
+  const note = leadsNamesProgressNote(progress);
+  return note ? `<small class="metric-reason leads-names-note">${escapeHtml(note)}</small>` : "";
+}
+
+/** The Company field typed on the HubSpot contact — not a deal's company record. */
+function leadsCompanyHtml(row) {
+  const company = String((row && row.company) || "").trim();
+  return company
+    ? escapeHtml(company)
+    : `<span class="muted">${LEADS_COMPANY_NOT_RECORDED}</span>`;
+}
+
+/** Plain-text heading for a contact (drawer title): name, else company. */
+function leadsContactHeading(row) {
+  const status = row ? row.contact_name_status : null;
+  const name = status === "recorded" ? String(row.contact_name || "").trim() : "";
+  const company = String((row && row.company) || "").trim();
+  if (name && company) return `${name} — ${company}`;
+  return name || company || leadsNameState(row).text;
+}
+
+/**
+ * Compact truth banner: reconciliation state + historical bootstrap readiness.
+ * Truth state is visible but never blocks a usable page.
+ */
+function leadsTruthStateHtml(payload) {
   if (!payload) {
-    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Could not load contacts.</p>`;
-    if (pager) pager.innerHTML = "";
-    return;
+    return `<div class="mapping-notice mapping-notice--info">CRM funnel truth is unavailable. Numbers are withheld rather than shown as zero.</div>`;
   }
+  const notes = [];
+  const recon = payload.reconciliation || {};
+  const sync = payload.sync || {};
+  const windowKey = (payload.window || {}).window_key;
+
   if (payload.available === false) {
-    const reason = payload.reason === "campaign_identity_unavailable"
-      ? "Google Ads campaign identity is unavailable, so this attribution scope cannot be resolved. This is unavailable — not zero."
-      : "Canonical CRM contact store unavailable.";
-    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">${escapeHtml(reason)}</p>`;
-    if (pager) pager.innerHTML = "";
-    return;
+    notes.push({ cls: "mapping-notice--info", text: "Canonical CRM contact store unavailable — counts are withheld, not zero." });
+  } else if (recon.status === "mismatch") {
+    notes.push({ cls: "mapping-notice--error", text: "Reconciliation required — funnel counts are withheld until the scope invariant holds." });
+  } else if (recon.status === "partial") {
+    // m4 (PR-ADS-178B-F1): reason codes in words, never raw identifiers.
+    const reasons = (recon.reasons || []).map(canonicalReasonLabel).join("; ");
+    notes.push({ cls: "mapping-notice--info", text: `Partial evidence: ${escapeHtml(reasons || "some stage evidence is missing")}.` });
   }
 
-  const rows = payload.rows || [];
-  if (!rows.length) {
-    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">No contacts entered ${escapeHtml(stage.label)} in this window.</p>`;
-    if (pager) pager.innerHTML = "";
-    return;
+  if (payload.campaign_identity_available === false) {
+    notes.push({ cls: "mapping-notice--info", text: "Google Ads campaign identity unavailable — campaign- and keyword-attributable scopes are unavailable (not zero)." });
   }
 
-  const tbody = rows.map((r, i) => {
-    return `<tr class="clickable-row" data-leads-row="${i}" tabindex="0">
-      <td>${leadsContactNameHtml(r)}</td>
-      <td>${leadsCompanyHtml(r)}</td>
-      <td>${escapeHtml(r.event_date || "—")}</td>
-      <td>${escapeHtml(r.lifecycle_stage_label || "—")}</td>
-      <td>${escapeHtml(LEADS_STATUS_LABELS[r.mql_status_category] || r.mql_status_category || "—")}</td>
-      <td>${escapeHtml(r.acquisition_group_label || sourceGroupLabel(r.acquisition_group))}</td>
-      <td>${leadsChannelPlatformHtml(r)}</td>
-      <td>${leadsCampaignCellHtml(r, "campaign")}</td>
-      <td>${leadsCampaignCellHtml(r, "keyword")}</td>
-      <td>${escapeHtml(r.country || "—")}</td>
-      <td>${r.has_gclid ? "Yes" : "No"}</td>
-    </tr>`;
-  }).join("");
-
-  body.innerHTML = `<table class="data-table">
-    <thead><tr>
-      <th title="The contact's first and last name in HubSpot">Contact${leadsNamesNoteHtml(payload.names_progress)}</th>
-      <th title="The Company field on the HubSpot contact">Company</th>
-      <th title="The selected stage-entry event date">${escapeHtml(stage.label)} date</th>
-      <th title="Current lifecycle stage — may be later than the selected event">Current stage</th>
-      <th>Working status</th>
-      <th>Source</th>
-      <th title="Canonical acquisition channel and platform">Channel / Platform</th>
-      <th title="Google Ads campaign — only shown where Google Ads semantics are proven">Campaign</th>
-      <th title="Google Ads keyword — only shown where Google Ads semantics are proven">Keyword</th>
-      <th>Country</th><th>GCLID</th>
-    </tr></thead>
-    <tbody>${tbody}</tbody></table>`;
-
-  body.querySelectorAll("[data-leads-row]").forEach((tr) => {
-    const open = () => leadsOpenDrawer(rows[Number(tr.getAttribute("data-leads-row"))], stage);
-    tr.addEventListener("click", open);
-    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
-  });
-
-  if (pager) {
-    const total = payload.total;
-    const from = (payload.page - 1) * payload.page_size + 1;
-    const to = from + rows.length - 1;
-    pager.innerHTML = `
-      <button type="button" class="btn btn--secondary" id="leads-prev" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
-      <span class="roas-window-range">${from}–${to}${total === null ? "" : ` of ${Number(total).toLocaleString()}`}</span>
-      <button type="button" class="btn btn--secondary" id="leads-next" ${payload.has_more ? "" : "disabled"}>Next</button>`;
-    const prev = document.getElementById("leads-prev");
-    const next = document.getElementById("leads-next");
-    if (prev) prev.addEventListener("click", async () => { _leadsPage = Math.max(1, _leadsPage - 1); await leadsRenderContacts(event); });
-    if (next) next.addEventListener("click", async () => { _leadsPage += 1; await leadsRenderContacts(event); });
+  const bootstrap = sync.bootstrap_status;
+  if (bootstrap && bootstrap !== "complete") {
+    const allTime = windowKey === "all_time";
+    notes.push({
+      cls: allTime ? "mapping-notice--error" : "mapping-notice--info",
+      text: `Historical CRM sync in progress (bootstrap: ${escapeHtml(bootstrap)}).` +
+            (allTime ? " All Time does not yet represent complete history." : ""),
+    });
   }
+
+  if (!notes.length) return "";
+  return notes.map((n) => `<div class="mapping-notice ${n.cls}">${n.text}</div>`).join("");
 }
 
 function sourceGroupLabel(group) {
@@ -8318,207 +8146,103 @@ function closeLeadsDrawer() {
   }
 }
 
-// ── Deals page ─────────────────────────────────────────────────────────────
+async function leadsRenderContacts(event) {
+  const stage = leadsStageFor(event);
+  const header = document.getElementById("leads-table-header");
+  const body = document.getElementById("leads-table-body");
+  const pager = document.getElementById("leads-pagination");
+  if (header) header.textContent = `Contacts that entered the ${stage.stage} stage in this window`;
+  if (!body) return;
+  body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Loading contacts…</p>`;
 
-// ── Closed-Won Deals — every source (PR-ADS-113, relabelled PR-ADS-164A) ────
-// Deal-level revenue truth: EVERY HubSpot closed-won deal in the window, from
-// every source (not only Google Ads), windowed by deal close date (NEVER the
-// scheduler run_date). This is revenue truth, not an active pipeline funnel.
-// The canonical verdict (closed_won_population) decides between three states:
-// deals listed, a read ledger with no deal in the window, and a population
-// that is withheld or unavailable — which never reads as "none".
+  const params = new URLSearchParams({
+    window: getRoasBusinessWindow(),
+    window_type: "business",
+    event,
+    scope: _leadsScope,
+    page: String(_leadsPage),
+    page_size: String(LEADS_PAGE_SIZE),
+  });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
+  if (_leadsStatus) params.set("operational_status", _leadsStatus);
+  if (_leadsQuery) params.set("q", _leadsQuery);
 
-let revenueDealsData = [];
-let revenueDealsSummary = null;
-let revenueDealsLedgerStatus = null;
-
-// The deal's stored HubSpot source group — the same grouping Revenue by Source
-// uses, so a deal can be found in both. An identifier this map does not know
-// is shown as stored, never folded into another group.
-const DEAL_SOURCE_GROUP_LABELS = {
-  google_ads: "Google Ads",
-  other_paid: "Other Paid",
-  organic: "Organic",
-  offline: "Offline",
-  unclassified: "Unclassified",
-  ambiguous: "Ambiguous — contacts disagree",
-};
-
-function dealSourceLabel(group) {
-  if (group === null || group === undefined || group === "") return "—";
-  return DEAL_SOURCE_GROUP_LABELS[group] || String(group).replace(/_/g, " ");
-}
-
-// One deal's own USD amount. An unknown amount is never zero and never a dash.
-function dealAmountHtml(r) {
-  if (r.deal_amount_usd === null || r.deal_amount_usd === undefined) {
-    return `${dashValue(null)} <small class="metric-reason">no proven USD amount</small>`;
-  }
-  return escapeHtml(fmtMoney(r.deal_amount_usd));
-}
-
-// Withheld or unavailable: the canonical word and reason, no figure.
-function renderRevenueDealsUnavailable(verdict) {
-  return renderClosedWonBlocked(verdict);
-}
-
-// Only reached when the canonical verdict is published with value 0.
-function renderRevenueDealsSafeEmptyState() {
-  return `
-    <div class="revenue-blocked-card revenue-empty-card">
-      <div class="revenue-blocked-card__eyebrow">Closed-won deals</div>
-      <h3>No closed-won deals closed in this period</h3>
-      <p>The deal ledger was read and is current. No HubSpot deal, from any source, was closed-won in this business window.</p>
-    </div>`;
-}
-
-function renderRevenueDealsSummary(summary) {
-  const s = summary || {};
-  const opts = businessBlockerOpts();
-  return `
-    <div class="revenue-summary-strip revenue-summary-strip--four">
-      <div><span>Closed-Won Deals</span><strong>${rowMetricHtml(s, "closed_won_deals", fmtCount, opts)}</strong></div>
-      <div><span>Won Revenue</span><strong>${rowMetricHtml(s, "won_revenue", fmtMoney, opts)}</strong></div>
-      <div><span>Average Deal Value</span><strong>${canonicalValueHtml(s.average_deal_value, (s.metrics || {}).revenue_usd, fmtMoney, opts)}</strong></div>
-      <div><span title="Deals in this list that came from Google Ads and carry both a campaign and a click ID (GCLID). A subset of the deals counted on the left.">GCLID-attributable Deals</span><strong>${dashValue(s.gclid_attributable_deals, fmtCount)}</strong></div>
-    </div>
-  `;
-}
-
-// Sort: most recent close first, then largest revenue.
-function sortRevenueDealRows(rows) {
-  return [...rows].sort((a, b) =>
-    String(b.deal_close_date || "").localeCompare(String(a.deal_close_date || "")) ||
-    (b.deal_amount_usd || 0) - (a.deal_amount_usd || 0)
-  );
-}
-
-// Only fields the deal row carries: the deal's own name (the ledger holds no
-// employer name) and its stored source group (it holds no click-match field).
-function renderRevenueDealsTable(rows) {
-  const headerRow = `
-    <tr>
-      <th>Deal</th>
-      <th>Closed</th>
-      <th>Country</th>
-      <th>Campaign</th>
-      <th>Source</th>
-      <th>Won Revenue</th>
-    </tr>
-  `;
-  const bodyRows = rows.map((r) => `
-    <tr>
-      <td>${escapeHtml(r.deal_name || "—")}</td>
-      <td>${escapeHtml(r.deal_close_date ? String(r.deal_close_date).slice(0, 10) : "—")}</td>
-      <td>${escapeHtml(r.country || "—")}</td>
-      <td>${escapeHtml(r.campaign_name || "—")}</td>
-      <td>${escapeHtml(dealSourceLabel(r.acquisition_group))}</td>
-      <td>${dealAmountHtml(r)}</td>
-    </tr>
-  `).join("");
-  return `
-    <div class="table-scroll">
-      <table class="data-table roas-table revenue-decision-table">
-        ${headerRow}
-        <tbody>${bodyRows}</tbody>
-      </table>
-    </div>
-  `;
-}
-
-function renderRevenueDealsPage() {
-  const kpiGrid = document.getElementById("revenue-deals-kpis");
-  const tableBody = document.getElementById("revenue-deals-table-body");
-  if (kpiGrid) kpiGrid.innerHTML = "";
-  if (!tableBody) return;
-
-  // Mart endpoint failed — NO silent fallback to /api/revenue-deals.
-  if (revenueDealsLedgerStatus === "mart_unavailable") {
-    tableBody.innerHTML = renderMartUnavailable();
-    return;
-  }
-
-  // PR-ADS-164A: the canonical verdict decides, never an empty array.
-  const verdict = closedWonPopulation(revenueDealsMart);
-  const state = closedWonPopulationState(verdict, revenueDealsData.length);
-
-  // Withheld / unavailable / unrecognised: the word and the reason, no figure.
-  if (state === "blocked") {
-    tableBody.innerHTML = renderRevenueDealsUnavailable(verdict);
-    return;
-  }
-
-  // Published with value 0: the ledger was read and holds no deal here.
-  if (state === "empty") {
-    tableBody.innerHTML = renderRevenueDealsSafeEmptyState();
-    return;
-  }
-
-  const sorted = sortRevenueDealRows(revenueDealsData);
-  tableBody.innerHTML = `
-    ${renderRevenueDealsSummary(martDealLedgerSummary(revenueDealsMart))}
-    ${renderMartDiagnostics(revenueDealsMart)}
-    ${renderRevenueDealsTable(sorted)}
-    <p class="revenue-footnote">Every HubSpot closed-won deal that closed in this period, from every source — not only Google Ads. Revenue is each deal's proven USD amount; Google Ads spend is shown on the Google Ads pages, not here.</p>
-  `;
-}
-
-async function loadDeals() {
-  const window_ = getRoasBusinessWindow();
-  const token = ++_revReqSeq.deals;
-  setWindowRangeLoading("revenue-deals-range");
-  const kpiGrid = document.getElementById("revenue-deals-kpis");
-  const tableBody = document.getElementById("revenue-deals-table-body");
-  if (kpiGrid) kpiGrid.innerHTML = "";
-  if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading closed-won deals…</p>';
-
+  let payload = null;
   try {
-    // PR-ADS-126: PRIMARY truth is the canonical mart deal view.
-    const data = await fetchRevenuePerformance("deal", window_);
-    if (token !== _revReqSeq.deals) return;  // stale response superseded
-    if (!data) {
-      // Mart endpoint failed — NO silent fallback to /api/revenue-deals.
-      revenueDealsMart = null;
-      revenueDealsLedgerStatus = "mart_unavailable";
-      revenueDealsData = [];
-      revenueDealsSummary = null;
-      renderRevenueDealsPage();
-      return;
-    }
-    if (!_revResponseIsCurrent("deals", token, data)) return;
-    revenueDealsMart = data;
-    // PR-ADS-164A: the mart answered. Whether its deal list is published,
-    // empty or withheld is read from data.closed_won_population at render
-    // time. (PR-ADS-127 mapped data_health.deal_ledger_status here, but
-    // recognised only "database_unavailable" and defaulted everything else —
-    // a stale ledger included — to "available", which rendered as "none".)
-    revenueDealsLedgerStatus = "loaded";
-    // PR-ADS-127: the Deals summary comes from the ledger's OWN summary so its
-    // count / Won Revenue / average all reconcile with the displayed deal rows.
-    revenueDealsSummary = data.ledger_summary || null;
-    revenueDealsData = data.rows || [];
-    renderWindowRange("revenue-deals-range", data.window || null);
-    renderRevenueDealsPage();
-  } catch (err) {
-    console.error("[loadDeals]", err);
-    if (token !== _revReqSeq.deals) return;
-    revenueDealsMart = null;
-    revenueDealsLedgerStatus = "mart_unavailable";
-    revenueDealsData = [];
-    revenueDealsSummary = null;
-    renderRevenueDealsPage();
-  }
-}
+    payload = await fetchJSON(`/api/crm-funnel/contacts?${params.toString()}`);
+  } catch (_) { payload = null; }
 
-// Deal-ledger summary for the summary strip. PR-ADS-127: the count, Won Revenue,
-// average and GCLID-attributable count ALL come from the mart's deal-ledger
-// summary — the SAME source as the displayed deal rows — so the strip always
-// reconciles with the table. PR-ADS-164A: there is no client-side fallback.
-// Re-adding the rows here counted an unpriced deal as zero and published the
-// remainder as the total; without the server's summary the strip says
-// Unavailable.
-function martDealLedgerSummary(data) {
-  return (data && data.ledger_summary) || null;
+  if (!payload) {
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Could not load contacts.</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+  if (payload.available === false) {
+    const reason = payload.reason === "campaign_identity_unavailable"
+      ? "Google Ads campaign identity is unavailable, so this attribution scope cannot be resolved. This is unavailable — not zero."
+      : "Canonical CRM contact store unavailable.";
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">${escapeHtml(reason)}</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+
+  const rows = payload.rows || [];
+  if (!rows.length) {
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">No contacts entered the ${escapeHtml(stage.stage)} stage in this window.</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+
+  const tbody = rows.map((r, i) => {
+    return `<tr class="clickable-row" data-leads-row="${i}" tabindex="0">
+      <td>${leadsContactNameHtml(r)}</td>
+      <td>${leadsCompanyHtml(r)}</td>
+      <td>${escapeHtml(r.event_date || "—")}</td>
+      <td>${escapeHtml(r.lifecycle_stage_label || "—")}</td>
+      <td>${escapeHtml(LEADS_STATUS_LABELS[r.mql_status_category] || r.mql_status_category || "—")}</td>
+      <td>${escapeHtml(r.acquisition_group_label || sourceGroupLabel(r.acquisition_group))}</td>
+      <td>${leadsChannelPlatformHtml(r)}</td>
+      <td>${leadsCampaignCellHtml(r, "campaign")}</td>
+      <td>${leadsCampaignCellHtml(r, "keyword")}</td>
+      <td>${escapeHtml(r.country || "—")}</td>
+      <td>${r.has_gclid ? "Yes" : "No"}</td>
+    </tr>`;
+  }).join("");
+
+  body.innerHTML = `<div class="deal-scroll"><table class="data-table">
+    <thead><tr>
+      <th title="The contact's first and last name in HubSpot">Contact${leadsNamesNoteHtml(payload.names_progress)}</th>
+      <th title="The Company field on the HubSpot contact">Company</th>
+      <th title="The selected stage-entry event date">${escapeHtml(stage.stage)} stage-entry date</th>
+      <th title="Current lifecycle stage — may be later than the selected event">Current stage</th>
+      <th>Working status</th>
+      <th>Source</th>
+      <th title="Canonical acquisition channel and platform">Channel / Platform</th>
+      <th title="Google Ads campaign — only shown where Google Ads semantics are proven">Campaign</th>
+      <th title="Google Ads keyword — only shown where Google Ads semantics are proven">Keyword</th>
+      <th>Country</th><th>GCLID</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody></table></div>`;
+
+  body.querySelectorAll("[data-leads-row]").forEach((tr) => {
+    const open = () => leadsOpenDrawer(rows[Number(tr.getAttribute("data-leads-row"))], stage);
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+  });
+
+  if (pager) {
+    const total = payload.total;
+    const from = (payload.page - 1) * payload.page_size + 1;
+    const to = from + rows.length - 1;
+    pager.innerHTML = `
+      <button type="button" class="btn btn--secondary" id="leads-prev" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
+      <span class="roas-window-range">${from}–${to}${total === null ? "" : ` of ${Number(total).toLocaleString()}`}</span>
+      <button type="button" class="btn btn--secondary" id="leads-next" ${payload.has_more ? "" : "disabled"}>Next</button>`;
+    const prev = document.getElementById("leads-prev");
+    const next = document.getElementById("leads-next");
+    if (prev) prev.addEventListener("click", async () => { _leadsPage = Math.max(1, _leadsPage - 1); await leadsRenderContacts(event); });
+    if (next) next.addEventListener("click", async () => { _leadsPage += 1; await leadsRenderContacts(event); });
+  }
 }
 
 // ── Revenue Attribution Health — admin diagnostics (PR-ADS-113) ─────────────
@@ -14727,8 +14451,8 @@ function datasetRelatedPage(source, dataset) {
     "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
     "google_ads_api/canonical_geo": { page: "roas-countries", label: "Countries" },
     "google_ads_api/canonical_spend": { page: "campaigns",  label: "Campaigns"    },
-    "hubspot/contacts":     { page: "leads",         label: "Leads" },
-    "hubspot/deals":        { page: "deals",         label: "Deals"        },
+    "hubspot/contacts":     { page: "pipeline",      label: "Pipeline" },
+    "hubspot/deals":        { page: "pipeline",      label: "Pipeline"     },
     "gclid/matches":        { page: "gclid-attribution", label: "GCLID Attribution" },
   };
   return map[key] || null;
@@ -16391,13 +16115,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => activateDashboardTab(btn.dataset.dashTab));
   });
 
-  // Wire up canonical Leads controls (business windows — PR-ADS-153C).
-  // The remaining Leads filters are wired by leadsRenderControls(); the window
-  // select is shared application state, so it is wired here like every other.
-  const leadsWindow = document.getElementById("leads-window");
-  if (leadsWindow) {
-    leadsWindow.value = getRoasBusinessWindow();
-    leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  // Wire up the Pipeline page controls (business windows — PR-ADS-178B).
+  // The lead filters (Scope, Source) and the list's own filters are wired by
+  // leadsRenderControls(); the window select is shared application state, so
+  // it is wired here like every other.
+  const pipelineRefresh = document.getElementById("pipeline-refresh-btn");
+  const pipelineWindow  = document.getElementById("pipeline-window");
+  if (pipelineRefresh) pipelineRefresh.addEventListener("click", loadPipeline);
+  if (pipelineWindow) {
+    pipelineWindow.value = getRoasBusinessWindow();
+    pipelineWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
   // Wire up the Campaigns page controls (business windows — PR-ADS-177B)
@@ -16418,15 +16145,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     roasCountryWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-
-  // Wire up Closed-Won Deals controls (business windows — PR-ADS-113)
-  const dealsRefresh = document.getElementById("revenue-deals-refresh-btn");
-  const dealsWindow  = document.getElementById("revenue-deals-window");
-  if (dealsRefresh) dealsRefresh.addEventListener("click", loadDeals);
-  if (dealsWindow) {
-    dealsWindow.value = getRoasBusinessWindow();
-    dealsWindow.addEventListener("change", handleBusinessWindowSelectChange);
-  }
 
   // Wire up Revenue Attribution Health controls (business windows — PR-ADS-113)
   const revHealthRefresh = document.getElementById("revenue-health-refresh-btn");
@@ -16740,11 +16458,10 @@ function handleBusinessWindowSelectChange(e) {
   setRoasBusinessWindow(e.target.value);
   switch (_currentPage) {
     case "dashboard":       loadDashboardTab(); break;
-    // A new window is a new cohort — restart Leads paging at page 1 so the
+    // A new window is a new cohort — restart the leads list at page 1 so the
     // table can never show an offset that belonged to the previous window.
-    case "leads":           _leadsPage = 1; loadLeads(); break;
+    case "pipeline":        _leadsPage = 1; loadPipeline(); break;
     case "roas-countries":  loadRoasCountries(); break;
-    case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
     case "campaigns":       loadCampaignsPage(); break;
     default:                break;
@@ -16790,7 +16507,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, pipeline: 0, health: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {
@@ -16946,7 +16663,6 @@ function renderRevenueEmptyState(scope) {
 // Holds the latest mart response per business page so filter-chip re-renders and
 // blocked/ready gating read the SAME canonical payload the loader fetched.
 let roasCountryMart = null;
-let revenueDealsMart = null;
 // PR-ADS-130: geo reconciliation root-cause for the blocked Country Revenue & Spend card.
 let roasCountryGeoReconcile = null;
 
@@ -18922,7 +18638,7 @@ async function loadCountryDrilldown(country, countryCode, drawerRow, windowKey) 
 function renderCountryDrawer(r, data) {
   const opts = campBlockerOpts(data || roasCountryMart);
   const name = countryDisplayName(r.country);
-  const links = [["deals", "Open Deals"], ["revenue-health", "Open Revenue Health"]]
+  const links = [["pipeline", "Open Pipeline"], ["revenue-health", "Open Revenue Health"]]
     .filter(([page]) => dashCanNavigate(page))
     .map(([page, label]) => `<a class="ctry-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
   const dealsWithheld = r.closed_won_deals === null || r.closed_won_deals === undefined;

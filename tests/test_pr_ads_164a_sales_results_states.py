@@ -144,9 +144,13 @@ def _source():
 
 
 def _payloads(monkeypatch, state, **kw):
-    """What the Deals endpoint and the source reader really send for ``state``."""
+    """What the Deals endpoint and the source reader really send for ``state``.
+    PR-ADS-178B: plus the Pipeline builder's payload, which the deal list (the
+    Closed-Won Deals page's successor) renders."""
     _patch(monkeypatch, state, **kw)
-    return {"deal": _mart("deal"), "source": _source()}
+    from services.pipeline_service import build_pipeline
+    return {"deal": _mart("deal"), "source": _source(),
+            "pipeline": build_pipeline(WINDOW, now=NOW)}
 
 
 def _verdict(payload):
@@ -279,13 +283,20 @@ _ASYNC_HARNESS = _VM_HARNESS.replace(
     "process.stdout.write(JSON.stringify(v === undefined ? null : v)));")
 assert _ASYNC_HARNESS != _VM_HARNESS, "the 161B harness tail changed"
 
+# PR-ADS-178B: the deal list is the Pipeline page's; its real loader is
+# driven with the real Pipeline payload. "deals" is the deal-list panel,
+# "page" the whole page (KPI cards, funnel, deals, customers, footer).
 _PROBE = """
 const P = %(payloads)s;
 _currentUser = %(user)s;
-fetchRevenuePerformance = async (view) => P.deal;
+fetchJSON = async (url) => P.pipeline;
 (async () => {
-  await loadDeals();
-  return { deals: __els["revenue-deals-table-body"].innerHTML };
+  await loadPipeline();
+  const outcomes = __els["pipeline-outcomes"].innerHTML;
+  const i = outcomes.indexOf('id="pipeline-deals"');
+  const j = outcomes.indexOf('id="pipeline-customers"');
+  return { deals: outcomes.slice(i, j),
+           page: __els["pipeline-summary"].innerHTML + outcomes };
 })()
 """
 
@@ -332,7 +343,8 @@ def _assert_says_only_why(html, word, words):
 
 def test_10_the_deals_page_lists_every_source_deal_with_the_fields_it_carries(
         monkeypatch, tmp_path):
-    html = _ui(_payloads(monkeypatch, "deals"), tmp_path)["deals"]
+    out = _ui(_payloads(monkeypatch, "deals"), tmp_path)
+    html, page = out["deals"], _text(out["page"])
     text = _text(html)
     for column in ("Deal", "Closed", "Country", "Campaign", "Source",
                    "Won Revenue"):
@@ -343,12 +355,13 @@ def test_10_the_deals_page_lists_every_source_deal_with_the_fields_it_carries(
     assert "Brand - UK" in text and "United Kingdom" in text
     assert ">Google Ads</td>" in html and ">Organic</td>" in html
     assert "$9.0k" in text and "$4.0k" in text
-    # The strip: the count, the total, the average, and the GCLID subset named
-    # for what it counts.
-    assert "Closed-Won Deals 2 " in text and "Won Revenue $13.0k" in text
-    assert "Average Deal Value $6.5k" in text
-    assert "GCLID-attributable Deals 1 " in text
-    assert "from every source — not only Google Ads" in text
+    # PR-ADS-178B: the KPI cards (the strip's successor): the count, the
+    # total and the average. The GCLID subset card is not one of the five
+    # (owner brief: SQLs, deals, customers, revenue, average).
+    assert "Closed-won deals 2 " in page and "Won revenue $13.0k" in page
+    assert "Average deal value $6.5k" in page
+    assert "GCLID-attributable" not in page
+    assert "from every source" in text
     # A deal that closed outside the window is not in it.
     assert "Old deal" not in text
     # Nothing the payload does not carry, and no Google Ads spend.
@@ -384,23 +397,26 @@ def test_12_the_deals_page_never_reads_a_withheld_ledger_as_no_deals(
 def test_15_withheld_revenue_reads_withheld_with_its_reason_never_a_dash(
         monkeypatch, tmp_path):
     payloads = _payloads(monkeypatch, "unpriced")
-    html = _ui(payloads, tmp_path)["deals"]
+    out = _ui(payloads, tmp_path)
+    html, page = out["deals"], out["page"]
     text = _text(html)
     # The count is published; the total and the average are not.
-    assert "Closed-Won Deals 3 " in text
-    assert f"Won Revenue Withheld {NO_AMOUNT_WORDS}" in text
-    assert f"Average Deal Value Withheld {NO_AMOUNT_WORDS}" in text
-    strip = html[html.index("revenue-summary-strip"):html.index("<table")]
-    assert "—" not in _text(strip), "a dash stands in for a withheld total"
+    # PR-ADS-178B: on the KPI cards (the strip's successor).
+    cards = page[page.index("pipeline-kpi-grid"):page.index('id="pipeline-funnel"')]
+    assert "Closed-won deals 3 " in _text(cards)
+    assert f"Won revenue Withheld {NO_AMOUNT_WORDS}" in _text(cards)
+    assert f"Average deal value Withheld {NO_AMOUNT_WORDS}" in _text(cards)
+    assert "—" not in _text(cards), "a dash stands in for a withheld total"
     # Never the priced part presented as the total.
-    assert "$13.0k" not in text and "$6.5k" not in text
+    assert "$13.0k" not in _text(page) and "$6.5k" not in _text(page)
     # Every deal is still listed; the unpriced one says why it has no amount.
     assert "Gamma pilot" in text and "$9.0k" in text and "$4.0k" in text
     assert "Unavailable no proven USD amount" in text
     assert ">Unclassified</td>" in html
     # A viewer gets the reason but no link; an admin can open the blockers.
     assert "View blockers" not in text
-    admin = _ui(payloads, tmp_path, user={"role": "admin"})["deals"]
+    assert "View blockers" not in _text(page)
+    admin = _ui(payloads, tmp_path, user={"role": "admin"})["page"]
     assert "View blockers" in _text(admin)
     assert "cte_family=revenue_proof" in admin
 
@@ -409,7 +425,8 @@ def _mutated(payloads, **verdict):
     """A REAL payload set whose verdict alone is replaced (``None`` removes
     it) — the rows, summaries and every other key stay as the server sent."""
     out = json.loads(json.dumps(payloads, default=str))
-    for surface in ("deal", "source"):
+    # PR-ADS-178B: the Pipeline payload carries the same verdict for its list.
+    for surface in ("deal", "source", "pipeline"):
         if verdict.get("drop"):
             out[surface].pop("closed_won_population", None)
         else:
@@ -463,6 +480,17 @@ def test_20_the_guard_is_load_bearing_without_it_stale_reads_as_none(
         '  if (!closedWonPopulationPublished(verdict)) '
         'return dealCount > 0 ? "rows" : "empty";\n'))
     payloads = _payloads(monkeypatch, "stale")
+    # PR-ADS-178B: the Pipeline builder withholds the list itself as well
+    # (deals_status, and the KPI card's own verdict), so the client guard is
+    # shown load-bearing against a faulty server that sends neither: the list
+    # "published" and empty, its count card claiming publication, and only
+    # the population verdict saying stale.
+    payloads["pipeline"] = {**payloads["pipeline"], "deals": [],
+                            "deals_status": "published", "deals_reason": None,
+                            "kpis": {**payloads["pipeline"]["kpis"],
+                                     "closed_won_deals": {"value": None,
+                                                          "status": "published",
+                                                          "reason": None}}}
     out = _ui(payloads, tmp_path, js=bypassed)
     assert "No closed-won deals closed in this period" in _text(out["deals"])
     # …and with the guard in place the same payloads say why.
@@ -475,17 +503,19 @@ def test_20_the_guard_is_load_bearing_without_it_stale_reads_as_none(
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _deals_markup():
+    # PR-ADS-178B: the deals are on the Pipeline page.
     html = INDEX_HTML.read_text(encoding="utf-8")
-    m = re.search(r'<section id="page-deals".*?</section>', html, re.S)
-    assert m, "the Deals page section is missing"
+    m = re.search(r'<section id="page-pipeline".*?\n      </section>', html, re.S)
+    assert m, "the Pipeline page section is missing"
     return m.group(0)
 
 
 def _deals_js():
-    """The Deals page's own region of app.js, comments stripped."""
+    """The deal list's own region of app.js (PR-ADS-178B: the Pipeline
+    page's), with the KPI cards that state its count, comments stripped."""
     js = APP_JS.read_text(encoding="utf-8")
-    start = js.index("let revenueDealsData = [];")
-    end = js.index("// ── Revenue Attribution Health", start)
+    start = js.index("// ── KPI cards: one source each")
+    end = js.index("// ── Customers won", start)
     return re.sub(r"^\s*//.*$", "", js[start:end], flags=re.M)
 
 
@@ -507,11 +537,11 @@ def test_22_the_deals_page_code_has_no_dead_column_no_spend_card_no_old_label():
                  "No closed-won deals found"):
         assert gone not in region, gone
     # The canonical metrics go through the shared helpers, not a formatter
-    # that turns "withheld" into a dash.
-    assert 'rowMetricHtml(s, "won_revenue", fmtMoney' in region
-    assert 'rowMetricHtml(s, "closed_won_deals", fmtCount' in region
-    assert "fmtMoney(s.won_revenue)" not in region
-    assert "fmtCount(s.deal_count)" not in region
+    # that turns "withheld" into a dash (PR-ADS-178B: the KPI cards).
+    assert "canonicalMetricHtml(k.won_revenue_usd, fmtMoney" in region
+    assert "canonicalMetricHtml(k.closed_won_deals, fmtCount" in region
+    assert "fmtMoney(k.won_revenue_usd" not in region
+    assert "fmtCount(k.closed_won_deals" not in region
 
 
 def test_23_no_roas_or_cac_wording_reached_either_page():

@@ -46,7 +46,8 @@ def test_revenue_pages_constant_includes_both_roas_pages():
     # PR-ADS-153C: Leads is a CRM/business page and joined the clean revenue chrome.
     # PR-ADS-168B: Revenue by Source is deleted (its hash redirects to Channels).
     # PR-ADS-177B: Campaign Revenue & Spend merged into the Campaigns page.
-    assert 'REVENUE_PAGES = ["dashboard", "campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"]' in JS
+    # PR-ADS-178B: Leads and Deals merged into the Pipeline page.
+    assert 'REVENUE_PAGES = ["dashboard", "campaigns", "roas-countries", "pipeline", "revenue-health", "channels", "system"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -223,7 +224,8 @@ def test_other_pages_not_treated_as_revenue_pages():
     assert "loadCampaigns" in JS
     assert "loadKeywords" in JS
     assert "loadSearchTerms" in JS
-    assert "loadLeads" in JS
+    # PR-ADS-178B: the leads list's loader is the Pipeline page's.
+    assert "loadPipeline" in JS
 
 
 def test_revenue_pages_list():
@@ -236,4 +238,5 @@ def test_revenue_pages_list():
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
     # PR-ADS-177B: roas-campaigns merged into campaigns (business windows).
-    assert names == ["dashboard", "campaigns", "roas-countries", "deals", "revenue-health", "leads", "channels", "system"]
+    # PR-ADS-178B: leads and deals merged into pipeline (business windows).
+    assert names == ["dashboard", "campaigns", "roas-countries", "pipeline", "revenue-health", "channels", "system"]

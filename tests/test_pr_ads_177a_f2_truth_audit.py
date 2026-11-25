@@ -155,9 +155,14 @@ def test_f_the_channels_momentum_toggle_and_every_channels_label_say_lead_status
 
 def test_g_the_deals_legacy_renderers_carry_no_sql_literal():
     """The JS behind every legacy lead-status count on Deals (not only what a
-    fixture happens to render)."""
+    fixture happens to render). PR-ADS-178B: those renderers are deleted with
+    the counts (owner decision 4); the renderers Deals draws now carry no
+    SQL literal at all."""
     for name in ("renderDealLeadStatusBacklog", "renderDealSourcePipeline",
                  "renderDealSqlNoDeal"):
+        assert f"function {name}(" not in APP, name
+    for name in ("renderDashboardDeals", "pipelineSourceBreakdownHtml",
+                 "pipelineDealsHtml", "pipelineCustomersWonHtml"):
         for text in _literals(_fn(name)):
             assert not _BARE_SQL.search(text), (name, text[:120])
 

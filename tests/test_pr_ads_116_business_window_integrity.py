@@ -218,15 +218,16 @@ def test_audit_window_includes_label_and_closed_flag(monkeypatch):
 
 
 def test_window_range_elements_present():
+    # PR-ADS-178B: the Closed-Won Deals page is the Pipeline page.
     for el in ("campaigns-range", "roas-countries-range",
-               "revenue-deals-range", "revenue-health-range"):
+               "pipeline-range", "revenue-health-range"):
         assert f'id="{el}"' in HTML, f"missing range element {el}"
     assert "function renderWindowRange" in JS
     assert "function formatWindowRange" in JS
     # Each loader renders its range from the response window.
     assert 'renderWindowRange("campaigns-range"' in JS
     assert 'renderWindowRange("roas-countries-range"' in JS
-    assert 'renderWindowRange("revenue-deals-range"' in JS
+    assert 'renderWindowRange("pipeline-range"' in JS
     assert 'renderWindowRange("revenue-health-range"' in JS
 
 
@@ -240,7 +241,7 @@ def test_stale_response_guard_present():
     guard = _fn("function _revResponseIsCurrent", span=300)
     assert "getRoasBusinessWindow()" in guard
     for loader in ("function loadCampaignsPage", "function loadRoasCountries",
-                   "function loadDeals", "function loadRevenueHealth"):
+                   "function loadPipeline", "function loadRevenueHealth"):
         body = _fn(loader, span=1600)
         assert "++_revReqSeq" in body, f"{loader} must take a request token"
         assert "_revResponseIsCurrent" in body or "_revReqSeq" in body
@@ -280,7 +281,7 @@ def test_selector_change_clears_previous_range_immediately():
     for loader, el in (
         ("function loadCampaignsPage", "campaigns-range"),
         ("function loadRoasCountries", "roas-countries-range"),
-        ("function loadDeals", "revenue-deals-range"),
+        ("function loadPipeline", "pipeline-range"),
         ("function loadRevenueHealth", "revenue-health-range"),
     ):
         body = _fn(loader, span=1600)

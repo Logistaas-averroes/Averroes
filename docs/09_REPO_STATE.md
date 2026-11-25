@@ -7057,3 +7057,83 @@ Evidence's endpoint and renderers) and 177D (Keywords & Search Terms).
 * **Not done.** CLAUDE.md's "dashboard rows return None, not 0, for zero
   revenue" sentence no longer holds for Dashboard → Campaigns (`docs/60` §8);
   CLAUDE.md is not edited here.
+
+## PR-ADS-178B — one Pipeline page: leads and deals together
+
+`docs/61`. Depends on PR-ADS-177B (`d543dcc`). Unblocks 178C (retire the old
+routes after porting what parity and the audits read from them).
+
+* **One page.** `pipeline` ("Pipeline") in the Dashboard design replaces the
+  Leads page and the Closed-Won Deals page: command bar (business windows
+  through today; Scope / Source as LEAD filters), five KPI cards (SQLs = the
+  acquisition cohort through `cohortCountHtml` on the response's cohort;
+  closed-won deals, customers, won revenue = the mart deal view's summary
+  metrics; average deal value = its `ledger_summary`), the lifecycle funnel
+  "Entered stage in window" (stage buttons open the leads list; "Moved to
+  Customer stage" keeps its help text; the working-status breakdown stays as
+  its own button), the leads list (`/api/crm-funnel/contacts`, names, no
+  emails, the existing drawer), the closed-won deal list (Source column + a
+  filter on the deal's own source group; shown only when its length equals the
+  published count), customers won (a list only when it numbers the published
+  count), one truth-footer line.
+* **One builder.** `services/pipeline_service.build_pipeline`
+  (`@single_snapshot`) at `GET /api/pipeline?window=&scope=&acquisition_group=`.
+  A lead filter blanks no deal figure; under one, customers won is unavailable
+  with `customers_won_not_split_by_contact_source`.
+* **Dashboard → Deals** republishes `build_pipeline` (+ a previous-period
+  comparison from the same builder) and renders the Pipeline renderers.
+  Deleted: its second composition (three closed-won counts, `build_revenue_by_source`
+  source groups with a lead-status column, the through-today campaign
+  breakdown), the legacy "Qualified (lead status)" backlog and
+  `db.revenue_repository.fetch_sql_lead_details` (owner decision 4), the
+  always-Unavailable cards, the aging panel and the decision cards.
+* **Navigation.** `NAV_ITEMS.pipeline = ["pipeline"]`; `leads`, `deals`,
+  `opportunities` are `RETIRED_PAGE_REDIRECTS` carrying their intent (section
+  anchor; `open_working`). Links relabelled "Open Pipeline" (Countries drawers,
+  Dashboard → Revenue cards).
+* **Registries / audits.** Reader-cutover INVENTORY (`pipeline_service` row;
+  `dashboard_deals_service` via `build_pipeline`), `_page_builders()` +
+  `pipeline_checks` (windows_reconcile, status/reason, list = members);
+  parity: a `pipeline` consumer on `closed_won_revenue_usd`,
+  `closed_won_deals`, `customers`, `google_ads_cohort_sqls`; the cohort audit
+  builds and scans the pipeline payload; SQL-doctrine registry 12 canonical /
+  11 legacy / 8 mixed, 0 unknown.
+* **Kept for 178C.** `/api/revenue-deals`, `/api/crm-funnel`,
+  `/api/crm-funnel/customers-won`, `/api/crm-funnel/operational-status`,
+  `/api/dashboard/deals` (still used by the tab).
+* **Tests.** `tests/test_pr_ads_178b_pipeline_one_page.py` (12),
+  `tests/test_pr_ads_178b_pipeline_pg_integration.py` (11, PG; in the CI
+  PostgreSQL step and its did-run list). Existing-test changes with a reason
+  each: `docs/61` §9.2.
+
+## PR-ADS-178B-F1 — truth audit round 1 on the Pipeline page
+
+Same branch, a second commit. One Major, no blockers (`docs/61` §11).
+
+* **MAJOR-1.** The "Disqualified / Other" working-status breakdown called
+  `leadsCount`, which 178B deleted: the panel hung on "Loading…" with an
+  unhandled rejection, and `loadPipeline` threw on a window or filter change
+  with that view selected. `leadsCount` is restored (null/undefined is the word
+  "Unavailable", never 0); a node test awaits the view's real renderer, and a
+  static test checks that every function `app.js` calls is defined.
+* **m1.** Customers won is the window's all-source won population whatever
+  the lead filters; no longer withheld under one.
+* **m3.** The average deal value compares its divisor (`deal_count`) with the
+  published deals; a mismatch is `average_deal_value_population_mismatch`.
+* **m4 / m5 / o1.** Funnel reasons in words, HubSpot property names in titles;
+  the SQL card says the lead filters do not narrow it; a stage count under
+  partial evidence is "at least N" with the reason.
+* **m2.** Counterfactuals for three guards that survived mutation
+  (`pipeline_checks` KPI half, `period_change` previous window, the average's
+  deal-count agreement).
+* **Tests.** `tests/test_pr_ads_178b_f1_truth_audit_round1.py` (18, non-PG).
+  Carried: m6, m7, m8 (`docs/61` §11).
+
+### PR-ADS-178B-F2 — funnel conversion % beside a lower bound
+
+In truth audit round 2, a conversion % next to an "at least N" stage was
+still shown as an exact number. Now an undated TO stage gives
+"at least X%", and an undated FROM stage gives "—" with the reason
+(`pipelineFunnelHtml`). Test: `tests/test_pr_ads_178b_f1_truth_audit_round1.py`
+`test_09_a`/`test_09_b`; `test_09_a` fails on 2904d7f. The full note is in
+docs/61 §12.

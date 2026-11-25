@@ -299,10 +299,17 @@ def test_evidence_loaders_use_window_param():
     # The funnel query is built with URLSearchParams so the Source filter can be
     # attached; what matters is that Leads calls the canonical family with a
     # BUSINESS window, never the evidence-windowed /api/leads.
-    assert "/api/crm-funnel?${params.toString()}" in APP_JS
-    load_funnel = APP_JS.split("async function leadsLoadFunnel(")[1].split("\n}")[0]
-    assert "window: getRoasBusinessWindow()" in load_funnel
-    assert 'window_type: "business"' in load_funnel
+    # PR-ADS-178B: the leads list is on the Pipeline page. Its funnel is built
+    # by the Pipeline builder on the BUSINESS window; its contact rows are
+    # read from the canonical family with the business window.
+    assert "/api/crm-funnel/contacts?${params.toString()}" in APP_JS
+    contacts = APP_JS.split("async function leadsRenderContacts(")[1].split("\n}")[0]
+    assert "window: getRoasBusinessWindow()" in contacts
+    assert 'window_type: "business"' in contacts
+    svc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "services", "pipeline_service.py"), encoding="utf-8").read()
+    assert 'crm_funnel.build("business", window,' in svc
+    assert "window: window_, scope: _leadsScope" in APP_JS.split("async function loadPipeline(")[1]
     # PR-ADS-165A: the Countries page fetched /api/geo and
     # /api/leads/country-summary and joined them in the browser by country
     # text. The server joins them now (on the canonical country identity), so
@@ -331,13 +338,14 @@ def test_revenue_and_dashboard_keep_business_window_selector():
     # PR-ADS-168B: "revenue-by-source" is deleted (redirects to Channels).
     # PR-ADS-177B: "roas-campaigns" is merged into "campaigns", which is on
     # business windows now.
-    for rp in ("campaigns", "roas-countries", "deals", "dashboard"):
+    # PR-ADS-178B: "deals" is merged into "pipeline" (business windows).
+    for rp in ("campaigns", "roas-countries", "pipeline", "dashboard"):
         assert rp in rev_block
     ev_block = APP_JS[APP_JS.find("const EVIDENCE_PAGES"):
                       APP_JS.find("const EVIDENCE_PAGES") + 300]
     # No revenue/dashboard route leaks into the evidence-page list.
     for rp in ("campaigns", "roas-campaigns", "roas-countries", "revenue-by-source",
-               "dashboard", "deals"):
+               "dashboard", "deals", "pipeline"):
         assert f'"{rp}"' not in ev_block
 
 
@@ -584,7 +592,9 @@ def test_campaign_drawer_no_longer_bounds_on_run_date():
     assert "build_campaign_drawer_evidence" in fn
     repo = open(_os.path.join(root, "db", "revenue_repository.py"), encoding="utf-8").read()
     detail = repo[repo.find("def fetch_campaign_lead_detail("):
-                  repo.find("def fetch_sql_lead_details(")]
+                  # PR-ADS-178B: fetch_sql_lead_details (the next function)
+                  # is deleted; the one after it bounds the same body.
+                  repo.find("def fetch_won_revenue(")]
     assert "contact_created_at >=" in detail and "run_date >=" not in detail
 
 

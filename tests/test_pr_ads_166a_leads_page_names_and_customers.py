@@ -122,11 +122,12 @@ def _js_definition(source: str, name: str) -> str:
     fn = re.search(rf"^(?:async )?function {re.escape(name)}\(", source, re.M)
     if fn:
         return _js_block(source, source[fn.start():fn.end()])
-    const = re.search(rf"^const {re.escape(name)} =\s*(.)", source, re.M)
+    const = re.search(rf"^(const|let) {re.escape(name)} =\s*(.)", source, re.M)
     assert const, f"app.js defines no top-level {name}"
-    if const.group(1) in "{[":
-        return _js_block(source, f"const {name} =")
-    return re.search(rf"^const {re.escape(name)} =[\s\S]*?[\"\d\]];", source,
+    kw = const.group(1)
+    if const.group(2) in "{[":
+        return _js_block(source, f"{kw} {name} =")
+    return re.search(rf"^{kw} {re.escape(name)} =[\s\S]*?[\"\d\]le];", source,
                      re.M).group(0)
 
 
@@ -175,10 +176,64 @@ def _text(markup: str) -> str:
 
 
 def _figure(markup: str, which: str) -> str:
-    """The visible text of ONE of the two figures."""
-    parts = markup.split('<div class="leads-customer-figure" data-leads-figure="')
-    (chunk,) = [p for p in parts[1:] if p.startswith(which + '"')]
-    return _text('<div x="' + chunk)
+    """The visible text of ONE of the two figures (PR-ADS-178B: on the
+    Pipeline page — the funnel's Customer-stage cell, and the Customers card
+    with the Customers won section)."""
+    marker = {"stage_moves": "<!--stage_moves-->",
+              "customers_won": "<!--customers_won-->"}[which]
+    return _text(markup.split(marker)[1].split("<!--end-->")[0])
+
+
+def _pipeline_from(funnel, won):
+    """PR-ADS-178B — the Pipeline builder's payload for one window, shaped
+    from the funnel slice and the customers-won verdicts the builder
+    republishes (``pipeline_service._customers_won``: the list only beside a
+    published count; withheld = no list, with the reason)."""
+    won = won or {}
+
+    def verdict(key):
+        m = won.get(key)
+        if isinstance(m, dict) and m.get("status") in (
+                "published", "withheld", "unavailable", "not_published"):
+            return m
+        return {"value": None, "status": "unavailable",
+                "reason": "closed_won_verdict_missing"}
+    cust, deals = verdict("customers"), verdict("closed_won_deals")
+    if cust["status"] == "published" and "won_customers" in won:
+        cw = {"status": "published", "reason": None, "rows": won["won_customers"]}
+    elif cust["status"] == "published":
+        cw = {"status": "withheld",
+              "reason": won.get("won_customers_omitted") or "closed_won_rows_do_not_match_count"}
+    else:
+        cw = {"status": cust["status"], "reason": cust.get("reason")}
+    return {"window": {"key": WINDOW}, "cohort": None, "funnel": funnel,
+            "kpis": {"customers": cust, "closed_won_deals": deals},
+            "customers_won": cw}
+
+
+def _figures_calls(funnel, won, key="p"):
+    """The renderers that draw the two figures on the Pipeline page."""
+    payload = _pipeline_from(funnel, won)
+    return {f"{key}__moves": ["pipelineFunnelHtml", [payload]],
+            f"{key}__cards": ["pipelineKpiCardsHtml", [payload, None]],
+            f"{key}__list": ["pipelineCustomersWonHtml", [payload]]}
+
+
+def _figures_markup(out: dict, key="p") -> str:
+    """One markup holding the two figures, each between markers: the funnel's
+    Customer-stage cell, and the Customers card + the Customers won section."""
+    moves = out[f"{key}__moves"]
+    cell = moves[moves.index('data-funnel-event="customer"'):]
+    cell = cell[:cell.index("</button>")]
+    cards = out[f"{key}__cards"]
+    card = cards[cards.index('data-kpi="customers"'):]
+    card = card[:card.index('data-kpi="revenue"')]
+    return ("<!--stage_moves--><x " + cell + "<!--end-->"
+            "<!--customers_won--><x " + card + out[f"{key}__list"] + "<!--end-->")
+
+
+def _figures(funnel, won, *, role=None) -> str:
+    return _figures_markup(_node(_figures_calls(funnel, won), role=role))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -187,11 +242,13 @@ def _figure(markup: str, which: str) -> str:
 def test_01_the_customer_stage_is_named_as_a_stage_move_on_the_strip_tab_and_table():
     stages = {s["event"]: s for s in _node({})["__stages"]}
     assert stages["customer"]["label"] == "Moved to Customer stage in HubSpot"
-    assert stages["customer"]["tab"] == "Moved to Customer stage"
+    # PR-ADS-178B: the stages are the Pipeline funnel's (no tabs); each also
+    # names its stage for the list header ("Customer").
+    assert stages["customer"]["stage"] == "Customer"
     # No funnel stage is called plain "Customers" any more, on any surface.
     for s in stages.values():
         assert s["label"].strip().lower() != "customers", s
-        assert s["tab"].strip().lower() != "customers", s
+        assert s["stage"].strip().lower() != "customers", s
         assert "lifecycle customers" not in s["label"].lower()
 
 
@@ -205,17 +262,22 @@ def test_02_the_production_quarter_shows_219_stage_moves_and_customers_won_separ
     assert won["closed_won_deals"] == {"value": WON_DEALS,
                                        "status": "published", "reason": None}
 
-    markup = _node({"page": ["leadsCustomerFiguresHtml",
-                             [_funnel_payload(), won]]})["page"]
+    # PR-ADS-178B: on the Pipeline page — the funnel's Customer-stage cell,
+    # and the Customers card beside the Customers won list.
+    markup = _figures(_funnel_payload(), won)
     moves, customers = _figure(markup, "stage_moves"), _figure(markup, "customers_won")
     assert moves == (
+        # PR-ADS-178B-F1 m4: the stage's date-property sub-label is gone from the
+        # visible text (a title attribute when the payload names one; nothing
+        # when it does not — the old "—" was that empty label).
         "Moved to Customer stage in HubSpot 219 Counts contacts whose HubSpot "
         "lifecycle stage changed to Customer in this period, including old "
         "contacts updated by the team. It is not new customers.")
     assert customers.startswith(
-        "Customers won 7 Distinct companies with a closed-won deal closed in "
-        "this period. Closed-won deals in this period: 8 Show the 7 customers "
-        "won Customer Closed-won deals Latest close date ")
+        "Customers 7 Distinct HubSpot companies · never summed HubSpot companies "
+        "on closed-won deals Customers won Distinct companies with a closed-won "
+        "deal closed in this period. Not the same as contacts moved to the "
+        "Customer stage. Customer Closed-won deals Latest close date ")
     # Neither figure carries the other's number.
     assert "219" not in customers and "7" not in re.sub(r"\D219\D", " ", moves)
 
@@ -268,15 +330,17 @@ def test_05_withheld_customers_render_the_word_and_the_reason_never_a_number(mon
     assert won["closed_won_deals"] == {"value": WON_DEALS,
                                        "status": "published", "reason": None}
 
-    markup = _node({"page": ["leadsCustomerFiguresHtml",
-                             [_funnel_payload(), won]]})["page"]
+    markup = _figures(_funnel_payload(), won)
     customers = _figure(markup, "customers_won")
+    # PR-ADS-178B: the Customers card and the Customers won section.
     assert customers == (
-        "Customers won Withheld a won deal has no company, or several "
-        "Distinct companies with a closed-won deal closed in this period. "
-        "Closed-won deals in this period: 8")
-    value_cell = _text(markup.split('data-leads-figure="customers_won"')[1]
-                       .split("leads-customer-figure__help")[0])
+        "Customers Withheld a won deal has no company, or several Distinct "
+        "HubSpot companies · never summed HubSpot companies on closed-won deals "
+        "Customers won Distinct companies with a closed-won deal closed in this "
+        "period. Not the same as contacts moved to the Customer stage. Withheld "
+        "a won deal has no company, or several — no list of customers is shown.")
+    value_cell = _text(markup.split('class="dash-kpi-card__value">')[1]
+                       .split("dash-kpi-card__sub")[0])
     assert not re.search(r"\d", value_cell), value_cell
     assert "—" not in value_cell
     # The stage-move figure is untouched by the withholding.
@@ -309,13 +373,13 @@ def test_06_an_unreadable_or_stale_ledger_is_unavailable_with_its_reason(monkeyp
     assert no_companies["customers"]["reason"] == cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE
     assert no_companies["closed_won_deals"]["value"] == WON_DEALS
 
-    out = _node({"u": ["leadsCustomerFiguresHtml", [_funnel_payload(), unreadable]],
-                 "s": ["leadsCustomerFiguresHtml", [_funnel_payload(), stale]]})
-    out.pop("__stages")
+    out = _node({**_figures_calls(_funnel_payload(), unreadable, "u"),
+                 **_figures_calls(_funnel_payload(), stale, "s")})
+    out = {k: _figures_markup(out, k) for k in ("u", "s")}
     assert _figure(out["u"], "customers_won").startswith(
-        "Customers won Unavailable the deal ledger could not be read ")
+        "Customers Unavailable the deal ledger could not be read ")
     assert _figure(out["s"], "customers_won").startswith(
-        "Customers won Unavailable the deal sync is overdue")
+        "Customers Unavailable the deal sync is overdue")
     for markup in out.values():
         assert not re.search(r"\d", _figure(markup, "customers_won"))
 
@@ -341,11 +405,15 @@ def test_07_a_scope_or_source_filter_gets_no_customers_won_figure_and_no_ledger_
             assert out[key]["reason"] == svc.REASON_FILTER_NOT_APPLICABLE
         assert out["metric_family"] == "closed_won_customers"
 
-    markup = _node({"p": ["leadsCustomerFiguresHtml",
-                          [_funnel_payload(count=206), out]]})["p"]
-    assert _figure(markup, "customers_won").startswith(
-        "Customers won Unavailable customers won is not split by contact "
-        "source — clear the Scope and Source filters ")
+    # The 166A route still answers this reason, and the Customers won renderer
+    # says it in words. (PR-ADS-178B-F1 m1: the Pipeline builder no longer
+    # sends it — under a lead filter its list is the same all-source won
+    # population; the Customers card is never blanked either way.)
+    markup = _figures(_funnel_payload(count=206), out)
+    assert ("Customers won Distinct companies with a closed-won deal closed in "
+            "this period. Not the same as contacts moved to the Customer stage. "
+            "Unavailable customers won is not split by contact source — clear "
+            "the Scope and Source filters") in _figure(markup, "customers_won")
 
 
 def test_08_a_window_the_reader_contract_cannot_express_is_refused_not_approximated(monkeypatch):
@@ -394,52 +462,53 @@ def test_09_a_reader_that_sends_no_usable_verdict_fails_closed(monkeypatch):
 
 
 def test_10_the_page_never_falls_back_to_the_stage_moves_when_customers_won_is_missing():
+    """PR-ADS-178B: the Pipeline page reads ONE response, so the old
+    cross-response cases (no customers-won payload, another metric family,
+    another window) cannot arise; what remains is the page's own fall-backs:
+    no verdict, a published zero, an unknown stage-move count."""
     published = {"metric_family": "closed_won_customers",
                  "requested": {"window_key": WINDOW},
                  "customers": {"value": 7, "status": "published", "reason": None},
                  "closed_won_deals": {"value": 8, "status": "published", "reason": None}}
-    out = _node({
-        "no_payload": ["leadsCustomerFiguresHtml", [_funnel_payload(), None]],
-        "wrong_family": ["leadsCustomerFiguresHtml", [_funnel_payload(), {
-            **published, "metric_family": "lifecycle_stage_events"}]],
-        "other_window": ["leadsCustomerFiguresHtml", [
-            _funnel_payload(window_key="current_quarter"), published]],
-        "no_verdict": ["leadsCustomerFiguresHtml", [_funnel_payload(), {
+    raw = _node({
+        **_figures_calls(_funnel_payload(), {
             "metric_family": "closed_won_customers",
-            "requested": {"window_key": WINDOW}, "customers": {"value": 7}}]],
-        "zero": ["leadsCustomerFiguresHtml", [_funnel_payload(count=0), {
+            "requested": {"window_key": WINDOW}, "customers": {"value": 7}}, "no_verdict"),
+        **_figures_calls(_funnel_payload(), None, "no_payload"),
+        **_figures_calls(_funnel_payload(count=0), {
             **published,
             "customers": {"value": 0, "status": "published", "reason": None},
-            "closed_won_deals": {"value": 0, "status": "published", "reason": None}}]],
-        "moves_unknown": ["leadsCustomerFiguresHtml", [
-            {"available": False, "window": {"window_key": WINDOW}}, published]],
+            "closed_won_deals": {"value": 0, "status": "published", "reason": None},
+            "won_customers": []}, "zero"),
+        **_figures_calls({"available": False, "window": {"window_key": WINDOW}},
+                         published, "moves_unknown"),
     })
-    for key in ("no_payload", "wrong_family", "other_window", "no_verdict"):
+    out = {k: _figures_markup(raw, k) for k in ("no_verdict", "no_payload", "zero",
+                                                 "moves_unknown")}
+    for key in ("no_verdict", "no_payload"):
         customers = _figure(out[key], "customers_won")
-        assert customers.startswith("Customers won Unavailable "), (key, customers)
+        assert customers.startswith("Customers Unavailable "), (key, customers)
         assert not re.search(r"\d", customers), (key, customers)
         assert "219" in _figure(out[key], "stage_moves")
-    assert "could not be loaded" in _figure(out["no_payload"], "customers_won")
-    assert "answered a different period" in _figure(out["other_window"], "customers_won")
     # A published zero is "0" on both sides, not a word and not a dash.
     assert _figure(out["zero"], "stage_moves").startswith(
         "Moved to Customer stage in HubSpot 0 ")
-    assert _figure(out["zero"], "customers_won").startswith("Customers won 0 ")
-    assert _figure(out["zero"], "customers_won").endswith("in this period: 0")
-    assert "<details" not in out["zero"]            # nothing to list
+    assert _figure(out["zero"], "customers_won").startswith("Customers 0 ")
+    assert "No customer was won in this period." in _figure(out["zero"], "customers_won")
+    assert "<table" not in out["zero"]            # nothing to list
     # An unknown stage-move count is a word; customers won is unaffected.
     assert _figure(out["moves_unknown"], "stage_moves").startswith(
         "Moved to Customer stage in HubSpot Unavailable ")
-    assert _figure(out["moves_unknown"], "customers_won").startswith("Customers won 7 ")
+    assert _figure(out["moves_unknown"], "customers_won").startswith("Customers 7 ")
 
 
 def test_11_only_an_admin_gets_the_view_blockers_link_from_the_leads_figure(monkeypatch):
     _ledger(monkeypatch, companies={"d3": []})
     won = _won()
     assert won["customers"]["reason"] == cwt.R_CUSTOMER_IDENTITY   # a CRM finding
-    args = ["leadsCustomerFiguresHtml", [_funnel_payload(), won]]
-    viewer = _node({"p": args}, role="viewer")["p"]
-    admin = _node({"p": args}, role="admin")["p"]
+    # PR-ADS-178B: the Pipeline page's Customers card and section.
+    viewer = _figures(_funnel_payload(), won, role="viewer")
+    admin = _figures(_funnel_payload(), won, role="admin")
     assert "View blockers" not in viewer
     assert "View blockers" in admin
     assert "cte_window=business%2Flast_quarter" in admin
@@ -576,8 +645,8 @@ def test_16_the_row_renders_name_not_recorded_never_blank_a_dash_or_the_company(
     assert out["heading_unnamed"] == "Acme Freight"
     assert out["heading_nothing"] == "Name not recorded"
 
-    table = APP_JS.split("async function leadsRenderContacts(")[1].split(
-        "\nfunction sourceGroupLabel")[0]
+    # PR-ADS-178B: the function's own body (sourceGroupLabel precedes it now).
+    table = APP_JS.split("async function leadsRenderContacts(")[1].split("\n}\n")[0]
     assert "<td>${leadsContactNameHtml(r)}</td>" in table
     assert "<td>${leadsCompanyHtml(r)}</td>" in table
     assert ">Contact${" in table and ">Company</th>" in table
@@ -768,10 +837,10 @@ def test_23_the_production_quarter_over_the_real_funnel_219_moves_beside_8_won_d
     assert won["customers"]["value"] == WON_COMPANIES
     assert won["closed_won_deals"]["value"] == WON_DEALS
 
-    markup = _node({"p": ["leadsCustomerFiguresHtml", [payload, won]]})["p"]
+    markup = _figures(payload, won)
     assert _figure(markup, "stage_moves").startswith(
         "Moved to Customer stage in HubSpot 219 ")
-    assert _figure(markup, "customers_won").startswith("Customers won 7 ")
+    assert _figure(markup, "customers_won").startswith("Customers 7 ")
 
     # The page of contacts behind the stage-move count is those 219, named.
     page = _contacts_page(page_size=100)
@@ -851,8 +920,8 @@ def test_17_not_loaded_and_not_recorded_are_two_claims_and_the_header_says_how_f
                             "unavailable.")
     assert _text(out["header"]) == out["progress"]
     assert out["header_done"] == ""
-    table = APP_JS.split("async function leadsRenderContacts(")[1].split(
-        "\nfunction sourceGroupLabel")[0]
+    # PR-ADS-178B: the function's own body (sourceGroupLabel precedes it now).
+    table = APP_JS.split("async function leadsRenderContacts(")[1].split("\n}\n")[0]
     assert ">Contact${leadsNamesNoteHtml(payload.names_progress)}</th>" in table
 
 
@@ -882,46 +951,43 @@ def test_18_the_won_customers_list_is_shown_only_for_a_published_count_that_it_m
     published = {"value": 3, "status": "published", "reason": None}
     withheld = {"value": None, "status": "withheld",
                 "reason": cwt.R_CUSTOMER_IDENTITY}
-    out = _node({
-        "published": ["leadsCustomerFiguresHtml",
-                      [_funnel_payload(), _won_payload(published, _WON_LIST)]],
+    cases = {
+        "published": _won_payload(published, _WON_LIST),
         # A withheld count that (wrongly) still carried a list: nothing shown.
-        "withheld": ["leadsCustomerFiguresHtml",
-                     [_funnel_payload(), _won_payload(withheld, _WON_LIST)]],
-        "withheld_no_list": ["leadsCustomerFiguresHtml",
-                             [_funnel_payload(), _won_payload(withheld)]],
+        "withheld": _won_payload(withheld, _WON_LIST),
+        "withheld_no_list": _won_payload(withheld),
         # A list that disagrees with its own headline is not shown beside it.
-        "mismatch": ["leadsCustomerFiguresHtml",
-                     [_funnel_payload(), _won_payload(published, _WON_LIST[:2])]],
-        "no_list": ["leadsCustomerFiguresHtml",
-                    [_funnel_payload(), _won_payload(published)]],
-    })
-    out.pop("__stages")
+        "mismatch": _won_payload(published, _WON_LIST[:2]),
+        "no_list": _won_payload(published),
+    }
+    raw = _node({k: v for key, won in cases.items()
+                 for k, v in _figures_calls(_funnel_payload(), won, key).items()})
+    out = {key: _figures_markup(raw, key) for key in cases}
     shown = _figure(out["published"], "customers_won")
+    # PR-ADS-178B: the Customers card, then the Customers won section's list.
     assert shown == (
-        "Customers won 3 Distinct companies with a closed-won deal closed in "
-        "this period. Closed-won deals in this period: 4 "
-        "Show the 3 customers won Customer Closed-won deals Latest close date "
+        "Customers 3 Distinct HubSpot companies · never summed HubSpot companies "
+        "on closed-won deals Customers won Distinct companies with a closed-won "
+        "deal closed in this period. Not the same as contacts moved to the "
+        "Customer stage. Customer Closed-won deals Latest close date "
         "Shared <Logistics> 2 2026-08-11 "
         "Company has no name in HubSpot 1 2026-08-12 "
         "Company name not loaded yet 1 Unavailable")
     assert "<Logistics>" not in out["published"]                 # escaped
-    assert "<details" in out["published"]
-    line = "The list of customers could not be built for this period."
+    assert "<table" in out["published"]
     for key in ("withheld", "withheld_no_list", "mismatch", "no_list"):
-        assert "<details" not in out[key], key
+        assert "<table" not in out[key], key
         assert "Shared" not in out[key], key
         assert "Company name not loaded yet" not in out[key], key
-    # A published count with no list that matches it says so, in one line
-    # (review). A withheld count has no list to explain.
+    # A published count with no list that matches it says so (the list's own
+    # verdict: the rows do not match the published count).
     for key in ("mismatch", "no_list"):
         assert _figure(out[key], "customers_won").endswith(
-            "Closed-won deals in this period: 4 " + line), key
-    for key in ("withheld", "withheld_no_list", "published"):
-        assert line not in out[key], key
+            "Withheld the deal rows received do not match the published count "
+            "— no list of customers is shown."), key
     assert _figure(out["withheld"], "customers_won").startswith(
-        "Customers won Withheld a won deal has no company, or several ")
-    assert _figure(out["mismatch"], "customers_won").startswith("Customers won 3 ")
+        "Customers Withheld a won deal has no company, or several ")
+    assert _figure(out["mismatch"], "customers_won").startswith("Customers 3 ")
 
 
 def test_19_a_name_step_that_is_partial_stays_partial_on_the_run(monkeypatch):
@@ -1354,9 +1420,10 @@ def test_27_the_customers_won_payload_lists_the_won_customers_only_when_they_are
     # Newest close first.
     assert [r["company_id"] for r in listed][0] == "co-d7"
 
-    markup = _node({"p": ["leadsCustomerFiguresHtml", [_funnel_payload(), won]]})["p"]
+    markup = _figures(_funnel_payload(), won)
     text = _figure(markup, "customers_won")
-    assert "Show the 7 customers won" in text
+    # PR-ADS-178B: the Pipeline page's Customers won table (no fold).
+    assert text.startswith("Customers 7 ") and markup.count("<tr>") == 1 + 7
     assert "Shared Logistics 2 2026-08-11" in text
     assert "Company has no name in HubSpot 1 2026-08-12" in text
     assert text.count("Company name not loaded yet") == 4
@@ -1369,9 +1436,8 @@ def test_27_the_customers_won_payload_lists_the_won_customers_only_when_they_are
     assert "won_customers" not in withheld
     assert "Shared Logistics" not in json.dumps(withheld, default=str)
     assert "co-shared" not in json.dumps(withheld, default=str)
-    markup = _node({"p": ["leadsCustomerFiguresHtml",
-                          [_funnel_payload(), withheld]]})["p"]
-    assert "<details" not in markup and "Shared Logistics" not in markup
+    markup = _figures(_funnel_payload(), withheld)
+    assert "<table" not in markup and "Shared Logistics" not in markup
 
     # Withheld with every deal still resolving to one company (the last full
     # association scan is five days old). The list COULD be built — and is not.
@@ -1408,11 +1474,14 @@ def test_28_a_list_that_cannot_be_reconciled_with_the_published_count_is_left_ou
     assert out["customers"]["value"] == WON_COMPANIES
     assert "won_customers" not in out
     assert out["won_customers_omitted"] == "closed_won_rows_do_not_match_count"
-    markup = _node({"p": ["leadsCustomerFiguresHtml", [_funnel_payload(), out]]})["p"]
-    assert _figure(markup, "customers_won") == (
-        "Customers won 7 Distinct companies with a closed-won deal closed in "
-        "this period. Closed-won deals in this period: 8 "
-        "The list of customers could not be built for this period.")
+    markup = _figures(_funnel_payload(), out)
+    # PR-ADS-178B: the Customers card keeps its published 7; the section
+    # says why there is no list (the rows do not match the count).
+    assert _figure(markup, "customers_won").startswith("Customers 7 ")
+    assert _figure(markup, "customers_won").endswith(
+        "Withheld the deal rows received do not match the published count "
+        "— no list of customers is shown.")
+    assert "<table" not in markup
 
     # With no database the names are "unavailable" — never "not loaded".
     monkeypatch.setattr(crs, "load_won_deals", real)
@@ -1421,7 +1490,7 @@ def test_28_a_list_that_cannot_be_reconciled_with_the_published_count_is_left_ou
                         lambda ids: {"available": False, "names": {}})
     out = funnel.build_customers_won("business", WINDOW, now=NOW)
     assert {r["company_name_status"] for r in out["won_customers"]} == {"unavailable"}
-    markup = _node({"p": ["leadsCustomerFiguresHtml", [_funnel_payload(), out]]})["p"]
+    markup = _figures(_funnel_payload(), out)
     assert _figure(markup, "customers_won").count("Company name unavailable") == 7
 
 
@@ -1737,11 +1806,13 @@ def test_31_the_leads_customers_won_block_is_a_registered_parity_consumer_of_the
                    {"sync_state": fresh_sync_state(NOW, hours_ago=120)}):
         _ledger(monkeypatch, **kwargs)
         won = _won()
+        # PR-ADS-178B: Dashboard → Deals publishes {value, status, reason}
+        # (the Pipeline builder's KPIs).
         kpis = deals_page.build_dashboard_deals(WINDOW, now=NOW)["kpis"]
-        assert won["customers"]["value"] == kpis["closed_won_customers"], kwargs
-        assert won["customers"]["status"] == kpis["closed_won_customers_status"], kwargs
-        assert won["customers"]["reason"] == kpis["closed_won_customers_reason"], kwargs
-        assert won["closed_won_deals"]["value"] == kpis["closed_won_deals"], kwargs
+        assert won["customers"]["value"] == kpis["customers"]["value"], kwargs
+        assert won["customers"]["status"] == kpis["customers"]["status"], kwargs
+        assert won["customers"]["reason"] == kpis["customers"]["reason"], kwargs
+        assert won["closed_won_deals"]["value"] == kpis["closed_won_deals"]["value"], kwargs
     _ledger(monkeypatch)
     won = _won()
     assert (won["customers"]["value"], won["closed_won_deals"]["value"]) == (

@@ -453,19 +453,38 @@ CONSUMERS: list[dict] = [
        migration_notes="revenue_per_sql is an inverse-CPQL family metric on the legacy denominator.",
        truth_status="rates None on None/0 denominator",
        headline=True, row=True, executive=True),
-    _c("Dashboard Deals", "kpis.sqls, lead_status_qualified_no_won_deal backlog (out of the funnel), source breakdown status.",
+    # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder. The
+    # legacy lead-status backlog (fetch_sql_lead_details), the source
+    # breakdown's lead-status column and the campaign breakdown are deleted;
+    # its one SQL figure is the acquisition cohort, read from build_pipeline.
+    _c("Dashboard Deals", "kpis.sqls (the Pipeline builder's acquisition-cohort KPI) and its period delta.",
        endpoint="GET /api/dashboard/deals",
-       service_function="services.dashboard_deals_service._build_kpis / _build_sql_no_deal / _source_status",
-       repository_source="revenue_decision_mart summary + db.revenue_repository.fetch_sql_lead_details",
-       source_table=LEGACY_TABLE + " (backlog, source groups) | " + LIFECYCLE_TABLE + " (kpis.sqls, campaign breakdown)",
-       sql_definition="kpis.sqls / campaign breakdown: the acquisition cohort (PR-ADS-177A); "
-                      "backlog: WHERE d.status_category = 'qualified', labelled 'Qualified (lead status)'",
-       date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=BUSINESS,
-       scope="google_ads_cohort | source group (legacy)", classification=CLS_MIXED,
-       code_location="services/dashboard_deals_service.py:_build_sql_no_deal",
-       migration_notes="Per-contact SQL rows (contact id + company) in the drawer.",
-       truth_status="lead_status_qualified_no_won_deal None when unavailable",
-       headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
+       service_function="services.dashboard_deals_service.build_dashboard_deals / _build_period_change",
+       repository_source="services.pipeline_service.build_pipeline (revenue_decision_mart summary.metrics.sqls)",
+       source_table=LIFECYCLE_TABLE,
+       sql_definition=COHORT_DEF, date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
+       windows=BUSINESS, scope="google_ads_cohort", classification=CLS_CANONICAL,
+       code_location="services/dashboard_deals_service.py:build_dashboard_deals",
+       migration_notes="PR-ADS-178B: no figure of its own; the delta is the same builder over the previous window.",
+       truth_status="kpis.sqls {value: None, status, reason} unless the cohort is published",
+       headline=True, executive=True),
+    # PR-ADS-178B: the one Pipeline page (leads and deals). Two SQL ideas,
+    # never one word: the KPI is the acquisition cohort; the funnel is the
+    # canonical lifecycle stage-ENTRY count ("Entered stage in window").
+    _c("Pipeline page", "kpis.sqls (acquisition cohort) beside the lifecycle funnel's stage-entry counts.",
+       endpoint="GET /api/pipeline",
+       service_function="services.pipeline_service.build_pipeline / _metric_truth",
+       repository_source="revenue_decision_mart summary.metrics.sqls + canonical_crm_funnel_service.build",
+       source_table=LIFECYCLE_TABLE,
+       sql_definition="kpis.sqls: " + COHORT_DEF + "; funnel: " + LIFECYCLE_DEF,
+       date_field=COHORT_DATE + " | " + LIFECYCLE_DATE, dedup_key=COHORT_DEDUP,
+       windows=BUSINESS, scope="google_ads_cohort | all_source lifecycle events",
+       classification=CLS_CANONICAL,
+       code_location="services/pipeline_service.py:build_pipeline",
+       migration_notes="Replaces the Leads page (/api/crm-funnel) and the Closed-Won Deals page; "
+                       "the funnel is labelled 'Entered stage in window', never 'SQLs'.",
+       truth_status="kpis.sqls withheld (value None) with the cohort's reason; funnel counts None when the store is unavailable",
+       headline=True, row=True, executive=True, operational=True),
 
     # ── Operational ─────────────────────────────────────────────────────────
     _c("Lead Quality API (/api/leads)", "Legacy status buckets on run_date; no frontend caller.",
@@ -696,6 +715,7 @@ _CAMP = "Dashboard Campaigns"
 _CTRY = "Dashboard Countries"
 _REV = "Dashboard Revenue"
 _DEALS = "Dashboard Deals"
+_PIPELINE = "Pipeline page"
 _LEADS_API = "Lead Quality API (/api/leads)"
 _WORKBENCH = "Campaign identity workbench"
 _MAILCHIMP = "Mailchimp attribution audit"
@@ -922,12 +942,17 @@ RULES: list[dict] = [
     _m("rev.module", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV, ["contact_created_at_ref"]),
     _r("rev", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV,
        symbol=["_build_customer_trend", "_build_kpis", "_build_unavailable", "build_dashboard_revenue"]),
-    _m("deals.module", "services/dashboard_deals_service.py", CLS_LEGACY, _DEALS, ["sql_verdict_ref"]),
-    _r("deals", "services/dashboard_deals_service.py", CLS_LEGACY, _DEALS,
-       symbol=["_build_campaign_breakdown", "_build_decision_cards", "_build_funnel", "_build_kpis",
-               "_build_period_change", "_build_source_breakdown", "_build_truth_status",
-               "_build_unavailable", "_source_status", "build_dashboard_deals",
-               "_build_sql_no_deal", "_sql_no_deal_status"]),
+    # PR-ADS-178B: Dashboard → Deals republishes build_pipeline; its module
+    # constant names the KPI keys its period delta reads (`sqls` among them).
+    _m("deals.module", "services/dashboard_deals_service.py", CLS_CANONICAL, _DEALS, ["sqls_field_ref"]),
+    _r("deals", "services/dashboard_deals_service.py", CLS_CANONICAL, _DEALS,
+       symbol=["_build_period_change", "build_dashboard_deals"]),
+    # PR-ADS-178B: the Pipeline builder — the mart's cohort SQL KPI and the
+    # canonical lifecycle funnel, each under its own name.
+    _m("pipeline.module", "services/pipeline_service.py", CLS_CANONICAL, _PIPELINE,
+       ["sqls_field_ref", "lifecycle_funnel_service_ref"]),
+    _r("pipeline", "services/pipeline_service.py", CLS_CANONICAL, _PIPELINE,
+       symbol=["_metric_truth", "build_pipeline", "_funnel"]),
 
     # ── scheduled outputs ───────────────────────────────────────────────────
     # PR-ADS-162H: the report rules (report.core.module, report.core,
@@ -1209,7 +1234,8 @@ RULES: list[dict] = [
     _r("revrepo.source", "db/revenue_repository.py", CLS_LEGACY, _SRC,
        symbol=["fetch_source_leads", "fetch_source_leads_daily"]),
     _r("revrepo.series", "db/revenue_repository.py", CLS_LEGACY, _REV, symbol="fetch_lead_daily_series"),
-    _r("revrepo.sql_details", "db/revenue_repository.py", CLS_LEGACY, _DEALS, symbol="fetch_sql_lead_details"),
+    # PR-ADS-178B: "revrepo.sql_details" (fetch_sql_lead_details) removed with
+    # the Dashboard Deals lead-status backlog it fed.
 
     # ── api/server.py by route function ─────────────────────────────────────
     # PR-ADS-176C: "api.geo" (api_leads_country_summary), "country_evidence.join"
@@ -1336,12 +1362,13 @@ RULES: list[dict] = [
     _r("ui.revenue_tab", "static/app.js", CLS_MIXED, _REV,
        symbol=["renderRevKpiRow", "renderRevConversionStrip", "renderRevTruthFooter",
                "renderRevenueBlockedState", "renderRevenueHealth"]),
-    _r("ui.deals_tab", "static/app.js", CLS_MIXED, _DEALS,
-       symbol=["renderDashboardDeals", "renderDealKpiRow", "renderDealSourcePipeline",
-               "renderDealCampaignPipeline", "renderDealSqlNoDeal", "renderDealTruthFooter",
-               # PR-ADS-177A-F1: the funnel's cohort SQL stage, and the legacy
-               # lead-status backlog out of it.
-               "renderDealFunnel", "renderDealLeadStatusBacklog"]),
+    # PR-ADS-178B: Dashboard → Deals renders the Pipeline page's own
+    # renderers; the KPI cards gate the cohort SQL figure on the response's
+    # cohort (cohortCountHtml). The Deals tab's legacy panels are deleted.
+    _r("ui.deals_tab", "static/app.js", CLS_CANONICAL, _DEALS,
+       symbol=["renderDashboardDeals"]),
+    _r("ui.pipeline", "static/app.js", CLS_CANONICAL, _PIPELINE,
+       symbol=["pipelineKpiCardsHtml", "pipelineFunnelHtml"]),
     _r("ui.mart", "static/app.js", CLS_CANONICAL, _MART,
        symbol=["renderMartSummaryStrip", "getBusinessVerdictBadge"]),
     # PR-ADS-177A: the one SQL-count gate for every mart / Dashboard leads and
@@ -1539,12 +1566,8 @@ DECISION_SURFACES: list[dict] = [
      "date_field": COHORT_DATE,
      "kind": "verdict", "gated": "'SQLs withheld' under a withheld cohort (PR-ADS-177A)",
      "evidence_kind": "row evidence"},
-    {"surface": "Dashboard Deals _source_status",
-     "code_location": "services/dashboard_deals_service.py:_source_status",
-     "sql_definition": LEGACY_DEF + " (source groups) | " + COHORT_DEF + " (campaign rows)",
-     "scope": "source group | campaign", "date_field": LEGACY_DATE,
-     "kind": "verdict", "gated": "'SQLs withheld' when a row's count is None (PR-ADS-177A)",
-     "evidence_kind": "row evidence"},
+    # PR-ADS-178B: "Dashboard Deals _source_status" removed — Dashboard →
+    # Deals republishes the Pipeline builder and judges no row on SQLs.
     {"surface": "Revenue attribution classify_verdict (watch/waste)",
      "code_location": "services/revenue_attribution_service.py:classify_verdict",
      "sql_definition": COHORT_DEF, "scope": "google_ads_cohort (campaign / country row)",
