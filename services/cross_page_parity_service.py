@@ -282,6 +282,12 @@ def _classify_unavailable(readings: list, metric_key: str):
 #: rule are evaluated over the SAME days they measured. It certifies no
 #: identity of its own (it is not in METRIC_IDENTITIES).
 CONSUMER_SETTLED_REFERENCE = "revenue_decision_mart/country"
+#: PR-ADS-177B — the SETTLED campaign view (``settled=True``): the Campaigns
+#: page and Dashboard → Campaigns read it (owner decision 2026-11-24, 2).
+#: Dashboard → Campaigns is compared with it over the same settled days, in
+#: the ``*_settled_days`` identities below — never with the campaign view
+#: through today (Overview, Revenue, Deals, Channels keep today).
+CONSUMER_SETTLED_CAMPAIGN_REFERENCE = "revenue_decision_mart/campaign_settled"
 
 #: Identities that partition a whole. Registering the split is not enough — if
 #: the parts do not add back to the total, one of the three is wrong and the
@@ -362,7 +368,6 @@ METRIC_IDENTITIES = {
         "coverage_proof": PROOF_CAMPAIGN_SPEND,
         "consumers": [
             ("dashboard/overview", "kpis.google_ads_spend_usd"),
-            ("dashboard/campaigns", "kpis.verified_spend_usd"),
             ("revenue_decision_mart", "summary.spend_usd"),
         ],
     },
@@ -437,7 +442,6 @@ METRIC_IDENTITIES = {
         "scope": "campaign_attributable_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
-            ("dashboard/campaigns", "kpis.won_revenue_usd"),
             ("revenue_decision_mart", "summary.attributed_won_revenue_usd"),
         ],
     },
@@ -447,7 +451,6 @@ METRIC_IDENTITIES = {
         "scope": "campaign_attributable_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
-            ("dashboard/campaigns", "kpis.closed_won_deals"),
             ("revenue_decision_mart", "summary.attributed_closed_won_deals"),
         ],
     },
@@ -457,7 +460,6 @@ METRIC_IDENTITIES = {
         "scope": "campaign_attributable_revenue",
         "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
-            ("dashboard/campaigns", "kpis.customers"),
             ("revenue_decision_mart", "summary.attributed_customers"),
         ],
     },
@@ -505,7 +507,6 @@ METRIC_IDENTITIES = {
         "consumers": [
             ("dashboard/overview", "kpis.sqls"),
             ("dashboard/revenue", "kpis.sqls"),
-            ("dashboard/campaigns", "kpis.sqls"),
             ("dashboard/deals", "kpis.sqls"),
             ("revenue_decision_mart", "summary.sqls"),
         ],
@@ -562,6 +563,38 @@ METRIC_IDENTITIES = {
         ],
     },
 }
+
+#: PR-ADS-177B — the SETTLED campaign view's identities. Dashboard →
+#: Campaigns reads the campaign view over settled days, so it is one identity
+#: with the settled campaign reference, never with the consumers above whose
+#: window includes today. Each is the same question as its through-today
+#: counterpart (``contract_metric``: the key both consumers file their
+#: provenance under) over the settled days, with its coverage proven by the
+#: settled reference (``proof_consumer``).
+for _key, _base, _path, _ref_path in (
+        # The reference's spend under the settle rule (None until the
+        # morning re-read), never the moving total.
+        ("google_ads_spend_usd", "google_ads_spend_usd", "kpis.verified_spend_usd",
+         "campaign_totals.spend"),
+        ("campaign_attributed_won_revenue_usd", "campaign_attributed_won_revenue_usd",
+         "kpis.won_revenue_usd", "summary.attributed_won_revenue_usd"),
+        ("campaign_attributed_closed_won_deals", "campaign_attributed_closed_won_deals",
+         "kpis.closed_won_deals", "summary.attributed_closed_won_deals"),
+        ("campaign_attributed_customers", "campaign_attributed_customers",
+         "kpis.customers", "summary.attributed_customers"),
+        ("google_ads_cohort_sqls", "google_ads_cohort_sqls", "kpis.sqls",
+         "summary.sqls")):
+    _spec = METRIC_IDENTITIES[_base]
+    METRIC_IDENTITIES[f"{_key}__settled_days"] = {
+        "label": f"{_spec['label']} — settled days (Campaigns)",
+        "canonical_source": _spec["canonical_source"],
+        "scope": _spec["scope"],
+        "coverage_proof": _spec["coverage_proof"],
+        "contract_metric": _base,
+        "proof_consumer": CONSUMER_SETTLED_CAMPAIGN_REFERENCE,
+        "consumers": [("dashboard/campaigns", _path),
+                      (CONSUMER_SETTLED_CAMPAIGN_REFERENCE, _ref_path)],
+    }
 
 #: Lifecycle stages from the canonical HubSpot contact funnel — a DIFFERENT
 #: authority from the mart's lead population above, reached through each stage's
@@ -865,7 +898,8 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
     certify any future identity that forgot to name its evidence.
     """
     proof = spec.get("coverage_proof")
-    mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
+    mart = (consumers.get(spec.get("proof_consumer") or "revenue_decision_mart")
+            or {}).get("payload") or {}
     # PR-ADS-167A: a COUNTRY identity's coverage is proven over the days its
     # consumer measured. When that consumer declares a settled-day window, the
     # proof is the settled reference's (same canonical contract, same days),
@@ -1026,6 +1060,8 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
             window=window, view="campaign", now=now),
         CONSUMER_SETTLED_REFERENCE: lambda: build_revenue_decision_mart(
             window=window, view="country", now=now),
+        CONSUMER_SETTLED_CAMPAIGN_REFERENCE: lambda: build_revenue_decision_mart(
+            window=window, view="campaign", now=now, settled=True),
     }
 
     built: dict = {}
@@ -1150,8 +1186,11 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             entry = consumers.get(consumer_name) or {}
             payload = entry.get("payload")
             value = _dig(payload, path) if payload else None
-            contract = ((payload or {}).get(METRIC_TRUTH_KEY) or {}).get(metric_key)
-            problem = _contract_problem(contract, spec, metric_key,
+            # PR-ADS-177B: a settled-days identity reads the provenance filed
+            # under its through-today counterpart's key (`contract_metric`).
+            contract_key = spec.get("contract_metric") or metric_key
+            contract = ((payload or {}).get(METRIC_TRUTH_KEY) or {}).get(contract_key)
+            problem = _contract_problem(contract, spec, contract_key,
                                         _window_signature(payload or {}, window)[0],
                                         consumer=consumer_name, window=window)
             # PR-ADS-154C-F3 §5: an "unavailable" reading must say WHY, from the
@@ -1470,13 +1509,16 @@ def _cohort_sql_total(rows_total, residual):
 
 def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
     """PR-ADS-177A — the window's Google Ads acquisition-cohort SQLs, read from
-    three surfaces over the SAME settled days, must be one number:
+    every settled-day surface over the SAME settled days, must be one number:
 
     * the Countries page (the mart's country view): listed markets'
       ``country_totals.sqls`` + the residual row's ``sqls``;
     * Dashboard Countries: ``kpis.sqls`` + ``residual.sqls``;
     * Campaign Evidence, built over exactly those days
-      (``build_campaign_evidence(bounds=…)``): ``summary.cohort_sqls_google_ads``.
+      (``build_campaign_evidence(bounds=…)``): ``summary.cohort_sqls_google_ads``;
+    * PR-ADS-177B: the Campaigns page (the settled campaign view): Σ campaign
+      rows' ``sqls`` + ``campaign_residual_row.sqls``; and Dashboard →
+      Campaigns' ``kpis.sqls``.
 
     A surface that withholds is ``not_evaluable`` (a withheld count cannot
     disprove parity), never a pass; any two published values that differ is
@@ -1489,11 +1531,23 @@ def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
     page_residual = ((residual_row or {}).get("sqls") if residual_row is not None
                      else (0 if (page.get("cohort") or {}).get("sql_status") == "published"
                            else None))
+    # PR-ADS-177B: the settled campaign view (the Campaigns page) and
+    # Dashboard → Campaigns measure the same settled days: rows + residual.
+    camp = (consumers.get(CONSUMER_SETTLED_CAMPAIGN_REFERENCE) or {}).get("payload") or {}
+    dcamp = (consumers.get("dashboard/campaigns") or {}).get("payload") or {}
+    camp_published = (camp.get("cohort") or {}).get("sql_status") == "published"
+    camp_rows = [r.get("sqls") for r in camp.get("rows") or []]
+    camp_rows_total = (sum(camp_rows) if camp_published and camp_rows
+                       and all(isinstance(v, int) for v in camp_rows)
+                       else (0 if camp_published and not camp_rows else None))
     readings = {
         "countries_page": _cohort_sql_total(
             (page.get("country_totals") or {}).get("sqls"), page_residual),
         "dashboard_countries": _cohort_sql_total(
             (dash.get("kpis") or {}).get("sqls"), (dash.get("residual") or {}).get("sqls")),
+        "campaigns_page": _cohort_sql_total(
+            camp_rows_total, (camp.get("campaign_residual_row") or {}).get("sqls")),
+        "dashboard_campaigns": (dcamp.get("kpis") or {}).get("sqls"),
         "campaign_evidence": None,
     }
     w = page.get("window") or {}
@@ -1538,8 +1592,10 @@ def _cohort_sql_parity_campaign_view(consumers: dict, window: str, now) -> dict:
     * the Dashboard Overview's SQL headline: ``kpis.google_ads_cohort_sqls``;
     * Campaign Evidence, built over exactly those days.
 
-    The other campaign-view Dashboard pages (Revenue, Campaigns, Deals) are
-    already one identity with the mart (``google_ads_cohort_sqls``)."""
+    The other campaign-view Dashboard pages (Revenue, Deals) are already one
+    identity with the mart (``google_ads_cohort_sqls``). PR-ADS-177B: Dashboard
+    → Campaigns and the Campaigns page read the SETTLED campaign view and are in
+    the settled group above, not here."""
     from datetime import date as _date  # noqa: PLC0415
     mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
     overview = (consumers.get("dashboard/overview") or {}).get("payload") or {}

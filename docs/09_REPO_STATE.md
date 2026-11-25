@@ -7008,3 +7008,52 @@ Owner decision, 25 Nov 2026: cut CI time; this is a small platform.
   PRs merge one at a time onto the base they were tested on, which is the
   practice here (squash with `expectedHeadSha`). If two PRs ever merge back to
   back, re-run CI on the second.
+
+## PR-ADS-177B — one Campaigns page, Meta ad sets beside it
+
+`docs/60`. Depends on PR-ADS-177A (`b1cc9e9`). Unblocks 177C (retire Campaign
+Evidence's endpoint and renderers) and 177D (Keywords & Search Terms).
+
+* **One page.** `campaigns` ("Campaigns") in the Dashboard design: business
+  windows ending yesterday, KPI cards from the mart's `campaign_totals`, the
+  campaign table (Spend, Leads, SQLs, Won Deals, Customers, Won Revenue, Period
+  Revenue / Ad Spend, Status), a "No campaign label" residual row (cohort leads /
+  SQLs only; other cells "Not campaign-attributable"), a drawer that fails
+  closed unless its deal ids equal the row's `deal_ids`, and a truth footer.
+  Strict spend gate as Countries. `#/roas-campaigns` redirects to `campaigns`;
+  the menu item is `[campaigns, keywords, search-terms]`; "Open Campaign Revenue
+  & Spend" links are now "Open Campaigns".
+* **Settled campaign view (option B).** `build_revenue_decision_mart(view=
+  "campaign", settled=True)` / `?settled=true`: settled window, the spend settle
+  rule (`canonical_campaign_spend_block(settled=True)`), ledger and cohort over
+  the same days, rows with `deal_ids`. Read only by the Campaigns page and
+  Dashboard → Campaigns; Overview, Revenue, Deals, Channels and Closed-Won Deals
+  keep through-today. A deal closed today is on Overview / Deals, not on
+  Campaigns, whose range chip says why. First day of a window: the 167A card and
+  `no_settled_day_in_window` on every contract.
+* **Dashboard → Campaigns** reads the settled view. Deleted: `_period_ratio`
+  (rows carry the reader-contract ratio; a zero revenue is a published `0.00x`),
+  `_group_deals_by_campaign` (the drawer's proof is the row's `deal_ids`), the
+  all-source "Unattributed / Needs Review" row, and the keyword-theme panel (it
+  read the non-windowed `keywords` snapshot, which now has no in-product reader).
+* **Meta ad sets.** `GET /api/meta-ads/adsets` →
+  `services/meta_ads_adset_table_service.py` over the 171C truth service: ad-set
+  rows by id, own totals (never summed with Google), HubSpot outcomes
+  "Not linked yet", per-account time zones and the settle rule, withheld (rows
+  empty, totals null) with the reason. Registered in the reader-cutover audit
+  (`META_ADSET_PAGES`, JS gate `metaAdsetTableGate`) and the SQL-doctrine
+  inventory.
+* **Parity / audits.** The Campaigns page and Dashboard → Campaigns join the
+  settled `cohort_sql_parity` group; five `*__settled_days` identities compare
+  Dashboard → Campaigns with `revenue_decision_mart/campaign_settled`. The
+  cohort audit scans `campaign_totals` / `campaign_residual_row` and checks the
+  residual's conservation.
+* **Tests.** `tests/test_pr_ads_177b_campaigns_one_page.py` (14),
+  `tests/test_pr_ads_177b_settled_campaign_view.py` (6),
+  `tests/test_pr_ads_177b_campaigns_pg_integration.py` (5, PG),
+  `tests/test_pr_ads_177b_meta_adsets_pg_integration.py` (7, PG) — both PG
+  modules are in the CI PostgreSQL step and its did-run list. Existing-test
+  changes, each with its reason: `docs/60` §7.2.
+* **Not done.** CLAUDE.md's "dashboard rows return None, not 0, for zero
+  revenue" sentence no longer holds for Dashboard → Campaigns (`docs/60` §8);
+  CLAUDE.md is not edited here.

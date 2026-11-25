@@ -232,9 +232,11 @@ def test_evidence_pages_list_and_helper():
     # must not leave a second window implementation behind (§21).
     # PR-ADS-176B: "geo" left with the Countries evidence page; the one
     # Countries page (roas-countries) is on business windows (owner decision).
-    for route in ("campaigns", "search-terms", "ngrams", "keywords"):
+    # PR-ADS-177B: "campaigns" is the one Campaigns page, on business windows
+    # (owner decision 2026-11-24, 2).
+    for route in ("search-terms", "ngrams", "keywords"):
         assert f'"{route}"' in block, f"EVIDENCE_PAGES missing {route}"
-    for retired in ("leads", "opportunities", "waste", "geo", "roas-countries"):
+    for retired in ("leads", "opportunities", "waste", "geo", "roas-countries", "campaigns"):
         assert f'"{retired}"' not in block, (
             f"EVIDENCE_PAGES must not contain the retired route {retired}")
     assert "function isEvidencePage(" in APP_JS
@@ -327,12 +329,15 @@ def test_revenue_and_dashboard_keep_business_window_selector():
     rev_block = APP_JS[APP_JS.find("const REVENUE_PAGES"):
                        APP_JS.find("const REVENUE_PAGES") + 200]
     # PR-ADS-168B: "revenue-by-source" is deleted (redirects to Channels).
-    for rp in ("roas-campaigns", "roas-countries", "deals", "dashboard"):
+    # PR-ADS-177B: "roas-campaigns" is merged into "campaigns", which is on
+    # business windows now.
+    for rp in ("campaigns", "roas-countries", "deals", "dashboard"):
         assert rp in rev_block
     ev_block = APP_JS[APP_JS.find("const EVIDENCE_PAGES"):
                       APP_JS.find("const EVIDENCE_PAGES") + 300]
     # No revenue/dashboard route leaks into the evidence-page list.
-    for rp in ("roas-campaigns", "roas-countries", "revenue-by-source", "dashboard", "deals"):
+    for rp in ("campaigns", "roas-campaigns", "roas-countries", "revenue-by-source",
+               "dashboard", "deals"):
         assert f'"{rp}"' not in ev_block
 
 

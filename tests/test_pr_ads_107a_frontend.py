@@ -46,7 +46,7 @@ def _section(page_id):
 
 
 def test_campaign_dropdown_has_business_labels():
-    select = _select("roas-campaigns-window")
+    select = _select("campaigns-window")
     for label in BUSINESS_LABELS:
         assert label in select, f"Missing business window label: {label}"
     for key in BUSINESS_KEYS:
@@ -62,7 +62,7 @@ def test_country_dropdown_has_business_labels():
 
 
 def test_campaign_dropdown_has_no_ad_windows():
-    select = _select("roas-campaigns-window")
+    select = _select("campaigns-window")
     for value in AD_WINDOW_OPTION_VALUES:
         assert value not in select, f"Old ad window still present on ROAS campaign page: {value}"
 
@@ -74,7 +74,7 @@ def test_country_dropdown_has_no_ad_windows():
 
 
 def test_default_selected_window_is_current_quarter():
-    for select_id in ("roas-campaigns-window", "roas-countries-window"):
+    for select_id in ("campaigns-window", "roas-countries-window"):
         select = _select(select_id)
         match = re.search(r'<option value="([^"]+)"[^>]*selected', select)
         assert match, f"No default selected option in {select_id}"
@@ -87,11 +87,15 @@ def test_default_selected_window_is_current_quarter():
 def test_roas_loaders_use_revenue_attribution_endpoint():
     # PR-ADS-126: the ROAS loaders read the canonical mart as PRIMARY truth via
     # fetchRevenuePerformance(view, window) — never the legacy page endpoints.
-    for fn, view in (("loadRoasCampaigns", "campaign"), ("loadRoasCountries", "country")):
+    # PR-ADS-177B: the one Campaigns page reads the mart's SETTLED campaign
+    # view (owner decision 2026-11-24, 2); still the mart, never a legacy
+    # page endpoint.
+    for fn, needle in (("loadCampaignsPage", "/api/revenue-performance?view=campaign&settled=true"),
+                       ("loadRoasCountries", 'fetchRevenuePerformance("country"')):
         idx = JS.find(f"function {fn}")
         assert idx != -1, f"{fn} not found"
-        body = JS[idx:idx + 900]
-        assert f'fetchRevenuePerformance("{view}"' in body, f"{fn} must read the mart"
+        body = JS[idx:idx + 1400]
+        assert needle in body, f"{fn} must read the mart"
         assert "/api/revenue-attribution?" not in body
         assert "/api/reports/roas/campaigns" not in body
         assert "/api/reports/roas/countries" not in body
@@ -108,7 +112,7 @@ def test_business_window_config_present():
 
 
 def test_no_windsor_in_roas_campaign_section():
-    section = _section("page-roas-campaigns")
+    section = _section("page-campaigns")
     assert "windsor" not in section.lower(), "Windsor wording must be removed from ROAS campaign page"
 
 
@@ -129,14 +133,16 @@ def test_no_windsor_in_roas_page_explanations():
 
 def test_clean_subtitles_on_roas_pages():
     """PR-ADS-110: one short subtitle, no repeated doctrine wall."""
-    camp = _section("page-roas-campaigns")
-    assert "Campaign-level Google Ads spend compared with HubSpot closed-won revenue." in camp
+    camp = _section("page-campaigns")
+    # PR-ADS-177B: the one Campaigns page; still one short subtitle.
+    assert ("Google Ads campaign spend, leads and SQLs, closed-won deals, customers and "
+            "revenue, plus one residual row for contacts with no campaign label.") in camp
     country = _section("page-roas-countries")
     # PR-ADS-176B: the one Countries page; still one short subtitle.
     assert ("Google Ads spend, SQLs, closed-won deals and revenue for the listed "
             "markets, plus one residual for everything no market owns.") in country
     # The repeated exact doctrine phrase is demolished from the pages.
-    for page_id in ("page-roas-campaigns", "page-roas-countries"):
+    for page_id in ("page-campaigns", "page-roas-countries"):
         assert "Google Ads API = spend/platform evidence" not in _section(page_id)
 
 
@@ -148,12 +154,13 @@ def test_campaign_render_has_simple_columns():
 
     PR-ADS-128/129: the column headers live in the dedicated table renderer.
     """
-    idx = JS.find("function renderRoasCampaignTable")
+    idx = JS.find("function renderCampaignsPageTable")
     assert idx != -1
     body = JS[idx:idx + 2500]
     # PR-ADS-161E: the ratio column is the period ratio, never labelled ROAS.
+    # PR-ADS-177B: the verdict column is "Status" (the brief's column list).
     for col in ("Campaign", "Spend", "Leads", "SQLs", "Customers", "Won Revenue",
-                "${PERIOD_RATIO_LABEL}", "Decision"):
+                "${PERIOD_RATIO_LABEL}", "Status"):
         assert f">{col}<" in body, f"Missing campaign column header: {col}"
     for gone in ("ROAS", "CAC", "Confidence", "Notes"):
         assert f">{gone}<" not in body, f"Column should be removed: {gone}"

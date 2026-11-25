@@ -567,8 +567,10 @@ def test_revenue_pages_hide_global_chrome():
     # All five Revenue & Attribution pages are revenue pages.
     m = JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 200]
     # PR-ADS-168B: Revenue by Source is deleted, so it is no longer listed.
-    for p in ("roas-campaigns", "roas-countries", "deals", "revenue-health"):
+    # PR-ADS-177B: Campaign Revenue & Spend merged into "campaigns".
+    for p in ("campaigns", "roas-countries", "deals", "revenue-health"):
         assert f'"{p}"' in m
+    assert '"roas-campaigns"' not in m
     nav = JS[JS.find("function navigate(page, options)"):JS.find("function navigate(page, options)") + 3400]
     assert "isRevenuePage(page)" in nav
     assert "time-range-bar" in nav        # global ad-window bar gated
@@ -586,8 +588,14 @@ def test_spend_truth_panel_and_gates_present():
     assert "data-spend-backfill-action" in JS
     # Campaign page period-ratio gate on incomplete spend coverage
     # (PR-ADS-161E: the ratio is period revenue / ad spend, never "ROAS").
-    assert "function spendCoverageIncomplete" in JS
-    assert "Spend coverage incomplete — Period Revenue / Ad Spend unavailable" in JS
+    # PR-ADS-177B: the one Campaigns page's STRICT gate (as Countries): below
+    # the mart's spend_decision_ready it shows a card naming the gap and no
+    # figure (Campaign Revenue & Spend showed diagnostic spend under a notice).
+    assert "function renderCampaignSpendGateState" in JS
+    assert "Campaign figures are withheld for this window" in JS
+    page = JS[JS.find("function renderCampaignsPage()"):]
+    page = page[:page.find("\n}\n")]
+    assert page.find("spend_decision_ready !== true") < page.find("renderCampaignsPageSummary")
     assert "Spend coverage incomplete — ROAS unavailable" not in JS
     # Country page reconciliation gate.
     assert "country_spend_reconciled === false" in JS

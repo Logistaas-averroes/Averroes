@@ -46,7 +46,8 @@ def _fn(marker):
 
 
 # PR-ADS-168B: "revenue-by-source" is deleted (its hash redirects to Channels).
-REVENUE_PAGES_MIN = ["roas-campaigns", "roas-countries", "deals", "revenue-health"]
+# PR-ADS-177B: "roas-campaigns" is merged into "campaigns" (business windows).
+REVENUE_PAGES_MIN = ["campaigns", "roas-countries", "deals", "revenue-health"]
 
 
 # ── Test 1 — Revenue pages hide the global day-window bar ────────────────────
@@ -107,10 +108,12 @@ def test_shared_clean_spend_truth_card():
     # the card is the account's CAMPAIGN spend, and beside the country KPI
     # cards (listed markets' spend + the residual) it read as a third country
     # figure. The page's footer states the same statuses from spend_truth.
-    for page in ("function renderRoasCampaignsPage",):
-        body = _slice(page, span=3000)
-        assert "renderMartSpendTruth(" in body, f"{page} must use the shared spend card"
-    for page in ("function renderRevenueDealsPage", "function renderRoasCountriesPage"):
+    # PR-ADS-177B: the one Campaigns page has no spend card either: its
+    # Campaign Spend KPI is the verified figure, and an unverified window shows
+    # the strict gate card (renderCampaignSpendGateState) instead of any
+    # figure; its footer states the same statuses from spend_truth.
+    for page in ("function renderRevenueDealsPage", "function renderRoasCountriesPage",
+                 "function renderCampaignsPage()"):
         own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
         assert "renderMartSpendTruth(" not in own, page
 
@@ -180,14 +183,17 @@ def test_country_blocked_state_branches_by_status():
 
 def test_no_old_endpoint_fallback():
     cases = [
-        ("async function loadRoasCampaigns", "campaign", "/api/revenue-attribution?"),
+        # PR-ADS-177B: the Campaigns loader reads the settled campaign view.
+        ("async function loadCampaignsPage", "campaign", "/api/revenue-attribution?"),
         ("async function loadRoasCountries", "country", "/api/revenue-attribution?"),
         # PR-ADS-168B: loadRevenueBySource and the mart `source` view are deleted.
         ("async function loadDeals", "deal", "/api/revenue-deals?"),
     ]
     for loader, view, old_url in cases:
         body = _slice(loader, span=2000)
-        assert f'fetchRevenuePerformance("{view}"' in body, f"{loader} must read the mart"
+        reads_mart = (f'fetchRevenuePerformance("{view}"' in body
+                      or f"/api/revenue-performance?view={view}&settled=true" in body)
+        assert reads_mart, f"{loader} must read the mart"
         assert old_url not in body, f"{loader} must not call the legacy endpoint {old_url}"
     assert "function renderMartUnavailable" in JS
 

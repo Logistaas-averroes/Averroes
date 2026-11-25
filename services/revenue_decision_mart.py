@@ -256,6 +256,11 @@ def _spend_truth_block(core: dict) -> dict:
         # earlier dates were never fetched / failed (coverage incomplete).
         "campaign_spend_coverage_status": health.get("campaign_spend_coverage_status"),
         "campaign_spend_coverage_reason": health.get("campaign_spend_coverage_reason"),
+        # PR-ADS-177B: the settle rule over campaign spend (the settled
+        # campaign view only) and the gap that withholds it, e.g.
+        # ``spend_not_reread_since_day_ended`` before the morning sync.
+        "campaign_spend_settled_rule_applied": bool(health.get("spend_settled_rule_applied")),
+        "campaign_spend_unsettled_reason": health.get("spend_unsettled_reason"),
         "spend_coverage_detail": health.get("spend_coverage_detail") or {},
         # PR-ADS-153F: durable geo coverage evidence + the machine gap reason, so
         # a blocked country view can say WHICH ranges are missing or failed
@@ -940,16 +945,137 @@ def _country_page_blocks(rows: list, spend_truth: dict, *,
 #: & Spend and Dashboard Countries. Every other view keeps its window.
 SETTLED_DAY_VIEWS = frozenset({"country"})
 
+#: PR-ADS-177B (owner decision 2026-11-24, 2): the views a caller may ASK for
+#: over settled days with ``settled=True`` — the campaign view, read that way
+#: ONLY by the Campaigns page and Dashboard → Campaigns. It is never the
+#: default: Overview, Revenue, Deals, Channels and the Closed-Won Deals page
+#: keep the campaign / deal views through today (the 2026-11-20 decision).
+SETTLED_ON_REQUEST_VIEWS = frozenset({"campaign"})
+
+#: PR-ADS-177B: the Campaigns page's residual row — the acquisition-cohort
+#: contacts whose campaign label places them on no campaign row. It holds only
+#: leads and SQLs; spend and closed-won outcomes are not campaign-attributable
+#: there (the campaign view counts campaign-attributable deals only).
+CAMPAIGN_RESIDUAL_ROW_LABEL = "No campaign label"
+REASON_NOT_CAMPAIGN_ATTRIBUTABLE = "not_campaign_attributable"
+STATUS_NOT_APPLICABLE = "not_applicable"
+
 
 def _canonical_core(window: str, now: datetime | None, *,
-                    settled_days: bool = False):
+                    settled_days: bool = False, settled_spend: bool = False):
     """The single durable revenue-attribution contract for ``window``.
 
     ``settled_days`` ends an open window at yesterday for revenue and spend
-    alike (``SETTLED_DAY_VIEWS``)."""
+    alike (``SETTLED_DAY_VIEWS``). ``settled_spend`` (PR-ADS-177B, the settled
+    campaign view) also holds campaign spend to the settle rule."""
     if settled_days:
+        if settled_spend:
+            return build_revenue_attribution(window, now=now, settled_days=True,
+                                             settled_spend=True)
         return build_revenue_attribution(window, now=now, settled_days=True)
     return build_revenue_attribution(window, now=now)
+
+
+def _not_attributable_metric() -> dict:
+    return {"value": None, "status": STATUS_NOT_APPLICABLE,
+            "reason": REASON_NOT_CAMPAIGN_ATTRIBUTABLE}
+
+
+def _campaign_page_blocks(summary: dict, spend_truth: dict, readiness: dict,
+                          cohort: dict, *, empty_window: bool) -> tuple:
+    """PR-ADS-177B — ``(campaign_totals, campaign_residual_row)`` for the
+    campaign view: the figures the Campaigns page prints above and below its
+    table, so the page sums nothing (the PR-ADS-176B ``country_totals`` rule).
+
+    ``campaign_totals`` republishes the mart's own campaign-attributable
+    verdicts, each ``{value, status, reason}``: spend (the campaign spend rows'
+    USD total, published only when the spend gate is verified), the cohort's
+    leads and SQLs (Σ campaign rows + the residual = the cohort total), the
+    campaign-attributable closed-won deals, customers (distinct companies over
+    that population — never a sum of rows) and revenue, and the period ratio
+    the reader contract derived (``derive_period_revenue_per_ad_spend``).
+
+    ``campaign_residual_row`` is the cohort's ``campaign_residual``: Google
+    Ads contacts created in the window whose campaign label places them on no
+    row. Leads and SQLs only; every other figure is ``not_applicable`` with
+    ``not_campaign_attributable`` — never a 0, never in a total.
+    """
+    metrics = (summary or {}).get("metrics") or {}
+    reason_empty = canonical_contract.NO_SETTLED_DAY_IN_WINDOW
+
+    def _m(key):
+        m = metrics.get(key) or {}
+        if empty_window:
+            return cwt.metric(None, cwt.UNAVAILABLE, reason_empty)
+        if not m.get("status"):
+            return cwt.metric(None, cwt.UNAVAILABLE, "campaign_metric_unavailable")
+        return dict(m)
+
+    spend_ok = bool((readiness or {}).get("spend_decision_ready")) and not empty_window
+    spend_value = (summary or {}).get("spend_usd") if spend_ok else None
+    if empty_window:
+        spend_metric = cwt.metric(None, cwt.UNAVAILABLE, reason_empty)
+    elif spend_value is not None:
+        spend_metric = cwt.metric(spend_value, cwt.PUBLISHED)
+    else:
+        spend_metric = cwt.metric(
+            None, cwt.UNAVAILABLE,
+            (spend_truth or {}).get("campaign_spend_unsettled_reason")
+            or (spend_truth or {}).get("campaign_spend_coverage_reason")
+            or "google_ads_spend_coverage_or_fx_unverified")
+    totals_metrics = {
+        "spend": spend_metric,
+        "leads": _m("leads"),
+        "sqls": _m("sqls"),
+        "closed_won_deals": _m("attributed_closed_won_deals"),
+        "customers": _m("attributed_customers"),
+        "revenue_usd": _m("attributed_revenue_usd"),
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: (
+            _m(cwt.PERIOD_REVENUE_PER_AD_SPEND) if spend_ok or empty_window
+            else cwt.metric(None, cwt.UNAVAILABLE, spend_metric["reason"])),
+    }
+
+    def _v(key):
+        m = totals_metrics[key]
+        return m.get("value") if m.get("status") == cwt.PUBLISHED else None
+
+    campaign_totals = {
+        "population": "campaign_attributable",
+        "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "spend": _v("spend"),
+        "leads": _v("leads"),
+        "sqls": _v("sqls"),
+        "closed_won_deals": _v("closed_won_deals"),
+        "customers": _v("customers"),
+        "won_revenue": _v("revenue_usd"),
+        cwt.PERIOD_REVENUE_PER_AD_SPEND: _v(cwt.PERIOD_REVENUE_PER_AD_SPEND),
+        "metrics": totals_metrics,
+    }
+
+    residual = (cohort or {}).get("campaign_residual") or {}
+    if empty_window:
+        residual_row = None
+    else:
+        residual_row = {
+            "is_residual": True,
+            "campaign_id": None,
+            "campaign_name": CAMPAIGN_RESIDUAL_ROW_LABEL,
+            "label": CAMPAIGN_RESIDUAL_ROW_LABEL,
+            "definition": residual.get("definition"),
+            "leads": residual.get("leads"),
+            "sqls": residual.get("sqls"),
+            "sqls_status": (cohort or {}).get("sql_status"),
+            "sqls_reason": (cohort or {}).get("sql_reason"),
+            "spend": None, "closed_won_deals": None, "customers": None,
+            "won_revenue": None, cwt.PERIOD_REVENUE_PER_AD_SPEND: None,
+            "deal_ids": None,
+            "not_attributable_reason": REASON_NOT_CAMPAIGN_ATTRIBUTABLE,
+            "verdict": "not_campaign_attributable",
+            "metrics": {k: _not_attributable_metric() for k in (
+                "spend", "closed_won_deals", "customers", "revenue_usd",
+                cwt.PERIOD_REVENUE_PER_AD_SPEND)},
+        }
+    return campaign_totals, residual_row
 
 
 def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> dict:
@@ -992,6 +1118,8 @@ def build_revenue_decision_mart(
     view: str = "campaign",
     window: str = "current_quarter",
     now: datetime | None = None,
+    *,
+    settled: bool = False,
 ) -> dict:
     """Build the canonical Revenue Decision Mart contract for a view + window.
 
@@ -999,6 +1127,12 @@ def build_revenue_decision_mart(
         view: One of VALID_VIEWS (campaign | country | deal).
         window: A business-window key (analysis.business_windows.WINDOW_KEYS).
         now: Optional reference time for deterministic resolution/testing.
+        settled: PR-ADS-177B. The campaign view over SETTLED days (an open
+            window ends yesterday; campaign spend under the settle rule;
+            deals over ``settled_revenue_bounds``; the cohort over the same
+            days) — read only by the Campaigns page and Dashboard →
+            Campaigns. Never the default. The country view is always settled;
+            a settled deal view is not served (``ValueError``).
 
     Returns:
         The canonical contract: window, spend_truth, summary, rows, diagnostics.
@@ -1019,10 +1153,14 @@ def build_revenue_decision_mart(
         )
     # Validate / resolve the window up front so every view fails identically on a
     # bad window (shared window resolver — one truth for the business window).
+    if settled and view not in SETTLED_DAY_VIEWS | SETTLED_ON_REQUEST_VIEWS:
+        raise ValueError(f"The {view} view is not served over settled days.")
     resolve_canonical_window(window, now=now)
 
-    settled = view in SETTLED_DAY_VIEWS
-    core = _canonical_core(window, now, settled_days=settled)
+    settled_campaign = bool(settled and view in SETTLED_ON_REQUEST_VIEWS)
+    settled = view in SETTLED_DAY_VIEWS or settled_campaign
+    core = _canonical_core(window, now, settled_days=settled,
+                           settled_spend=settled_campaign)
 
     spend_truth = _spend_truth_block(core)
     if view == "country":
@@ -1047,6 +1185,10 @@ def build_revenue_decision_mart(
         summary = {**summary, "sqls_status": cohort["sql_status"],
                    "sqls_reason": cohort["sql_reason"]}
     country_totals = regional_mix = None
+    campaign_totals = campaign_residual_row = None
+    if view == "campaign":
+        campaign_totals, campaign_residual_row = _campaign_page_blocks(
+            summary, spend_truth, readiness, cohort, empty_window=_empty)
     if view == "country":
         rows_, country_totals, regional_mix = _country_page_blocks(
             payload["rows"], spend_truth, empty_window=_empty,
@@ -1078,8 +1220,11 @@ def build_revenue_decision_mart(
     # revenue contract can state the SAME refusal the summary states, rather than
     # withholding the value while naming no reason.
     _attributed_disclosure = summary.get("attributed_revenue_disclosure") or {}
-    return {
+    payload_out = {
         "view": view,
+        # PR-ADS-177B: True when this view is read over settled days (the
+        # country view always; the campaign view only when asked for).
+        "settled_days": bool(settled),
         "window": window_block,
         "spend_truth": spend_truth,
         # PR-ADS-153F §8: the shared country-truth disclosure, present on the
@@ -1113,6 +1258,12 @@ def build_revenue_decision_mart(
         # above — the page sums nothing itself.
         "country_totals": country_totals,
         "regional_mix": regional_mix,
+        # PR-ADS-177B (campaign view only, else None): the Campaigns page's
+        # totals — the mart's own campaign-attributable verdicts, the page sums
+        # nothing — and its pinned residual row (the cohort's contacts on no
+        # campaign row: leads and SQLs only).
+        "campaign_totals": campaign_totals,
+        "campaign_residual_row": campaign_residual_row,
         # Deal view (PR-ADS-164A): the canonical verdict for the
         # won-deal population behind `rows`. An empty `rows` is "there are
         # none" only when this says published with value 0.
@@ -1135,7 +1286,12 @@ def build_revenue_decision_mart(
                  "truth_status": (canonical_contract.TRUTH_READY
                                   if spend_truth.get("campaign_spend_status") == "verified"
                                   else canonical_contract.TRUTH_NOT_READY),
-                 "customer_id": spend_truth.get("customer_id")},
+                 "customer_id": spend_truth.get("customer_id"),
+                 # PR-ADS-177B: a settled view's spend withheld by the settle
+                 # rule says why (e.g. `spend_not_reread_since_day_ended`).
+                 **({"unavailable_reason": spend_truth["campaign_spend_unsettled_reason"]}
+                    if spend_truth.get("campaign_spend_status") != "verified"
+                    and spend_truth.get("campaign_spend_unsettled_reason") else {})},
                 # PR-ADS-154C-F3: the REVENUE contract follows
                 # `revenue_total_available`, not `revenue_available`. The
                 # population can be readable while its total is unknown because
@@ -1221,6 +1377,12 @@ def build_revenue_decision_mart(
             ]),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+    if _empty:
+        # PR-ADS-177B: nothing was measured over no settled day — every
+        # unpublished metric's contract names exactly that.
+        payload_out[canonical_contract.METRIC_TRUTH_KEY] = canonical_contract.name_no_settled_day(
+            payload_out[canonical_contract.METRIC_TRUTH_KEY])
+    return payload_out
 
 
 # ── Audit: do all Revenue & Attribution pages agree with the mart? ───────────
@@ -1301,7 +1463,6 @@ def build_revenue_performance_audit(
     mart_revenue = summary.get("won_revenue_usd")
 
     # Current per-page truth, each at its own grain.
-    campaigns = core.get("campaigns") or []
     # PR-ADS-168B: Revenue by Source is deleted, so it is no longer a page
     # compared here (Channels publishes its outcomes through the reader
     # contract, audited by audit_customer_revenue_reader_cutover).
@@ -1321,7 +1482,13 @@ def build_revenue_performance_audit(
                 continue
         return round(total, 2) if seen_value else None
 
-    campaign_page_spend = _sum_spend(campaigns)
+    # PR-ADS-177B: the Campaigns page reads the SETTLED campaign view (an open
+    # window ends yesterday, spend under the settle rule). It is compared with
+    # the mart's spend over the SAME days, as the country page is.
+    campaign_core = _canonical_core(window, now, settled_days=True, settled_spend=True)
+    campaign_page_spend = _sum_spend(campaign_core.get("campaigns") or [])
+    campaign_spend_truth = _spend_truth_block(campaign_core)
+    campaign_mart_spend = _summary_block(campaign_core, campaign_spend_truth).get("spend_usd")
     # PR-ADS-167A: Country Revenue & Spend reads the settled-day core (an open
     # window ends at yesterday). It is compared with the mart's spend over the
     # SAME days — never with a window one day longer, which would report the
@@ -1334,7 +1501,8 @@ def build_revenue_performance_audit(
 
     tolerance = 0.02  # mirrors SPEND_VARIANCE_TOLERANCE for reconciliation
     pages_spec = [
-        ("roas_by_campaign", "Campaign Revenue & Spend", "spend", campaign_page_spend, mart_spend),
+        ("roas_by_campaign", "Campaigns", "spend", campaign_page_spend,
+         campaign_mart_spend),
         ("roas_by_country", "Countries", "spend", country_page_spend,
          country_mart_spend),
         ("deals", "Deals", "revenue", deals_revenue, mart_revenue),
@@ -1357,11 +1525,12 @@ def build_revenue_performance_audit(
             "difference_pct": pct,
             "status": status,
             "reasons": _difference_reasons(
-                key, country_spend_truth if key == "roas_by_country" else spend_truth,
+                key, {"roas_by_country": country_spend_truth,
+                      "roas_by_campaign": campaign_spend_truth}.get(key, spend_truth),
                 status=status),
-            # PR-ADS-167A: the window each comparison was made over.
-            "window": (_window_block(country_core) if key == "roas_by_country"
-                       else None),
+            # PR-ADS-167A / 177B: the window each comparison was made over.
+            "window": ({"roas_by_country": _window_block(country_core),
+                        "roas_by_campaign": _window_block(campaign_core)}.get(key)),
         })
 
     return {

@@ -213,11 +213,15 @@ def test_native_gbp_never_formatted_as_usd():
     assert 'GBP: "£"' in JS
     assert "function fmtCurrency" in JS
     assert "function fmtNativeGBP" in JS and "function fmtUSD" in JS
-    # The campaign summary renders native via fmtCurrency (GBP), never fmtMoney.
-    i = JS.find("function renderRoasCampaignSummary")
-    block = JS[i:i + 1600]
-    assert "fmtCurrency(native, nativeCur)" in block
-    assert 'nativeCur = sh.spend_native_currency || "GBP"' in block
+    # PR-ADS-177B: the Campaigns page prints only USD reporting spend, and only
+    # past its strict gate (spend_decision_ready requires verified FX), so no
+    # native figure can reach a "$"; Dashboard → Campaigns renders native
+    # spend with its own currency, never fmtMoney.
+    page = JS[JS.find("function renderCampaignsPage()"):]
+    page = page[:page.find("\n}\n")]
+    assert page.find("spend_decision_ready !== true") < page.find("renderCampaignsPageTable")
+    cell = JS[JS.find("function campSpendCell"):JS.find("function campSpendCell") + 900]
+    assert 'fmtCompactCurrency(row.spend_native, row.native_currency || "GBP")' in cell
     # The Spend Truth panel shows native GBP with fmtCurrency, USD with fmtUSD.
     st = JS[JS.find("function renderSpendTruth"):JS.find("function renderSpendTruth") + 4200]
     assert "Google Ads native spend" in st

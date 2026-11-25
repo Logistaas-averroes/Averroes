@@ -485,7 +485,7 @@ def test_window_integrity_warns_only_when_ranges_collapse():
 def test_campaign_and_country_pages_unchanged():
     # Campaign / Country revenue pages still render their multiple-notation
     # tables and are not coupled to the new revenue-deals surfaces.
-    camp = _fn("function renderRoasCampaignTable", span=3600)
+    camp = _fn("function renderCampaignsPageTable", span=3600)
     country = _fn("function renderRoasCountryTable", span=3600)
     # PR-ADS-161E: the period ratio (formerly labelled ROAS) through the
     # canonical adapter, multiple notation; never the certified ``roas`` key.

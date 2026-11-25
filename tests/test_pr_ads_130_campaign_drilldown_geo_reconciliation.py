@@ -159,24 +159,27 @@ def test_campaign_detail_db_unavailable_is_reported(monkeypatch):
 
 # Test 4 — frontend has an expandable campaign row control
 def test_frontend_has_expandable_campaign_row():
-    table = _slice("function renderRoasCampaignTable", span=4800)  # PR-ADS-161E: canonical cells
-    assert "data-campaign-expand-idx" in table
-    assert "campaign-drilldown-row" in table
-    # A click handler toggles the drawer and lazy-loads the detail.
-    assert "data-campaign-expand-idx" in JS
-    assert "function loadCampaignDrilldown" in JS
-    assert "/api/revenue-performance/campaign-detail?window=" in JS
+    # PR-ADS-177B: on the one Campaigns page a campaign ROW opens the
+    # Dashboard drawer (the 176B Countries pattern) instead of an expand
+    # button and inline drill row; the drawer lazy-loads the detail over the
+    # row's own settled days.
+    table = _slice("function renderCampaignsPageTable", span=4800)
+    assert "data-campaign-page-row" in table and 'role="button"' in table
+    assert 'e.target.closest("#campaigns-page-body [data-campaign-page-row]")' in JS
+    assert "async function loadCampaignsPageDrilldown" in JS
+    assert "/api/revenue-performance/campaign-detail?settled=true&window=" in JS
 
 
 # Test 5 — expanded drawer renders a client/deal table
 def test_drawer_renders_client_deal_table():
     fn = _slice("function renderCampaignDrilldown", span=2000)
-    assert "Clients / Deals Behind This Campaign" in fn
+    assert "Closed-won deals behind this campaign" in fn
     for col in (">Company<", ">Company ID<", ">Main Contact<", ">Contact ID<",
                 ">Deal<", ">Deal ID<", ">Amount<", ">Close Date<"):
         assert col in fn, f"drilldown table missing column {col}"
     # Empty state copy for a campaign with no attributed client detail.
-    assert "No attributed closed-won client detail found for this campaign." in fn
+    # PR-ADS-177B: shown only when the row's own deal list (deal_ids) is empty.
+    assert "No closed-won deals for this campaign in this window." in fn
 
 
 # Test 6 — no undefined / null text in the drilldown UI

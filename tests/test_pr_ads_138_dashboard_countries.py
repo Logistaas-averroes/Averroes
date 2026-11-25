@@ -107,7 +107,13 @@ GEO_BY_COUNTRY = {"available": True, "has_rows": True, "total_spend": 10000.0,
                        "cost_micros": 6000_000_000, "spend": 6000.0, "spend_usd": 8000.0, "fx_complete": True},
                       {"country_criterion_id": "2826", "country_code": "GB", "country_name": "United Kingdom",
                        "cost_micros": 4000_000_000, "spend": 4000.0, "spend_usd": 5000.0, "fx_complete": True}]}
-COVERAGE_COMPLETE = [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified"}]
+# PR-ADS-177B: the settled campaign view (Dashboard → Campaigns, which the
+# parity cases build from this fixture) holds campaign spend to the settle
+# rule, so the chunk carries its fetch time — as production stamps it, and as
+# GEO_COVERAGE_COMPLETE below already does (fetched at import: the parity CLI
+# cases resolve their window against the wall clock).
+COVERAGE_COMPLETE = [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified",
+                      "fetched_at": datetime.now(tz=timezone.utc)}]
 LEAD_ROWS = (
     [{"campaign_name": "Global Competitors", "country": "United States",
       "status_category": "qualified", "has_gclid": True}] * 20

@@ -137,9 +137,14 @@ def test_f3_2_countries_is_out_of_the_full_campaign_attributable_comparison():
     consumers = {c for c, _ in
                  parity.METRIC_IDENTITIES["google_ads_cohort_sqls"]["consumers"]}
     assert "dashboard/countries" not in consumers
+    # PR-ADS-177B: Dashboard → Campaigns reads the settled campaign view; it
+    # is compared over its own days, in the settled identity.
     assert consumers == {"dashboard/overview", "dashboard/revenue",
-                         "dashboard/campaigns", "dashboard/deals",
-                         "revenue_decision_mart"}
+                         "dashboard/deals", "revenue_decision_mart"}
+    settled = {c for c, _ in parity.METRIC_IDENTITIES[
+        "google_ads_cohort_sqls__settled_days"]["consumers"]}
+    assert settled == {"dashboard/campaigns", "revenue_decision_mart/campaign_settled"}
+    assert "dashboard/countries" not in settled
 
 
 def test_f3_3_the_residual_sqls_are_registered_and_published(monkeypatch):

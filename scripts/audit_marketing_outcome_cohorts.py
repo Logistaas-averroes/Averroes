@@ -351,6 +351,16 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
         out.append("kpis.sqls_status=published")
     residual = payload.get("residual") or {}
     out += [f"residual.{k}" for k in _MART_ROW_FIELDS if _num(residual.get(k))]
+    # PR-ADS-177B: the campaign view's page totals and pinned residual row
+    # (the mart's and Dashboard → Campaigns').
+    ctot = payload.get("campaign_totals") or {}
+    out += [f"campaign_totals.{k}" for k in _MART_ROW_FIELDS if _num(ctot.get(k))]
+    for k in _MART_ROW_FIELDS:
+        m = ((ctot.get("metrics") or {}).get(k) or {})
+        if m.get("value") is not None or m.get("status") == "published":
+            out.append(f"campaign_totals.metrics.{k}")
+    out += _rows("campaign_residual_row", [payload["campaign_residual_row"]]
+                 if payload.get("campaign_residual_row") else [])
     return out
 
 
@@ -375,6 +385,16 @@ def mart_conservation_problems(payload: dict, *, view: str) -> list[str]:
         if view == "campaign":
             parts = [r.get(field) for r in payload.get("rows") or []]
             parts.append((cohort.get("campaign_residual") or {}).get(field))
+            # PR-ADS-177B: the pinned residual row is the same count.
+            rrow = payload.get("campaign_residual_row")
+            if rrow is not None and rrow.get(field) != parts[-1]:
+                problems.append(f"{view}: campaign_residual_row.{field} "
+                                f"{rrow.get(field)} != cohort.campaign_residual "
+                                f"{parts[-1]}")
+            ct = (payload.get("campaign_totals") or {}).get(field)
+            if ct is not None and want is not None and ct != want:
+                problems.append(f"{view}: campaign_totals.{field} {ct} != cohort "
+                                f"total {want}")
         elif view == "country":
             parts = [r.get(field) for r in payload.get("rows") or []]
         else:
@@ -456,8 +476,8 @@ def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
             a.holds(f"{w} {name} stale_disclosed",
                     "the published cohort declares its window end and, when "
                     "the funnel is stale, its as-of watermark")
-        view = ("campaign" if name == "mart/campaign" else "country"
-                if name == "mart/country" else name)
+        view = ("campaign" if name in ("mart/campaign", "mart/campaign_settled")
+                else "country" if name == "mart/country" else name)
         if view in ("campaign", "country", "dashboard/countries"):
             problems = mart_conservation_problems(payload, view=view)
             if problems:
@@ -878,6 +898,9 @@ def _build_mart_payloads(window: str, now) -> dict:
     builders = {
         "mart/campaign": lambda: build_revenue_decision_mart(view="campaign", window=window, now=now),
         "mart/country": lambda: build_revenue_decision_mart(view="country", window=window, now=now),
+        # PR-ADS-177B: the Campaigns page's settled campaign view.
+        "mart/campaign_settled": lambda: build_revenue_decision_mart(
+            view="campaign", window=window, now=now, settled=True),
         "dashboard/overview": lambda: build_dashboard_overview(window=window, now=now),
         "dashboard/campaigns": lambda: build_dashboard_campaigns(window=window, now=now),
         "dashboard/countries": lambda: build_dashboard_countries(window=window, now=now),

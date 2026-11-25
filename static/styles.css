@@ -4214,21 +4214,9 @@ body.is-revenue-page #monitoring-banner {
   padding: 2px 8px;
 }
 
-/* PR-ADS-130: ROAS by Campaign row drilldown (clients / deals behind revenue). */
-.campaign-expand-btn {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 0 6px 0 0;
-  color: #475569;
-}
-.campaign-expand-btn:hover { color: #0f172a; }
-.campaign-drilldown-row > td {
-  background: #f8fafc;
-  padding: 0;
-}
+/* PR-ADS-130: the closed-won deals behind a campaign. PR-ADS-177B: shown in
+   the Campaigns page drawer (the expand button and inline drill row are gone
+   with Campaign Revenue & Spend). */
 .campaign-drilldown {
   padding: 12px 16px;
 }
@@ -6903,6 +6891,35 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   .ctry-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ctry-residual-tiles { grid-template-columns: minmax(0, 1fr); }
   .ctry-drawer__summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+/* PR-ADS-177B: the one Campaigns page (#/campaigns) reuses the Dashboard
+   Campaigns classes (camp-*). These rules are its only additions: seven KPI
+   cards, the residual row's definition line, the "Not campaign-attributable"
+   and "Not linked yet" cells, and the Meta ad-set table. Tables scroll inside
+   their panel (.camp-scroll); the page itself never scrolls sideways. */
+.campaigns-page { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.campaigns-page .revenue-filter-chips { margin: 0 0 var(--space-3); }
+.camp-page-kpi-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.campaigns-page .dash-panel { min-width: 0; }
+.campaigns-page .camp-table th { white-space: normal; vertical-align: bottom; min-width: 72px; }
+.campaigns-page .camp-table th .th-sub { display: block; text-transform: none; letter-spacing: 0; max-width: 150px; }
+.campaigns-page .camp-table td { vertical-align: top; white-space: normal; }
+.campaigns-page .camp-table td.camp-td--name { min-width: 170px; }
+.campaigns-page .camp-table .metric-reason { white-space: normal; min-width: 96px; max-width: 160px; color: var(--text-muted); display: block; }
+.campaigns-page .camp-table .metric-blockers-link { display: inline-block; font-size: 11px; }
+#page-campaigns .roas-window-range { white-space: normal; }
+.camp-residual-def { font-size: 11px; color: var(--text-muted); font-weight: 400; white-space: normal; max-width: 260px; margin-top: 2px; }
+.camp-not-attributable, .meta-not-linked { font-size: 11px; font-style: italic; white-space: normal; }
+.meta-adset-table .meta-adset-total td { border-top: 2px solid var(--border); background: var(--surface-2, transparent); }
+.meta-adset-withheld { margin: 0 0 var(--space-2); }
+.camp-row--residual td { background: var(--surface-2, transparent); }
+
+@media (max-width: 1280px) {
+  .camp-page-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .camp-page-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

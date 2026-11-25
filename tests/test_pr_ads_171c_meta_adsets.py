@@ -935,14 +935,27 @@ def test_30_no_new_run_type_and_no_new_freshness_status():
 
 
 def test_31_no_page_and_no_route_reads_the_adset_figures_yet():
+    """PR-ADS-177B gave the breakdown its first page: the Campaigns page's
+    "Meta Ads — ad sets" table (owner decision 2026-11-24, 4). Still no route
+    or page reads the truth module directly: the route wraps the ONE
+    registered page reader (`meta_ads_adset_table_service`), and the UI reads
+    `meta_reported_leads` only inside the table renderer, through its gate."""
     for path in ("api/server.py", "static/app.js", "static/index.html"):
-        file = ROOT / path
-        if not file.exists():
-            continue
-        text = file.read_text()
+        text = (ROOT / path).read_text()
         assert "meta_ads_adset_truth_service" not in text
         assert "build_meta_adset_breakdown_for_days" not in text
-        assert "meta_reported_leads" not in text
+    assert "meta_reported_leads" not in (ROOT / "static/index.html").read_text()
+    server = (ROOT / "api/server.py").read_text()
+    assert "from services.meta_ads_adset_table_service import build_meta_adset_table" in server
+    readers = [p.name for p in (ROOT / "services").glob("*.py")
+               if "build_meta_adset_breakdown_for_days" in p.read_text()
+               and p.name != "meta_ads_adset_truth_service.py"]
+    assert readers == ["meta_ads_adset_table_service.py"]
+    js = (ROOT / "static/app.js").read_text()
+    i = js.index("function renderMetaAdsetTable(")
+    body = js[i:js.index("\n}\n", i)]
+    assert "metaAdsetTableGate(data)" in body
+    assert js.count("meta_reported_leads") == body.count("meta_reported_leads")
 
 
 # ── backfill ──────────────────────────────────────────────────────────────

@@ -96,7 +96,7 @@ def test_confidence_summary_and_snapshot_history_loaders_are_retired():
 def test_roas_campaigns_uses_business_window():
     """PR-ADS-107A: ROAS campaigns loader uses the business-window resolver,
     not the ad-style global day window."""
-    start = JS.find("function loadRoasCampaigns")
+    start = JS.find("function loadCampaignsPage")
     assert start != -1, "loadRoasCampaigns function not found"
     roas_section = JS[start:start + 500]
     assert "getRoasBusinessWindow()" in roas_section
@@ -148,9 +148,9 @@ def test_help_drawer_resets_body_on_close():
 def test_roas_campaigns_dropdown_is_business_window():
     """PR-ADS-107A: ROAS campaigns window dropdown is a business-window select,
     decoupled from the ad-style global day window."""
-    assert 'id="roas-campaigns-window"' in HTML
-    match = re.search(r'<select[^>]*id="roas-campaigns-window"[^>]*>', HTML)
-    assert match, "roas-campaigns-window select not found"
+    assert 'id="campaigns-window"' in HTML
+    match = re.search(r'<select[^>]*id="campaigns-window"[^>]*>', HTML)
+    assert match, "campaigns-window select not found"
     assert "data-business-window-select" in match.group(0)
     assert "data-sync-window-select" not in match.group(0)
 

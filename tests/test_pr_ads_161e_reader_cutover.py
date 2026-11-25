@@ -987,7 +987,13 @@ def test_33_the_audit_goes_red_when_a_page_keeps_proof_beside_a_withheld_count(
             r["metrics"] = {"closed_won_deals": cwt.metric(
                 None, cwt.WITHHELD, cwt.R_CAMPAIGN_UNPLACED)}
             r["deals"] = [{"deal_id": "1", "amount_usd": 1000.0}]
+        # PR-ADS-177B: the tab's rows are the mart's campaign rows only (its
+        # all-source "Unattributed" row, which held this label-less deal, is
+        # gone), so the fallback row is a whole campaign row of the tab's
+        # shape — the leak under test is still its proof list.
         return rows or [{"campaign_name": "x", "closed_won_deals": None,
+                         "status": "Closed-won outcome withheld",
+                         "attribution_status": "mapped", "spend_native": None,
                          "metrics": {"closed_won_deals": cwt.metric(
                              None, cwt.WITHHELD, cwt.R_CAMPAIGN_UNPLACED)},
                          "deals": [{"deal_id": "1"}]}]

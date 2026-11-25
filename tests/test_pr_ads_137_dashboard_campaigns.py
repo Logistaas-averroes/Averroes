@@ -103,7 +103,13 @@ GEO_BY_COUNTRY = {"available": True, "has_rows": True, "total_spend": 10000.0,
                        "cost_micros": 6000_000_000, "spend": 6000.0, "spend_usd": 8000.0, "fx_complete": True},
                       {"country_criterion_id": "2826", "country_code": "GB", "country_name": "United Kingdom",
                        "cost_micros": 4000_000_000, "spend": 4000.0, "spend_usd": 5000.0, "fx_complete": True}]}
-COVERAGE_COMPLETE = [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified"}]
+# PR-ADS-177B: the tab reads the SETTLED campaign view, whose spend is held to
+# the settle rule — a chunk settles only the days that had ended when it was
+# fetched. Fetched at import (the 138 geo fixture's rule): after NOW, so it
+# holds every day through NOW's yesterday, as production's does after the
+# morning sync — and through the wall clock's yesterday for any CLI case.
+COVERAGE_COMPLETE = [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified",
+                      "fetched_at": datetime.now(tz=timezone.utc)}]
 LEAD_ROWS = (
     [{"campaign_name": "Global Competitors", "country": "United States",
       "status_category": "qualified", "has_gclid": True}] * 20
@@ -349,10 +355,17 @@ def test_campaign_period_ratio_only_when_spend_and_revenue_safe(monkeypatch):
     assert (g["period_revenue_per_ad_spend"] == round(29000.0 / 8000.0, 2)
             and g["period_ratio_available"] is True)
     assert g.get("roas") is None  # attribution ROAS is never published
-    # A campaign with verified spend but ZERO revenue shows no misleading 0.00x —
-    # its status conveys the outcome.
+    # PR-ADS-177B: the row ratio is the mart row's — the reader contract's
+    # `derive_period_revenue_per_ad_spend` — no longer this page's own
+    # `_period_ratio` (deleted). Verified spend with published ZERO revenue is
+    # a MEASURED 0.00x there, carried with its non-cohort disclosure (audit
+    # check 18 requires a published zero to give a published 0), exactly as
+    # the Countries and Campaigns pages print it. The status still conveys it.
     brand = _camp(out, "Brand - UK")
-    assert brand["period_revenue_per_ad_spend"] is None and brand["period_ratio_available"] is False
+    ratio = brand["metrics"]["period_revenue_per_ad_spend"]
+    assert (ratio["status"], ratio["value"]) == ("published", 0.0)
+    assert ratio["ratio_kind"] == "non_cohort_operational_ratio"
+    assert brand["period_revenue_per_ad_spend"] == 0.0
     assert brand["status"] == "SQL producer"
 
 
@@ -381,13 +394,20 @@ def test_null_amount_makes_campaign_revenue_and_period_ratio_unavailable(monkeyp
 
 
 def test_unattributed_revenue_preserved_and_excluded_from_period_ratio(monkeypatch):
+    # PR-ADS-177B: the all-source "Unattributed / Needs Review" row is gone —
+    # the tab reads the mart's campaign view, which counts campaign-attributable
+    # deals only (the residual is the cohort's contacts on no campaign row,
+    # leads and SQLs only). The deal on no campaign (d4, $4,000) is on no row,
+    # in no KPI and in no ratio numerator; it stays in all-source truth
+    # (Overview / Deals), never forced onto a campaign.
     out = _campaigns(monkeypatch)
-    unatt = _camp(out, "Unattributed / Needs Review")
-    assert unatt is not None
-    assert unatt["won_revenue_usd"] == 4000.0  # revenue kept, never dropped
-    assert unatt["attribution_status"] == "unattributed"
-    assert unatt["spend_native"] is None and unatt["period_revenue_per_ad_spend"] is None
-    # It is NOT counted in the Google-Ads period-ratio numerator.
+    assert _camp(out, "Unattributed / Needs Review") is None
+    assert all("d4" not in (r.get("deal_ids") or []) for r in out["campaigns"])
+    res = out["campaign_residual_row"]
+    assert res["label"] == "No campaign label" and res["sqls"] == 0
+    for key in ("spend", "closed_won_deals", "customers", "revenue_usd",
+                "period_revenue_per_ad_spend"):
+        assert res["metrics"][key]["status"] == "not_applicable"
     assert out["kpis"]["won_revenue_usd"] == 29000.0
     assert out["kpis"]["period_revenue_per_ad_spend"] == round(29000.0 / 13000.0, 2)
 
@@ -483,12 +503,13 @@ def test_mapping_unavailable_makes_campaign_attribution_partial():
     # A mapping-unavailable campaign, NO unattributed row → still partial.
     rows = [{"campaign_name": "X", "attribution_status": "mapping_unavailable",
              "status": "FX unavailable"}]
-    ts = _build_truth_status(spend_truth, readiness, rows, ready_sig, ready_sig, True)
+    # PR-ADS-177B: the keyword-theme argument is gone with its panel.
+    ts = _build_truth_status(spend_truth, readiness, rows, ready_sig, True)
     assert ts["campaign_attribution"] == "partial"
     # A cleanly-mapped-only set → ready.
     rows_ok = [{"campaign_name": "X", "attribution_status": "mapped",
                 "status": "Revenue proven"}]
-    ts_ok = _build_truth_status(spend_truth, readiness, rows_ok, ready_sig, ready_sig, True)
+    ts_ok = _build_truth_status(spend_truth, readiness, rows_ok, ready_sig, True)
     assert ts_ok["campaign_attribution"] == "ready"
 
 
@@ -517,15 +538,18 @@ def test_attribution_status_preserves_mapping_distinction(monkeypatch):
     # to a single "unmapped"); the unattributed callout is its own status.
     out = _campaigns(monkeypatch)
     assert _camp(out, "Global Competitors")["attribution_status"] == "mapped"
-    assert _camp(out, "Unattributed / Needs Review")["attribution_status"] == "unattributed"
+    # PR-ADS-177B: no all-source "unattributed" row exists to carry a status.
+    assert all(r["attribution_status"] in ("mapped", "mapping_unavailable")
+               for r in out["campaigns"])
 
 
 def test_unavailable_card_copy_accurate_for_healthy_window(monkeypatch):
     # Healthy window (FX verified, revenue complete, ROAS present): the Unavailable
-    # card must NOT claim FX/revenue is incomplete — it flags keyword attribution.
+    # card must NOT claim FX/revenue is incomplete — it flags search-term
+    # attribution (PR-ADS-177B: the keyword-theme panel is dropped).
     out = _campaigns(monkeypatch)
     card = next(c for c in out["decision_cards"] if c["type"] == "unavailable")
-    assert "keyword" in card["body"].lower()
+    assert "search term" in card["body"].lower()
     assert "fx coverage is incomplete" not in card["body"].lower()
 
 
@@ -540,25 +564,27 @@ def test_fmt_usd_short_none_is_unavailable():
 
 
 def test_keyword_themes_never_fake_outcomes_or_period_ratio(monkeypatch):
+    # PR-ADS-177B: the keyword-theme panel read the legacy, NON-windowed
+    # `keywords` snapshot beside window-scoped figures; it is dropped (the
+    # smaller honest option, docs/60 §3). The tab claims no keyword figure at
+    # all now — no theme row, so no outcome or ratio on one.
     out = _campaigns(monkeypatch)
-    kt = out["keyword_themes"]
-    assert kt["status"] == "ready"
-    assert kt["window_scoped"] is False  # honest: recent snapshot, not window-scoped
-    assert kt["themes"], "expected keyword themes"
-    for t in kt["themes"]:
-        assert t["sqls"] is None
-        assert t["customers"] is None
-        assert t["won_revenue_usd"] is None
-        assert t["period_revenue_per_ad_spend"] is None
-        assert t.get("roas") is None
-        assert t["spend_usd"] is not None  # spend/clicks evidence is real
+    assert "keyword_themes" not in out
+    assert "keyword_attribution" not in out["truth_status"]
 
 
 def test_keyword_snapshot_unavailable_degrades(monkeypatch):
-    out = _campaigns(monkeypatch, keyword_snapshot={"available": False, "run_date": None, "rows": []})
-    assert out["keyword_themes"]["status"] == "unavailable"
-    assert out["keyword_themes"]["themes"] == []
-    assert out["truth_status"]["keyword_attribution"] == "unavailable"
+    # PR-ADS-177B: the snapshot is not read at all — a failing read cannot
+    # reach the tab.
+    import db.revenue_repository as repo
+
+    def boom():
+        raise AssertionError("the keyword snapshot must not be read")
+    _patch_durable(monkeypatch)
+    monkeypatch.setattr(repo, "fetch_keyword_theme_snapshot", boom)
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    out = build_dashboard_campaigns(WINDOW, now=NOW)
+    assert out["campaigns"]
 
 
 def test_search_term_signals_bucketed_by_waste_state(monkeypatch):
@@ -587,10 +613,14 @@ def test_decision_cards_shape_and_safety(monkeypatch):
 def test_truth_status_keys(monkeypatch):
     out = _campaigns(monkeypatch)
     ts = out["truth_status"]
-    for key in ("spend", "fx", "revenue", "campaign_attribution", "keyword_attribution", "search_terms"):
+    # PR-ADS-177B: no keyword-attribution key (the panel is dropped); every
+    # campaign row is cleanly mapped and the all-source unattributed row is
+    # gone, so campaign attribution is ready (a mapping-unavailable row still
+    # makes it partial: test_mapping_unavailable_makes_campaign_attribution_partial).
+    for key in ("spend", "fx", "revenue", "campaign_attribution", "search_terms"):
         assert key in ts
-    assert ts["keyword_attribution"] == "unavailable"  # no keyword→outcome attribution
-    assert ts["campaign_attribution"] == "partial"  # unattributed revenue present
+    assert "keyword_attribution" not in ts
+    assert ts["campaign_attribution"] == "ready"
 
 
 # ══════════════════ 6. Read-only safety ═════════════════════════════════════
@@ -730,9 +760,8 @@ def test_keyword_and_search_panels_state_read_only():
     block = JS[JS.find("// ── Dashboard — Campaigns & Keywords tab"):JS.find("// ── Campaigns page")]
     assert "read-only" in block.lower()
     assert "no platform write" in block.lower()
-    # Keyword theme outcome cells render Unavailable, never a number.
-    fn = _slice(JS, "function renderCampKeywordThemes", 1600)
-    assert "Unavailable" in fn
+    # PR-ADS-177B: the keyword-theme panel (and its renderer) is deleted.
+    assert "function renderCampKeywordThemes" not in JS
 
 
 def test_drawer_renders_proof_columns():
@@ -760,7 +789,7 @@ def test_campaigns_responsive_classes_exist():
 
 
 def test_campaigns_error_and_loading_states_exist():
-    assert "Campaigns &amp; Keywords unavailable" in JS
+    assert "Campaigns unavailable" in JS   # PR-ADS-177B: the tab is "Campaigns"
     loader = _slice(JS, "async function loadDashboardCampaigns", 1400)
     assert "renderDashSkeleton()" in loader
     assert "is-refreshing" in loader

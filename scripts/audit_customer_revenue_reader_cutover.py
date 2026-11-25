@@ -620,8 +620,20 @@ META_SPEND_READERS = (
     {"consumer": "services/meta_ads_spend_line_service.py",
      "surface": "the Meta Ads (spend) line (Channels, Dashboard Channels)"},
     {"consumer": "services/meta_ads_adset_truth_service.py",
-     "surface": "ad-set breakdown (no page yet, PR-ADS-171C)"},
+     "surface": "ad-set breakdown (PR-ADS-171C); read by the Campaigns page's "
+                "Meta Ads — ad sets table (PR-ADS-177B)"},
 )
+#: PR-ADS-177B: the ad-set breakdown's ONLY page reader, and the JS gate every
+#: figure of its table goes through. A module that calls the breakdown and is
+#: not registered here is a violation; the reader must carry the owner's
+#: retirement disclosure beside the figures.
+META_ADSET_ENTRY = "build_meta_adset_breakdown_for_days"
+META_ADSET_PAGES = (
+    {"consumer": "services/meta_ads_adset_table_service.py",
+     "surface": "/api/meta-ads/adsets; Campaigns → Meta Ads — ad sets"},
+)
+META_ADSET_JS_GATE = "metaAdsetTableGate"
+META_ADSET_JS_RENDERERS = ("renderMetaAdsetTable",)
 #: Pages show Meta spend only through the line, which gates on the disclosure.
 META_LINE_ENTRY = "build_meta_ads_spend_line"
 META_LINE_PAGES = (
@@ -672,6 +684,27 @@ def meta_structural_checks(a: Audit, js: str) -> None:
         if META_LINE_ENTRY in names and rel != "services/meta_ads_spend_line_service.py":
             a.check("meta_spend_disclosure_carried", rel in pages,
                     f"{rel} builds the Meta line and is not in META_LINE_PAGES")
+    adset_pages = {r["consumer"] for r in META_ADSET_PAGES}
+    for rel in _production_py():
+        if rel in (AUDIT_FILE, "services/meta_ads_adset_truth_service.py"):
+            continue
+        if META_ADSET_ENTRY in _code_names(rel):
+            a.check("meta_spend_disclosure_carried", rel in adset_pages,
+                    f"{rel} reads the Meta ad-set breakdown and is not in META_ADSET_PAGES")
+    for rel in sorted(adset_pages):
+        a.check("meta_spend_disclosure_carried", (_ROOT / rel).exists()
+                and "owner_declared_retired_disclosure" in _string_constants(rel),
+                f"registered Meta ad-set reader {rel} is missing or does not "
+                "carry owner_declared_retired_disclosure")
+    adset_gate = _js_function(js, META_ADSET_JS_GATE)
+    a.check("meta_spend_disclosure_carried",
+            "owner_declared_retired_disclosure" in adset_gate
+            and "meta_retired_disclosure_missing" in adset_gate,
+            f"{META_ADSET_JS_GATE} must withhold a table whose declaration has no disclosure")
+    for fn in META_ADSET_JS_RENDERERS:
+        body = _js_function(js, fn)
+        a.check("meta_spend_disclosure_carried", bool(body) and META_ADSET_JS_GATE in body,
+                f"{fn} must read the Meta ad-set table through {META_ADSET_JS_GATE}")
     for rel in sorted(readers | pages):
         # A registered file that is gone is a broken register, not a crash.
         a.check("meta_spend_disclosure_carried", (_ROOT / rel).exists(),

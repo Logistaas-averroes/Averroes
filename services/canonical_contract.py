@@ -384,6 +384,22 @@ def metric_truth_block(resolved: dict, entries: list[dict]) -> dict:
     return {e["metric"]: metric_contract(resolved=resolved, **e) for e in entries}
 
 
+def name_no_settled_day(block: dict) -> dict:
+    """PR-ADS-177B — over a settled-day window with NO completed day, every
+    metric this response does not publish is unavailable for exactly that
+    reason (``NO_SETTLED_DAY_IN_WINDOW``): nothing was measured. Its consumers
+    say so in the contract, so the parity audit's first-day exemption
+    (PR-ADS-177A-F3: the audit's OWN settled range must be empty too) can tell
+    this from an unexplained absence. Ready metrics are left as they are."""
+    out = {}
+    for key, contract in (block or {}).items():
+        if isinstance(contract, dict) and contract.get("truth_status") != TRUTH_READY:
+            contract = {**contract, "unavailable_reason": NO_SETTLED_DAY_IN_WINDOW,
+                        "violation_codes": []}
+        out[key] = contract
+    return out
+
+
 def unavailable_contract(*, data_source: str, window: str, reason: str,
                          now: datetime | None = None,
                          account_time_zone: str | None = None) -> dict:

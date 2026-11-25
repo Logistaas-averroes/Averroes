@@ -361,9 +361,13 @@ def test_campaign_table_spend_state_ui():
     assert "Verified zero spend" in JS
     assert "Spend mapping required" in JS
     assert "Mapping required" in JS
-    # Native spend in the table uses the currency-correct formatter when USD is
-    # not ready (never "$" for native GBP).
-    assert "fmtCurrency(r.spend, nativeCur)" in JS
+    # Native spend uses the currency-correct formatter (never "$" for native
+    # GBP). PR-ADS-177B: the Campaigns page shows USD only past its spend gate;
+    # the Dashboard tab's native cell keeps the native currency.
+    assert 'fmtCompactCurrency(row.spend_native, row.native_currency || "GBP")' in JS
+    cell = JS[JS.find("function campaignsPageSpendCell"):]
+    cell = cell[:cell.find("\n}\n")]
+    assert "spendStatusLabel(r.spend_state)" in cell and "spend mapping required" in cell
 
 
 def test_spend_truth_panel_shows_account_reconciliation():

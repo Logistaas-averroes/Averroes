@@ -215,9 +215,12 @@ def test_04_an_incomplete_contact_sync_withholds_every_count_on_every_surface(
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _ready(live_db, fresh=False)
     payloads = audit._build_mart_payloads(WINDOW, None)
-    assert set(payloads) == {"mart/campaign", "mart/country", "dashboard/overview",
-                             "dashboard/campaigns", "dashboard/countries",
-                             "dashboard/revenue", "dashboard/deals"}
+    # PR-ADS-177B: the settled campaign view (the Campaigns page) is one more
+    # surface the audit builds and must find withheld.
+    assert set(payloads) == {"mart/campaign", "mart/campaign_settled", "mart/country",
+                             "dashboard/overview", "dashboard/campaigns",
+                             "dashboard/countries", "dashboard/revenue",
+                             "dashboard/deals"}
     for name, p in payloads.items():
         assert p is not None, name
         assert (p["cohort"]["sql_status"], p["cohort"]["sql_reason"]) == (
@@ -323,8 +326,11 @@ def test_06_the_countries_page_dashboard_countries_and_campaign_evidence_agree(
     report = parity.audit_window(WINDOW)
     p = report["cohort_sql_parity"]
     assert p["status"] == "identical", p
+    # PR-ADS-177B: the Campaigns page (Σ rows + "No campaign label" row) and
+    # Dashboard → Campaigns are two more readings of the same count.
     assert p["readings"] == {"countries_page": 4, "dashboard_countries": 4,
-                             "campaign_evidence": 4}
+                             "campaign_evidence": 4, "campaigns_page": 4,
+                             "dashboard_campaigns": 4}
     conservation = next(r for r in report["conservation"]
                         if r["total"] == "google_ads_cohort_sqls")
     assert conservation["status"] == "conserved"
@@ -358,7 +364,8 @@ def test_06c_withheld_parity_is_not_evaluable_never_a_pass(live_db, monkeypatch)
     p = parity.audit_window(WINDOW)["cohort_sql_parity"]
     assert p["status"] == "not_evaluable"
     assert p["readings"] == {"countries_page": None, "dashboard_countries": None,
-                             "campaign_evidence": None}
+                             "campaign_evidence": None, "campaigns_page": None,
+                             "dashboard_campaigns": None}
 
 
 # ── 7. the real payload on the real page ─────────────────────────────────────

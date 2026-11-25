@@ -1153,8 +1153,10 @@ def test_18_an_old_bookmark_lands_on_the_dashboard():
         "\nprocess.stdout.write(JSON.stringify(out));")
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
+    # PR-ADS-177B: roas-campaigns is retired too; it survives only as a
+    # redirect to Campaigns (RETIRED_PAGE_REDIRECTS), never as a page.
     assert json.loads(out.stdout) == {
-        "unit-economics": False, "roas-campaigns": True, "roas-countries": True,
+        "unit-economics": False, "roas-campaigns": False, "roas-countries": True,
         "deals": True, "dashboard": True}
 
 
@@ -1177,7 +1179,8 @@ def test_19_every_sidebar_page_is_still_routable():
         body = HTML.split(f'data-section="{item}"')[1].split("</nav>")[0]
         return re.findall(r'data-page="([a-z0-9-]+)"', body)
     assert strip("pipeline") == ["leads", "deals"]
-    assert "roas-campaigns" in strip("campaigns")
+    # PR-ADS-177B: Campaign Revenue & Spend merged into the Campaigns page.
+    assert strip("campaigns") == ["campaigns", "keywords", "search-terms"]
     # PR-ADS-176B: Countries is one page, the item itself (no strip).
     assert 'data-page="roas-countries" data-nav-item="countries"' in HTML
     assert "unit-economics" not in HTML
@@ -1188,9 +1191,10 @@ def test_19_every_sidebar_page_is_still_routable():
     assert loaded == {
         "dashboard", "campaigns", "search-terms", "keywords", "leads",
         "deals", "gclid-attribution", "scheduler", "health", "backfill",
-        "roas-campaigns", "roas-countries", "revenue-health",
+        "roas-countries", "revenue-health",
         "channels", "system"}  # PR-ADS-168B: revenue-by-source deleted;
-    #                              PR-ADS-176B: geo deleted (#/geo redirects)
+    #                              PR-ADS-176B: geo deleted (#/geo redirects);
+    #                              PR-ADS-177B: roas-campaigns deleted (redirects)
     assert loaded <= pages
 
 

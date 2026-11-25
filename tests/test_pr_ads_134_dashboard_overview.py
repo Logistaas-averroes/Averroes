@@ -604,7 +604,8 @@ def test_top_signals_computed_from_real_rows(monkeypatch):
     sig = out["top_signals"]
     assert sig["best_campaign"]["label"] == "Brand - UK"
     assert sig["best_campaign"]["revenue_usd"] == 9000.0
-    assert sig["best_campaign"]["target_page"] == "roas-campaigns"
+    # PR-ADS-177B: campaign evidence opens the one Campaigns page.
+    assert sig["best_campaign"]["target_page"] == "campaigns"
     assert sig["best_country"]["label"] == "United Kingdom"
     assert sig["best_country"]["target_page"] == "roas-countries"
     # PR-ADS-168B: Revenue by Source is deleted; source evidence opens Channels.
@@ -646,15 +647,15 @@ def test_waste_signal_carries_explicit_currency(monkeypatch):
 def test_decision_cards_link_to_evidence_pages(monkeypatch):
     out = _overview(monkeypatch)
     targets = {c["type"]: c["target_page"] for c in out["decision_cards"]}
-    assert targets["scale"] == "roas-campaigns"
+    assert targets["scale"] == "campaigns"   # PR-ADS-177B
     # PR-ADS-162G: the Action Queue page is deleted. The Investigate card
     # restates the campaign-level biggest_waste signal, so it opens the page
     # that signal already named as its evidence.
-    assert targets["investigate"] in ("roas-campaigns", "revenue-health")
+    assert targets["investigate"] in ("campaigns", "revenue-health")
     assert targets["unavailable"] == "revenue-health"
     investigate = next(c for c in out["decision_cards"] if c["type"] == "investigate")
-    if investigate["target_page"] == "roas-campaigns":
-        assert investigate["target_label"] == "Open Campaign Revenue & Spend"
+    if investigate["target_page"] == "campaigns":
+        assert investigate["target_label"] == "Open Campaigns"
     assert all(c["target_page"] != "action-queue" for c in out["decision_cards"])
     assert all("Action Queue" not in c.get("target_label", "")
                for c in out["decision_cards"])
@@ -757,8 +758,10 @@ def test_dashboard_markup_is_the_executive_overview():
 def test_dashboard_tabs_only_overview_active():
     section = _dashboard_section()
     assert 'class="dashboard-tab is-active"' in section
-    for label in ("Revenue", "Channels", "Campaigns &amp; Keywords", "Countries", "Deals"):
+    # PR-ADS-177B: the tab is "Campaigns" (its keyword-theme panel is dropped).
+    for label in ("Revenue", "Channels", "Campaigns", "Countries", "Deals"):
         assert label in section
+    assert 'data-dash-tab="campaigns">Campaigns</button>' in section
     # Overview is the active tab. PR-ADS-135/136/137/138/139 enabled Revenue,
     # Channels, Campaigns & Keywords, Countries and Deals in turn — so all six
     # dashboard tabs are now live and no disabled placeholder remains.
@@ -884,9 +887,11 @@ def test_signals_and_cards_link_to_evidence_pages():
     assert 'href="#/${escapeHtml(c.target_page)}"' in cards
     # Service-side targets are the real evidence pages.
     # PR-ADS-168B: Revenue by Source is deleted; its links now open Channels.
-    for target in ('"roas-campaigns"', '"roas-countries"', '"channels"',
+    # PR-ADS-177B: Campaign Revenue & Spend merged into Campaigns.
+    for target in ('"campaigns"', '"roas-countries"', '"channels"',
                    '"revenue-health"'):
         assert target in SERVICE
+    assert '"roas-campaigns"' not in SERVICE
     assert '"revenue-by-source"' not in SERVICE
     # PR-ADS-162G: the Action Queue page is deleted — no card may point at it.
     assert '"action-queue"' not in SERVICE

@@ -807,11 +807,19 @@ def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
     assert "FROM keywords" not in builder
     revenue_repo = (_ROOT / "db" / "revenue_repository.py").read_text(encoding="utf-8")
     assert "fetch_keyword_theme_snapshot" in revenue_repo
-    # The live reader, at its call site (PR-ADS-162G).
+    # The live reader, at its call site (PR-ADS-162G) — PR-ADS-177B REMOVED it:
+    # the Dashboard Campaigns tab's keyword-theme panel read this non-windowed
+    # snapshot and is dropped (docs/60 §3). This is the moment the docstring
+    # names: the legacy writes now have no in-product reader (only the orphan
+    # `/api/keywords`). Stopping them is its own decision, recorded in
+    # docs/60 §8, not taken here.
     campaigns_tab = _function_code(
         _ROOT / "services" / "dashboard_campaigns_service.py",
         "build_dashboard_campaigns")
-    assert "repo.fetch_keyword_theme_snapshot()" in campaigns_tab
+    assert "fetch_keyword_theme_snapshot" not in campaigns_tab
+    services = "".join(p.read_text(encoding="utf-8")
+                       for p in (_ROOT / "services").glob("*.py"))
+    assert "fetch_keyword_theme_snapshot" not in services
     # `/api/keywords` has no caller in the UI: an orphan, not a consumer.
     import re as _re
     app_js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")

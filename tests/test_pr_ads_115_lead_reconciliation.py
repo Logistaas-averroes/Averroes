@@ -217,7 +217,7 @@ def test_single_readiness_contract_shared():
     # PR-ADS-126: the readiness contract is computed ONCE in the backend mart
     # (_readiness_block) and shared by every view. Both ROAS pages gate on the
     # mart's revenue_decision_ready verdict instead of each re-deriving readiness.
-    camp = _fn("function renderRoasCampaignsPage", span=1600)
+    camp = _fn("function renderCampaignsPage()", span=1600)
     country = _fn("function renderRoasCountriesPage", span=1600)
     assert "readiness.revenue_decision_ready" in camp
     assert "readiness.revenue_decision_ready" in country

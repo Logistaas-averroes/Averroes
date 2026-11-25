@@ -879,7 +879,10 @@ RULES: list[dict] = [
                # PR-ADS-176B: the Countries page's totals and regional mix —
                # sums of the country rows' SQLs over the listed markets, from
                # the rows above; no SQL is recounted.
-               "_sum_rows", "_country_page_blocks"]),
+               "_sum_rows", "_country_page_blocks",
+               # PR-ADS-177B: the Campaigns page's totals (the summary's own
+               # cohort metrics) and its residual row (cohort.campaign_residual).
+               "_campaign_page_blocks"]),
     _m("ras.module", "services/revenue_attribution_service.py", CLS_CANONICAL, _RAS, ["sqls_field_ref"]),
     _r("ras.json", "services/revenue_attribution_service.py", CLS_INACTIVE, _JSONFALLBACK,
        symbol=["_build_from_json", "_build_campaign_rows", "_build_country_rows", "_build_summary"]),
@@ -904,7 +907,7 @@ RULES: list[dict] = [
                "_build_truth_status", "_new_bucket", "build_dashboard_channels"]),
     _m("camp.module", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP, ["sql_verdict_ref"]),
     _r("camp", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP,
-       symbol=["_build_campaign_rows", "_build_keyword_themes", "_build_kpis",
+       symbol=["_build_campaign_rows", "_build_kpis",
                "_build_period_change", "_build_unavailable", "_campaign_status",
                "build_dashboard_campaigns"]),
     _m("ctry.module", "services/dashboard_countries_service.py", CLS_LEGACY, _CTRY, ["sql_verdict_ref"]),
@@ -1322,7 +1325,10 @@ RULES: list[dict] = [
     _r("ui.campaigns_tab", "static/app.js", CLS_CANONICAL, _CAMP,
        symbol=["renderDashboardCampaigns", "renderCampKpiRow", "campBubbleSVG",
                "renderCampPerformanceMap", "wireCampBubbleHover", "renderCampLeaderboard",
-               "wireCampDrawers", "renderCampKeywordThemes", "renderCampTruthFooter", "loadCampaigns"]),
+               "wireCampDrawers", "renderCampTruthFooter", "loadCampaigns",
+               # PR-ADS-177B: the residual row (the cohort's contacts on no
+               # campaign row); the keyword-theme panel is deleted.
+               "renderCampLeaderboardResidual"]),
     _r("ui.countries_tab", "static/app.js", CLS_CANONICAL, _CTRY,
        symbol=["renderDashboardCountries", "renderCtryKpiRow", "wireCtryBubbleHover",
                "renderCtryLeaderboard", "wireCtryDrawers", "renderCtryResidualPanel",
@@ -1347,7 +1353,12 @@ RULES: list[dict] = [
                "cohortCountPublication", "cohortCountText", "campBlockerOpts",
                "isRevenueDecisionReady", "cohortLeadsReady", "countryResidualSpendValue"]),
     _r("ui.roas", "static/app.js", CLS_CANONICAL, _RAS,
-       symbol=["renderRoasCampaignSummary", "renderRoasCampaignTable", "sortRoasCampaignRows",
+       symbol=[# PR-ADS-177B: the one Campaigns page republishes the mart's
+               # settled campaign rows, `campaign_totals` and residual row SQLs
+               # (Campaign Revenue & Spend's renderers are deleted).
+               "renderCampaignsPageSummary", "renderCampaignsPageTable", "sortCampaignsPageRows",
+               "renderCampaignsResidualRow", "renderCampaignsPageDrawer",
+               "renderCampaignSpendGateState",
                "renderRoasCountrySummary", "renderRoasCountryTable", "sortRoasCountryRows",
                # PR-ADS-176B: the one Countries page republishes the mart's
                # country rows, `country_totals` and `regional_mix` SQLs.
@@ -1366,6 +1377,10 @@ RULES: list[dict] = [
     # no SQL figure.
     _r("ui.canonical_metrics", "static/app.js", CLS_DIAGNOSTIC, _READER_CUTOVER,
        symbol=["dashValue", "dealRateCell"]),
+    # PR-ADS-177B: the Meta ad-set table names an "SQLs" column whose every
+    # cell reads "Not linked yet" — no SQL figure is rendered.
+    _r("ui.meta_adsets", "static/app.js", CLS_DIAGNOSTIC, _READER_CUTOVER,
+       symbol="renderMetaAdsetTable", pattern="frontend_sqls_label"),
     # PR-ADS-176C: bound to the retired Geo country summary until now. Since
     # PR-ADS-176B deleted the #/geo page, the one hit left in index.html is the
     # Countries page subtitle ("SQLs"), which republishes the mart country

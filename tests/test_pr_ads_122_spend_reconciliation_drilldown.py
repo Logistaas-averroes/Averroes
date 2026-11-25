@@ -349,9 +349,19 @@ def test_reconcile_reports_incomplete_coverage(monkeypatch):
 
 
 def test_roas_page_still_blocks_on_incomplete_coverage():
-    assert "spendCoverageIncomplete" in JS
+    # PR-ADS-177B: Campaign Revenue & Spend (whose `spendCoverageIncomplete`
+    # notice this pinned) is merged into the one Campaigns page, which blocks
+    # STRICTLY: below the mart's spend_decision_ready (incomplete coverage
+    # included) it shows the gate card and no figure — no ratio at all.
+    page = JS[JS.find("function renderCampaignsPage()"):]
+    page = page[:page.find("\n}\n")]
+    i_gate = page.find("spend_decision_ready !== true")
+    assert -1 < i_gate < page.find("renderCampaignsPageSummary")
+    assert i_gate < page.find("renderCampaignsPageTable")
+    gate = JS[JS.find("function renderCampaignSpendGateState"):]
+    gate = gate[:gate.find("\n}\n")]
+    assert "Campaign figures are withheld for this window" in gate
     # PR-ADS-161E: the blocked ratio is period revenue / ad spend, never "ROAS".
-    assert "Spend coverage incomplete — Period Revenue / Ad Spend unavailable" in JS
     assert "Spend coverage incomplete — ROAS unavailable" not in JS
 
 

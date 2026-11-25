@@ -383,7 +383,7 @@ def test_frontend_campaign_coverage_copy():
     assert "verified as zero spend" in fn
     assert "spend_coverage_detail" in fn
     # Wired into the campaign page render.
-    page = _slice("function renderRoasCampaignsPage", span=1800)
+    page = _slice("function renderCampaignsPage()", span=1800)
     assert "renderMartCampaignCoverage(data)" in page
 
 
