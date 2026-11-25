@@ -6978,3 +6978,33 @@ fail-before / mutation evidence.
   cohort chip states the selected window's last day (every window) and its
   as-of watermark when stale.
 * **Tests.** `tests/test_pr_ads_177a_f3_truth_audit.py` (12).
+
+---
+
+## PR-ADS-178A — CI runs each test once, on pull requests only
+
+Owner decision, 25 Nov 2026: cut CI time; this is a small platform.
+
+* **Before.** A PR run took 63–75 min. The PostgreSQL step (~26 min) and the
+  contract step (~3 min) ran their modules, and then the full suite (~33 min)
+  ran those same modules a second time. Every merge then started another full
+  run on the push to `main`, re-proving a tree its PR had already run green.
+* **After.**
+  * The contract step writes `contract-results.xml`.
+  * The full-suite step reads both junit files and passes `--ignore` for each
+    module that contributed cases there. A module that contributed nothing
+    (skipped or failed to collect) still runs in the full suite.
+  * The PostgreSQL did-run assertion is unchanged.
+  * The workflow triggers on `pull_request` only, with `concurrency` cancelling
+    a superseded run on the same PR.
+* **Coverage.** Unchanged: every test still runs exactly once per job. Locally,
+  collection drops from 6690 to 6539 when two modules are ignored, which proves
+  the ignore list removes exactly those modules. The ten tests that pin the
+  workflow's structure (`-k "ci or workflow or deselect or gate or
+  registered"`, 92 cases) pass.
+* **Expected time.** About 40 min per PR instead of 63–75, and no second run
+  after each merge.
+* **Risk.** `main` is no longer re-tested after a merge. That is safe only while
+  PRs merge one at a time onto the base they were tested on, which is the
+  practice here (squash with `expectedHeadSha`). If two PRs ever merge back to
+  back, re-run CI on the second.

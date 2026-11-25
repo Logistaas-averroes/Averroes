@@ -18,8 +18,14 @@ name: Tests
 
 on:
   pull_request:
-  push:
-    branches: [main]
+
+# Owner decision 25 Nov 2026 (cost): CI runs on pull requests only. Every merge
+# to main is the squash of a PR head that this job already ran green, so a
+# second full run on the push to main re-proved the same tree. A newer push to
+# the same PR cancels the run it supersedes.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   suite:
@@ -378,12 +384,38 @@ jobs:
             tests/test_pr_ads_162h_report_generation_retired.py \
             tests/test_scheduler_google_ads_cutover.py \
             tests/test_pr_ads_145_search_terms_completion.py \
-            tests/test_pr_ads_129_roas_availability_geo_reconciliation.py -q
+            tests/test_pr_ads_129_roas_availability_geo_reconciliation.py -q \
+            --junitxml=contract-results.xml
 
-      - name: Full suite (known-failing-on-main deselected)
+      # Owner decision 25 Nov 2026 (cost): the full suite no longer re-runs the
+      # modules the PostgreSQL and contract steps above already ran green on
+      # this same commit. Those steps' junit files name exactly which modules
+      # contributed cases; each such module file is passed to --ignore here, so
+      # every test still runs exactly once per job. A module that contributed
+      # NO case above (skipped, failed to collect) is not in the junit and so
+      # still runs here — nothing is dropped. The PostgreSQL step's did-run
+      # assertion above is unchanged.
+      - name: Full suite (known-failing-on-main deselected; modules already run above excluded)
         run: |
           df -h /tmp
-          python -m pytest -q \
+          python - <<'PY' > already-run.txt
+          import os, xml.etree.ElementTree as ET
+          seen = set()
+          for path in ("pg-results.xml", "contract-results.xml"):
+              root = ET.parse(path).getroot()
+              for case in root.iter("testcase"):
+                  parts = case.get("classname", "").split(".")
+                  if len(parts) >= 2 and parts[0] == "tests":
+                      rel = f"tests/{parts[1]}.py"
+                      if os.path.isfile(rel):
+                          seen.add(rel)
+          for rel in sorted(seen):
+              print(f"--ignore={rel}")
+          PY
+          echo "Modules already run above (not re-run): $(wc -l < already-run.txt)"
+          cat already-run.txt
+          test -s already-run.txt || { echo "no junit modules found — refusing to guess"; exit 1; }
+          python -m pytest -q $(cat already-run.txt) \
             --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty"
 
   known-failing:
