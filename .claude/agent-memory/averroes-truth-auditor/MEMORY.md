@@ -822,3 +822,47 @@ truncated list. Verified by execution on exported copies of both commits.
 - Certification checks a snapshot-consistent build of each page. A torn read
   within one web request (the 161E/173A class) is invisible to it by
   construction.
+
+## PR-ADS-179A-F1 review (fea87ac on 91290f7, 2026-11-25) — schema lock, refusals
+
+- Certification windows (`services.snapshot_memo.certification_window` →
+  `db.connection.pinned_read_snapshot`) take advisory key `SCHEMA_LOCK_KEY`
+  SHARED at SESSION level (own short txn, `lock_timeout` 60 s, then unpinned);
+  `db.schema.init_db` takes it EXCLUSIVE xact-level as its first statement,
+  180 s bound, then raises `SchemaMigrationBlocked` (the ONLY init_db error
+  that propagates; every other init_db error is still logged and swallowed).
+  Callers of init_db in production: `api/server.py` lifespan (before
+  `start_scheduler`) and `scripts/backfill_meta_ads_spend.py`.
+  `ensure_database_ready` does NOT call init_db.
+- Session lock release: `_release_connection` rolls back, unlocks, and CLOSES
+  the connection if either step fails or unlock returns non-True. Verified by
+  mutation: never unlocking makes test_08_a fail (init_db stuck). NB: a leaked
+  session lock does not block init_db if init_db happens to get the SAME
+  pooled connection (own-session locks never conflict) — tests can miss a
+  leak that way; 08_a catches it because init_db runs in another thread.
+- Audits run in subprocesses (`_run_capped`, SIGKILL on timeout/RSS), so a
+  killed audit drops its session lock with its connection.
+- Refusals are recorded on `_Pin.violations` and turned into exit 2 by all
+  three window audits. Verdict ordering: a violation in the same window still
+  wins (exit 1).
+- Known gap (verified by probe): `SELECT 1; COMMIT; BEGIN ...` leaves status
+  INTRANS, so `_still_pinned` (IDLE check) misses it; the next statement in
+  the same block runs READ COMMITTED and read-WRITE. Caught only at savepoint
+  release (recorded, broken, exit 2). Fail-closed at the verdict, not at the
+  statement.
+- The unpinned fallback certifies exit 0 with only a log warning — no report
+  field says the window was not snapshot-consistent.
+
+## PR-ADS-179B review (acb4f66 on 9a09c6d, 2026-11-25) — pin escapes, disclosure
+- Verdict: merge with minors. Base vs head reports identical apart from the new
+  `snapshot`/`snapshot_pinning` keys; all 19 windows pinned; exit 0.
+- Pin check: transaction-local marker `averroes.pinned_read_snapshot` + `_Pin.verify`
+  after any statement whose template OR sent `cursor.query` names
+  COMMIT|END|ROLLBACK|ABORT|PREPARE, and after every executemany; `check_open`
+  refuses IDLE before execute/executemany/get_conn. In the audits only CASE…END
+  triggers it (~9% of statements); every check passes when pinned.
+- Found: callproc/copy_*/reset bypassed check_open; `_undo` set `broken` without a
+  violation so a broken window could certify `pinned: true`; `summarize()` dropped
+  `snapshot_pinning` from the daily row.
+- 161E test_26 fails in a tar copy (no .git); rerun with GIT_DIR=<worktree gitdir>.
+- PR-ADS-179B-F1 fixed items 1–3 (`_undo` records; `snapshot_broken`; summarize/_render carry the note; callproc/copy_*/reset guarded).

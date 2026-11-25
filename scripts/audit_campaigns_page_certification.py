@@ -139,6 +139,9 @@ class Findings:
         self.violations: list[str] = []
         self.unavailable: list[str] = []
         self.checks: list[dict] = []
+        #: PR-ADS-179B — ``snapshot_memo.pinning_summary`` over the windows
+        #: audited (None until they run). Disclosure only: no exit code.
+        self.snapshot_pinning: dict | None = None
 
     def record(self, name: str, ok: bool, detail: str = "") -> None:
         self.checks.append({"check": name, "ok": bool(ok), "detail": detail})
@@ -687,18 +690,26 @@ def run(windows, *, now=None) -> tuple[Findings, dict]:
     # refused, even one a reader swallowed, makes the window unavailable.
     from datetime import datetime, timezone  # noqa: PLC0415
 
+    # PR-ADS-179B: a window that could not pin its snapshot runs unpinned (as
+    # before 179A); its ``snapshot`` entry and ``f.snapshot_pinning`` say so.
+    # The exit code does not change.
     from services.snapshot_memo import (  # noqa: PLC0415
-        certification_window, refused_reads,
+        certification_window, pinning_summary, refused_reads, window_snapshot,
     )
     now = now or datetime.now(tz=timezone.utc)
     per_window = {}
     for w in windows:
-        with certification_window() as scope:
+        disclosure: dict = {}
+        with certification_window(disclosure) as scope:
             per_window[w] = audit_window(w, f, now=now)
+        per_window[w] = {**per_window[w],
+                         "snapshot": window_snapshot(scope, disclosure)}
         for refusal in refused_reads(scope):
             f.unavailable_now(f"pinned_snapshot[{w}]",
                               f"a read in this window was refused by its pinned "
                               f"snapshot: {refusal}"[:300])
+    f.snapshot_pinning = pinning_summary(
+        (w, per_window[w]["snapshot"]) for w in windows)
     return f, per_window
 
 
@@ -738,6 +749,7 @@ def main() -> int:
         "unavailable": findings.unavailable,
         "checks": findings.checks,
         "per_window": per_window,
+        "snapshot_pinning": findings.snapshot_pinning,
     }
     if args.json:
         print(json.dumps(result, indent=2, default=str))
@@ -748,6 +760,8 @@ def main() -> int:
         for c in findings.checks:
             print(f"  {'✓' if c['ok'] else '✗'} {c['check']}"
                   + (f"\n      {c['detail']}" if c["detail"] else ""))
+        if findings.snapshot_pinning:
+            print(f"\n  Snapshot: {findings.snapshot_pinning['note']}")
         verdict = {EXIT_CERTIFIED: "CERTIFIED", EXIT_VIOLATION: "VIOLATION",
                    EXIT_UNAVAILABLE: "UNAVAILABLE"}[exit_code]
         print(f"\n  {verdict} — exit {exit_code}")

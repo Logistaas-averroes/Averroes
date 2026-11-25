@@ -7372,3 +7372,87 @@ minors: no cross-window leak, and reports identical between base and head.
 * **Tests.** `test_pr_ads_179a_certification_runtime.py` gains 08_a–10_b, 17
   cases in all. Each new case fails on `91290f7`; 08_a fails with the real
   `DeadlockDetected`. Each also fails under a named mutation (M14–M17).
+
+## PR-ADS-179B — certification runtime: the re-audit's minors
+
+`docs/62` §8. On top of `9a09c6d` (PR-ADS-179A). Read-only. No check, gate,
+window or exit code changed.
+
+* **`SchemaMigrationBlocked` names both holders.** The schema lock also
+  serialises two `init_db` calls. For example,
+  `scripts/backfill_meta_ads_spend.py` running during a deploy holds it just
+  as a window does. The message now names certification window(s) or another
+  migration.
+* **The Meta backfill CLI exits 2.** On `SchemaMigrationBlocked` it now exits
+  2 with `schema_migration_blocked` and never reaches Meta. Before, it exited
+  1 with a traceback.
+* **`init_db` documents its real guarantee.** Only the lock-wait bound
+  raises. Every other error, including a `QueryCanceled` from a role-level
+  `statement_timeout` during the advisory wait, is still logged and
+  swallowed, unchanged. The docstring and `docs/62` overclaimed.
+* **No statement runs after a reader ends the pinned transaction.** 179A
+  checked only for an IDLE connection, which three escapes got past:
+  * `SELECT 1; COMMIT; BEGIN ISOLATION LEVEL READ COMMITTED`;
+  * `ROLLBACK AND CHAIN`, which has the same modes but a new snapshot;
+  * a commit through `cursor.connection`.
+
+  Each let the next statement in the block read outside the snapshot. Now:
+  * the pinned transaction carries a transaction-local marker;
+  * after any statement that names a transaction-ending verb, in its
+    template or in the text psycopg2 sent, and after every `executemany`,
+    the session must still show that marker, REPEATABLE READ and read only;
+  * before every statement, an IDLE connection is refused;
+  * `ROLLBACK AND CHAIN`, `ABORT` and `PREPARE TRANSACTION` are refused
+    before they are sent.
+
+  Asking the session was chosen over a verb blacklist on the statement text:
+  `END` closes every `CASE`, so no text rule is both safe and exact.
+* **An unpinned window is disclosed.** A window that runs unpinned (the
+  schema lock was held past its bound) now reports `snapshot: {pinned:
+  false, reason, detail}` in all three audits. Each report also carries a
+  `snapshot_pinning` summary whose note says that what was certified there
+  is not a snapshot-consistent build. The exit code is unchanged.
+* **The shared lock is released before pooling.** A new case reads
+  `pg_locks` on the window connection's own backend pid. The shared lock is
+  gone once the window closes, and the same connection is then reused from
+  the pool.
+* **Tests.** `tests/test_pr_ads_179b_certification_runtime_followups.py` has
+  10 PostgreSQL cases and is added to CI's PG step and did-run list. Two
+  cases in the 179a module changed:
+  * `test_06` now compares the reports without the pinning keys, which
+    differ by design. It asserts all windows pinned with the windows, and
+    all `not_recorded` without them.
+  * The `10_a` docstring no longer claims more than it tests.
+
+  Every new guard fails on `9a09c6d`, or under a named mutation (M18–M25)
+  where 179A already held.
+
+## PR-ADS-179B-F1 — truth audit round 1
+
+`docs/62` §9. On top of `acb4f66`. The verdict was merge with minors. Base
+and head reports were identical apart from the new keys. The CASE … END
+check found no false positives: 271 of 2,938 statements triggered it, and
+all passed.
+
+* **A broken pin never certifies or reads as pinned.** `_Pin._undo` marked
+  the snapshot broken without recording a refusal, and the audits read only
+  the refusals. So a reader that escaped through psycopg2's own cursor and
+  then raised, in the window's last read, certified with exit 0 and
+  `pinned: true` after reading `read committed`. Now:
+  * a refusal is recorded whenever the pin breaks, so the window exits 2;
+  * a broken pin, or one with any refusal, reads `snapshot_broken`;
+  * the summary note never calls such a window snapshot-consistent.
+* **The disclosure reaches the daily verdict.** 179B put `snapshot` and
+  `snapshot_pinning` in each audit's own report only. The stored
+  `platform_certification_runs.summary` row and the platform certification's
+  output dropped them, so the daily verdict did not show an unpinned window.
+  Now `summarize()` stores each audit's `snapshot_pinning`, and `_render`
+  prints its note.
+* **The pass-through bypasses are closed.** `callproc`, `copy_expert`,
+  `copy_to` and `copy_from` are guarded and verified like `execute`, and a
+  pinned view refuses `reset()`. The one remaining bypass, psycopg2's own
+  cursor via `cursor.connection.cursor()`, is disclosed in `docs/62` §8.3.
+* **Tests.** The 179b module gains 06_a (×2), 06_b, 07 and 08, for 15 cases.
+  Each fails on `acb4f66` and under a named mutation (M26–M33). `test_06`
+  in the 179a module now removes the pinning keys only at the audits' exact
+  report paths.

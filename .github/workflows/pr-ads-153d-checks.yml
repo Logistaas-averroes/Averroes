@@ -139,6 +139,7 @@ jobs:
             tests/test_pr_ads_177b_meta_adsets_pg_integration.py \
             tests/test_pr_ads_178b_pipeline_pg_integration.py \
             tests/test_pr_ads_179a_certification_runtime.py \
+            tests/test_pr_ads_179b_certification_runtime_followups.py \
             tests/test_pr_ads_177c_campaign_feed_port_pg_integration.py \
             tests/test_pr_ads_178c_leads_deals_port_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
@@ -321,6 +322,12 @@ jobs:
                            # every window, and every report is identical with
                            # and without the windows.
                            "tests.test_pr_ads_179a_certification_runtime",
+                           # PR-ADS-179B. The re-audit's minors: the schema
+                           # lock's two holders and the backfill's exit 2, no
+                           # statement after a reader ends the pinned
+                           # transaction, an unpinned window disclosed, the
+                           # shared lock released before pooling.
+                           "tests.test_pr_ads_179b_certification_runtime_followups",
                            # PR-ADS-177C. The retired Campaign Evidence feed's
                            # truth properties, ported onto the settled campaign
                            # view, the Campaigns page and Dashboard →

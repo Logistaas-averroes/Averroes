@@ -797,11 +797,20 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
     # here by construction (before, it was visible only by chance). A read the
     # snapshot refused — even one a reader swallowed — makes the window
     # cannot_check (``refused_reads``).
+    #
+    # PR-ADS-179B: a window that could not pin its snapshot (the schema lock
+    # held past its bound) runs unpinned, as before 179A — and the report
+    # says so per window (``snapshot``) and in ``snapshot_pinning``. The exit
+    # code does not change.
     from analysis.business_windows import WINDOW_KEYS
-    from services.snapshot_memo import certification_window, refused_reads
+    from services.snapshot_memo import (
+        certification_window, pinning_summary, refused_reads, window_snapshot,
+    )
     report["business_windows"] = []
+    pinning = []
     for bw in WINDOW_KEYS:
-        with certification_window() as scope:
+        disclosure: dict = {}
+        with certification_window(disclosure) as scope:
             payloads = _build_mart_payloads(bw, now)
             settled = payloads.get("mart/campaign_settled")
             instants = _settled_instants(settled) if settled is not None else None
@@ -810,8 +819,10 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
             a.cannot_check(f"[business:{bw}] pinned snapshot",
                            f"a read in this window was refused by its pinned "
                            f"snapshot: {refusal}")
-        report["business_windows"].append(audit_mart_window(
-            a, window=bw, payloads=payloads))
+        snapshot = window_snapshot(scope, disclosure)
+        pinning.append((bw, snapshot))
+        report["business_windows"].append({**audit_mart_window(
+            a, window=bw, payloads=payloads), "snapshot": snapshot})
         if settled is None:
             a.cannot_check(f"[campaigns:{bw}] build", "the settled campaign view "
                            "could not be built")
@@ -820,6 +831,7 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
         report["windows"].append(audit_campaign_cohort(
             a, window=bw, payload=settled, independent=independent))
 
+    report["snapshot_pinning"] = pinning_summary(pinning)
     report["population_split"] = global_population_split()
     return a, report
 
@@ -885,6 +897,11 @@ def _render(report: dict, a: Audit, exit_code: int) -> None:
                   f"{str(ch['excluded_non_google_sqls']):>10}"
                   f"{str(ch['sqls_missing_event_timestamp']):>9}")
         print(f"  as of: {rows[0].get('as_of')}  (source fresh: {rows[0].get('source_fresh')})")
+
+    pinning = report.get("snapshot_pinning") or {}
+    if pinning:
+        print()
+        print(f"  Snapshot: {pinning.get('note')}")
 
     split = report.get("population_split")
     if split:

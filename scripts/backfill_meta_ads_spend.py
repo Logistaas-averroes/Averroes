@@ -57,8 +57,10 @@ campaign with ``python -m scripts.meta_ads_smoke_test --month YYYY-MM``.
 
 Exit code: 0 every month of every account verified and convertible to USD (or
 nothing to do); 1 every account failed, or Meta is misconfigured; 2 the
-database is not ready or Meta is not configured; 3 ``partial`` — some account
-failed, or some USD rates are missing.
+database is not ready, its schema migration could not take the schema lock
+(``schema_migration_blocked``, PR-ADS-179B: a certification window or another
+migration held it past its bound; nothing is backfilled), or Meta is not
+configured; 3 ``partial`` — some account failed, or some USD rates are missing.
 """
 from __future__ import annotations
 
@@ -103,8 +105,18 @@ def main(argv=None) -> int:
             print(json.dumps({"status": "failed", "reason": "database_unavailable",
                               "error": detail}, indent=2))
             return 2
-        from db.schema import init_db  # noqa: PLC0415
-        init_db()
+        from db.schema import SchemaMigrationBlocked, init_db  # noqa: PLC0415
+        try:
+            init_db()
+        except SchemaMigrationBlocked as exc:
+            # PR-ADS-179B: the schema lock was held past its bound (a
+            # certification window, or another migration — a deploy's).
+            # Nothing was migrated and nothing is backfilled: "unavailable",
+            # never a traceback (exit 1) that reads as a failed backfill.
+            print(json.dumps({"status": "failed",
+                              "reason": "schema_migration_blocked",
+                              "error": str(exc)}, indent=2))
+            return 2
     from connectors.meta_ads import parse_account_ids  # noqa: PLC0415
     accounts = None
     if args.accounts:
