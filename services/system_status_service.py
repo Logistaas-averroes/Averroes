@@ -281,13 +281,19 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     # PR-ADS-153F: Countries depends on canonical geo spend and the campaign
     # total it must reconcile against.
     "countries": ["canonical_geo", "canonical_spend"],
-    "leads": ["leads"],
+    # PR-ADS-178C: "leads" and "opportunities" removed — retired page keys
+    # (redirects to the Pipeline page since PR-ADS-178B) that mapped to the
+    # legacy `leads` snapshot, which the Pipeline page does not read. The
+    # Pipeline page's funnel and lead list read the canonical contact funnel
+    # (`hubspot_contact_funnel`: its sync, and its stage-entry evidence) —
+    # the datasets `PAGE_DATASET_MAP.pipeline` in static/app.js names. Its
+    # deal figures read the canonical deal ledger, which has no dataset here.
+    "pipeline": ["contact_funnel", "lifecycle_events"],
     # PR-ADS-163B: "deals" removed. It mapped the Deals page to the legacy
     # `deals` snapshot, which that page does not read: once the snapshot's row
     # count could be read (0 rows since 2026-05-25), the page would have been
     # reported "blocked" on the state of a table that feeds nothing on it.
     "gclid-attribution": ["gclid_attribution", "gclid_coverage_snapshots"],
-    "opportunities": ["leads"],
     "health": ["all"],
     "backfill": ["admin"],
     "mailchimp": ["mailchimp_campaigns", "mailchimp_reports",

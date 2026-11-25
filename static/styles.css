@@ -4591,38 +4591,8 @@ body.is-revenue-page #monitoring-banner {
 
 /* ── Canonical Revenue Decision Mart UI (PR-ADS-126) ─────────────────────── */
 
-/* Compact diagnostics stack — the mart's own explanation of why spend/ROAS are
-   (un)available. Deliberately quiet (no warning wall). */
-.revenue-diagnostics {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 12px 0 16px;
-}
-
-.revenue-diagnostic {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.revenue-diagnostic strong {
-  flex: 0 0 auto;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  color: #475569;
-}
-
-.revenue-diagnostic span {
-  color: #334155;
-}
+/* PR-ADS-178C: the compact mart diagnostics stack is
+   deleted with renderMartDiagnostics, which no page called. */
 
 /* Revenue Page Parity panel — does every revenue page agree with the mart? */
 .revenue-page-parity {
@@ -5861,16 +5831,11 @@ body.is-revenue-page #monitoring-banner {
 .dash-funnel__stage-value .dash-unavailable { font-size: 15px; }
 .dash-funnel__stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
-/* PR-ADS-166A — Leads: stage moves and customers won, two separate figures. */
-.leads-customer-figures { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-4) 0; }
-.leads-customer-figure {
-  flex: 1 1 280px; padding: var(--space-4);
-  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-alt);
-}
+/* PR-ADS-166A — the Customer stage's help text (the Pipeline funnel's last
+   stage). PR-ADS-178C: the retired Leads page's two-figure cards and its
+   folded won-customers list are deleted with that page. */
 .leads-customer-figure__help { font-size: 12px; color: var(--text-muted); margin: 6px 0 0; line-height: 1.4; }
 .leads-customer-figure__help .metric-reason { display: inline; }
-.leads-won-customers { margin-top: var(--space-3); }
-.leads-won-customers > summary { cursor: pointer; font-size: 12px; font-weight: 600; }
 .leads-names-note { text-transform: none; letter-spacing: 0; }
 .dash-funnel__conv {
   align-self: center;
@@ -6923,67 +6888,17 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   PR-ADS-139 — Dashboard Deals, Opportunities & Pipeline Intelligence tab
-   Reuses the PR-ADS-134/135/136/137/138 dashboard design system (tokens, cards,
-   panels, funnel, decision cards, truth footer, drawers). Only Deals-specific
-   pieces below. Closed-won is revenue truth (USD); open pipeline is NOT revenue;
-   NO ROAS on this tab; open/lost/aging stages render Unavailable, never faked.
+   PR-ADS-139 — Dashboard → Deals; since PR-ADS-178B the Pipeline page's deal
+   list, customers won and source breakdown, which the tab renders too.
+   PR-ADS-178C: the deleted Deals-tab panels' CSS is gone with them (the KPI
+   grid, status dots and pills, the deal funnel, the aging list, the campaign
+   and SQL-no-deal panels, the drawer's review note and links).
    ══════════════════════════════════════════════════════════════════════════ */
 
-.deal-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-
-/* Status dots + pills. */
-.deal-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
-.deal-dot--proven { background: #22b07d; }
-.deal-dot--sql { background: #129ef5; }
-.deal-dot--pending { background: #ff8a3d; }
-.deal-dot--aging { background: #e0564e; }
-.deal-dot--attr { background: #7c5cff; }
-.deal-dot--muted { background: #b6bfca; }
-.deal-status {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  white-space: nowrap;
-  color: var(--deal-accent, var(--text-secondary));
-  background: color-mix(in srgb, var(--deal-accent, #b6bfca) 12%, transparent);
-}
-
-/* Pipeline funnel. */
-.deal-funnel-panel { display: block; }
-.deal-funnel { display: flex; flex-wrap: wrap; align-items: stretch; gap: 4px; margin-top: var(--space-2); }
-.deal-funnel__stage {
-  flex: 1 1 120px;
-  min-width: 110px;
-  border: 1px solid var(--border);
-  border-top: 3px solid var(--deal-accent, var(--border-strong));
-  border-radius: var(--radius-md);
-  background: var(--surface-alt);
-  padding: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.deal-funnel__stage--unavailable { opacity: 0.68; border-top-style: dashed; }
-.deal-funnel__label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
-.deal-funnel__value { font-size: 22px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
-.deal-funnel__amt { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.deal-funnel__status { font-size: 10px; color: var(--text-muted); margin-top: auto; }
-.deal-funnel__arrow { display: flex; align-items: center; color: var(--text-muted); font-size: 12px; padding: 0 2px; }
-.deal-funnel__conv { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text-secondary); }
 .deal-stage-note { font-size: 11px; color: var(--text-muted); font-style: italic; margin: var(--space-3) 0 0; line-height: 1.5; }
 
-/* Opportunity aging (structurally Unavailable). */
-.deal-aging-panel { display: block; }
-.deal-aging-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.deal-aging-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: baseline; font-size: 12px; padding: 8px 4px; border-bottom: 1px solid var(--border); }
-.deal-aging-row__bucket { font-weight: 600; color: var(--text-primary); }
-.deal-aging-row__count, .deal-aging-row__amt { font-variant-numeric: tabular-nums; color: var(--text-secondary); text-align: right; }
-
-/* Tables (source / campaign / deals / sql-no-deal). */
-.deal-source-panel, .deal-campaign-panel, .deal-table-panel, .deal-sql-panel { display: block; }
+/* Tables (deals by source, the deal list). */
+.deal-source-panel, .deal-table-panel { display: block; }
 .deal-scroll { overflow-x: auto; }
 .deal-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 720px; }
 .deal-table--rows { min-width: 820px; }
@@ -7017,15 +6932,8 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .deal-drawer__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3); margin: 0; }
 .deal-drawer__grid dt { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
 .deal-drawer__grid dd { margin: 2px 0 0; font-size: 13px; color: var(--text-primary); }
-.deal-review-note { font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
-.deal-drawer__actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
-.deal-drawer__link { font-size: 12px; color: var(--brand-sky-accent); text-decoration: none; font-weight: 600; }
 
-@media (max-width: 1100px) {
-  .deal-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 @media (max-width: 640px) {
-  .deal-kpi-grid { grid-template-columns: minmax(0, 1fr); }
   .deal-drawer__grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
 

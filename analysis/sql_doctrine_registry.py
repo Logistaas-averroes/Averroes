@@ -1201,14 +1201,12 @@ RULES: list[dict] = [
     # matched no occurrence; a module-level one written there now is unknown.
     _r("api.crm_funnel", "api/server.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        symbol=["api_crm_funnel", "api_crm_funnel_contacts", "api_crm_funnel_operational_status",
-               "api_crm_funnel_sync", "api_crm_funnel_coverage",
-               # PR-ADS-166A: imports the funnel service to call
-               # `build_customers_won`. It publishes closed-won customers and
-               # deals from the reader contract — no SQL count, no CPQL.
-               "api_crm_funnel_customers_won"]),
-    # PR-ADS-166A: the reader-cutover audit's INVENTORY names the funnel
-    # service's FILE as a closed-won reader (`build_customers_won`). A path in
-    # a diagnostic's table; it publishes nothing.
+               "api_crm_funnel_sync", "api_crm_funnel_coverage"]),
+    # PR-ADS-178C: "api_crm_funnel_customers_won" (/api/crm-funnel/customers-won,
+    # PR-ADS-166A) is retired with its route; the Pipeline builder carries the
+    # reading. The reader-cutover audit names the funnel service's FILE in a
+    # comment where its PR-ADS-166A INVENTORY row stood. A path in a
+    # diagnostic's source; it publishes nothing.
     _m("readercutover.audit.module", "scripts/audit_customer_revenue_reader_cutover.py",
        CLS_DIAGNOSTIC, _FUNNEL_ENGINE, ["lifecycle_funnel_service_ref"]),
     _r("api.crm_funnel_audit", "api/server.py", CLS_DIAGNOSTIC, _FUNNELREC, symbol="api_crm_funnel_audit"),
@@ -1230,8 +1228,8 @@ RULES: list[dict] = [
     _m("diag.parity.module", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
        ["contact_created_at_ref", "lifecycle_sql_property_ref", "sql_reconciliation_ref",
         "sqls_field_ref"]),
-    # PR-ADS-166A: the parity audit builds the Leads page's "Customers won"
-    # block (`build_customers_won`, in the funnel service file) as one more
+    # PR-ADS-166A / PR-ADS-178C: the parity audit reads the Pipeline page's
+    # "Customers won" block (`build_pipeline`'s `customers_won`) as one more
     # consumer of the customers / closed-won-deals identities. No SQL figure.
     _r("diag.parity.consumers", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="_build_consumers"),

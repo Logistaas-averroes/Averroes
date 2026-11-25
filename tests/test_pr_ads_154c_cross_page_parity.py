@@ -170,6 +170,26 @@ def _contract(metric, source, scope, **over):
     return block
 
 
+def _customers_won_block(_mt):
+    """PR-ADS-178C: the Pipeline payload's ``customers_won`` block, in
+    production's shape (``pipeline_service._customers_won``). It reads the
+    closed-won reader contract directly, so it names the deal ledger, and
+    publishes each figure as {value, status, reason}. It is the
+    ``pipeline/customers_won`` consumer — PR-ADS-166A's ``leads/customers_won``
+    (``/api/crm-funnel/customers-won``, retired), moved into the builder."""
+    _LEDGER = contract_mod.SOURCE_CANONICAL_DEAL_LEDGER
+    return {
+        "status": "published", "reason": None, "rows": [],
+        "metric_family": "closed_won_customers", "window_basis": "deal_close_date",
+        "window": dict(_WIN), "legacy_fallback_used": False,
+        "customers": {"value": 3, "status": "published", "reason": None,
+                      "dedup_key": "hubspot_company_id"},
+        "closed_won_deals": {"value": 3, "status": "published", "reason": None},
+        contract_mod.METRIC_TRUTH_KEY: _mt(
+            ("customers", _LEDGER, "all_source_business_revenue"),
+            ("closed_won_deals", _LEDGER, "all_source_business_revenue"))}
+
+
 def _pipeline_payload(_mt):
     """PR-ADS-178B: the Pipeline builder's payload, in production's shape."""
     _MART = contract_mod.SOURCE_REVENUE_DECISION_MART
@@ -177,6 +197,7 @@ def _pipeline_payload(_mt):
     def m(v):
         return {"value": v, "status": "published", "reason": None}
     return {
+        "customers_won": _customers_won_block(_mt),
         "window": dict(_WIN), "read_only": True, "page": "pipeline",
         "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
         "kpis": {"won_revenue_usd": m(33000.0), "closed_won_deals": m(3),
@@ -215,18 +236,12 @@ def _payloads(**overrides):
     # revenue over 3 customers, 29000 over 2 for both the campaign- and
     # country-attributed subsets, 25 campaign-attributable SQLs against 0
     # source-group SQLs, 105 leads.
+    pipeline = _pipeline_payload(_mt)
     base = {
-        # PR-ADS-166A: the Leads page's "Customers won" block
-        # (`/api/crm-funnel/customers-won`). It reads the closed-won reader
-        # contract directly, so it names the deal ledger, and publishes each
-        # figure as {value, status, reason}.
-        "leads/customers_won": {
-            "window": dict(_WIN), "legacy_fallback_used": False,
-            "customers": {"value": 3, "status": "published", "reason": None},
-            "closed_won_deals": {"value": 3, "status": "published", "reason": None},
-            contract_mod.METRIC_TRUTH_KEY: _mt(
-                ("customers", _LEDGER, "all_source_business_revenue"),
-                ("closed_won_deals", _LEDGER, "all_source_business_revenue"))},
+        # PR-ADS-166A / PR-ADS-178C: the Pipeline page's "Customers won" block
+        # — the consumer `_build_consumers` reads off the pipeline payload
+        # (`_pipeline_customers_won_reading`), so it is that payload's block.
+        "pipeline/customers_won": pipeline["customers_won"],
         "dashboard/overview": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_decision_mart",       # a STRING, as in production
@@ -322,7 +337,7 @@ def _payloads(**overrides):
         # (`build_pipeline`), whose KPIs are {value, status, reason}; the
         # Pipeline page is the same payload and a consumer of its own.
         "dashboard/deals": _pipeline_payload(_mt),
-        "pipeline": _pipeline_payload(_mt),
+        "pipeline": pipeline,
         # PR-ADS-177B: the mart's SETTLED campaign view — the Campaigns page
         # and Dashboard → Campaigns read it, and it is the reference the
         # `*__settled_days` identities compare Dashboard → Campaigns with.
@@ -1267,8 +1282,10 @@ def test_f2_2d_all_source_outcomes_span_every_page_that_publishes_them(monkeypat
     # PR-ADS-166A added a sixth surface for customers (and closed-won deals):
     # the Leads page's "Customers won" block, which publishes no revenue. The
     # expectation grew by that one consumer; nothing was removed.
+    # PR-ADS-178C: that block is the Pipeline page's now (the route it was
+    # read through is retired); the consumer moved, none was removed.
     expected = {"closed_won_revenue_usd": pages,
-                "customers": pages | {"leads/customers_won"}}
+                "customers": pages | {"pipeline/customers_won"}}
     for key in ("closed_won_revenue_usd", "customers"):
         consumers = {c for c, _ in METRIC_IDENTITIES[key]["consumers"]}
         assert consumers == expected[key], key

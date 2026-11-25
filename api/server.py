@@ -34,6 +34,8 @@ Protected endpoints (require authenticated session):
   (PR-ADS-177C retired /api/campaigns, /api/campaign-detail, /api/keywords,
    /api/search-terms, /api/search-terms/summary, /api/search-terms/ngrams and
    /api/revenue-attribution; each answers 404.)
+  (PR-ADS-178C retired /api/revenue-deals and /api/crm-funnel/customers-won;
+   each answers 404. The Pipeline page, /api/pipeline, publishes both.)
   GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
   GET  /api/search-term-evidence/flagged — Canonical Flagged / Waste view over deduplicated search_terms facts (requires auth; PR-ADS-153D).
@@ -47,7 +49,6 @@ Protected endpoints (require authenticated session):
   GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
-  GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
   POST /api/revenue-recovery/run   — Admin-only Revenue Truth Recovery (local DB writes only; reads HubSpot read-only; PR-ADS-114).
   GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
   POST /api/lead-reconciliation/run — Admin-only Lead Event-Date Reconciliation (local DB writes only; reads HubSpot read-only; PR-ADS-115).
@@ -4213,41 +4214,6 @@ async def get_revenue_attribution_audit(
         ) from exc
 
 
-@app.get("/api/revenue-deals")
-async def get_revenue_deals(
-    window: str = Query(default="current_quarter"),
-    _user=Depends(require_auth),
-):
-    """Closed-Won Deals (PR-ADS-113; canonical deal ledger since PR-ADS-153E-B).
-
-    Read-only deal-level revenue truth for the Deals page: EVERY HubSpot
-    closed-won deal in the window, from every source (not only Google Ads),
-    windowed by the real deal close date (NEVER the scheduler run_date).
-    Business-revenue windows only: current_quarter, last_quarter, last_6_months,
-    ytd, all_time.
-
-    No Google Ads conversion value. No scheduler-date revenue windows.
-    ``closed_won_population`` carries the canonical {value, status, reason} of
-    the window's won-deal count (PR-ADS-164A): an empty ``deals`` list means
-    "no deal closed" only beside ``status: published, value: 0``. A stale or
-    unreadable ledger is withheld / unavailable with its reason, and
-    ``source_health.ledger_status`` names the same reason.
-
-    Read-only — no writes to Google Ads, HubSpot, or any external system.
-    """
-    from services.revenue_attribution_service import build_revenue_deals
-
-    try:
-        return build_revenue_deals(window)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("Revenue deals computation failed: %s", exc)
-        raise HTTPException(
-            status_code=500, detail="Revenue deals computation failed"
-        ) from exc
-
-
 # ---------------------------------------------------------------------------
 # Canonical Revenue Decision Mart (PR-ADS-125)
 # ---------------------------------------------------------------------------
@@ -4605,25 +4571,24 @@ async def get_dashboard_deals(
     window: str = Query(default="current_quarter"),
     _user=Depends(require_auth),
 ):
-    """Dashboard Deals, Opportunities & Pipeline Intelligence contract (PR-ADS-139).
+    """Dashboard → Deals (PR-ADS-139; one builder since PR-ADS-178B).
 
-    ONE read-only payload for the Dashboard → Deals tab: what happens after an SQL —
-    how many became closed-won customers, how much closed-won revenue that produced,
-    which sources / campaigns create it, and which qualified SQLs have not yet become
-    customers. Composes the canonical Revenue Decision Mart (deal + campaign views)
-    for SQLs / customers / closed-won revenue, the Revenue-by-Source contract for the
-    source → pipeline breakdown, and the closed-won deal ledger for proof.
+    The Dashboard → Deals tab's ONE read: ``build_pipeline`` (the Pipeline
+    page's builder) for the window, plus a previous-period comparison built by
+    the same builder over the previous window. It composes no figure of its
+    own. Closed-won deals, customers (distinct HubSpot companies, never summed)
+    and won revenue are the reader contract's ``{value, status, reason}``; SQLs
+    are the Google Ads acquisition cohort. The deal ledger holds closed-won
+    deals only, so open pipeline, lost deals and opportunity aging are not
+    shown. No spend ratio. A withheld figure is null with its reason, never 0.
 
-    HubSpot closed-won is revenue truth (USD). Open pipeline is NOT revenue; a
-    closed-lost deal is NOT negative revenue; an opportunity is NOT a customer. This
-    tab shows no spend ratio. The durable HubSpot deal ledger stores CLOSED-WON deals only,
-    so open opportunities, closed-lost deals, opportunity aging, opportunity-created
-    counts and the two opportunity-conversion rates are rendered "Unavailable" — never
-    invented. Unavailable metrics are null plus a reason — never a fabricated $0 / 0%.
+    PR-ADS-178C: kept — the Dashboard → Deals tab fetches it
+    (``loadDashboardDeals``); ``/api/revenue-deals`` and
+    ``/api/crm-funnel/customers-won`` are retired.
 
-    Uses business windows (current_quarter | last_quarter | last_6_months | ytd
-    | all_time), not ad-style day windows. Read-only: no writes to HubSpot, Google
-    Ads, budgets, bids, campaigns, keywords, negatives, or offline conversions.
+    Business windows only (current_quarter | last_quarter | last_6_months |
+    ytd | all_time). Read-only: no writes to HubSpot, Google Ads, budgets,
+    bids, campaigns, keywords, negatives, or offline conversions.
     """
     from services.dashboard_deals_service import build_dashboard_deals  # noqa: PLC0415
 
@@ -4657,9 +4622,13 @@ async def get_pipeline(
     numbers exactly that count. Withheld means absent, with the reason.
 
     ``scope`` / ``acquisition_group`` are LEAD filters: they narrow the funnel
-    only; under either, customers won is unavailable with the reason, and no
-    deal figure changes. Paged contact rows stay on
+    only; no deal figure changes, and customers won is the window's all-source
+    list whatever they are (PR-ADS-178B-F1 m1). Paged contact rows stay on
     ``/api/crm-funnel/contacts``. Business windows only. No write anywhere.
+
+    PR-ADS-178C: the retired ``/api/revenue-deals`` (the Closed-Won Deals
+    page's ledger) and ``/api/crm-funnel/customers-won`` (the Leads page's
+    customers won) answer 404; this route publishes both.
     """
     from services.pipeline_service import build_pipeline  # noqa: PLC0415
 
@@ -6156,43 +6125,6 @@ def api_crm_funnel_contacts(
     except Exception as exc:  # noqa: BLE001
         log.error("[api/crm-funnel/contacts] failed: %s", exc)
         raise HTTPException(status_code=500, detail="CRM funnel contacts unavailable") from exc
-
-
-@app.get("/api/crm-funnel/customers-won")
-def api_crm_funnel_customers_won(
-    user: dict = Depends(require_auth),
-    window: str = Query(default="current_quarter"),
-    window_type: str = Query(default="business"),
-    scope: str = Query(default="all_source"),
-    acquisition_group: str | None = Query(default=None),
-) -> dict[str, Any]:
-    """"Customers won" for the Leads page window (PR-ADS-166A). Read-only.
-
-    Distinct HubSpot companies with a closed-won deal closed in the window,
-    republished from the closed-won reader contract as
-    ``{value, status, reason}`` — a DIFFERENT metric from the page's
-    lifecycle-stage count ("moved to Customer stage in HubSpot"), shown beside
-    it and never derived from it.
-
-    A non-business window, or a Scope / Source filter (which classify
-    contacts, not deals), returns ``unavailable`` with the reason instead of
-    an approximation. A withheld or unavailable count is ``null``, never 0.
-
-    ``won_customers`` — one entry per won customer (company name, deal count,
-    latest close date) — is present ONLY when the customer count is
-    published. Withheld or unavailable: the key is absent.
-    """
-    try:
-        from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
-        return crm_funnel.build_customers_won(
-            window_type, window, scope=scope,
-            acquisition_group=acquisition_group or None)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        log.error("[api/crm-funnel/customers-won] failed: %s", exc)
-        raise HTTPException(status_code=500,
-                            detail="customers won unavailable") from exc
 
 
 @app.get("/api/crm-funnel/operational-status")

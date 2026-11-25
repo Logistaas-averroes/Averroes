@@ -7237,3 +7237,41 @@ because 178B deleted that table. The Campaigns drawer's "Open Deals" becomes
 "Open Pipeline". Round-3 minors: the Scale card names a bigger shared row it
 passed over; headlines count names when one is shared; L5 matches the exact
 label.
+
+## PR-ADS-178C — the legacy Leads / Deals feeds retired
+
+`docs/61` §13. On main `ea6a7ae` (178B + 177C). Read-only: no Google Ads or
+HubSpot write added or removed.
+
+* **Retired (404):** `GET /api/revenue-deals` (no caller) and
+  `GET /api/crm-funnel/customers-won`. **Kept:** `GET /api/dashboard/deals`
+  (Dashboard → Deals fetches it). `GET /api/crm-funnel` (no page caller) was
+  not in the brief and is left.
+* **Ported first:** the customers-won reading (`load_won_deals`' own
+  customers / closed-won-deals verdicts, window, provenance) moved from the
+  funnel service into `build_pipeline`'s `customers_won` block; the
+  cross-page parity audit reads it there as `pipeline/customers_won` — still
+  the one consumer of those identities that does not republish the mart —
+  and a new PG case shows it failing on either side. The funnel service
+  reads no closed-won deal now; its reader-inventory row is gone.
+* **Enforced:** check 21 `retired_readers_absent` of the reader-cutover audit
+  (in the production certification) fails if either route is registered or
+  requested again or `build_customers_won` returns.
+* **Dead code removed:** `renderMartDiagnostics`, four retired "Customers
+  won" reason labels, the Deals-tab / Leads-page / diagnostics CSS,
+  `PAGE_PIPELINE_IMPACT` `leads` / `opportunities`. System Status now maps
+  `pipeline` to the canonical contact funnel (`contact_funnel`,
+  `lifecycle_events`, which name `page: "pipeline"`); the legacy `leads`
+  snapshot names no page (the Pipeline page does not read it).
+* **178B minors:** m6 — the deal-source filter is per surface (Pipeline /
+  Dashboard → Deals), resets on a window change, and its counts are the
+  payload's `source_breakdown`; m7 — the 166A cases run the real Pipeline
+  builder (no adapter); m8 — `docs/61` §9.1 / §11 say which cases a mutation
+  proves and which only failed for a missing feature; round-2 observation —
+  the funnel counts undated stage reaches per attribution scope, so a narrow
+  Scope marks only its own lower bounds.
+* **Tests:** `tests/test_pr_ads_178c_leads_deals_feeds_retired.py` (9) and
+  `tests/test_pr_ads_178c_leads_deals_port_pg_integration.py` (6, in CI's
+  PostgreSQL step and did-run list); 15 of 15 fail on `ea6a7ae`, each guard
+  also under a named mutation (`docs/61` §13.7). SQL-doctrine inventory: 0
+  unknown.

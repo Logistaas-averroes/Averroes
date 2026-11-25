@@ -107,7 +107,13 @@ def test_all_revenue_pages_share_mart_renderers():
     # spend_truth (asserted per page below).
     assert "function renderMartSpendTruth" not in JS
     assert "function renderMartSummaryStrip" not in JS
-    assert "function renderMartDiagnostics" in JS
+    # PR-ADS-178C: renderMartDiagnostics is deleted too — no page called it
+    # after PR-ADS-178B (docs/61 §8, §13). The Campaigns and Countries pages
+    # deliberately do not render the mart's diagnostics (their own truth
+    # footers state the spend truth, asserted below); the loop's diagnostics
+    # assertion had become unreachable (both pages `continue` before it) and
+    # is replaced by this absence check.
+    assert "renderMartDiagnostics" not in JS
     for page in (
         "function renderCampaignsPage()",
         "function renderRoasCountriesPage",
@@ -142,14 +148,7 @@ def test_all_revenue_pages_share_mart_renderers():
             assert "data.spend_truth" in footer
             assert "renderRoasCountrySummary(data)" in own
             continue
-        if page == "function renderRevenueDealsPage":
-            # PR-ADS-164A: the Deals page lists ALL-SOURCE won deals, so it no
-            # longer shows the Google Ads spend card above them (spend lives
-            # on the Google Ads pages). Sliced to the function's own end so
-            # the assertion is about this renderer, not its neighbours.
-            own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
-            assert "renderMartSpendTruth(" not in own
-        assert "renderMartDiagnostics(" in body, f"{page} must render shared diagnostics"
+        raise AssertionError(f"{page}: no assertion covers this page")
     # PR-ADS-178B: the Pipeline page shows no spend. (PR-ADS-177C deleted the
     # mart spend card / summary strip renderers — no page called them.)
     pipeline = JS[JS.find("function renderPipelinePage()"):
@@ -312,7 +311,9 @@ def test_mart_contract_exposes_readiness_for_ui():
 
 
 def test_parity_css_present():
-    # The compact parity panel + diagnostics have styling (no unstyled raw dump).
-    assert ".revenue-diagnostics" in CSS
+    # The compact parity panel has styling (no unstyled raw dump).
+    # PR-ADS-178C: the diagnostics stack's CSS is deleted with
+    # renderMartDiagnostics (no caller), so it is asserted gone.
+    assert ".revenue-diagnostics" not in CSS and ".revenue-diagnostic " not in CSS
     assert ".revenue-page-parity" in CSS
     assert ".parity-status" in CSS

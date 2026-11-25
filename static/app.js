@@ -2102,12 +2102,11 @@ const CANONICAL_REASON_LABELS = {
   acquisition_membership_unresolved: "a won deal's acquisition contact is unresolved",
   campaign_identity_unavailable: "campaign identity is unavailable",
   canonical_closed_won_population_unavailable: "the closed-won population is unavailable",
-  // PR-ADS-166A: why the Leads page has no "Customers won" figure.
-  customers_won_needs_a_business_window: "customers won is only defined for a business window",
-  customers_won_not_split_by_contact_source:
-    "customers won is not split by contact source — clear the Scope and Source filters",
-  customers_won_unreadable: "the customers-won figure could not be loaded",
-  customers_won_window_mismatch: "the customers-won figure answered a different period",
+  // PR-ADS-178C: the four PR-ADS-166A "Customers won" refusal reasons
+  // (customers_won_needs_a_business_window / _not_split_by_contact_source /
+  // _unreadable / _window_mismatch) are deleted: only the retired route and
+  // the retired Leads page sent them. The Pipeline builder refuses a
+  // non-business window with a 400, and no lead filter touches the list.
   // PR-ADS-164A: the two fail-closed reasons a page gives when it cannot use
   // the verdict it was sent (see closedWonBlockedMetric).
   closed_won_verdict_missing: "the server sent no usable publication verdict for these deals",
@@ -6464,8 +6463,8 @@ const CAMPAIGN_WINDOW_LABELS = {
 // ENTERED each lifecycle stage in the window, labelled so.
 //
 // The Scope and Source selectors are LEAD filters: they narrow the funnel and
-// the leads list. They never blank a deal figure; under either, Customers won
-// is unavailable with the reason (the filter classifies contacts, not deals).
+// the leads list. They never blank or narrow a deal figure, and Customers won
+// is the window's all-source list whatever they are (PR-ADS-178B-F1 m1).
 
 // PR-ADS-166A — the two "customer" figures, each under its own name. They are
 // different metrics and are never added, subtracted or shown as one another.
@@ -6567,12 +6566,17 @@ let _leadsStatus = "";
 let _leadsQuery = "";
 let _leadsPage = 1;
 let _leadsPendingStatus = null;
-// The /api/pipeline response being rendered, and the deal list's own filter
-// (the deal's HubSpot source group — never a lead filter).
+// The /api/pipeline response being rendered.
 let pipelineData = null;
 let pipelineStatus = "idle";
-let _pipelineDealSource = "";
 let _pipelinePendingSection = null;
+// The deal list's own filter (the deal's HubSpot source group — never a lead
+// filter), ONE PER SURFACE: the Pipeline page and Dashboard → Deals render the
+// same list from two responses, and a group picked on one never filters the
+// other (PR-ADS-178C m6). Each selection remembers the window it was made in;
+// a different window starts again from every deal source, so a period never
+// opens filtered by a choice made for another period.
+const _pipelineDealSourceBySurface = {};
 
 /** Carry a retired page's filter intent into the leads list (In Progress Leads). */
 function leadsSetPendingStatus(status) {
@@ -6937,6 +6941,49 @@ function pipelineFilterDeals(rows, group) {
   return rows.filter((r) => dealSourceKey(r) === group);
 }
 
+/** Which surface a payload is rendered on: Dashboard → Deals says so
+ *  (`surface: "dashboard_deals"`); everything else is the Pipeline page. */
+function pipelineDealSurface(d) {
+  return (d && d.surface === "dashboard_deals") ? "dashboard_deals" : "pipeline";
+}
+
+function pipelineWindowKey(d) {
+  return String(((d && d.window) || {}).key || "");
+}
+
+/** This surface's selected deal source group for THIS response's window, or
+ *  "" — a selection made in another window is not carried over. */
+function pipelineDealSourceFor(d) {
+  const sel = _pipelineDealSourceBySurface[pipelineDealSurface(d)];
+  if (!sel || sel.window !== pipelineWindowKey(d)) return "";
+  return sel.group || "";
+}
+
+function pipelineSetDealSource(d, group) {
+  _pipelineDealSourceBySurface[pipelineDealSurface(d)] = {
+    group: group || "", window: pipelineWindowKey(d) };
+}
+
+/**
+ * The deal-source filter's options, from the payload's OWN per-group counts
+ * (`source_breakdown`: each deal's own group through the reader contract) —
+ * one source for the figures, never a second count of the rows here. A group
+ * whose count is not published says so; with no breakdown there is no filter.
+ */
+function pipelineDealSourceOptions(d) {
+  const groups = (d && d.source_breakdown) || null;
+  if (!Array.isArray(groups) || !groups.length) return null;
+  return groups
+    .map((g) => {
+      const key = g.source_group || "not_recorded";
+      const m = (g.metrics || {}).closed_won_deals || {};
+      const published = m.status === "published" && m.value !== null && m.value !== undefined;
+      return { key, label: dealSourceLabel(key === "not_recorded" ? null : key),
+        count: published ? m.value : null };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 function pipelineDealsHtml(d) {
   const header = `
     <div class="dash-panel__header">
@@ -6965,15 +7012,20 @@ function pipelineDealsHtml(d) {
         <p>The deal ledger was read and is current. No HubSpot deal, from any source, was closed-won in this business window.</p>
       </div>`;
   }
-  const groups = [];
-  rows.forEach((r) => { const g = dealSourceKey(r); if (!groups.includes(g)) groups.push(g); });
-  groups.sort((a, b) => dealSourceLabel(a).localeCompare(dealSourceLabel(b)));
-  const active = groups.includes(_pipelineDealSource) ? _pipelineDealSource : "";
-  const options = [`<option value="">All deal sources (${fmtCount(rows.length)})</option>`]
-    .concat(groups.map((g) => {
-      const n = rows.filter((r) => dealSourceKey(r) === g).length;
-      return `<option value="${escapeHtml(g)}"${g === active ? " selected" : ""}>${escapeHtml(dealSourceLabel(g))} (${fmtCount(n)})</option>`;
-    })).join("");
+  // The counts are the payload's: the card's published deal count for "All",
+  // and `source_breakdown` per group (m6) — the page counts no rows here.
+  const groups = pipelineDealSourceOptions(d);
+  const chosen = pipelineDealSourceFor(d);
+  const active = (groups && groups.some((g) => g.key === chosen)) ? chosen : "";
+  const total = ((d && d.kpis) || {}).closed_won_deals || {};
+  const countText = (n) => (n === null || n === undefined
+    ? "count not published" : fmtCount(n));
+  const options = groups
+    ? [`<option value="">All deal sources (${escapeHtml(countText(total.value))})</option>`]
+      .concat(groups.map((g) =>
+        `<option value="${escapeHtml(g.key)}"${g.key === active ? " selected" : ""}>${escapeHtml(g.label)} (${escapeHtml(countText(g.count))})</option>`))
+      .join("")
+    : "";
   const shown = pipelineSortDeals(pipelineFilterDeals(rows, active));
   const body = shown.map((r) => `
     <tr class="deal-row" data-pipeline-deal="${escapeHtml(String(r.deal_id))}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.deal_name || "deal")} detail">
@@ -6987,11 +7039,12 @@ function pipelineDealsHtml(d) {
   const note = active
     ? `<p class="deal-stage-note" data-pipeline-deal-filter-note>Showing ${escapeHtml(fmtCount(shown.length))} of ${escapeHtml(fmtCount(rows.length))} closed-won deals — filtered by each deal's own HubSpot source group. The cards above count every deal.</p>`
     : "";
-  return `${header}
+  const controls = groups ? `
     <div class="roas-window-controls pipeline-deal-controls">
-      <label class="roas-window-label" for="pipeline-deal-source">Deal source:</label>
-      <select id="pipeline-deal-source" class="waste-filter-select" data-pipeline-deal-source aria-label="Filter deals by the deal's own source group">${options}</select>
-    </div>
+      <label class="roas-window-label" for="${pipelineDealSurface(d)}-deal-source">Deal source:</label>
+      <select id="${pipelineDealSurface(d)}-deal-source" class="waste-filter-select" data-pipeline-deal-source aria-label="Filter deals by the deal's own source group">${options}</select>
+    </div>` : "";
+  return `${header}${controls}
     <div class="deal-scroll">
       <table class="deal-table deal-table--rows pipeline-deal-table">
         <thead><tr><th>Deal</th><th>Closed</th><th>Won Revenue</th><th>Source</th><th>Campaign</th><th>Country</th></tr></thead>
@@ -7042,7 +7095,7 @@ function pipelineWireDeals(root, d) {
   const sel = panel.querySelector("[data-pipeline-deal-source]");
   if (sel) {
     sel.addEventListener("change", (e) => {
-      _pipelineDealSource = e.target.value || "";
+      pipelineSetDealSource(d, e.target.value || "");
       panel.innerHTML = pipelineDealsHtml(d);
       pipelineWireDeals(root, d);
     });
@@ -15004,23 +15057,6 @@ function martCountryReady(data) {
 function martRoasReady(data, view) {
   if (view === "country") return martCountryReady(data);
   return martSpendReady(data);
-}
-
-// Compact diagnostics — the mart's own explanation of why spend/ROAS are
-// (un)available. One tidy stack, never a warning wall.
-function renderMartDiagnostics(data) {
-  const diagnostics = (data && data.diagnostics) || [];
-  if (!diagnostics.length) return "";
-  return `
-    <div class="revenue-diagnostics">
-      ${diagnostics.map((d) => `
-        <div class="revenue-diagnostic">
-          <strong>${escapeHtml((d && d.code) || "diagnostic")}</strong>
-          <span>${escapeHtml((d && d.message) || "")}</span>
-        </div>
-      `).join("")}
-    </div>
-  `;
 }
 
 // A mart fetch failure must NOT silently fall back to the old page endpoints —

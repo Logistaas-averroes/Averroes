@@ -731,9 +731,18 @@ def test_deals_admin_gated_links_respect_role():
 
 
 def test_deals_responsive_classes_exist():
-    for cls in (".deal-kpi-grid", ".deal-funnel", ".deal-scroll", ".deal-table",
-                ".deal-drawer", ".deal-aging-list", ".dash-tab-intro"):
+    # PR-ADS-178C: the tab renders the Pipeline page's panels (PR-ADS-178B);
+    # every class it draws is styled. The deleted panels' classes
+    # (.deal-kpi-grid, .deal-funnel, .deal-aging-list) are gone with them.
+    block = _block()
+    for cls in (".pipeline-kpi-grid", ".deal-scroll", ".deal-table",
+                ".deal-drawer", ".dash-tab-intro", ".deal-source-panel",
+                ".deal-table-panel"):
         assert cls in CSS, f"{cls} missing from styles.css"
+    for cls in ("deal-source-panel", "deal-table-panel", "dash-tab-intro"):
+        assert cls in block, cls
+    for gone in (".deal-kpi-grid", ".deal-funnel", ".deal-aging-list"):
+        assert gone not in CSS, gone
     assert "@media (max-width: 1100px)" in CSS
     assert "@media (max-width: 640px)" in CSS
 

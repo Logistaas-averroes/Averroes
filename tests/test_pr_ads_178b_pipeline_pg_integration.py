@@ -140,7 +140,13 @@ def test_02_a_lead_filter_narrows_the_funnel_and_blanks_no_deal_figure(
     assert narrowed["source_breakdown"] == whole["source_breakdown"]
     # Customers won is the window's all-source won population: the lead
     # filters do not touch it (PR-ADS-178B-F1 m1).
-    assert narrowed["customers_won"] == whole["customers_won"]
+    # (PR-ADS-178C: the block carries provenance; its build instant aside.)
+    def _stable(block):
+        out = dict(block)
+        out["metric_truth"] = {m: {k: v for k, v in c.items() if "generated" not in k}
+                               for m, c in out["metric_truth"].items()}
+        return out
+    assert _stable(narrowed["customers_won"]) == _stable(whole["customers_won"])
     assert whole["customers_won"]["status"] == "published"
     assert len(whole["customers_won"]["rows"]) == whole["kpis"]["customers"]["value"]
     with pytest.raises(ValueError):
@@ -155,8 +161,14 @@ def test_03_withheld_customers_and_a_stale_ledger_leave_no_figure_and_no_list(
     p = _pipeline()
     c = p["kpis"]["customers"]
     assert c["value"] is None and c["status"] in ("withheld", "unavailable") and c["reason"]
-    assert p["customers_won"] == {"status": c["status"], "reason": c["reason"]}
-    assert "rows" not in p["customers_won"]
+    # PR-ADS-178C: the block also carries its own reading of the reader
+    # contract (the retired customers-won route's), which says the same.
+    cw = p["customers_won"]
+    assert {k: cw[k] for k in ("status", "reason")} == {"status": c["status"],
+                                                        "reason": c["reason"]}
+    assert "rows" not in cw
+    assert {k: cw["customers"][k] for k in ("value", "status", "reason")} == {
+        "value": None, "status": c["status"], "reason": c["reason"]}
     assert p["deals_status"] == "published" and len(p["deals"]) == 3   # deals stand
     # A stale deal ledger (PR-ADS-161F): deals, customers and revenue withheld.
     from tests.test_pr_ads_153e_b_pg_integration import _sync_state
@@ -191,13 +203,18 @@ def test_04_dashboard_deals_republishes_the_pipeline_builder_and_reads_no_legacy
     from services.dashboard_deals_service import build_dashboard_deals
     dash = _json(build_dashboard_deals(WINDOW))
     p = _pipeline()
-    for key in ("kpis", "deals", "customers_won", "source_breakdown", "cohort", "window",
+    for key in ("kpis", "deals", "source_breakdown", "cohort", "window",
                 "closed_won_population", "funnel"):
         assert dash[key] == p[key], key
     # The provenance is the same contract (its build instant aside).
     strip = lambda mt: {m: {k: v for k, v in c.items() if "generated" not in k and k != "as_of"}
                         for m, c in mt.items()}
     assert strip(dash["metric_truth"]) == strip(p["metric_truth"])
+    # PR-ADS-178C: customers won carries its own provenance (the reader
+    # contract's verdicts); the same block, its build instant aside.
+    cw_d, cw_p = dict(dash["customers_won"]), dict(p["customers_won"])
+    assert strip(cw_d.pop("metric_truth")) == strip(cw_p.pop("metric_truth"))
+    assert cw_d == cw_p
     assert dash["surface"] == "dashboard_deals"
     pc = dash["period_change"]
     assert set(pc["metrics"]) == {"sqls", "closed_won_deals", "closed_won_customers",

@@ -299,7 +299,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "dataset": "contact_funnel",
         "stale_threshold_days": 2,
         "depends_on": [],
-        "page": None,
+        # PR-ADS-178C: the Pipeline page's funnel and lead list read this.
+        "page": "pipeline",
     },
     # Stage-entry evidence recency. Same table, but the date column is the newest
     # lifecycle transition held — so a contact sync that is running while HubSpot
@@ -311,7 +312,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "dataset": "lifecycle_events",
         "stale_threshold_days": 8,
         "depends_on": ["contact_funnel"],
-        "page": None,
+        # PR-ADS-178C: the Pipeline funnel's stage-entry evidence.
+        "page": "pipeline",
     },
     "search_terms": {
         "table": "search_terms",
@@ -385,7 +387,12 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "dataset": "contacts",
         "stale_threshold_days": 8,
         "depends_on": [],
-        "page": "leads",
+        # PR-ADS-178C: was "leads", a retired page (a redirect to the Pipeline
+        # page since PR-ADS-178B). The Pipeline page does not read this legacy
+        # snapshot — its funnel reads `contact_funnel` / `lifecycle_events`
+        # above, which now name it — so, like `deals` (PR-ADS-163B), this
+        # dataset names no page.
+        "page": None,
     },
     # PR-ADS-163B: `date_column` named `close_date`, a column the `deals` table
     # has never had (db/schema.py), so this dataset's row count could not be
