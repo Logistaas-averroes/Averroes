@@ -304,16 +304,24 @@ def test_08_customers_won_is_a_list_only_when_published_and_equal_to_the_count()
     _, bad = _page(_payload(kpis={"customers": _m(3)}))
     cb = bad[bad.index('id="pipeline-customers"'):]
     assert "Acme Freight" not in cb and "Withheld" in cb and "no list of customers" in cb
-    # Under a lead filter: unavailable with the reason; the KPIs are not blanked.
-    filt = _payload(customers_won={"status": "unavailable",
-                                   "reason": "customers_won_not_split_by_contact_source"})
+    # Under a lead filter the list is the same all-source population (F1 m1),
+    # and no deal KPI is blanked.
+    filt = _payload()
+    filt["filters"] = {"scope": "all_source", "acquisition_group": "organic",
+                       "lead_filtered": True}
     summary, fo = _page(filt)
     fc = fo[fo.index('id="pipeline-customers"'):]
-    assert "Unavailable" in fc and "not split by contact source" in fc
+    assert "Acme Freight" in fc and "Unavailable" not in fc
+    # A status and reason the payload carries are said in words, no list.
+    _, uo = _page(_payload(customers_won={"status": "unavailable",
+                                          "reason": "customers_won_not_split_by_contact_source"}))
+    uc = uo[uo.index('id="pipeline-customers"'):]
+    assert "Unavailable" in uc and "not split by contact source" in uc and "Acme Freight" not in uc
     assert re.search(r'data-kpi="customers">.*?>2<', summary, re.DOTALL)
     assert re.search(r'data-kpi="revenue">.*?\$9', summary, re.DOTALL)
-    # Never merged with the deal list.
-    assert "pipeline-customers-table" not in fo
+    # Never merged with the deal list: the deal section holds no customer table.
+    deals_section = fo[fo.index('id="pipeline-deals"'):fo.index('id="pipeline-customers"')]
+    assert "pipeline-customers-table" not in deals_section and "Acme Freight" not in deals_section
 
 
 # ── 9. the deal drawer drops the always-null fields ──────────────────────────

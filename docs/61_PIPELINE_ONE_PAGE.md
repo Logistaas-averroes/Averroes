@@ -101,10 +101,14 @@ Opportunity→Customer); `_deal_row`'s Company and Age were always null.
   with the deal list.
 * **Lead filters.** Scope and Source are LEAD filters: they narrow the funnel
   (`crm_funnel.build(scope=, acquisition_group=)`) and the leads list; every
-  deal figure and the cohort KPI are the window's whatever they are. Under
-  either, customers won is `unavailable` /
-  `customers_won_not_split_by_contact_source` (the 166A reason); the
-  Customers card is a deal figure and is not blanked. The page labels the
+  deal figure and the cohort KPI are the window's whatever they are.
+  Customers won is the window's all-source won-deal population too: the lead
+  filters do not touch it, so it is the same list filtered or not
+  (PR-ADS-178B-F1 m1; 178B had made it `unavailable` /
+  `customers_won_not_split_by_contact_source` under a lead filter, withholding
+  a figure no filter changes). Under a lead filter the SQL card says it is the
+  Google Ads cohort, not narrowed by the lead filters, and the funnel note
+  says it is a different population (all sources) (F1 m5). The page labels the
   selectors "Leads scope" / "Leads source" inside a dashed "lead filters" group.
 * **The working-status breakdown** ("Disqualified / Other", operational, not
   a funnel stage) is kept as a muted button under the funnel, rendering into the
@@ -263,7 +267,7 @@ a scratch script that restores the file after each):
 | Mutation | Fails |
 | --- | --- |
 | M1 the builder lists rows that do not number the count | PG 10 |
-| M2 customers won ignores a lead filter | PG 02 (×2) |
+| M2 a lead filter ignored by the funnel (178B-F1 m1: customers won now deliberately ignores it — PG 02 asserts the same list) | PG 02 (×2) |
 | M3 the SQL KPI printed around `cohortCountHtml` | one-page 03 |
 | M4 `pipelineDealRows` without the 164A count guard | one-page 06 |
 | M5 `pipelineCustomersWonRows` without the count check | one-page 08 |
@@ -321,3 +325,46 @@ Static: `python3.11 -m compileall -q analysis api connectors db scheduler
 services scripts tests`, `node --check static/app.js`, `git diff --check
 d543dcc`. Modules run: see the PR report (every touched / added module and the
 CI PostgreSQL-step modules importing a changed module).
+
+## 11. PR-ADS-178B-F1 — truth audit round 1
+
+One Major, no blockers; fixed in place on the same branch.
+
+| Finding | Fix (file:line at F1) | Guard |
+| --- | --- | --- |
+| **MAJOR-1** the working-status breakdown called `leadsCount`, deleted by 178B: "Loading…" forever, an unhandled rejection, and `loadPipeline` threw on a window or filter change with that view selected | `static/app.js` `leadsCount` restored before `leadsRenderOperational` — null/undefined renders the word "Unavailable", never 0 and never a dash | `f1::test_01_a/b/c` (node, awaited: the table renders its counts; `loadPipeline` resolves with the view selected); `f1::test_02` every function `app.js` calls is defined (`test_02_b`: the scan names a deleted function); `153c::test_frontend_renders_unavailable_scope_as_dash_never_zero` restored to pin `leadsCount` and its call site |
+| m1 customers won withheld under a lead filter that does not touch it | `services/pipeline_service.py` `_customers_won` (no `lead_filtered` branch) | PG `test_02`: narrowed `customers_won` == whole; one-page `test_08` |
+| m2 A1 the KPI half of `pipeline_checks` survived being set to `True` | — (guard existed) | `f1::test_03_a` (×3), `test_03_b` |
+| m2 A2 `period_change` survived building the current window as "previous" | — | `f1::test_04` (×4): the previous window's bounds, like for like |
+| m2 A3 / m3 the average's deal-count agreement survived removal; it compared `closed_won_deals`, not the divisor `deal_count`; a mismatch said `closed_won_verdict_missing` | `pipeline_service._average_deal_value`: compares `deal_count` AND `closed_won_deals` with the published deals; a mismatch is `average_deal_value_population_mismatch` (labelled in words) | `f1::test_05`, `test_05_b` |
+| m4 raw reason codes and HubSpot property names in the funnel's text | `leadsTruthStateHtml` maps reasons through `canonicalReasonLabel`; the stage's property name moved into a `title` ("HubSpot stage-entry date" shown) | `f1::test_06` |
+| m5 the SQL card and funnel did not say which population a lead filter narrows | `pipelineKpiCardsHtml` note under `filters.lead_filtered`; funnel note "a different population (all sources …)" | `f1::test_07` |
+| o1 (pre-existing) under `reconciliation.status = partial` a stage with undated entries showed a plain number that is a lower bound | `pipelineFunnelLowerBounds` + `pipelineFunnelHtml`: "at least N" with the reason; every stage when the payload cannot say which (the builder now passes `coverage.stage_reached_without_entry_date`) | `f1::test_08` |
+
+Fail-before: `tests/test_pr_ads_178b_f1_truth_audit_round1.py` copied onto a
+`git archive 4d088cd` tree — the MAJOR-1, m3, m4, m5 and o1 cases fail; the
+three m2 counterfactuals pass there (the guards existed) and fail under their
+named mutation on the F1 tree:
+
+| Mutation | Fails |
+| --- | --- |
+| A1 the KPI conditions of `pipeline_checks` replaced by `True` | f1 03_a (×3), 03_b |
+| A2 `_build_period_change` builds `(window, now)` instead of the previous reference | f1 04 (×4) |
+| A3 the deal-count agreement removed from `_average_deal_value` | f1 05 |
+| M-MAJOR `leadsCount` deleted again | f1 01_a, 01_b, 01_c, 02, 02_b; 153c |
+
+Existing tests changed in F1: `153c::test_frontend_renders_unavailable_scope_as_dash_never_zero`
+(178B had rewritten it to the funnel only; F1 restores its `leadsCount`
+intent with the word in place of the dash, and keeps the funnel half);
+`178b_pg::test_02` and `178b_one_page::test_08` (m1: the list is the same
+under a lead filter — a behaviour change, not a weakening; the renderer
+still says a carried reason in words); `166a::test_07` (comment only).
+
+Carried, not fixed here (follow-ups):
+
+* **m6** the deal-source filter's state (`_pipelineDealSource`) is shared by
+  the Pipeline page and Dashboard → Deals.
+* **m7** 166A's customer cases reach the Pipeline renderers through an
+  adapter (`_pipeline_from`) rather than a real `build_pipeline` payload.
+* **m8** §9.1's fail-before wording ("fail on d543dcc") does not say which
+  cases fail for a missing module versus a wrong behaviour.

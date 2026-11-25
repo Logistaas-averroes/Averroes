@@ -7105,3 +7105,26 @@ routes after porting what parity and the audits read from them).
   `tests/test_pr_ads_178b_pipeline_pg_integration.py` (11, PG; in the CI
   PostgreSQL step and its did-run list). Existing-test changes with a reason
   each: `docs/61` §9.2.
+
+## PR-ADS-178B-F1 — truth audit round 1 on the Pipeline page
+
+Same branch, a second commit. One Major, no blockers (`docs/61` §11).
+
+* **MAJOR-1.** The "Disqualified / Other" working-status breakdown called
+  `leadsCount`, which 178B deleted: the panel hung on "Loading…" with an
+  unhandled rejection, and `loadPipeline` threw on a window or filter change
+  with that view selected. `leadsCount` is restored (null/undefined is the word
+  "Unavailable", never 0); a node test awaits the view's real renderer, and a
+  static test checks that every function `app.js` calls is defined.
+* **m1.** Customers won is the window's all-source won population whatever
+  the lead filters; no longer withheld under one.
+* **m3.** The average deal value compares its divisor (`deal_count`) with the
+  published deals; a mismatch is `average_deal_value_population_mismatch`.
+* **m4 / m5 / o1.** Funnel reasons in words, HubSpot property names in titles;
+  the SQL card says the lead filters do not narrow it; a stage count under
+  partial evidence is "at least N" with the reason.
+* **m2.** Counterfactuals for three guards that survived mutation
+  (`pipeline_checks` KPI half, `period_change` previous window, the average's
+  deal-count agreement).
+* **Tests.** `tests/test_pr_ads_178b_f1_truth_audit_round1.py` (18, non-PG).
+  Carried: m6, m7, m8 (`docs/61` §11).

@@ -68,6 +68,11 @@ REASON_DEAL_LIST_MISMATCH = "closed_won_rows_do_not_match_count"
 REASON_NO_DEALS_TO_AVERAGE = "no_closed_won_deals_in_window"
 #: The mart deal view answered no verdict for a metric: fail closed.
 REASON_VERDICT_MISSING = "closed_won_verdict_missing"
+#: The average deal value's own population (the deal count it divides by,
+#: the deal count and revenue of the summary it comes from) is not the
+#: published deals and revenue beside it: it describes other deals, so it is
+#: not shown (PR-ADS-178B-F1 m3).
+REASON_AVERAGE_POPULATION_MISMATCH = "average_deal_value_population_mismatch"
 #: The lifecycle funnel could not be built.
 REASON_FUNNEL_UNREADABLE = "lifecycle_funnel_unreadable"
 #: A deal whose source group the ledger does not carry. Shown as itself,
@@ -103,7 +108,13 @@ def _average_deal_value(ledger: dict, deals: dict, revenue: dict) -> dict:
     the published total ÷ every won deal), with a status. It inherits a
     withheld total or count; a published 0 deals has no average (never $0);
     and it is shown only when the ledger summary it comes from counted the
-    SAME deals and revenue as the cards beside it."""
+    SAME deals and revenue as the cards beside it.
+
+    ``deal_count`` is the divisor (``won_revenue / deal_count``), so it is
+    compared with the published deals itself — not only the summary's
+    ``closed_won_deals`` (PR-ADS-178B-F1 m3). A summary with no average is a
+    missing verdict; an average over other deals or other revenue is a
+    population mismatch, said in its own words."""
     for m in (revenue, deals):
         if m["status"] != cwt.PUBLISHED:
             return cwt.metric(None, m["status"], m["reason"])
@@ -111,10 +122,13 @@ def _average_deal_value(ledger: dict, deals: dict, revenue: dict) -> dict:
         return cwt.metric(None, cwt.UNAVAILABLE, REASON_NO_DEALS_TO_AVERAGE)
     led = ledger or {}
     value = led.get("average_deal_value")
-    if (value is None or led.get("closed_won_deals") != deals["value"]
+    if value is None:
+        return cwt.metric(None, cwt.UNAVAILABLE, REASON_VERDICT_MISSING)
+    if (led.get("deal_count") != deals["value"]
+            or led.get("closed_won_deals") != deals["value"]
             or led.get("won_revenue") is None
             or round(float(led["won_revenue"]), 2) != round(float(revenue["value"]), 2)):
-        return cwt.metric(None, cwt.UNAVAILABLE, REASON_VERDICT_MISSING)
+        return cwt.metric(None, cwt.UNAVAILABLE, REASON_AVERAGE_POPULATION_MISMATCH)
     return cwt.metric(value, cwt.PUBLISHED)
 
 
@@ -173,12 +187,13 @@ def _source_breakdown(base: dict, deal_rows: list | None) -> list | None:
     return out
 
 
-def _customers_won(base: dict, customers: dict, *, lead_filtered: bool) -> dict:
+def _customers_won(base: dict, customers: dict) -> dict:
     """Section 6. A list only beside a PUBLISHED customer count and only when
-    it numbers exactly that count; absent otherwise, with the reason."""
-    if lead_filtered:
-        return {"status": cwt.UNAVAILABLE,
-                "reason": crm_funnel.REASON_FILTER_NOT_APPLICABLE}
+    it numbers exactly that count; absent otherwise, with the reason.
+
+    The lead filters do not touch it: it is the window's all-source won-deal
+    population, the same one the Customers card counts, whatever the funnel
+    is narrowed to (PR-ADS-178B-F1 m1)."""
     if customers["status"] != cwt.PUBLISHED:
         return {"status": customers["status"], "reason": customers["reason"]}
     block = crm_funnel._won_customers_block(base, customers)  # noqa: SLF001
@@ -216,6 +231,11 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
         "campaign_identity_available": f.get("campaign_identity_available"),
         "events": f.get("events") or {},
         "conversions": f.get("conversions"),
+        # Which stages were reached without an entry date: the page marks
+        # those counts as lower bounds under partial evidence (F1 o1).
+        "coverage": ({"stage_reached_without_entry_date":
+                      (f.get("coverage") or {}).get("stage_reached_without_entry_date")}
+                     if f.get("coverage") is not None else None),
         "reconciliation": f.get("reconciliation"),
         "sync": f.get("sync"),
     }
@@ -348,8 +368,7 @@ def build_pipeline(window: str = "current_quarter", now: datetime | None = None,
         "deals_status": deals_status,
         "deals_reason": deals_reason,
         "source_breakdown": _source_breakdown(base, deal_rows),
-        "customers_won": _customers_won(base, kpis["customers"],
-                                        lead_filtered=lead_filtered),
+        "customers_won": _customers_won(base, kpis["customers"]),
         "truth_footer": TRUTH_FOOTER,
         **_rates(),
         canonical_contract.METRIC_TRUTH_KEY: _metric_truth(window_block, kpis, summary, cohort),

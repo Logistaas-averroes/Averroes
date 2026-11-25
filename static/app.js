@@ -2139,6 +2139,13 @@ const CANONICAL_REASON_LABELS = {
   // the verdict it was sent (see closedWonBlockedMetric).
   closed_won_verdict_missing: "the server sent no usable publication verdict for these deals",
   closed_won_rows_do_not_match_count: "the deal rows received do not match the published count",
+  // PR-ADS-178B-F1: the Pipeline page's own reasons, in plain words.
+  no_closed_won_deals_in_window: "no closed-won deals in this window, so there is no average",
+  average_deal_value_population_mismatch:
+    "the average was computed over a different deal count or revenue than the figures beside it",
+  lifecycle_funnel_unreadable: "the lifecycle funnel could not be read",
+  missing_stage_entry_date: "some contacts reached a stage with no entry date recorded in HubSpot",
+  unknown_lifecycle_stage: "some contacts hold a lifecycle stage this funnel does not recognise",
   sql_to_customer_rate_needs_one_acquisition_cohort_and_scope:
     "SQLs and won deals are different populations and cohorts",
   revenue_per_sql_needs_one_acquisition_cohort_and_scope:
@@ -7271,6 +7278,10 @@ function pipelineKpiCardsHtml(d, pc) {
       sub: `Google Ads contacts · this window${cohortThroughSuffix(d.cohort)}`,
       delta: pc ? cohortDeltaChip("sqls", pc, d) : "",
       source: "HubSpot acquisition cohort",
+      // m5 (PR-ADS-178B-F1): the lead filters narrow the funnel and the
+      // lead list, never this card — say so where the card is read.
+      note: ((d.filters || {}).lead_filtered === true)
+        ? "Google Ads acquisition cohort — not narrowed by the lead filters (Scope, Source)." : "",
       ok: cohortCountPublication(d.cohort).publish && sqls.value !== null && sqls.value !== undefined },
     { key: "deals", label: "Closed-won deals",
       value: canonicalMetricHtml(k.closed_won_deals, fmtCount, opts),
@@ -7297,6 +7308,7 @@ function pipelineKpiCardsHtml(d, pc) {
           <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
           <div class="dash-kpi-card__value">${c.value}</div>
           <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          ${c.note ? `<div class="dash-kpi-card__note" data-kpi-note>${escapeHtml(c.note)}</div>` : ""}
           ${c.delta ? `<div class="dash-kpi-card__meta">${c.delta}</div>` : ""}
           <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
         </div>`).join("")}
@@ -7304,12 +7316,45 @@ function pipelineKpiCardsHtml(d, pc) {
 }
 
 // ── The lifecycle funnel: stage ENTRIES in the window ───────────────────────
+/**
+ * Which stage counts are lower bounds, each with its reason in words.
+ *
+ * Under `reconciliation.status === "partial"` a stage some contacts reached
+ * with no recorded entry date counts only the dated entries: the undated ones
+ * may belong to this window. The payload's coverage names the stages; when it
+ * does not (no per-stage coverage), EVERY stage is a lower bound — never
+ * assume exactness the evidence does not carry.
+ */
+function pipelineFunnelLowerBounds(f) {
+  const out = {};
+  const recon = (f && f.reconciliation) || {};
+  if (recon.status !== "partial") return out;
+  const missing = ((f.coverage || {}).stage_reached_without_entry_date);
+  const perStage = missing && typeof missing === "object";
+  LEADS_STAGES.forEach((stage) => {
+    if (!perStage) {
+      out[stage.event] = canonicalReasonLabel("missing_stage_entry_date")
+        + " (the evidence does not say which stages)";
+      return;
+    }
+    const n = missing[stage.event];
+    if (n === null || n === undefined) {
+      out[stage.event] = canonicalReasonLabel("missing_stage_entry_date")
+        + " (not reported for this stage)";
+    } else if (Number(n) > 0) {
+      out[stage.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot`;
+    }
+  });
+  return out;
+}
+
 function pipelineFunnelHtml(d) {
   const f = (d && d.funnel) || {};
   const events = f.events || {};
   const available = f.available === true;
   const mismatch = (f.reconciliation || {}).status === "mismatch";
   const convByPair = {};
+  const lowerBound = pipelineFunnelLowerBounds(f);
   (f.conversions || []).forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
 
   const cells = LEADS_STAGES.map((stage, i) => {
@@ -7326,9 +7371,17 @@ function pipelineFunnelHtml(d) {
         : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
     }
     const dateProp = block.event_date_property || "";
+    const bound = lowerBound[stage.event];
+    // o1 (PR-ADS-178B-F1): under partial evidence a stage with contacts that
+    // reached it with no entry date is a LOWER BOUND — "at least N", with
+    // the reason — never a plain, exact-looking number.
     const value = (count === null || count === undefined)
       ? `<span class="dash-unavailable">${mismatch ? "Reconciliation required" : "Unavailable"}</span>`
-      : escapeHtml(fmtCount(count));
+      : (bound
+        ? `<span class="dash-lower-bound" data-lower-bound="${stage.event}" title="${escapeHtml(bound)}">at least ${escapeHtml(fmtCount(count))}</span>`
+        : escapeHtml(fmtCount(count)));
+    const boundNote = (bound && count !== null && count !== undefined)
+      ? `<span class="dash-funnel__stage-sub pipeline-funnel__bound">Lower bound: ${escapeHtml(bound)}</span>` : "";
     const help = stage.event === "customer"
       ? `<p class="leads-customer-figure__help">${escapeHtml(LEADS_STAGE_MOVE_HELP)}</p>` : "";
     const active = _leadsView === stage.event;
@@ -7339,7 +7392,8 @@ function pipelineFunnelHtml(d) {
         title="List the contacts that entered ${escapeHtml(stage.stage)} in this window">
         <span class="dash-funnel__stage-label">${escapeHtml(stage.label)}</span>
         <span class="dash-funnel__stage-value">${value}</span>
-        <span class="dash-funnel__stage-sub" title="Event date: ${escapeHtml(dateProp)}">${escapeHtml(dateProp || "—")}</span>
+        ${dateProp ? `<span class="dash-funnel__stage-sub" title="HubSpot property: ${escapeHtml(dateProp)}">HubSpot stage-entry date</span>` : ""}
+        ${boundNote}
         ${help}
       </button>`;
   }).join("");
@@ -7350,7 +7404,7 @@ function pipelineFunnelHtml(d) {
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Lifecycle funnel · ${escapeHtml(PIPELINE_FUNNEL_LABEL)}</h3>
-        <p class="dash-panel__sub">Contacts that entered each HubSpot lifecycle stage in this window, each on its own stage-entry date — a different metric from the SQL card above (the acquisition cohort). Click a stage to list its contacts.</p>
+        <p class="dash-panel__sub">Contacts that entered each HubSpot lifecycle stage in this window, each on its own stage-entry date — a different metric and a different population (all sources, narrowed only by the lead filters) from the SQL card above (the Google Ads acquisition cohort). Click a stage to list its contacts.</p>
       </div>
     </div>
     ${leadsTruthStateHtml(f.available === undefined ? null : f)}
@@ -7788,6 +7842,17 @@ function leadsSyncControlVisibility() {
   }
 }
 
+/**
+ * A working-status count: null/undefined is UNAVAILABLE — the word, never 0
+ * and never a dash (PR-ADS-178B-F1 MAJOR-1: restored; the operational view
+ * calls it).
+ */
+function leadsCount(value) {
+  return (value === null || value === undefined)
+    ? '<span class="dash-unavailable">Unavailable</span>'
+    : escapeHtml(Number(value).toLocaleString());
+}
+
 async function leadsRenderOperational() {
   const header = document.getElementById("leads-table-header");
   const body = document.getElementById("leads-table-body");
@@ -7910,7 +7975,8 @@ function leadsTruthStateHtml(payload) {
   } else if (recon.status === "mismatch") {
     notes.push({ cls: "mapping-notice--error", text: "Reconciliation required — funnel counts are withheld until the scope invariant holds." });
   } else if (recon.status === "partial") {
-    const reasons = (recon.reasons || []).join(", ");
+    // m4 (PR-ADS-178B-F1): reason codes in words, never raw identifiers.
+    const reasons = (recon.reasons || []).map(canonicalReasonLabel).join("; ");
     notes.push({ cls: "mapping-notice--info", text: `Partial evidence: ${escapeHtml(reasons || "some stage evidence is missing")}.` });
   }
 

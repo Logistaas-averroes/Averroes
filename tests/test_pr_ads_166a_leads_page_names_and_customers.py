@@ -267,7 +267,10 @@ def test_02_the_production_quarter_shows_219_stage_moves_and_customers_won_separ
     markup = _figures(_funnel_payload(), won)
     moves, customers = _figure(markup, "stage_moves"), _figure(markup, "customers_won")
     assert moves == (
-        "Moved to Customer stage in HubSpot 219 — Counts contacts whose HubSpot "
+        # PR-ADS-178B-F1 m4: the stage's date-property sub-label is gone from the
+        # visible text (a title attribute when the payload names one; nothing
+        # when it does not — the old "—" was that empty label).
+        "Moved to Customer stage in HubSpot 219 Counts contacts whose HubSpot "
         "lifecycle stage changed to Customer in this period, including old "
         "contacts updated by the team. It is not new customers.")
     assert customers.startswith(
@@ -402,9 +405,10 @@ def test_07_a_scope_or_source_filter_gets_no_customers_won_figure_and_no_ledger_
             assert out[key]["reason"] == svc.REASON_FILTER_NOT_APPLICABLE
         assert out["metric_family"] == "closed_won_customers"
 
-    # PR-ADS-178B: on the Pipeline page a lead filter makes the Customers won
-    # LIST unavailable with this reason (pipeline_service._customers_won);
-    # the Customers card is a deal figure and is never blanked by it.
+    # The 166A route still answers this reason, and the Customers won renderer
+    # says it in words. (PR-ADS-178B-F1 m1: the Pipeline builder no longer
+    # sends it — under a lead filter its list is the same all-source won
+    # population; the Customers card is never blanked either way.)
     markup = _figures(_funnel_payload(count=206), out)
     assert ("Customers won Distinct companies with a closed-won deal closed in "
             "this period. Not the same as contacts moved to the Customer stage. "

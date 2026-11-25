@@ -138,10 +138,11 @@ def test_02_a_lead_filter_narrows_the_funnel_and_blanks_no_deal_figure(
     assert narrowed["kpis"] == whole["kpis"]
     assert narrowed["deals"] == whole["deals"]
     assert narrowed["source_breakdown"] == whole["source_breakdown"]
-    # Customers won is unavailable with the reason; no list.
-    assert narrowed["customers_won"] == {
-        "status": "unavailable", "reason": "customers_won_not_split_by_contact_source"}
+    # Customers won is the window's all-source won population: the lead
+    # filters do not touch it (PR-ADS-178B-F1 m1).
+    assert narrowed["customers_won"] == whole["customers_won"]
     assert whole["customers_won"]["status"] == "published"
+    assert len(whole["customers_won"]["rows"]) == whole["kpis"]["customers"]["value"]
     with pytest.raises(ValueError):
         _pipeline(acquisition_group="not_a_group")
 

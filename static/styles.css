@@ -7290,6 +7290,10 @@ button.pipeline-funnel__stage:hover { border-color: var(--brand-sky-accent); }
 button.pipeline-funnel__stage:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: 2px; }
 button.pipeline-funnel__stage.is-active { background: var(--surface); box-shadow: 0 0 0 2px var(--brand-sky-accent) inset; }
 .pipeline-funnel .leads-customer-figure__help { margin-top: 4px; }
+/* PR-ADS-178B-F1: a lower-bound stage count and the SQL card's population note. */
+.dash-lower-bound { font-weight: 600; }
+.pipeline-funnel__bound { color: var(--c-warning); }
+.pipeline-kpi-grid .dash-kpi-card__note { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 .pipeline-other-view { margin-top: var(--space-3); }
 .pipeline-funnel .dash-funnel__stage-sub { overflow-wrap: anywhere; }
 #pipeline-leads [hidden] { display: none !important; }

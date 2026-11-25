@@ -215,8 +215,18 @@ def test_scope_allowlists_are_resolved_from_the_canonical_classifiers():
 
 
 def test_frontend_renders_unavailable_scope_as_dash_never_zero():
-    # PR-ADS-178B: the funnel renders a null/undefined stage count as the word
-    # "Unavailable" (never 0); leadsCount went with the Leads page's strip.
+    # The working-status breakdown renders its counts through leadsCount, which
+    # maps null/undefined to an unavailable marker, never 0. PR-ADS-178B-F1:
+    # restored after 178B deleted it while leadsRenderOperational still called
+    # it; the marker is the word "Unavailable" (never a dash, docs/48).
+    assert "leadsCount" in _APP_JS
+    helper = _APP_JS.split("function leadsCount(")[1].split("\n}\n")[0]
+    assert "(value === null || value === undefined)" in helper
+    assert "Unavailable" in helper
+    assert "|| 0" not in helper
+    operational = _APP_JS.split("async function leadsRenderOperational(")[1].split("\n}\n")[0]
+    assert "leadsCount(" in operational
+    # The funnel's stage counts: null/undefined is the word, never 0 (178B).
     funnel = _APP_JS.split("function pipelineFunnelHtml(")[1].split("\n}\n")[0]
     assert "(count === null || count === undefined)" in funnel
     assert '"Unavailable"' in funnel
