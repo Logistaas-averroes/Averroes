@@ -139,11 +139,15 @@ def test_04_code_used_only_by_the_routes_is_deleted():
         assert name not in defined, f"{rel}:{name}"
     # build_revenue_by_source itself stays: the Dashboard breakdowns read it.
     from services.source_attribution_service import build_revenue_by_source  # noqa: F401
+    # PR-ADS-178B: Dashboard → Deals no longer does — it republishes the
+    # Pipeline builder (its source breakdown is the deal list by each deal's
+    # own source group, through the reader contract).
     for rel in ("services/dashboard_overview_service.py",
                 "services/dashboard_revenue_service.py",
-                "services/dashboard_deals_service.py",
                 "services/dashboard_channels_service.py"):
         assert "build_revenue_by_source(" in (ROOT / rel).read_text(), rel
+    assert "build_revenue_by_source(" not in (
+        ROOT / "services/dashboard_deals_service.py").read_text()
 
 
 # ── 2. the page ───────────────────────────────────────────────────────────
@@ -369,7 +373,9 @@ def test_15_every_dashboard_link_to_channels_discloses_the_difference():
         for line, label in targets:
             assert label == "canonical_contract.CHANNELS_LINK_LABEL", f"{rel}:{line} {label}"
         assert '"Open Channels"' not in (ROOT / rel).read_text(), rel
-    assert total == 16
+    # PR-ADS-178B: 10 — the six on Dashboard → Deals went with its decision
+    # cards (scale ×3, watch ×3); every remaining link still carries the label.
+    assert total == 10
 
 
 def test_16_the_overview_best_source_signal_carries_the_label(monkeypatch):

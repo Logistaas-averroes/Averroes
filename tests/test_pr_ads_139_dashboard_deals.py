@@ -23,6 +23,15 @@ Proves the sixth (final) Dashboard tab (Dashboard → Deals) and its read-only c
     leaks undefined/null/NaN.
   - Read-only: no platform-write verbs in touched files; the new repository fetcher
     is SELECT-only; building the contract calls no db.writers write fn.
+
+PR-ADS-178B (docs/61): the tab republishes the Pipeline builder
+(``services.pipeline_service.build_pipeline``) — no composition of its own. Its
+KPIs are ``{value, status, reason}``; the always-Unavailable opportunity /
+open-pipeline / aging / rate panels, the decision cards, the campaign
+breakdown and the legacy "Qualified (lead status)" backlog (owner decision 4)
+are deleted, and the ledger's closed-won-only scope is stated once in the
+truth footer. Each case below keeps its property on that contract; the per-test
+reasons are in docs/61 §7.2.
 """
 
 import os
@@ -50,7 +59,9 @@ REPO_SRC = open(os.path.join(ROOT, "db", "revenue_repository.py"), encoding="utf
 NOW = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
 WINDOW = "ytd"
 
-_BLOCK_START = "// ── Dashboard — Deals, Opportunities & Pipeline Intelligence tab"
+# PR-ADS-178B: the tab's block (its loader and renderer); the panels it draws
+# are the Pipeline page's renderers (pipelineKpiCardsHtml, …).
+_BLOCK_START = "// ── Dashboard — Deals tab (PR-ADS-139; one builder since PR-ADS-178B)"
 _BLOCK_END = "// ── Campaigns page"
 
 
@@ -205,7 +216,8 @@ def _patch_durable(monkeypatch, *, deals=None, sql_leads=None, revenue_connected
         make_canonical_unavailable(monkeypatch)
     monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": list(SRC_LEADS)})
     monkeypatch.setattr(repo, "fetch_source_revenue", lambda s, e: {"available": True, "rows": list(SRC_REVENUE)})
-    monkeypatch.setattr(repo, "fetch_sql_lead_details", lambda s, e: dict(sl) if sl is not None else {"available": False, "rows": []})
+    # PR-ADS-178B: `fetch_sql_lead_details` is deleted with the lead-status
+    # backlog it fed (owner decision 4); nothing reads it, so nothing is patched.
     import db.writers as db_writers
     monkeypatch.setattr(db_writers, "source_attribution_health_counts",
                         lambda: {"classified_contacts": 28, "attributed_deals": 3, "ambiguous_deals": 0, "unclassified_deals": 0})
@@ -308,71 +320,76 @@ def test_read_only_and_conversion_value_never_used(monkeypatch):
 def test_kpis_closed_won_and_sqls(monkeypatch):
     out = _deals(monkeypatch)
     k = out["kpis"]
-    assert k["sqls"] == 25
-    assert k["closed_won_deals"] == 3
-    assert k["closed_won_revenue_usd"] == 33000.0
+    # PR-ADS-178B: every KPI is {value, status, reason} (the Pipeline builder).
+    assert k["sqls"]["value"] == 25
+    assert k["closed_won_deals"]["value"] == 3
+    assert k["won_revenue_usd"]["value"] == 33000.0
     # PR-ADS-161E: retired. 3 / 25 divided all-source won deals (close date) by
     # campaign-attributable SQLs (contact creation) — two populations, two
     # cohorts — so it is unavailable with the reason, never a conversion.
-    assert k["sql_to_customer_rate"] is None
-    assert k["sql_to_customer_rate_reason"] == (
+    rate = out["sql_to_customer_rate"]
+    assert rate["value"] is None and rate["status"] == "unavailable"
+    assert rate["reason"] == (
         "sql_to_customer_rate_needs_one_acquisition_cohort_and_scope")
 
 
 def test_closed_won_revenue_only_from_closed_won_deals(monkeypatch):
     out = _deals(monkeypatch)
-    for d in out["deals"]:
-        assert d["stage_group"] == "Closed Won"
+    # PR-ADS-178B: the list is exactly the canonical closed-won population
+    # (the ledger rows' won stage), shown only beside its published count.
+    assert sorted(d["deal_id"] for d in out["deals"]) == ["d1", "d2", "d4"]
+    assert out["closed_won_population"] == {"value": 3, "status": "published", "reason": None}
+    assert {d["deal_stage_label"] for d in out["deals"]} == {"Deal Won", "won"}
 
 
 def test_open_pipeline_is_unavailable_not_revenue(monkeypatch):
+    # PR-ADS-178B: the always-Unavailable open-pipeline / opportunity figures
+    # are gone (brief: one footer line instead). Still no open-pipeline figure
+    # anywhere, and the page says why once.
+    import json
     out = _deals(monkeypatch)
-    k = out["kpis"]
-    assert k["open_pipeline_usd"] is None
-    assert k["opportunities_created"] is None
-    assert k["open_opportunities"] is None
-    # The funnel's Open Pipeline stage is a null count marked Stage unavailable.
-    open_stage = next(s for s in out["funnel"] if s["stage"] == "Open Pipeline")
-    assert open_stage["count"] is None
-    assert open_stage["amount_usd"] is None
-    assert open_stage["status"] == "Stage unavailable"
+    text = json.dumps(out, default=str)
+    for key in ("open_pipeline_usd", "opportunities_created", "open_opportunities"):
+        assert f'"{key}"' not in text, key
+    assert "Open and lost deals are not in the deal ledger" in out["truth_footer"]
 
 
 def test_closed_lost_is_unavailable_not_negative_revenue(monkeypatch):
+    import json
     out = _deals(monkeypatch)
-    assert out["kpis"]["closed_lost_deals"] is None
-    assert out["kpis"]["lost_pipeline_usd"] is None
+    text = json.dumps(out, default=str)
+    assert '"closed_lost_deals"' not in text and '"lost_pipeline_usd"' not in text
+    assert "lost deals" in out["truth_footer"]
     # No negative amounts anywhere.
     for d in out["deals"]:
-        assert d["amount_usd"] is None or d["amount_usd"] >= 0
+        assert d["deal_amount_usd"] is None or d["deal_amount_usd"] >= 0
 
 
 def test_opportunity_rates_unavailable(monkeypatch):
+    # PR-ADS-178B: no opportunity rate is published anywhere (the ledger holds
+    # no opportunity); the one rate the page names is unavailable with why.
+    import json
     out = _deals(monkeypatch)
-    assert out["kpis"]["sql_to_opportunity_rate"] is None
-    assert out["kpis"]["opportunity_to_customer_rate"] is None
-    metrics = {u["metric"] for u in out["unavailable"]}
-    assert "sql_to_opportunity_rate" in metrics
-    assert "opportunity_to_customer_rate" in metrics
+    text = json.dumps(out, default=str)
+    assert '"sql_to_opportunity_rate"' not in text
+    assert '"opportunity_to_customer_rate"' not in text
+    assert out["sql_to_customer_rate"]["status"] == "unavailable"
 
 
 def test_pipeline_stage_data_flagged_unavailable(monkeypatch):
+    # PR-ADS-178B: the closed-won-only scope is stated once, in the footer.
     out = _deals(monkeypatch)
-    assert out["pipeline_stage_data_available"] is False
-    assert "durable HubSpot deal ledger" in out["pipeline_stage_reason"]
-    metrics = {u["metric"] for u in out["unavailable"]}
-    for m in ("open_pipeline_usd", "opportunities_created", "closed_lost_deals",
-              "opportunity_aging", "avg_days_to_close"):
-        assert m in metrics
+    assert out["truth_footer"] == (
+        "Open and lost deals are not in the deal ledger: only closed-won deals are "
+        "synced, so open pipeline, lost deals and opportunity aging are not shown here.")
 
 
 def test_aging_buckets_all_unavailable(monkeypatch):
+    # PR-ADS-178B: the aging panel (four always-Unavailable buckets) is
+    # dropped; nothing ages a deal the ledger does not hold.
     out = _deals(monkeypatch)
-    assert len(out["aging_buckets"]) == 4
-    for b in out["aging_buckets"]:
-        assert b["open_opportunities"] is None
-        assert b["open_pipeline_usd"] is None
-        assert b["status"] == "Stage unavailable"
+    assert "aging_buckets" not in out
+    assert "opportunity aging" in out["truth_footer"]
 
 
 def test_no_roas_field_anywhere(monkeypatch):
@@ -389,100 +406,70 @@ def test_no_roas_field_anywhere(monkeypatch):
 def test_null_amount_stays_unavailable_not_zero(monkeypatch):
     deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None)]
     out = _deals(monkeypatch, deals=deals)
-    # The canonical ledger names the DEAL; `company` (the contact's employer) is
-    # not a ledger field and is explicitly Unavailable.
-    ghost = next(d for d in out["deals"] if d["deal_name"] == "Ghost")
-    assert ghost["amount_usd"] is None  # never a lowered $0
-    assert ghost["status"] == "Amount unavailable"
+    # The canonical ledger names the DEAL; the contact's employer is not a
+    # ledger field and is not on the row (PR-ADS-178B: dropped, always null).
+    ghost = next(d for d in out["deals"] if d["deal_id"] == "d4")
+    assert ghost["deal_amount_usd"] is None  # never a lowered $0
+    assert "company" not in ghost
+    # The page says why, never "$0" (dealAmountHtml).
+    assert "no proven USD amount" in JS[JS.find("function dealAmountHtml"):][:400]
 
 
 def test_rate_never_fake_zero_percent():
-    from services.dashboard_deals_service import _rate
-    assert _rate(3, 25) == round(3 / 25, 4)
-    assert _rate(0, 25) == 0.0     # a REAL measured 0% (0 customers is a true zero)
-    assert _rate(3, 0) is None     # unsafe denominator → Unavailable, never 0%
-    assert _rate(None, 25) is None
-    assert _rate(3, None) is None
+    # PR-ADS-178B: the tab computes no rate at all (its `_rate` is deleted with
+    # the always-Unavailable rate cards); the one it names is unavailable.
+    import services.dashboard_deals_service as svc
+    assert not hasattr(svc, "_rate")
+    src = open(os.path.join(ROOT, "services", "pipeline_service.py"), encoding="utf-8").read()
+    assert "cwt.incompatible_rate(cwt.R_SQL_TO_CUSTOMER_INCOMPATIBLE)" in src
 
 
 # ══════════════════ 4. Source / campaign pipeline ═══════════════════════════
 
 
 def test_source_breakdown_closed_won_no_open_pipeline(monkeypatch):
+    # PR-ADS-178B: the breakdown is the deal list by each deal's OWN source
+    # group, through the reader contract; owner decision 4 drops its legacy
+    # lead-status ("Qualified (lead status)") column.
     out = _deals(monkeypatch)
     by = {r["source_group"]: r for r in out["source_breakdown"]}
     assert "google_ads" in by
     g = by["google_ads"]
-    assert g["sqls"] == 23
+    assert "sqls" not in g
     assert g["closed_won_deals"] == 3
-    assert g["closed_won_revenue_usd"] == 33000.0
-    # Open pipeline is not durable → Unavailable for every source.
+    assert g["won_revenue"] == 33000.0
+    # Open pipeline is not durable → no such field on any source.
     for r in out["source_breakdown"]:
-        assert r["open_pipeline_usd"] is None
-        assert r["sql_to_opportunity_rate"] is None
+        assert "open_pipeline_usd" not in r
+        assert "sql_to_opportunity_rate" not in r
 
 
 def test_campaign_breakdown_reconciles(monkeypatch):
-    # Every Google Ads deal here carries a campaign (Ghost, d4, is left out —
-    # see the next test), so per-campaign figures are exact.
+    # PR-ADS-178B: the tab's "Campaign → Pipeline" breakdown read the mart's
+    # through-today campaign view — a second build of figures the Campaigns
+    # page owns. It is deleted; every deal row still carries its campaign label.
     out = _deals(monkeypatch, deals=DEAL_ROWS[:2])
-    by = {r["campaign_name"]: r for r in out["campaign_breakdown"]}
-    assert by["Global Competitors"]["sqls"] == 20
-    assert by["Global Competitors"]["closed_won_deals"] == 2
-    assert by["Global Competitors"]["closed_won_revenue_usd"] == 29000.0
-    for r in out["campaign_breakdown"]:
-        assert r["open_pipeline_usd"] is None
+    assert "campaign_breakdown" not in out
+    assert {d["campaign_name"] for d in out["deals"]} == {"Global Competitors"}
 
 
 # ══════════════════ 5. SQLs not yet closed-won ══════════════════════════════
 
 
 def test_sql_no_deal_preserved_and_excludes_customers(monkeypatch):
+    # PR-ADS-178B, owner decision 4: the legacy "Qualified (lead status) · no
+    # won deal" backlog is dropped and NOT replaced by "cohort SQLs with no won
+    # deal" (that would mix two cohorts). This case and the three that pinned
+    # the backlog's own states (source down, revenue disconnected, no GCLID)
+    # are replaced by: no backlog, no reader, no key.
+    import json
+    import db.revenue_repository as repo
     out = _deals(monkeypatch)
-    companies = [r["company"] for r in out["sql_no_deal"]]
-    # Acme (has a closed-won deal) is excluded; the three pending SQLs remain.
-    assert "Acme" not in companies
-    assert set(companies) == {"Pending Co", "Old Lead", "No Attr"}
-    assert out["sql_no_deal_total"] == 3
-    # PR-ADS-177A-F1 (MAJOR 2): keyed for what it counts — lead status.
-    assert out["kpis"]["lead_status_qualified_no_won_deal"] == 3
-    assert out["lead_status_backlog"]["count"] == 3
-    # An aging SQL (168 days) is flagged for review; a contact with no campaign is attribution review.
-    by = {r["company"]: r for r in out["sql_no_deal"]}
-    # PR-ADS-177A-F1 (MAJOR 2): a lead-status row is never called an SQL.
-    assert by["Old Lead"]["status"] == "Aging qualified lead — needs sales review"
-    assert by["No Attr"]["status"] == "Attribution needs review"
-    assert by["Pending Co"]["days_since_sql"] == 12
-
-
-def test_sql_no_deal_unavailable_when_source_down(monkeypatch):
-    out = _deals(monkeypatch, sql_leads={"available": False, "rows": []})
-    assert out["sql_no_deal_available"] is False
-    assert out["sql_no_deal"] == []
-    assert out["kpis"]["lead_status_qualified_no_won_deal"] is None
-    assert "sql_no_deal" in {u["metric"] for u in out["unavailable"]}
-    # The reason names the lead-source outage (not the disconnected case).
-    reason = next(u["reason"] for u in out["unavailable"] if u["metric"] == "sql_no_deal")
-    assert "lead source" in reason.lower() or "qualified-lead source" in reason.lower()
-
-
-def test_sql_no_deal_unavailable_when_revenue_disconnected(monkeypatch):
-    # When there are no durable closed-won deals, has_closed_won_deal is unreliable,
-    # so the panel is Unavailable with a DISTINCT reason (not the lead-source outage).
-    out = _deals(monkeypatch, revenue_connected=False)
-    assert out["sql_no_deal_available"] is False
-    assert out["sql_no_deal"] == []
-    assert out["kpis"]["lead_status_qualified_no_won_deal"] is None
-    reason = next(u["reason"] for u in out["unavailable"] if u["metric"] == "sql_no_deal")
-    assert "disconnected" in reason.lower()
-
-
-def test_sql_no_gclid_is_attribution_review(monkeypatch):
-    # A qualified SQL with a campaign but no gclid → "Attribution needs review"
-    # (reachable in production; the null-campaign case is filtered out upstream).
-    out = _deals(monkeypatch)
-    by = {r["company"]: r for r in out["sql_no_deal"]}
-    assert by["No Attr"]["status"] == "Attribution needs review"
+    assert not hasattr(repo, "fetch_sql_lead_details")
+    text = json.dumps(out, default=str)
+    for gone in ("sql_no_deal", "lead_status_backlog", "lead_status_qualified_no_won_deal",
+                 "Qualified (lead status)"):
+        assert gone not in text, gone
 
 
 def test_null_amount_withholds_aggregate_revenue(monkeypatch):
@@ -492,23 +479,27 @@ def test_null_amount_withholds_aggregate_revenue(monkeypatch):
     # unavailable payload flags closed_won_revenue_usd. Customers still count.
     deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None, campaign_name="Global Competitors")]
     out = _deals(monkeypatch, deals=deals)
-    assert out["kpis"]["closed_won_revenue_usd"] is None  # never a lowered $0
-    assert out["kpis"]["closed_won_deals"] == 3       # won deals still counted
-    assert "closed_won_revenue_usd" in {u["metric"] for u in out["unavailable"]}
-    gc = next(r for r in out["campaign_breakdown"] if r["campaign_name"] == "Global Competitors")
-    assert gc["closed_won_revenue_usd"] is None
-    # All three fixture deals now carry the same campaign, and one canonical row
-    # set feeds both the table and the breakdown — so the campaign holds 3.
-    assert gc["closed_won_deals"] == 3  # won deals survive
+    rev = out["kpis"]["won_revenue_usd"]
+    assert rev["value"] is None and rev["status"] != "published"  # never a lowered $0
+    assert rev["reason"]                                           # says why
+    assert out["kpis"]["closed_won_deals"]["value"] == 3          # won deals still counted
+    assert out["kpis"]["average_deal_value_usd"]["value"] is None
+    # PR-ADS-178B: the per-source part holding the unpriced deal is withheld
+    # too (reader contract); its won deals survive.
+    g = next(r for r in out["source_breakdown"] if r["source_group"] == "google_ads")
+    assert g["won_revenue"] is None
+    assert g["closed_won_deals"] == 3  # won deals survive
 
 
 def test_funnel_none_count_is_unavailable_not_no_activity(monkeypatch):
-    # Regression (Copilot): a withheld (None) count must read "Stage unavailable",
-    # never "No activity in window". Disconnected → Closed Won customers is None.
+    # Regression (Copilot): a withheld (None) count must never read as "no
+    # activity". PR-ADS-178B: the deal funnel is gone; the deal count is a
+    # {value, status, reason} that is not published, and the list is absent
+    # (never [], which would say "none").
     out = _deals(monkeypatch, revenue_connected=False)
-    closed_won = next(s for s in out["funnel"] if s["stage"] == "Closed Won")
-    assert closed_won["count"] is None
-    assert closed_won["status"] == "Stage unavailable"
+    deals = out["kpis"]["closed_won_deals"]
+    assert deals["value"] is None and deals["status"] != "published" and deals["reason"]
+    assert out["deals"] is None
 
 
 # ══════════════════ 6. Disconnected / ledger outage / period change ═════════
@@ -520,25 +511,24 @@ def test_161e_an_unplaced_google_ads_deal_withholds_per_campaign_figures(monkeyp
     be a lower bound shown as a total — the canonical campaign rule withholds
     them, with the reason, while the page's all-source figures still publish."""
     out = _deals(monkeypatch)
-    gc = next(r for r in out["campaign_breakdown"]
-              if r["campaign_name"] == "Global Competitors")
-    assert gc["closed_won_deals"] is None
-    assert gc["closed_won_revenue_usd"] is None
-    assert out["kpis"]["closed_won_deals"] == 3
-    assert out["kpis"]["closed_won_revenue_usd"] == 33000.0
+    # PR-ADS-178B: the tab publishes no per-campaign figure any more (the
+    # campaign breakdown is deleted), so none can be a lower bound; the
+    # all-source figures still publish.
+    assert "campaign_breakdown" not in out
+    assert out["kpis"]["closed_won_deals"]["value"] == 3
+    assert out["kpis"]["won_revenue_usd"]["value"] == 33000.0
 
 
 def test_disconnected_integration_blanks_revenue(monkeypatch):
     out = _deals(monkeypatch, revenue_connected=False)
     k = out["kpis"]
-    assert k["closed_won_deals"] is None
-    assert k["closed_won_customers"] is None
-    assert k["closed_won_revenue_usd"] is None
-    assert k["sql_to_customer_rate"] is None
-    assert k["sqls"] == 25  # SQLs survive
-    assert out["deal_proof_available"] is False
-    assert out["truth_status"]["deals"] == "blocked"
-    assert out["deals"] == []
+    for key in ("closed_won_deals", "customers", "won_revenue_usd", "average_deal_value_usd"):
+        assert k[key]["value"] is None and k[key]["status"] != "published", key
+    assert out["sql_to_customer_rate"]["value"] is None
+    assert k["sqls"]["value"] == 25  # SQLs survive
+    # PR-ADS-178B: the deal proof is absent with the population's verdict.
+    assert out["deals_status"] == k["closed_won_deals"]["status"]
+    assert out["deals"] is None
 
 
 def test_deal_ledger_outage_blanks_deal_proof(monkeypatch):
@@ -552,9 +542,10 @@ def test_deal_ledger_outage_blanks_deal_proof(monkeypatch):
     patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_deals_service import build_dashboard_deals
     out = build_dashboard_deals(WINDOW, now=NOW)
-    assert out["deal_proof_available"] is False
-    assert out["deals"] == []
-    assert out["truth_status"]["deals"] == "unavailable"
+    # PR-ADS-178B: an unreadable ledger is UNAVAILABLE (an outage), with no list.
+    assert out["deals"] is None
+    assert out["deals_status"] == "unavailable"
+    assert out["kpis"]["closed_won_deals"]["status"] == "unavailable"
 
 
 def test_no_fake_deltas_when_previous_baseline_missing(monkeypatch):
@@ -562,54 +553,53 @@ def test_no_fake_deltas_when_previous_baseline_missing(monkeypatch):
     pc = out["period_change"]
     assert pc["available"] is False
     assert pc["metrics"] == {}
-    assert "period_change" in {u["metric"] for u in out["unavailable"]}
+    # PR-ADS-178B: the reason is on the block itself (the `unavailable` list
+    # went with the always-Unavailable cards it mostly described).
+    assert pc["reason"] == "All Time has no previous period to compare against."
 
 
 def test_decision_cards_shape_and_safety(monkeypatch):
+    # PR-ADS-178B: the decision cards are dropped (brief: "the legacy decision
+    # cards"). Their Watch / Investigate cards read the legacy lead-status
+    # population; Scale read the source groups of a second builder. The tab
+    # renders none and its payload carries none.
     out = _deals(monkeypatch)
-    types = [c["type"] for c in out["decision_cards"]]
-    assert types == ["scale", "watch", "investigate", "unavailable"]
-    for c in out["decision_cards"]:
-        assert c["headline"] and c["body"]
-        assert "$0" not in c["body"]
-    unavail = next(c for c in out["decision_cards"] if c["type"] == "unavailable")
-    assert "durable HubSpot deal ledger" in unavail["body"]
+    assert "decision_cards" not in out
+    assert "renderDashDecisionCards(" not in _block()
 
 
 def test_truth_status_keys(monkeypatch):
+    # PR-ADS-178B: one truth-footer line replaces the status chips; read-only
+    # is still stated, by the payload and the footer chip.
     out = _deals(monkeypatch)
-    ts = out["truth_status"]
-    for key in ("sqls", "deals", "stages", "amounts", "attribution", "read_only"):
-        assert key in ts
-    assert ts["stages"] == "partial"  # only closed-won is durable
-    assert ts["read_only"] == "ready"
+    assert out["read_only"] is True
+    assert out["truth_footer"].startswith("Open and lost deals are not in the deal ledger")
+    footer = JS[JS.find("function pipelineTruthFooterHtml"):][:600]
+    assert "Read-only" in footer and "d.truth_footer" in footer
 
 
 # ══════════════════ 7. Read-only safety ═════════════════════════════════════
 
 
 def test_new_repo_fetcher_is_read_only():
-    body = _repo_fn_body("fetch_sql_lead_details").lower()
-    for forbidden in ("insert", "update ", "delete", "upsert", "drop", "alter",
-                      "requests.post", "requests.patch", "requests.put"):
-        assert forbidden not in body, f"fetch_sql_lead_details must be read-only ('{forbidden}')"
-    assert "select" in body
+    # PR-ADS-178B: the fetcher is deleted with the backlog it fed (decision 4).
+    assert "def fetch_sql_lead_details" not in REPO_SRC
 
 
 def test_sql_fetcher_status_filter_is_post_dedup():
-    # Regression (backend review): the SQL definition must mirror fetch_lead_quality
-    # (dedup across all rows, then latest-row-wins qualified) so the panel's SQL count
-    # reconciles with the canonical `sqls` KPI. Status is filtered in the OUTER query,
-    # never inside the dedup CTE.
-    body = _repo_fn_body("fetch_sql_lead_details")
-    assert "WHERE d.status_category = 'qualified'" in body
-    cte = body[:body.find("SELECT d.contact_id")]
-    assert "status_category = 'qualified'" not in cte
+    # PR-ADS-178B: removed with the fetcher; no production module calls it.
+    for rel in ("services/dashboard_deals_service.py", "services/pipeline_service.py",
+                "db/revenue_repository.py", "api/server.py"):
+        src = open(os.path.join(ROOT, rel), encoding="utf-8").read()
+        code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
+        assert "fetch_sql_lead_details(" not in code, rel
 
 
 def test_no_platform_writes_in_touched_files():
     files = [
         "services/dashboard_deals_service.py",
+        # PR-ADS-178B: the builder the tab republishes.
+        "services/pipeline_service.py",
         "db/revenue_repository.py",
         "api/server.py",
         "static/app.js",
@@ -677,19 +667,19 @@ def test_deals_tab_calls_its_endpoint():
 
 
 def test_deals_renders_all_panels():
+    # PR-ADS-178B: the tab draws the Pipeline page's own renderers.
     block = _block()
-    for fn in ("renderDealKpiRow", "renderDealFunnel", "renderDealAging",
-               "renderDealSourcePipeline", "renderDealCampaignPipeline",
-               "renderDealTable", "renderDealSqlNoDeal", "renderDealTruthFooter",
-               "wireDealDrawers"):
-        assert fn in block, f"deals tab should define {fn}"
-    assert "renderDashDecisionCards(" in block
+    for fn in ("pipelineKpiCardsHtml", "pipelineSourceBreakdownHtml", "pipelineDealsHtml",
+               "pipelineCustomersWonHtml", "pipelineTruthFooterHtml", "pipelineWireDeals"):
+        assert fn in block, f"deals tab should render {fn}"
     assert "renderDashSkeleton()" in block
 
 
 def test_open_pipeline_labeled_not_revenue():
+    # PR-ADS-178B: no open-pipeline figure is drawn; the tab says open and
+    # lost deals are not in the ledger.
     block = _block()
-    assert "not revenue" in block.lower()
+    assert "Open and lost deals are not in the deal ledger" in block
 
 
 def test_no_roas_rendered_on_this_tab():
@@ -699,7 +689,9 @@ def test_no_roas_rendered_on_this_tab():
 
 
 def test_deals_reuses_prior_design_system():
-    block = _block()
+    # PR-ADS-178B: the tab plus the Pipeline renderers it draws.
+    block = _block() + JS[JS.find("function pipelineKpiCardsHtml"):
+                          JS.find("// ── The leads list (section 4)")]
     for cls in ("dash-kpi-card", "dash-panel", "dash-truth-footer"):
         assert cls in block
     for lib in ("chart.js", "Chart(", "d3.", "highcharts", "recharts", "echarts"):
@@ -707,15 +699,19 @@ def test_deals_reuses_prior_design_system():
 
 
 def test_drawer_has_proof_fields():
-    start = JS.find("const DEAL_DRAWER_FIELDS")
+    # PR-ADS-178B: the drawer drops the always-null fields (company, company
+    # id, main contact, created date, age, days to close) and keeps every field
+    # the ledger carries for a deal.
+    start = JS.find("const PIPELINE_DEAL_DRAWER_FIELDS")
     assert start != -1
-    block = JS[start:start + 900]
-    for label in ("Company", "Company ID", "Main Contact", "Contact ID", "Deal",
-                  "Deal ID", "Amount", "Stage", "Created date", "Close date",
-                  "Campaign / source", "Country", "Attribution"):
+    block = JS[start:start + 600]
+    for label in ("Deal", "HubSpot deal ID", "Won revenue (USD)", "Stage", "Close date",
+                  "Campaign label", "Country", "Attribution", "Source group"):
         assert label in block
-    fn = _slice(JS, "function dealDrawerCell", 400)
-    assert "dashValue(deal.amount_usd, fmtMoney)" in fn  # null → Unavailable, never $0
+    for gone in ("Company", "Main Contact", "Created date", "Age (days)", "Days to close"):
+        assert gone not in block
+    fn = JS[JS.find("function pipelineDealDrawerCell"):][:500]
+    assert "dealAmountHtml(r)" in fn  # null → "no proven USD amount", never $0
 
 
 def test_deals_block_has_no_undefined_or_null_leaks():
@@ -726,10 +722,12 @@ def test_deals_block_has_no_undefined_or_null_leaks():
 
 
 def test_deals_admin_gated_links_respect_role():
-    footer = _slice(JS, "function renderDealTruthFooter", 1200)
-    assert "dashCanNavigate(" in footer
-    drawer = _slice(JS, "function wireDealDrawers", 2600)
-    assert "dashCanNavigate(" in drawer
+    # PR-ADS-178B: the tab's one link (to the Pipeline page) is gated like
+    # every Dashboard link; the footer and the drawer carry no link.
+    block = _block()
+    assert 'dashCanNavigate("pipeline")' in block
+    drawer = JS[JS.find("function pipelineDealDrawerHtml"):]
+    assert "href" not in drawer[:drawer.find("\n}\n")]
 
 
 def test_deals_responsive_classes_exist():

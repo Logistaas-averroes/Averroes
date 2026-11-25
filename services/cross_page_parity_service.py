@@ -354,6 +354,8 @@ PROOF_COUNTRY_SQLS = "mart_lead_population_and_country_assignment"
 #: PR-ADS-166A — `GET /api/crm-funnel/customers-won`, the Leads page's
 #: "Customers won" block.
 CONSUMER_LEADS_CUSTOMERS_WON = "leads/customers_won"
+#: PR-ADS-178B: the one Pipeline page (leads and deals), ``build_pipeline``.
+CONSUMER_PIPELINE = "pipeline"
 
 METRIC_IDENTITIES = {
     # ── Google Ads spend, FULL account denominator ───────────────────────────
@@ -392,7 +394,10 @@ METRIC_IDENTITIES = {
             ("dashboard/overview", "kpis.closed_won_revenue_usd"),
             ("dashboard/revenue", "kpis.closed_won_revenue_usd"),
             ("dashboard/channels", "kpis.closed_won_revenue_usd"),
-            ("dashboard/deals", "kpis.closed_won_revenue_usd"),
+            # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder;
+            # both read the mart deal view's reader-contract summary.
+            ("dashboard/deals", "kpis.won_revenue_usd.value"),
+            (CONSUMER_PIPELINE, "kpis.won_revenue_usd.value"),
             ("revenue_decision_mart", "summary.won_revenue_usd"),
         ],
         "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
@@ -408,7 +413,8 @@ METRIC_IDENTITIES = {
             ("dashboard/overview", "kpis.closed_won_deals"),
             ("dashboard/revenue", "kpis.closed_won_deals"),
             ("dashboard/channels", "kpis.total_closed_won_deals"),
-            ("dashboard/deals", "kpis.closed_won_deals"),
+            ("dashboard/deals", "kpis.closed_won_deals.value"),
+            (CONSUMER_PIPELINE, "kpis.closed_won_deals.value"),
             ("revenue_decision_mart", "summary.closed_won_deals"),
             # PR-ADS-166A: the Leads page's "Customers won" block reads the
             # reader contract directly; it must show the Deals page's figures.
@@ -427,7 +433,8 @@ METRIC_IDENTITIES = {
             ("dashboard/overview", "kpis.customers"),
             ("dashboard/revenue", "kpis.customers"),
             ("dashboard/channels", "kpis.customers"),
-            ("dashboard/deals", "kpis.closed_won_customers"),
+            ("dashboard/deals", "kpis.customers.value"),
+            (CONSUMER_PIPELINE, "kpis.customers.value"),
             ("revenue_decision_mart", "summary.customers"),
             (CONSUMER_LEADS_CUSTOMERS_WON, "customers.value"),
         ],
@@ -507,7 +514,8 @@ METRIC_IDENTITIES = {
         "consumers": [
             ("dashboard/overview", "kpis.sqls"),
             ("dashboard/revenue", "kpis.sqls"),
-            ("dashboard/deals", "kpis.sqls"),
+            ("dashboard/deals", "kpis.sqls.value"),
+            (CONSUMER_PIPELINE, "kpis.sqls.value"),
             ("revenue_decision_mart", "summary.sqls"),
         ],
     },
@@ -1041,6 +1049,7 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
     from services.dashboard_campaigns_service import build_dashboard_campaigns  # noqa: PLC0415
     from services.dashboard_channels_service import build_dashboard_channels  # noqa: PLC0415
     from services.dashboard_deals_service import build_dashboard_deals  # noqa: PLC0415
+    from services.pipeline_service import build_pipeline  # noqa: PLC0415
     from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
 
     from services.canonical_crm_funnel_service import (  # noqa: PLC0415
@@ -1056,6 +1065,7 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
         "dashboard/campaigns": lambda: build_dashboard_campaigns(window=window, now=now),
         "dashboard/countries": lambda: build_dashboard_countries(window=window, now=now),
         "dashboard/deals": lambda: build_dashboard_deals(window=window, now=now),
+        CONSUMER_PIPELINE: lambda: build_pipeline(window, now=now),
         "revenue_decision_mart": lambda: build_revenue_decision_mart(
             window=window, view="campaign", now=now),
         CONSUMER_SETTLED_REFERENCE: lambda: build_revenue_decision_mart(

@@ -77,11 +77,15 @@ def test_m1_b_every_dashboard_kpi_and_the_countries_page_say_it_when_stale():
         "const c = %s; const k = {google_ads_cohort_sqls: 4, campaign_row_cohort_sqls: 3,"
         " sqls: 4, sqls_residual: 1, leads: 9, metrics: {}};"
         "const d = {cohort: c, kpis: k, period_change: {}, window: {is_closed_window: false}};"
+        # PR-ADS-178B: Dashboard → Deals renders the Pipeline KPI cards,
+        # whose figures are {value, status, reason}.
+        "const dd = {cohort: c, kpis: {sqls: {value: 4, status: 'published', reason: null}},"
+        " window: {is_closed_window: false}};"
         "const page = {cohort: c, country_totals: {sqls: 4, leads: 9, sqls_status: 'published',"
         " metrics: {sqls: {value: 4, status: 'published', reason: null}}}, rows: [], summary: {},"
         " regional_mix: [{region: 'Europe', sqls: 4, metrics: {sqls: {value: 4, status:"
         " 'published', reason: null}}}]};"
-        "[renderDashKpiRow(d), renderCampKpiRow(d), renderCtryKpiRow(d), renderDealKpiRow(d),"
+        "[renderDashKpiRow(d), renderCampKpiRow(d), renderCtryKpiRow(d), pipelineKpiCardsHtml(dd, null),"
         " renderRoasCountrySummary(page), renderCountriesRegionalMix(page)]" % c)
     names = ["overview", "campaigns", "countries", "deals", "countries page", "regional mix"]
     for name, html in zip(names, out):
@@ -160,49 +164,50 @@ def _deals_payload(monkeypatch, *, withheld=False):
 
 def test_m2_a_the_deals_funnel_holds_no_legacy_stage_and_the_backlog_is_its_own_block(
         monkeypatch):
+    # PR-ADS-178B (owner decision 4): the legacy lead-status backlog is
+    # dropped, not kept beside the funnel; Dashboard → Deals publishes the
+    # Pipeline builder, whose funnel is the lifecycle stage-entry funnel.
     d = _deals_payload(monkeypatch)
-    stages = [s["stage"] for s in d["funnel"]]
-    assert "SQLs Not Yet Closed-Won" not in stages
-    assert not any("Not Yet" in s for s in stages)
-    b = d["lead_status_backlog"]
-    assert (b["label"], b["metric_family"]) == ("Qualified (lead status) · no won deal",
-                                                "legacy_lead_status_category")
-    assert b["count"] == d["kpis"]["lead_status_qualified_no_won_deal"] == 3
-    assert "sqls_not_closed_won" not in d["kpis"]
+    assert "lead_status_backlog" not in d
+    assert "lead_status_qualified_no_won_deal" not in json.dumps(d)
+    assert "sqls_not_closed_won" not in json.dumps(d)
+    assert d["funnel"]["label"] == "Entered stage in window"
+    assert not any("Not Yet" in str(k) for k in (d["funnel"].get("events") or {}))
 
 
 def test_m2_b_the_real_deals_payload_never_puts_a_legacy_count_under_sql(monkeypatch):
     d = _deals_payload(monkeypatch)
+    # PR-ADS-178B: the tab's real payload through the renderers it draws.
     out = _render(
-        "const d = %s; [renderDealFunnel(d), renderDealLeadStatusBacklog(d),"
-        " renderDealSourcePipeline(d), renderDealSqlNoDeal(d), renderDealKpiRow(d),"
-        " renderDashDecisionCards(d)]" % json.dumps(d))
-    funnel, backlog, source, sql_no_deal, kpis, cards = out
-    # The legacy blocks: not one bare "SQL"/"SQLs".
-    for name, html in (("backlog", backlog), ("source pipeline", source),
-                       ("qualified no deal", sql_no_deal)):
+        "const d = %s; [pipelineKpiCardsHtml(d, d.period_change),"
+        " pipelineSourceBreakdownHtml(d), pipelineDealsHtml(d),"
+        " pipelineCustomersWonHtml(d), pipelineFunnelHtml(d)]" % json.dumps(d))
+    kpis, source, deals, customers, funnel = out
+    # No legacy lead-status count is drawn at all.
+    for name, html in (("kpis", kpis), ("source", source), ("deals", deals),
+                       ("customers", customers), ("funnel", funnel)):
+        assert "Qualified (lead status)" not in html, name
+    # The deal blocks carry no "SQL" word; the KPI's SQL figure is the cohort,
+    # under the cohort label, and the funnel never says a bare "SQLs".
+    for name, html in (("source", source), ("deals", deals), ("customers", customers)):
         assert not _BARE_SQL.search(_text(html)), (name, _text(html)[:600])
-    notwon = kpis[kpis.index('data-kpi="notwon"'):]
-    assert "Qualified (lead status)" in notwon and not _BARE_SQL.search(_text(notwon))
-    for card in d["decision_cards"]:
-        if card["type"] in ("watch", "investigate"):
-            assert not _BARE_SQL.search(card["headline"] + " " + card["body"]), card
-    # The funnel: the cohort stage alone carries "SQLs", with the cohort label,
-    # and the legacy count (3) is not in it.
-    assert "SQLs · contacts acquired in window" in funnel
-    assert "Not Yet Closed-Won" not in funnel and "SQL — not yet" not in funnel
+    assert "SQLs · contacts acquired in window" in kpis
+    assert not re.search(r"\bSQLs\b", _text(funnel).replace(
+        "a different metric from the SQL card above", ""))
 
 
 def test_m2_c_under_a_withheld_cohort_the_funnel_says_withheld_and_the_reason(
         monkeypatch):
+    # PR-ADS-178B: the tab's SQL figure is the Pipeline KPI card (the deal
+    # funnel is gone); under a withheld cohort it says Withheld and why.
     d = _deals_payload(monkeypatch, withheld=True)
-    sql = d["funnel"][0]
-    assert (sql["stage"], sql["status"], sql["sql_status"]) == (
-        "SQLs", "SQLs withheld", "withheld")
-    assert sql["sql_reason"] == "source_bootstrap_incomplete"
-    funnel = _render("const d = %s; renderDealFunnel(d)" % json.dumps(d))
-    first = funnel[funnel.index("deal-funnel__stage"):]
-    first = first[:first.index("deal-funnel__status")]
+    sqls = d["kpis"]["sqls"]
+    assert (sqls["value"], sqls["status"]) == (None, "withheld")
+    assert sqls["reason"] == "source_bootstrap_incomplete"
+    assert d["cohort"]["sql_reason"] == "source_bootstrap_incomplete"
+    kpis = _render("const d = %s; pipelineKpiCardsHtml(d, null)" % json.dumps(d))
+    first = kpis[kpis.index('data-kpi="sqls"'):]
+    first = first[:first.index("dash-kpi-card__sub")]
     assert "Withheld" in first and "Stage unavailable" not in first
     assert "Unavailable" not in first.replace("dash-unavailable", "")
     assert "backfill is still running" in first        # the reason, in words
@@ -244,9 +249,12 @@ def test_n1_a_every_cohort_label_carries_its_window_end():
         " metrics: {}};"
         "const d = {cohort: %s, kpis: k, period_change: {}, window: {}};"
         "const dc = {cohort: %s, kpis: k, period_change: {}, window: {}};"
+        # PR-ADS-178B: the Deals tab renders the Pipeline KPI cards.
+        "const dd = {cohort: d.cohort, kpis: {sqls: {value: 4, status: 'published',"
+        " reason: null}}, window: {}};"
         "const page = {cohort: %s, country_totals: {sqls: 4, leads: 9,"
         " metrics: {sqls: {value: 4, status: 'published', reason: null}}}, rows: [], summary: {}};"
-        "[renderDashKpiRow(d), renderCampKpiRow(d), renderDealKpiRow(d), renderCtryKpiRow(dc),"
+        "[renderDashKpiRow(d), renderCampKpiRow(d), pipelineKpiCardsHtml(dd, null), renderCtryKpiRow(dc),"
         " renderRoasCountrySummary(page)]" % (camp, ctry, ctry))
     for name, html in zip(("overview", "campaigns", "deals"), out[:3]):
         assert "through 24 Nov 2026" in html, name
@@ -295,7 +303,8 @@ def test_n2_the_sql_delta_is_shown_only_for_a_completed_window():
     assert open_w != raw and "still maturing" in open_w
     assert "A cohort keeps maturing" in open_w        # the maturity note, beside it
     assert closed_w == raw
-    for fn in ("renderDashKpiRow", "renderCampKpiRow", "renderCtryKpiRow", "renderDealKpiRow"):
+    # PR-ADS-178B: the Deals tab's KPI row is the Pipeline KPI cards.
+    for fn in ("renderDashKpiRow", "renderCampKpiRow", "renderCtryKpiRow", "pipelineKpiCardsHtml"):
         i = APP.index(f"\nfunction {fn}(")
         body = APP[i:APP.index("\n}\n", i)]
         assert 'dashDeltaChip("sqls"' not in body, fn
@@ -328,6 +337,9 @@ def test_n3_a_run_audits_every_business_window_and_every_payload(monkeypatch):
     monkeypatch.setattr(dco, "build_dashboard_countries", _payload("dashboard/countries"))
     monkeypatch.setattr(drv, "build_dashboard_revenue", _payload("dashboard/revenue"))
     monkeypatch.setattr(dd, "build_dashboard_deals", _payload("dashboard/deals"))
+    # PR-ADS-178B: the Pipeline page's builder is audited too.
+    import services.pipeline_service as ps
+    monkeypatch.setattr(ps, "build_pipeline", _payload("pipeline"))
     monkeypatch.setattr(audit, "independent_counts", lambda *a, **k: None)
     monkeypatch.setattr(audit, "global_population_split", lambda: None)
     _a, report = audit.run(now=datetime(2026, 11, 24, 12, tzinfo=timezone.utc))
@@ -335,7 +347,7 @@ def test_n3_a_run_audits_every_business_window_and_every_payload(monkeypatch):
     surfaces = {"mart/campaign", "mart/country", "mart/campaign_settled",
                 "dashboard/overview",
                 "dashboard/campaigns", "dashboard/countries", "dashboard/revenue",
-                "dashboard/deals"}
+                "dashboard/deals", "pipeline"}
     assert [w["window"] for w in report["business_windows"]] == list(WINDOW_KEYS)
     for w in report["business_windows"]:
         assert set(w["surfaces"]) == surfaces, w["window"]

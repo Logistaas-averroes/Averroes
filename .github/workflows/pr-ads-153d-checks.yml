@@ -139,6 +139,7 @@ jobs:
             tests/test_pr_ads_177a_one_sql_count_pg_integration.py \
             tests/test_pr_ads_177b_campaigns_pg_integration.py \
             tests/test_pr_ads_177b_meta_adsets_pg_integration.py \
+            tests/test_pr_ads_178b_pipeline_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -303,6 +304,14 @@ jobs:
                            # own totals, never a partial sum, each account in
                            # its own zone, unverified days withhold.
                            "tests.test_pr_ads_177b_meta_adsets_pg_integration",
+                           # PR-ADS-178B. The one Pipeline page: build_pipeline
+                           # over real tables — the cohort KPI beside the
+                           # lifecycle funnel, the deal list only beside the
+                           # count it equals, customers won, lead filters that
+                           # blank no deal figure, Dashboard → Deals on the
+                           # same builder, parity, the reader-cutover and
+                           # cohort audits, the route.
+                           "tests.test_pr_ads_178b_pipeline_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

@@ -898,7 +898,9 @@ def test_drawer_aggregates_across_approved_aliases_and_reconciles(monkeypatch):
 def test_drawer_lead_detail_bounds_on_contact_created_at_not_run_date():
     repo_src = open(os.path.join(ROOT, "db", "revenue_repository.py"), encoding="utf-8").read()
     fn = repo_src[repo_src.find("def fetch_campaign_lead_detail("):
-                  repo_src.find("def fetch_sql_lead_details(")]
+                  # PR-ADS-178B: fetch_sql_lead_details (the next function)
+                  # is deleted; the one after it bounds the same body.
+                  repo_src.find("def fetch_won_revenue(")]
     assert "contact_created_at >=" in fn and "contact_created_at <" in fn
     assert "source_type = 'paid_search'" in fn
     assert "lead_truth_exclusions" in fn

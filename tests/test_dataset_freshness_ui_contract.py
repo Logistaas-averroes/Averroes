@@ -61,7 +61,9 @@ EXPECTED_PAGES: set[str] = {
     # PR-ADS-176B: "geo" was deleted with the Countries evidence page. The one
     # Countries page (roas-countries) is a clean revenue page with no strip.
     "keywords",
-    "deals",
+    # PR-ADS-178B: "deals" (and "leads") are one page, "pipeline", whose strip
+    # reads the contact funnel and the deal ledger.
+    "pipeline",
     "gclid_attribution",
     # PR-ADS-162G: "action_queue" was here until the Action Queue page was deleted.
 }

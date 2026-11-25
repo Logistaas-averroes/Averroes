@@ -185,8 +185,8 @@ def _patch_business_total_stack(monkeypatch, rows=None, *, available=True):
                         lambda s, e: {"available": True, "rows": []})
     monkeypatch.setattr(repo, "fetch_lead_daily_series",
                         lambda s, e: {"available": True, "rows": []})
-    monkeypatch.setattr(repo, "fetch_sql_lead_details",
-                        lambda s, e: {"available": True, "rows": []})
+    # PR-ADS-178B: `fetch_sql_lead_details` is deleted with the Deals
+    # lead-status backlog; nothing reads it, so nothing is patched.
     monkeypatch.setattr(repo, "fetch_canonical_campaign_spend",
                         lambda s, e, *_a, **_k: {"available": False, "rows": []})
     monkeypatch.setattr(repo, "fetch_spend_coverage",

@@ -170,6 +170,25 @@ def _contract(metric, source, scope, **over):
     return block
 
 
+def _pipeline_payload(_mt):
+    """PR-ADS-178B: the Pipeline builder's payload, in production's shape."""
+    _MART = contract_mod.SOURCE_REVENUE_DECISION_MART
+
+    def m(v):
+        return {"value": v, "status": "published", "reason": None}
+    return {
+        "window": dict(_WIN), "read_only": True, "page": "pipeline",
+        "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
+        "kpis": {"won_revenue_usd": m(33000.0), "closed_won_deals": m(3),
+                 "customers": m(3), "sqls": m(25),
+                 "average_deal_value_usd": m(11000.0)},
+        contract_mod.METRIC_TRUTH_KEY: _mt(
+            ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+            ("closed_won_deals", _MART, "all_source_business_revenue"),
+            ("customers", _MART, "all_source_business_revenue"),
+            ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))}
+
+
 def _payloads(**overrides):
     """Consumer payloads in the EXACT shape production publishes.
 
@@ -299,16 +318,11 @@ def _payloads(**overrides):
                 ("country_attributed_sqls", _MART, "country_attributed_sqls"),
                 ("country_unattributed_residual_sqls", _MART,
                  "country_unattributed_residual_sqls"))},
-        "dashboard/deals": {
-            "window": dict(_WIN), "read_only": True,
-            "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
-            "kpis": {"closed_won_revenue_usd": 33000.0, "closed_won_deals": 3,
-                     "closed_won_customers": 3, "sqls": 25},
-            contract_mod.METRIC_TRUTH_KEY: _mt(
-                ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
-                ("closed_won_deals", _MART, "all_source_business_revenue"),
-                ("customers", _MART, "all_source_business_revenue"),
-                ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
+        # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder
+        # (`build_pipeline`), whose KPIs are {value, status, reason}; the
+        # Pipeline page is the same payload and a consumer of its own.
+        "dashboard/deals": _pipeline_payload(_mt),
+        "pipeline": _pipeline_payload(_mt),
         # PR-ADS-177B: the mart's SETTLED campaign view — the Campaigns page
         # and Dashboard → Campaigns read it, and it is the reference the
         # `*__settled_days` identities compare Dashboard → Campaigns with.
@@ -576,7 +590,9 @@ LEGACY_READ_REGISTRY = {
     ("services/campaign_evidence_service.py", "fetch_campaign_lead_detail"): "detail_rows",
     ("services/campaign_evidence_service.py", "fetch_lead_quality"): "detail_rows",
     ("services/campaign_identity_service.py", "fetch_lead_quality"): "diagnostic",
-    ("services/dashboard_deals_service.py", "fetch_sql_lead_details"): "detail_rows",
+    # PR-ADS-178B: ("services/dashboard_deals_service.py",
+    # "fetch_sql_lead_details") removed — the read and the reader are deleted
+    # with Dashboard → Deals' legacy lead-status backlog (owner decision 4).
     ("services/dashboard_revenue_service.py", "fetch_lead_daily_series"): "detail_rows",
     ("services/google_ads_spend_service.py", "fetch_geo_spend_total"): "diagnostic",
     ("services/lead_reconciliation_service.py", "fetch_missing_event_date_leads"): "diagnostic",
@@ -1224,8 +1240,10 @@ def test_f2_2d_all_source_outcomes_span_every_page_that_publishes_them(monkeypat
     checks all five rather than two."""
     from services.cross_page_parity_service import METRIC_IDENTITIES
 
+    # PR-ADS-178B: the Pipeline page is a seventh surface (Dashboard → Deals
+    # republishes it); nothing was removed.
     pages = {"dashboard/overview", "dashboard/revenue", "dashboard/channels",
-             "dashboard/deals", "revenue_decision_mart"}
+             "dashboard/deals", "pipeline", "revenue_decision_mart"}
     # PR-ADS-166A added a sixth surface for customers (and closed-won deals):
     # the Leads page's "Customers won" block, which publishes no revenue. The
     # expectation grew by that one consumer; nothing was removed.
@@ -1236,7 +1254,7 @@ def test_f2_2d_all_source_outcomes_span_every_page_that_publishes_them(monkeypat
         assert consumers == expected[key], key
 
     out = _audit_with(monkeypatch, _payloads(
-        dashboard__deals={"kpis.closed_won_customers": 4}))
+        dashboard__deals={"kpis.customers.value": 4}))
     assert out["ok"] is False
     assert parity.V_VALUE_MISMATCH in out["violation_codes"]
 
@@ -1531,7 +1549,9 @@ def test_f2_7b_the_cli_exits_nonzero_against_an_inconsistent_fixture(monkeypatch
 
     def broken(window, now):
         built = real(window, now)
-        built["dashboard/deals"]["payload"]["kpis"]["closed_won_revenue_usd"] = 42.0
+        # PR-ADS-178B: the tab's KPIs are {value, status, reason}.
+        kpis = built["dashboard/deals"]["payload"]["kpis"]
+        kpis["won_revenue_usd"] = {**kpis["won_revenue_usd"], "value": 42.0}
         return built
     monkeypatch.setattr(parity, "_build_consumers", broken)
 
@@ -1557,7 +1577,10 @@ _SETTLED_SQLS = "google_ads_cohort_sqls__settled_days"
     ("dashboard/revenue", "kpis.sqls", "google_ads_cohort_sqls"),
     ("dashboard/campaigns", "kpis.sqls", _SETTLED_SQLS),
     ("revenue_decision_mart/campaign_settled", "summary.sqls", _SETTLED_SQLS),
-    ("dashboard/deals", "kpis.sqls", "google_ads_cohort_sqls"),
+    # PR-ADS-178B: the Pipeline builder's KPIs are {value, status, reason};
+    # Dashboard → Deals republishes it and the Pipeline page is compared too.
+    ("dashboard/deals", "kpis.sqls.value", "google_ads_cohort_sqls"),
+    ("pipeline", "kpis.sqls.value", "google_ads_cohort_sqls"),
     ("revenue_decision_mart", "summary.sqls", "google_ads_cohort_sqls"),
 ])
 def test_f2_8_one_sql_identity_is_compared_across_every_consumer(

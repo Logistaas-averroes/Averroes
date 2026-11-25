@@ -7057,3 +7057,51 @@ Evidence's endpoint and renderers) and 177D (Keywords & Search Terms).
 * **Not done.** CLAUDE.md's "dashboard rows return None, not 0, for zero
   revenue" sentence no longer holds for Dashboard → Campaigns (`docs/60` §8);
   CLAUDE.md is not edited here.
+
+## PR-ADS-178B — one Pipeline page: leads and deals together
+
+`docs/61`. Depends on PR-ADS-177B (`d543dcc`). Unblocks 178C (retire the old
+routes after porting what parity and the audits read from them).
+
+* **One page.** `pipeline` ("Pipeline") in the Dashboard design replaces the
+  Leads page and the Closed-Won Deals page: command bar (business windows
+  through today; Scope / Source as LEAD filters), five KPI cards (SQLs = the
+  acquisition cohort through `cohortCountHtml` on the response's cohort;
+  closed-won deals, customers, won revenue = the mart deal view's summary
+  metrics; average deal value = its `ledger_summary`), the lifecycle funnel
+  "Entered stage in window" (stage buttons open the leads list; "Moved to
+  Customer stage" keeps its help text; the working-status breakdown stays as
+  its own button), the leads list (`/api/crm-funnel/contacts`, names, no
+  emails, the existing drawer), the closed-won deal list (Source column + a
+  filter on the deal's own source group; shown only when its length equals the
+  published count), customers won (a list only when it numbers the published
+  count), one truth-footer line.
+* **One builder.** `services/pipeline_service.build_pipeline`
+  (`@single_snapshot`) at `GET /api/pipeline?window=&scope=&acquisition_group=`.
+  A lead filter blanks no deal figure; under one, customers won is unavailable
+  with `customers_won_not_split_by_contact_source`.
+* **Dashboard → Deals** republishes `build_pipeline` (+ a previous-period
+  comparison from the same builder) and renders the Pipeline renderers.
+  Deleted: its second composition (three closed-won counts, `build_revenue_by_source`
+  source groups with a lead-status column, the through-today campaign
+  breakdown), the legacy "Qualified (lead status)" backlog and
+  `db.revenue_repository.fetch_sql_lead_details` (owner decision 4), the
+  always-Unavailable cards, the aging panel and the decision cards.
+* **Navigation.** `NAV_ITEMS.pipeline = ["pipeline"]`; `leads`, `deals`,
+  `opportunities` are `RETIRED_PAGE_REDIRECTS` carrying their intent (section
+  anchor; `open_working`). Links relabelled "Open Pipeline" (Countries drawers,
+  Dashboard → Revenue cards).
+* **Registries / audits.** Reader-cutover INVENTORY (`pipeline_service` row;
+  `dashboard_deals_service` via `build_pipeline`), `_page_builders()` +
+  `pipeline_checks` (windows_reconcile, status/reason, list = members);
+  parity: a `pipeline` consumer on `closed_won_revenue_usd`,
+  `closed_won_deals`, `customers`, `google_ads_cohort_sqls`; the cohort audit
+  builds and scans the pipeline payload; SQL-doctrine registry 12 canonical /
+  11 legacy / 8 mixed, 0 unknown.
+* **Kept for 178C.** `/api/revenue-deals`, `/api/crm-funnel`,
+  `/api/crm-funnel/customers-won`, `/api/crm-funnel/operational-status`,
+  `/api/dashboard/deals` (still used by the tab).
+* **Tests.** `tests/test_pr_ads_178b_pipeline_one_page.py` (12),
+  `tests/test_pr_ads_178b_pipeline_pg_integration.py` (11, PG; in the CI
+  PostgreSQL step and its did-run list). Existing-test changes with a reason
+  each: `docs/61` §9.2.

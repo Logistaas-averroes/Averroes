@@ -109,7 +109,7 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="leads" data-nav-item="pipeline" href="#" role="button" tabindex="0" aria-label="Pipeline — leads and deals">
+          <a class="nav-item" data-page="pipeline" data-nav-item="pipeline" href="#" role="button" tabindex="0" aria-label="Pipeline — leads and deals">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             </span>
@@ -184,10 +184,6 @@
           <a class="section-tab dashboard-tab" data-page="campaigns" href="#/campaigns">Campaigns</a>
           <a class="section-tab dashboard-tab" data-page="keywords" href="#/keywords">Keyword Evidence</a>
           <a class="section-tab dashboard-tab" data-page="search-terms" href="#/search-terms" title="Search terms and pattern analysis">Search Terms</a>
-        </nav>
-        <nav class="dashboard-tabs section-tabs" data-section="pipeline" aria-label="Pipeline pages" hidden>
-          <a class="section-tab dashboard-tab" data-page="leads" href="#/leads" title="Leads — HubSpot CRM funnel">Leads</a>
-          <a class="section-tab dashboard-tab" data-page="deals" href="#/deals">Deals</a>
         </nav>
         <nav class="dashboard-tabs section-tabs" data-section="system" aria-label="System pages" hidden>
           <a id="nav-system-item" class="section-tab dashboard-tab" data-page="system" href="#/system" title="Is the data correct and up to date">System</a>
@@ -310,81 +306,73 @@
         <div id="keyword-evidence-shell"></div>
       </section>
 
-      <!-- Lead Quality -->
-      <!-- Leads — canonical HubSpot CRM funnel explorer (PR-ADS-153C) -->
-      <section id="page-leads" class="page" hidden>
+      <!-- Pipeline — leads and deals on one page (PR-ADS-178B, docs/61). It
+           replaces the Leads page (PR-ADS-153C) and the Closed-Won Deals page
+           (PR-ADS-113), in the Dashboard's visual language. One builder,
+           /api/pipeline; the paged contact rows stay on their own endpoint.
+           Business windows through today. -->
+      <section id="page-pipeline" class="page page--wide" hidden>
         <header class="page-header">
-          <h1 class="page-title">Leads</h1>
-          <p class="page-subtitle">HubSpot CRM funnel. Every stage is a lifecycle stage-entry event dated by its own HubSpot timestamp — not by contact creation date.</p>
+          <h1 class="page-title">Pipeline</h1>
+          <p class="page-subtitle">Leads and closed-won deals for one business window, through today. SQLs are the Google Ads acquisition cohort; the funnel counts contacts that entered each lifecycle stage in the window. The Scope and Source filters apply to leads only. Every HubSpot closed-won deal, from every source — not only Google Ads — by deal close date.</p>
         </header>
-        <div class="roas-window-controls">
-          <label class="roas-window-label" for="leads-window">Window:</label>
-          <select id="leads-window" class="waste-filter-select" data-business-window-select aria-label="Business window">
-            <option value="current_quarter" selected>Current Quarter</option>
-            <option value="last_quarter">Last Quarter</option>
-            <option value="last_6_months">Last 6 Months</option>
-            <option value="ytd">YTD</option>
-            <option value="all_time">All Time</option>
-          </select>
-          <label class="roas-window-label" for="leads-scope">Scope:</label>
-          <select id="leads-scope" class="waste-filter-select" aria-label="Attribution scope"></select>
-          <label class="roas-window-label" for="leads-source">Source:</label>
-          <select id="leads-source" class="waste-filter-select" aria-label="Acquisition source"></select>
-          <span class="roas-window-range" id="leads-range" aria-live="polite"></span>
-        </div>
-        <div id="leads-truth-state"></div>
-        <div id="leads-funnel-strip"></div>
-        <div id="leads-customer-figures"></div>
-        <div class="tab-bar" id="leads-tabs" role="tablist" aria-label="Funnel stage"></div>
-        <div class="roas-window-controls" id="leads-table-controls">
-          <!-- Each filter is wrapped so a view it cannot affect hides it
-               outright, rather than showing a control that does nothing. -->
-          <span class="leads-control" id="leads-status-control">
-            <label class="roas-window-label" for="leads-status">Working status:</label>
-            <select id="leads-status" class="waste-filter-select" aria-label="Working status"></select>
-          </span>
-          <span class="leads-control" id="leads-search-control">
-            <label class="roas-window-label" for="leads-search">Contact or company:</label>
-            <input id="leads-search" class="waste-filter-input" type="search" placeholder="Search name or company…" aria-label="Search by contact name or company">
-          </span>
-          <span class="grace-note" id="leads-controls-note" hidden></span>
-        </div>
-        <div class="panel">
-          <div class="panel__header" id="leads-table-header">Contacts</div>
-          <div class="panel__body panel__body--flush" id="leads-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
+        <div class="dash-command-bar">
+          <div class="dash-command-bar__truth">
+            <span class="dash-chip dash-chip--readonly">Read-only</span>
+            <span class="dash-chip">Leads: HubSpot lifecycle</span>
+            <span class="dash-chip">Deals: HubSpot Closed-Won · every source</span>
+          </div>
+          <div class="roas-window-controls dash-window-controls">
+            <label class="roas-window-label" for="pipeline-window">Window:</label>
+            <select id="pipeline-window" class="waste-filter-select" data-business-window-select aria-label="Business window">
+              <option value="current_quarter" selected>Current Quarter</option>
+              <option value="last_quarter">Last Quarter</option>
+              <option value="last_6_months">Last 6 Months</option>
+              <option value="ytd">YTD</option>
+              <option value="all_time">All Time</option>
+            </select>
+            <span class="pipeline-lead-filters" role="group" aria-label="Lead filters — apply to leads only">
+              <label class="roas-window-label" for="leads-scope">Leads scope:</label>
+              <select id="leads-scope" class="waste-filter-select" aria-label="Leads attribution scope (leads only)"></select>
+              <label class="roas-window-label" for="leads-source">Leads source:</label>
+              <select id="leads-source" class="waste-filter-select" aria-label="Leads acquisition source (leads only)"></select>
+            </span>
+            <button id="pipeline-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+            <span class="roas-window-range" id="pipeline-range" aria-live="polite"></span>
           </div>
         </div>
-        <div id="leads-pagination" class="roas-window-controls"></div>
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          A contact appears in every stage cohort it historically entered. A current Customer still counts in the quarter it became an SQL.
-        </p>
-      </section>
-
-      <!-- Closed-Won Deals — every source (PR-ADS-113, relabelled PR-ADS-164A) -->
-      <section id="page-deals" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Closed-Won Deals</h1>
-          <p class="page-subtitle">Every HubSpot closed-won deal, from every source — not only Google Ads — by deal close date.</p>
-        </header>
-        <div class="roas-window-controls">
-          <label class="roas-window-label">Window:</label>
-          <select id="revenue-deals-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
-            <option value="current_quarter" selected>Current Quarter</option>
-            <option value="last_quarter">Last Quarter</option>
-            <option value="last_6_months">Last 6 Months</option>
-            <option value="ytd">YTD</option>
-            <option value="all_time">All Time</option>
-          </select>
-          <button id="revenue-deals-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
-          <span class="roas-window-range" id="revenue-deals-range" aria-live="polite"></span>
-        </div>
-        <div id="revenue-deals-kpis" class="kpi-grid"></div>
-        <div class="panel">
-          <div class="panel__body panel__body--flush" id="revenue-deals-table-body">
+        <div id="pipeline-page-body" class="dashboard-overview pipeline-page">
+          <div id="pipeline-summary">
             <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
           </div>
+          <!-- The leads list: opened from a funnel stage; paged rows from
+               /api/crm-funnel/contacts. Names shown, never an email. -->
+          <section class="dash-panel pipeline-leads-panel" id="pipeline-leads" aria-label="Leads">
+            <div class="dash-panel__header">
+              <div>
+                <h3 class="dash-panel__title" id="leads-table-header">Leads</h3>
+                <p class="dash-panel__sub">Contacts that entered the selected stage in this window, newest stage entry first · click a contact for detail</p>
+              </div>
+            </div>
+            <div class="roas-window-controls" id="leads-table-controls" hidden>
+              <!-- Each filter is wrapped so a view it cannot affect hides it
+                   outright, rather than showing a control that does nothing. -->
+              <span class="leads-control" id="leads-status-control">
+                <label class="roas-window-label" for="leads-status">Working status:</label>
+                <select id="leads-status" class="waste-filter-select" aria-label="Working status"></select>
+              </span>
+              <span class="leads-control" id="leads-search-control">
+                <label class="roas-window-label" for="leads-search">Contact or company:</label>
+                <input id="leads-search" class="waste-filter-input" type="search" placeholder="Search name or company…" aria-label="Search by contact name or company">
+              </span>
+              <span class="grace-note" id="leads-controls-note" hidden></span>
+            </div>
+            <div id="leads-table-body">
+              <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
+            </div>
+            <div id="leads-pagination" class="roas-window-controls"></div>
+          </section>
+          <div id="pipeline-outcomes"></div>
         </div>
       </section>
 

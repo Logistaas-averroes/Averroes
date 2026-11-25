@@ -175,14 +175,36 @@ INVENTORY = (
      "canonical_via": "R_SQL_TO_CUSTOMER_INCOMPATIBLE", "status": "migrated"},
     {"consumer": "services/dashboard_deals_service.py",
      "surface": "/api/dashboard/deals",
-     "existing_source": "gclid_attribution.has_closed_won_deal; won deals ÷ SQLs",
-     "existing_meaning": "legacy-table won flag; mixed-cohort rate",
-     "canonical_replacement": "canonical won-deal contacts from the snapshot; "
-                              "canonical customers; rate unavailable",
+     "existing_source": "gclid_attribution.has_closed_won_deal; won deals ÷ SQLs. "
+                        "PR-ADS-178B: the mart deal summary, load_won_deals, "
+                        "summarize_deals and build_revenue_by_source beside each other",
+     "existing_meaning": "legacy-table won flag; mixed-cohort rate; three "
+                         "closed-won counts over one ledger",
+     "canonical_replacement": "PR-ADS-178B: republishes build_pipeline (the "
+                              "Pipeline builder, row below) — no read of its own",
      "window_cohort": "business window · close-date cohort",
-     "ui_effect": "Deals and customers separate; SQL→customer Unavailable + reason",
+     "ui_effect": "Dashboard → Deals renders the Pipeline page's KPI cards, deal "
+                  "list and customers won",
+     "families": ("customers", "revenue"),
+     "canonical_via": "build_pipeline", "status": "migrated"},
+    # PR-ADS-178B: the one Pipeline page (leads and deals together) and the
+    # builder Dashboard → Deals republishes.
+    {"consumer": "services/pipeline_service.py",
+     "surface": "/api/pipeline; Pipeline page; Dashboard → Deals",
+     "existing_source": "the Leads page's /api/crm-funnel/customers-won and the "
+                        "Closed-Won Deals page's /api/revenue-performance?view=deal",
+     "existing_meaning": "two customer builders and three closed-won counts on "
+                         "three surfaces",
+     "canonical_replacement": "the mart deal view's reader-contract summary for "
+                              "deals / customers / revenue / average; the deal "
+                              "list only beside a published count it equals; "
+                              "subset_metrics per deal source group; customers "
+                              "won only when the list numbers the published count",
+     "window_cohort": "business window through today · close-date cohort",
+     "ui_effect": "KPI cards = {value, status, reason}; Withheld / Unavailable "
+                  "+ reason; customers never summed; SQL→customer unavailable",
      "families": ("customers", "revenue", "sql_to_customer"),
-     "canonical_via": "load_closed_won_universe", "status": "migrated"},
+     "canonical_via": "subset_metrics", "status": "migrated"},
     {"consumer": "services/dashboard_channels_service.py",
      "surface": "/api/dashboard/channels",
      "existing_source": "per-channel won deals summed as customers",
@@ -226,7 +248,10 @@ INVENTORY = (
                               "stage-move count",
      "window_cohort": "business window · close-date cohort",
      "ui_effect": "Customers won = distinct companies or Withheld/Unavailable "
-                  "+ reason; unavailable under a Scope/Source filter",
+                  "+ reason; unavailable under a Scope/Source filter. "
+                  "PR-ADS-178B: no page reads the route now (the Pipeline page "
+                  "reads build_pipeline, which reuses _won_customers_block); "
+                  "kept for the parity audit until PR-ADS-178C",
      "families": ("customers",),
      "canonical_via": "load_won_deals", "status": "migrated"},
     {"consumer": "services/cross_page_parity_service.py",
@@ -383,6 +408,14 @@ def _text(rel: str) -> str:
     return (_ROOT / rel).read_text(encoding="utf-8")
 
 
+def _text_if_exists(rel: str) -> str:
+    """``rel``'s text, or "" when the file does not exist — a missing reader
+    carries no verdict (PR-ADS-178B: the counterfactual evaluates older trees
+    that predate ``services/pipeline_service.py``)."""
+    path = _ROOT / rel
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
 def _imports_of(rel: str) -> set:
     tree = ast.parse(_text(rel))
     names = set()
@@ -467,7 +500,7 @@ def structural_checks(a: Audit) -> dict:
     for row in INVENTORY:
         via = row.get("canonical_via")
         if row["status"] in ("migrated", "withheld") and via:
-            present = via in _text(row["consumer"])
+            present = via in _text_if_exists(row["consumer"])
             for fam, check in (("customers", "customer_readers_canonical"),
                                ("revenue", "revenue_readers_canonical")):
                 if fam in row["families"]:
@@ -486,7 +519,7 @@ def structural_checks(a: Audit) -> dict:
     )
     for rel in sorted({r["consumer"] for r in INVENTORY
                        if r["consumer"].endswith(".py")}):
-        for i, line in enumerate(_text(rel).splitlines(), 1):
+        for i, line in enumerate(_text_if_exists(rel).splitlines(), 1):
             code = line.split("#", 1)[0]
             for pat in py_patterns:
                 if re.search(pat, code):
@@ -534,16 +567,19 @@ def structural_checks(a: Audit) -> dict:
     mixed = []
     for rel in ("services/dashboard_revenue_service.py",
                 "services/dashboard_deals_service.py",
+                "services/pipeline_service.py",
                 "services/source_attribution_service.py",
                 "services/revenue_decision_mart.py"):
-        for i, line in enumerate(_text(rel).splitlines(), 1):
+        for i, line in enumerate(_text_if_exists(rel).splitlines(), 1):
             code = line.split("#", 1)[0]
             if re.search(r"(customers|won_deals|closed_won_deals|won_revenue|revenue)"
                          r"[^\n]*/\s*[^\n]*\b(sqls|leads)\b", code):
                 mixed.append(f"{rel}:{i}")
+    # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder, which
+    # carries the verdict for both surfaces.
     for rel in ("services/dashboard_revenue_service.py",
-                "services/dashboard_deals_service.py"):
-        if "R_SQL_TO_CUSTOMER_INCOMPATIBLE" not in _text(rel):
+                "services/pipeline_service.py"):
+        if "R_SQL_TO_CUSTOMER_INCOMPATIBLE" not in _text_if_exists(rel):
             mixed.append(f"{rel}: no incompatible-rate verdict")
     a.check("sql_to_customer_not_mixed", not mixed,
             f"cross-cohort rate computed at {mixed}")
@@ -988,6 +1024,8 @@ def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
         page_leak_checks(a, key, "revenue_decision_mart", pub, mart, placement)
         _ratio_name_check(a, f"{key} revenue_decision_mart", mart)
     for name, payload in (pages or {}).items():
+        if name in PIPELINE_PAGES and isinstance(payload, dict):
+            pipeline_checks(a, key, name, pub, truth_w, payload)
         page_leak_checks(a, key, name, (page_pubs or {}).get(name) or pub,
                          payload, placement)
         _ratio_name_check(a, f"{key} {name}", payload)
@@ -1145,6 +1183,52 @@ def mart_checks(a: Audit, key: str, pub: dict, truth_w: dict, mart: dict) -> dic
             "won_revenue_usd": s.get("won_revenue_usd")}
 
 
+#: PR-ADS-178B — pages built by ``build_pipeline`` (through today).
+PIPELINE_PAGES = frozenset({"pipeline", "dashboard_deals"})
+
+
+def pipeline_checks(a: Audit, key: str, page: str, pub: dict, truth_w: dict,
+                    payload: dict) -> None:
+    """6 / 7 / 8 over a Pipeline payload: every KPI is the canonical verdict
+    (published → the canonical value; otherwise no value and the canonical
+    status and reason), and the deal list is exactly the window's members —
+    or absent beside a count that is not published."""
+    out = truth_w.get("outcomes") or {}
+    kpis = payload.get("kpis") or {}
+    for field, m in (("closed_won_deals", "closed_won_deals"),
+                     ("customers", "customers"), ("won_revenue_usd", "revenue_usd")):
+        mine = kpis.get(field) or {}
+        canon = pub.get(m) or {}
+        if canon.get("status") == "published":
+            a.check("windows_reconcile",
+                    mine.get("status") == "published" and mine.get("value") == out.get(m),
+                    f"{key} {page}: kpis.{field}={mine.get('value')} "
+                    f"({mine.get('status')}) != canonical {out.get(m)}")
+        else:
+            a.check("withheld_values_absent", mine.get("value") is None,
+                    f"{key} {page}: kpis.{field}={mine.get('value')} while {m} "
+                    f"is {canon.get('status')}")
+            a.check("status_and_reason_serialized",
+                    mine.get("status") == canon.get("status")
+                    and mine.get("reason") == canon.get("reason"),
+                    f"{key} {page}: kpis.{field} {mine.get('status')}/"
+                    f"{mine.get('reason')} != canonical {canon}")
+    deals = payload.get("deals")
+    canon_deals = pub.get("closed_won_deals") or {}
+    if canon_deals.get("status") == "published":
+        truth_ids = (truth_w.get("membership") or {}).get("deal_ids")
+        got = None if deals is None else sorted(str(d.get("deal_id")) for d in deals)
+        a.check("windows_reconcile",
+                got is not None and truth_ids is not None
+                and got == sorted(map(str, truth_ids)),
+                f"{key} {page}: deal list {None if got is None else len(got)} != "
+                f"canonical members {None if truth_ids is None else len(truth_ids)}")
+    else:
+        a.check("withheld_not_reconstructable", deals is None,
+                f"{key} {page}: a deal list beside a {canon_deals.get('status')} "
+                "deal count")
+
+
 #: The tables a closed-won read could touch; fingerprinted before and after.
 _FINGERPRINT_TABLES = ("hubspot_deal_ledger", "hubspot_deal_company_association",
                        "hubspot_deal_company_observation",
@@ -1206,6 +1290,10 @@ def _page_builders():
                                     "build_dashboard_countries")),
         ("dashboard_deals", mod("services.dashboard_deals_service",
                                 "build_dashboard_deals")),
+        # PR-ADS-178B: the Pipeline page (through today, like Deals): checks 8,
+        # 9 and 18 walk it, and pipeline_checks reconciles its KPIs and deal
+        # list with the canonical truth (windows_reconcile).
+        ("pipeline", mod("services.pipeline_service", "build_pipeline")),
     )
 
 

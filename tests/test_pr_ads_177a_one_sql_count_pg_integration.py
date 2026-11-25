@@ -220,7 +220,7 @@ def test_04_an_incomplete_contact_sync_withholds_every_count_on_every_surface(
     assert set(payloads) == {"mart/campaign", "mart/campaign_settled", "mart/country",
                              "dashboard/overview", "dashboard/campaigns",
                              "dashboard/countries", "dashboard/revenue",
-                             "dashboard/deals"}
+                             "dashboard/deals", "pipeline"}   # PR-ADS-178B: + Pipeline
     for name, p in payloads.items():
         assert p is not None, name
         assert (p["cohort"]["sql_status"], p["cohort"]["sql_reason"]) == (

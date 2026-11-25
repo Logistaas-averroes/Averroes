@@ -19,8 +19,9 @@ REQUIRED_ROUTES = [
     "ngrams",
     # PR-ADS-176B: "geo" was deleted; #/geo redirects to roas-countries.
     "keywords",
-    "leads",
-    "deals",
+    # PR-ADS-178B: "leads" and "deals" are one page, "pipeline"; both keys
+    # are redirects to it.
+    "pipeline",
     "gclid-attribution",
     "scheduler",
     "health",
@@ -205,11 +206,13 @@ class TestBuildEmptyStateIntegration:
         with an explicit truth-state banner (unavailable / partial / mismatch /
         bootstrap) plus per-view empty copy, so it no longer calls
         buildEmptyState(). The stronger requirement is that it never renders a
-        missing count as zero."""
-        fn = self._get_function_slice("async function loadLeads()", window=600)
+        missing count as zero. PR-ADS-178B: the leads list is on the Pipeline
+        page; its funnel renders a missing stage count as "Unavailable"."""
+        fn = self._get_function_slice("async function loadPipeline()", window=2200)
         assert "leadsRenderActiveView" in fn
-        helper = APP_JS.split("function leadsCount(")[1].split("}")[0]
-        assert '"\u2014"' in helper or '"—"' in helper
+        funnel = APP_JS.split("function pipelineFunnelHtml(")[1].split("\n}\n")[0]
+        assert "(count === null || count === undefined)" in funnel
+        assert '"Unavailable"' in funnel
 
     def test_build_empty_state_called_in_backfill(self):
         body = self._get_function_slice("function renderBackfillSummary(", window=2000)

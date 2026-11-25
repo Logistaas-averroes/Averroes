@@ -1148,16 +1148,18 @@ def test_18_an_old_bookmark_lands_on_the_dashboard():
     script = pages + (
         "\nconst out = {};"
         "\nfor (const p of ['unit-economics', 'roas-campaigns', 'roas-countries',"
-        " 'deals', 'dashboard'])"
+        " 'pipeline', 'dashboard'])"
         " out[p] = PAGES.includes(p);"
         "\nprocess.stdout.write(JSON.stringify(out));")
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     # PR-ADS-177B: roas-campaigns is retired too; it survives only as a
     # redirect to Campaigns (RETIRED_PAGE_REDIRECTS), never as a page.
+    # PR-ADS-178B: "deals" likewise (a redirect to Pipeline); "pipeline" is
+    # the live page it was checked as.
     assert json.loads(out.stdout) == {
         "unit-economics": False, "roas-campaigns": False, "roas-countries": True,
-        "deals": True, "dashboard": True}
+        "pipeline": True, "dashboard": True}
 
 
 def test_19_every_sidebar_page_is_still_routable():
@@ -1178,7 +1180,9 @@ def test_19_every_sidebar_page_is_still_routable():
     def strip(item):
         body = HTML.split(f'data-section="{item}"')[1].split("</nav>")[0]
         return re.findall(r'data-page="([a-z0-9-]+)"', body)
-    assert strip("pipeline") == ["leads", "deals"]
+    # PR-ADS-178B: Pipeline is one page, the item itself (no strip).
+    assert 'data-section="pipeline"' not in HTML
+    assert 'data-page="pipeline" data-nav-item="pipeline"' in HTML
     # PR-ADS-177B: Campaign Revenue & Spend merged into the Campaigns page.
     assert strip("campaigns") == ["campaigns", "keywords", "search-terms"]
     # PR-ADS-176B: Countries is one page, the item itself (no strip).
@@ -1189,8 +1193,8 @@ def test_19_every_sidebar_page_is_still_routable():
     switch = JS.split("function loadPage(")[1].split("\n}\n")[0]
     loaded = set(re.findall(r'case "([a-z0-9-]+)":', switch))
     assert loaded == {
-        "dashboard", "campaigns", "search-terms", "keywords", "leads",
-        "deals", "gclid-attribution", "scheduler", "health", "backfill",
+        "dashboard", "campaigns", "search-terms", "keywords", "pipeline",
+        "gclid-attribution", "scheduler", "health", "backfill",
         "roas-countries", "revenue-health",
         "channels", "system"}  # PR-ADS-168B: revenue-by-source deleted;
     #                              PR-ADS-176B: geo deleted (#/geo redirects);
@@ -1221,7 +1225,7 @@ def test_20_the_reader_cutover_audit_still_holds(monkeypatch):
     assert {"revenue_decision_mart", "revenue_attribution", "revenue_by_source",
             "dashboard_overview", "dashboard_revenue", "dashboard_channels",
             "dashboard_campaigns", "dashboard_countries",
-            "dashboard_deals"} <= set(builders)
+            "dashboard_deals", "pipeline"} <= set(builders)
 
     # Counterfactual: leave the deleted file in the inventory and the audit
     # says so — the row was removed because it had to be, not for tidiness.
@@ -1230,8 +1234,11 @@ def test_20_the_reader_cutover_audit_still_holds(monkeypatch):
                  "status": "migrated"}
     monkeypatch.setattr(audit, "INVENTORY", (*audit.INVENTORY, stale_row))
     b = audit.Audit()
-    with pytest.raises(FileNotFoundError):
-        audit.structural_checks(b)
+    # PR-ADS-178B: the audit now completes over a tree that lacks an
+    # inventoried file (161E test_26 runs it on the base tree, which predates
+    # services/pipeline_service.py) and records the missing file as an
+    # inventory_complete violation — it used to crash on the read first.
+    audit.structural_checks(b)
     assert b.checks.get("inventory_complete") is False
     assert any(SERVICE in v for v in b.violations), b.violations
 

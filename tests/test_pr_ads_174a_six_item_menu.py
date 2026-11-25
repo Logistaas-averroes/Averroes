@@ -41,7 +41,9 @@ EXPECTED_ITEMS = [
     # PR-ADS-176B: Countries is one page (#/geo is retired into it), so it is
     # a single-page item with no strip.
     ("countries", "Countries", ["roas-countries"]),
-    ("pipeline", "Pipeline", ["leads", "deals"]),
+    # PR-ADS-178B: Pipeline is one page (#/leads, #/deals and #/opportunities
+    # are retired into it), so it is a single-page item with no strip.
+    ("pipeline", "Pipeline", ["pipeline"]),
     ("system", "System", ["system", "scheduler", "health", "revenue-health",
                           "backfill", "gclid-attribution"]),
 ]
@@ -55,7 +57,8 @@ EXPECTED_ITEM_FOR_PAGE = {
     "keywords": "campaigns", "search-terms": "campaigns",
     # PR-ADS-176B: "geo" is a retired key now (RETIRED_PAGE_REDIRECTS).
     "geo": "countries", "roas-countries": "countries",
-    "leads": "pipeline", "deals": "pipeline",
+    # PR-ADS-178B: "leads" and "deals" are retired keys now.
+    "leads": "pipeline", "deals": "pipeline", "pipeline": "pipeline",
     "system": "system", "scheduler": "system", "health": "system",
     "revenue-health": "system", "backfill": "system", "gclid-attribution": "system",
     # retired keys (RETIRED_PAGE_REDIRECTS) and hash aliases (HASH_ROUTE_ALIASES)
@@ -282,7 +285,6 @@ def test_06_the_strip_labels_are_the_old_sidebar_labels():
     assert labels == {
         "campaigns": "Campaigns",
         "keywords": "Keyword Evidence", "search-terms": "Search Terms",
-        "leads": "Leads", "deals": "Deals",
         "system": "System", "scheduler": "Data Runs", "health": "System Status",
         "revenue-health": "Revenue Health", "backfill": "Admin Backfill",
         "gclid-attribution": "GCLID Attribution",
@@ -296,10 +298,12 @@ def test_07_every_dashboard_target_page_and_redirect_target_is_in_the_menu():
         targets |= set(re.findall(r'"target_page":\s*"([a-z0-9-]+)"', src))
         targets |= set(re.findall(r'target_page="([a-z0-9-]+)"', src))
     # PR-ADS-177B: the campaign cards open "campaigns"; none opens the
-    # retired "roas-campaigns".
-    assert {"channels", "deals", "leads", "revenue-health", "campaigns",
+    # retired "roas-campaigns". PR-ADS-178B: the deal cards open "pipeline";
+    # none opens the retired "deals" or "leads".
+    assert {"channels", "pipeline", "revenue-health", "campaigns",
             "roas-countries", "search-terms"} <= targets
     assert "roas-campaigns" not in targets
+    assert not {"deals", "leads"} & targets
     redirects = json.loads(_node(_menu_js() + "\nprocess.stdout.write(JSON.stringify("
                                  "Object.values(RETIRED_PAGE_REDIRECTS).map((r) => r.page)));"))
     in_menu = {p for _, _, ps in EXPECTED_ITEMS for p in ps}
@@ -322,8 +326,9 @@ def test_08_the_active_item_for_every_page_is_evaluated_in_node():
 
 
 def test_09_the_lookup_guard_fails_on_a_broken_table():
-    """Shown failing: drop Deals from Pipeline and the lookup loses it."""
-    broken = _menu_js().replace('pages: ["leads", "deals"]', 'pages: ["leads"]')
+    """Shown failing: drop the page from Pipeline and the lookup loses it —
+    and the retired Deals key with it (PR-ADS-178B)."""
+    broken = _menu_js().replace('pages: ["pipeline"] }', 'pages: [] }')
     assert broken != _menu_js()
     out = _node(broken + "\nprocess.stdout.write(String(navItemForPage('deals')));")
     assert out == "null"
@@ -357,7 +362,8 @@ process.stdout.write(JSON.stringify(out));
         assert active == [item], (page, active)
         assert [x["current"] for x in state["items"] if x["active"]] == ["page"]
         assert all(x["current"] is None for x in state["items"] if not x["active"])
-        if item in ("overview", "channels", "countries"):   # single-page items (176B)
+        # single-page items (176B; Pipeline since 178B)
+        if item in ("overview", "channels", "countries", "pipeline"):
             assert state["strips"] == [] and state["bar"] is False
             assert state["activeTabs"] == []
         else:
@@ -408,7 +414,7 @@ process.stdout.write(JSON.stringify(out));
     assert [(x["item"], x["opens"], x["shown"]) for x in admin["items"]] == [
         ("overview", "dashboard", True), ("channels", "channels", True),
         ("campaigns", "campaigns", True), ("countries", "roas-countries", True),
-        ("pipeline", "leads", True), ("system", "system", True)]
+        ("pipeline", "pipeline", True), ("system", "system", True)]
     assert admin["strips"] == ["system"]
     assert [t for t in admin["tabs"] if t in EXPECTED_ITEMS[-1][2]] == EXPECTED_ITEMS[-1][2]
     # a non-admin keeps exactly what they could open before: Data Runs and GCLID

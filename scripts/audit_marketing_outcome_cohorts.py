@@ -269,8 +269,9 @@ def withheld_exposures(payload: dict) -> list[str]:
 #: Every lead / SQL count a mart- or Dashboard-shaped payload publishes from the
 #: acquisition cohort, by location. Named, not discovered by key: the same
 #: payloads ALSO carry other families on purpose (the Overview's lifecycle
-#: stage-entry counts, Dashboard Deals' legacy lead-status backlog, the source
-#: mix's legacy groups), each declared as such, and a key-name walk would call
+#: stage-entry counts and the Pipeline page's funnel (PR-ADS-178B: lifecycle
+#: stage entries, never the cohort), the source mix's legacy groups), each
+#: declared as such, and a key-name walk would call
 #: those exposures or — worse — be "fixed" by renaming them.
 _MART_SUMMARY_FIELDS = ("leads", "sqls")
 _MART_ROW_FIELDS = ("leads", "sqls")
@@ -346,7 +347,15 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
         if m.get("value") is not None or m.get("status") == "published":
             out.append(f"country_totals.metrics.{k}")
     kpis = payload.get("kpis") or {}
-    out += [f"kpis.{k}" for k in _DASH_KPI_FIELDS if _num(kpis.get(k))]
+    for k in _DASH_KPI_FIELDS:
+        v = kpis.get(k)
+        if isinstance(v, dict):
+            # PR-ADS-178B: the Pipeline builder publishes each KPI as
+            # {value, status, reason}; a withheld one carries no value.
+            if v.get("value") is not None or v.get("status") == "published":
+                out.append(f"kpis.{k}.value")
+        elif _num(v):
+            out.append(f"kpis.{k}")
     if kpis.get("sqls_status") == "published":
         out.append("kpis.sqls_status=published")
     residual = payload.get("residual") or {}
@@ -447,7 +456,7 @@ def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
 
     ``payloads``: name → payload (``mart/campaign``, ``mart/country``,
     ``dashboard/overview``, ``dashboard/campaigns``, ``dashboard/countries``,
-    ``dashboard/revenue``, ``dashboard/deals``)."""
+    ``dashboard/revenue``, ``dashboard/deals``, PR-ADS-178B ``pipeline``)."""
     w = f"[business:{window}]"
     out = {"window": window, "surfaces": {}}
     for name, payload in payloads.items():
@@ -894,6 +903,7 @@ def _build_mart_payloads(window: str, now) -> dict:
     from services.dashboard_deals_service import build_dashboard_deals
     from services.dashboard_overview_service import build_dashboard_overview
     from services.dashboard_revenue_service import build_dashboard_revenue
+    from services.pipeline_service import build_pipeline
     from services.revenue_decision_mart import build_revenue_decision_mart
     builders = {
         "mart/campaign": lambda: build_revenue_decision_mart(view="campaign", window=window, now=now),
@@ -906,6 +916,8 @@ def _build_mart_payloads(window: str, now) -> dict:
         "dashboard/countries": lambda: build_dashboard_countries(window=window, now=now),
         "dashboard/revenue": lambda: build_dashboard_revenue(window=window, now=now),
         "dashboard/deals": lambda: build_dashboard_deals(window=window, now=now),
+        # PR-ADS-178B: the Pipeline page (Dashboard → Deals republishes it).
+        "pipeline": lambda: build_pipeline(window, now=now),
     }
     out = {}
     for name, fn in builders.items():

@@ -53,9 +53,9 @@ REQUIRED_HELP_PAGES = [
     "keywords",
     # PR-ADS-176B: "geo" was deleted with its help entry; Countries is
     # "roas-countries" (below).
-    "leads",
-    "opportunities",
-    "deals",
+    # PR-ADS-178B: "leads", "opportunities" and "deals" are one page,
+    # "pipeline" (each old key redirects to it).
+    "pipeline",
     # PR-ADS-177B: "roas-campaigns" was merged into "campaigns" (above).
     "roas-countries",
     "gclid-attribution",
