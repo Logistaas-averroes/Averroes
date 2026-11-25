@@ -7524,3 +7524,31 @@ every page."
   mart contract, which is a backend addition. Whether a Lead-cohort stage
   after a missing-date exclusion is a lower bound is for the truth auditor
   (`docs/63` §4.3, §8).
+
+### PR-ADS-180A-F1 — truth audit round 1 on the shared funnel block
+
+A second commit on the same branch (`docs/63` §4.3, §7a).
+
+* **Major.** On `d48b6b7` one Lead population read "at least 13" on Overview
+  Activity and "13" on Overview Cohort; the two counts are the same
+  `events["lead"]`.
+  * Lead-cohort stages are now lower bounds (`dashCohortStageBounds`) in
+    three cases: any anchorless contact (then every stage); any exclusion at
+    an earlier stage (the silent path in `lead_cohort_progression`); or an
+    undated or unproven entry at the stage itself.
+  * Connectors follow 178B-F2 with cumulative bounds.
+  * The test runs real producers and renders both panels with the real
+    `app.js`.
+* **Minors.**
+  * No exact trend is shown beside "at least N".
+  * The Channels family label now says the stages are cumulative.
+  * An unavailable Overview block keeps its Lead-entry column names.
+  * The Channels share is documented as divided in the browser.
+  * `stageEntryWindowBasis` requires a `date_entered_` property.
+* **Recorded.** This PR fixed a 9a09c6d Pipeline leak: under a mismatch,
+  cohort rates were drawn between "Reconciliation required" cells.
+* **Tests.** `test_pr_ads_180a_shared_funnel_block.py` now has 37 cases
+  (07_a–07_h added; 06_d updated).
+* **Proposal, not built.** A backend per-stage bound, or narrowing the
+  anchorless set to contacts that could belong to the window. Today any
+  anchorless contact makes every cohort rate "—".

@@ -26,6 +26,7 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -559,9 +560,12 @@ def test_06_d_unavailable_overview_blocks_say_why_and_show_no_count():
     for html, why in zip(out, ("a funnel invariant broke, so no count is rendered",
                                "a funnel invariant broke, so no count is rendered")):
         assert f"<strong>Unavailable</strong> — {why}." in html
+        # PR-ADS-180A-F1 (minor 4): the first column of both Overview blocks
+        # is Lead entries, so an unavailable block keeps the lifecycle names
+        # (it fell back to the generic "Contacts" column caption on d48b6b7).
         assert list(_cells(html).values()) == [
-            "Contacts Unavailable", "MQL Unavailable", "SQL Unavailable",
-            "Opportunity Unavailable", "Customer stage Unavailable"]
+            "Leads Unavailable", "MQLs Unavailable", "SQLs Unavailable",
+            "Opportunities Unavailable", "Moved to Customer stage Unavailable"]
 
 
 def test_06_e_the_customer_column_is_the_lifecycle_stage_never_companies():
@@ -615,3 +619,177 @@ def test_06_g_the_revenue_tab_strip_is_no_longer_a_funnel_and_keeps_every_figure
     assert "Closed-Won Deals 0 By close date" in text
     assert "SQL-to-customer rate Unavailable" in text and "Revenue per SQL Unavailable" in text
     assert "&amp;amp;" not in html
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 7. PR-ADS-180A-F1 — truth audit round 1
+# ═════════════════════════════════════════════════════════════════════════════
+#: The auditor's fixture, through the REAL producers: canonical_crm_funnel_service
+#: .build → dashboard_overview_service._lifecycle_funnel_block /
+#: _lifecycle_activity_block, rendered by the real app.js. Window: last quarter
+#: (2026-07-01 .. 2026-09-30).
+_F1_NOW = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+_F1_WINDOW = "last_quarter"
+
+
+def _f1_row(i, stage, **dates):
+    r = {"contact_id": f"c{i}", "lifecycle_stage": stage, "created_at": "2026-07-01",
+         "hs_analytics_source": "ORGANIC_SEARCH"}
+    for k, v in dates.items():
+        r[f"date_entered_{k}"] = v
+    return r
+
+
+def _f1_rows(*, gap=False, anchorless=False, before_anchor=False):
+    # 10 fully dated contacts, Lead in the window, 4 of them to Opportunity.
+    rows = [_f1_row(i, "opportunity" if i < 4 else "marketingqualifiedlead",
+                    lead="2026-07-05", mql="2026-07-10",
+                    **({"sql": "2026-08-01", "opportunity": "2026-08-10"} if i < 4 else {}))
+            for i in range(10)]
+    if gap:        # 3 at SQL, Lead dated in the window, NO MQL date
+        rows += [_f1_row(i, "salesqualifiedlead", lead="2026-07-06", sql="2026-08-02")
+                 for i in range(10, 13)]
+    if anchorless:  # 5 at MQL with NO Lead date at all
+        rows += [_f1_row(i, "marketingqualifiedlead", mql="2026-07-12") for i in range(20, 25)]
+    if before_anchor:  # MQL dated before Lead; now at SQL with no SQL date (silent path)
+        rows += [_f1_row(30, "salesqualifiedlead", lead="2026-07-10", mql="2026-07-01")]
+    return rows
+
+
+def _overview_panels(monkeypatch, rows):
+    from db import crm_funnel_repository as repo
+    from services import canonical_crm_funnel_service as F
+    from services import dashboard_overview_service as O
+    monkeypatch.setattr(repo, "fetch_funnel_contacts",
+                        lambda start, end: {"available": True, "rows": rows})
+    monkeypatch.setattr(F, "_build_campaign_resolver",
+                        lambda s, e: (F.default_campaign_resolver, True))
+    monkeypatch.setattr(F, "_sync_state_block", lambda: {"available": True})
+    monkeypatch.setattr(O, "_lifecycle_previous_period",
+                        lambda _w, _n: {"available": False, "label": None, "window": None,
+                                        "counts": {}, "reason": "Previous period unavailable."})
+    funnel = O._lifecycle_funnel_block(_F1_WINDOW, now=_F1_NOW)
+    activity = O._lifecycle_activity_block(funnel, _F1_WINDOW, _F1_NOW)
+    d = {"lifecycle_activity": activity, "lifecycle_cohort": funnel.get("cohort")}
+    act, coh = _run_app("(() => { const d = %s; return [renderDashLifecycleActivity(d),"
+                        " renderDashLifecycleCohort(d)]; })()" % json.dumps(d, default=str))
+    return d, act, coh
+
+
+def _conv_titles(html):
+    return re.findall(r'<span class="dash-funnel__conv[^"]*"[^>]*title="([^"]*)"', html)
+
+
+def test_07_a_one_lead_population_reads_one_bound_on_both_overview_panels(monkeypatch):
+    """MAJOR 1. Activity's Lead count and the cohort's Lead size are the same
+    events["lead"] population. Five contacts reached Lead with no Lead date:
+    both panels say "at least 13" — on d48b6b7 the cohort said "13". Three
+    contacts reached MQL undated: the cohort's MQL is "at least 10", and every
+    cohort rate is unknown ("—" with the reason) once Lead is a bound."""
+    d, act, coh = _overview_panels(monkeypatch, _f1_rows(gap=True, anchorless=True))
+    assert d["lifecycle_cohort"]["stages"][0]["reached"] == 13      # the producer's own
+    acells, ccells = _cells(act), _cells(coh)
+    assert acells["contacts"].startswith("Leads at least 13 "), acells["contacts"]
+    assert ccells["contacts"].startswith("Leads at least 13 "), ccells["contacts"]
+    assert ccells["mql"].startswith("MQLs at least 10 "), ccells["mql"]
+    assert "Lead-entry date" in ccells["contacts"]
+    chips = _chips(coh)
+    assert chips == ["—", "—", "—", "—"], chips
+    assert _conv_titles(coh)[0].startswith("Conversion unknown: an earlier stage is a lower bound")
+    # No exact service rate is printed beside a bound pair, and no share.
+    assert "76.92" not in coh and "% of Lead cohort" not in _text(coh)
+
+
+def test_07_b_a_clean_cohort_renders_exact_on_both_panels(monkeypatch):
+    """Positive control: complete evidence, exact counts and rates."""
+    _d, act, coh = _overview_panels(monkeypatch, _f1_rows())
+    assert "at least" not in _text(act) and "at least" not in _text(coh)
+    assert _cells(act)["contacts"].startswith("Leads 10 ")
+    assert _cells(coh)["contacts"].startswith("Leads 10 ")
+    assert _chips(coh) == ["100%", "40%", "100%", "0%"]
+    assert "40% of Lead cohort" in _cells(coh)["sql"]
+
+
+def test_07_c_a_stage_gap_bounds_that_stage_and_every_later_one(monkeypatch):
+    """No anchorless contact: Lead is exact. MQL has 3 undated contacts, so it
+    is a bound — Lead→MQL is "at least X%" and its share "at least"; every
+    later stage is a bound and every later rate unknown (cumulative F2)."""
+    _d, _act, coh = _overview_panels(monkeypatch, _f1_rows(gap=True))
+    cells = _cells(coh)
+    assert cells["contacts"].startswith("Leads 13 ") and "at least" not in cells["contacts"]
+    assert cells["mql"].startswith("MQLs at least 10 ")
+    assert "at least 76.92% of Lead cohort" in cells["mql"]
+    for slot in ("sql", "opportunity", "customer"):
+        assert " at least " in f" {cells[slot]}", (slot, cells[slot])
+    assert _chips(coh) == ["at least 76.92%", "—", "—", "—"]
+
+
+def test_07_d_the_silent_path_bounds_a_later_stage(monkeypatch):
+    """A contact dropped at MQL (its MQL date precedes its Lead date) whose
+    later SQL is undated is neither counted nor excluded at SQL. Any earlier
+    exclusion makes every later stage a bound; the excluded stage itself is
+    not one for this reason."""
+    d, _act, coh = _overview_panels(monkeypatch, _f1_rows(before_anchor=True))
+    stages = {s["event"]: s for s in d["lifecycle_cohort"]["stages"]}
+    assert stages["mql"]["exclusion_reasons"] == {"stage_entry_before_lead_entry": 1}
+    assert stages["sql"]["excluded_contacts"] == 0          # the silent path
+    cells = _cells(coh)
+    assert cells["mql"].startswith("MQLs 10 "), cells["mql"]
+    assert cells["sql"].startswith("SQLs at least 4 "), cells["sql"]
+    assert "not followed into later stages" in cells["sql"]
+    assert _chips(coh)[:2] == ["90.91%", "at least 40%"], _chips(coh)
+
+
+def test_07_e_a_bound_activity_stage_shows_no_exact_trend():
+    """minor 2: "+10.0% vs Last Quarter" beside "at least 42" claims an exact
+    change of a count that is not exact."""
+    cov = {e: 0 for e in _EVENTS}
+    cov["sql"] = 12
+    stages = [{**s, "previous_period": {"status": "ok", "delta_pct": 0.1, "direction": "up"}}
+              for s in _activity()["stages"]]
+    html = _run_app("renderDashLifecycleActivity({lifecycle_activity: %s})" % json.dumps(_activity(
+        stages=stages, reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
+        coverage={"stage_reached_without_entry_date": cov})))
+    cells = _cells(html)
+    assert "No comparison" in cells["sql"] and "%" not in cells["sql"].split("Lower bound")[0]
+    assert "+10.0%" not in cells["sql"]
+    assert "+10.0% vs Last Quarter" in cells["mql"]
+
+
+def test_07_f_the_channels_family_label_is_cumulative():
+    """minor 3: channel_funnel_service.reached() is cumulative — every contact
+    that has reached a stage counts there — not a partition by furthest stage."""
+    html = _isolated("funnelBlockHtml({...%s, family: {key: 'acquisition_cohort_outcomes',"
+                     " basis: 'contact_created_at'}}, {})" % json.dumps(_model()))
+    assert ("Acquisition cohort: contacts created in the window; each stage counts every "
+            "contact that has reached it so far") in html
+    assert "furthest stage" not in JS
+
+
+def test_07_g_a_window_basis_needs_a_stage_entry_date_property():
+    """minor 5: a stage whose date property is not a stage-entry date does not
+    make the funnel "each stage on its own entry date"."""
+    out = _isolated("[stageEntryWindowBasis([{event_date_property: 'hs_v2_date_entered_lead'}]),"
+                    " stageEntryWindowBasis([{event_date_property: 'createdate'}]),"
+                    " stageEntryWindowBasis([{window_basis: 'date_entered_sql'}]),"
+                    " stageEntryWindowBasis([{event_date_property: 'hs_v2_date_entered_lead'}, {}])]")
+    assert out == ["stage_entry_date", None, "stage_entry_date", None]
+
+
+def test_07_h_pipeline_under_mismatch_draws_no_rate():
+    """Recorded by the audit: on 9a09c6d, `/api/pipeline` under a scope
+    mismatch drew cohort rates between "Reconciliation required" cells,
+    because pipeline_service._funnel passes the conversions through. Under any
+    unpublished verdict the block draws no connector rate."""
+    from tests.test_pr_ads_178b_pipeline_one_page import _page, _payload
+    convs = [{"from_event": a, "to_event": b, "available": True, "basis": "cohort",
+              "rate_pct": r} for a, b, r in (("lead", "mql", 50), ("mql", "sql", 40),
+                                             ("sql", "opportunity", 10),
+                                             ("opportunity", "customer", 25))]
+    f = {**_payload()["funnel"], "conversions": convs,
+         "reconciliation": {"status": "mismatch", "reasons": ["scope_nesting_broken:mql"]}}
+    summary, _ = _page(_payload(funnel=f))
+    funnel = summary[summary.index('id="pipeline-funnel"'):]
+    assert "Reconciliation required" in funnel
+    assert "dash-funnel__conv" not in funnel
+    assert not re.search(r"\d+%", _text(funnel)), _text(funnel)

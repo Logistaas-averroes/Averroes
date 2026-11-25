@@ -543,7 +543,10 @@ def test_10_previous_period_trend_is_distinct_from_cohort_conversion(monkeypatch
     model = src[src.index("function dashActivityFunnelModel("):]
     model = model[:model.index("\n}\n")]
     stages_part = model[model.index("stages: stages.map("):model.index("conversions: stages.slice(1)")]
-    assert "notes: [dashActivityTrend(" in stages_part
+    # PR-ADS-180A-F1: a lower-bound stage gets "No comparison" instead of
+    # the trend, so the trend is the note's non-bound branch.
+    assert "notes: [" in stages_part
+    assert ": dashActivityTrend(s.previous_period, a.previous_period)]" in stages_part
     assert "dashActivityConversion(" not in stages_part
     assert "vs previous period" in src
     html = _render_activity(activity)

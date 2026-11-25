@@ -2799,16 +2799,37 @@ const FUNNEL_EVENT_SLOTS = {
 /**
  * The window basis of a stage-entry funnel, from the payload's own per-stage
  * metadata: "stage_entry_date" only when EVERY stage names its own entry date
- * (`window_basis` date_entered_<stage>, or the HubSpot property it is read
- * from). Anything less is not stated — never assumed.
+ * (`window_basis` date_entered_<stage>, or the HubSpot date_entered_ property
+ * it is read from). Anything less is not stated — never assumed.
  */
 function stageEntryWindowBasis(blocks) {
   const list = Array.isArray(blocks) ? blocks : [];
   const dated = list.length > 0 && list.every((b) => !!b && (
     (typeof b.window_basis === "string" && b.window_basis.indexOf("date_entered_") === 0)
-    || !!b.event_date_property));
+    || (typeof b.event_date_property === "string"
+      && b.event_date_property.indexOf("date_entered_") !== -1)));
   return dated ? "stage_entry_date" : null;
 }
+
+/** Label-only column models for an unpublished lifecycle block: the payload's
+ * own stage labels where it sent them, the canonical names otherwise. */
+function lifecycleColumnLabels(stages) {
+  const byEvent = {};
+  (Array.isArray(stages) ? stages : []).forEach((st) => {
+    if (st && st.event && st.label) byEvent[st.event] = st.label;
+  });
+  return Object.keys(FUNNEL_EVENT_SLOTS).map((event) => ({
+    slot: FUNNEL_EVENT_SLOTS[event], key: event,
+    label: byEvent[event] || LIFECYCLE_COLUMN_LABELS[event] }));
+}
+
+// The lifecycle events' own column names (analysis/crm_lifecycle EVENT_LABELS),
+// for an Overview block whose payload carried none (an unavailable verdict).
+// PR-ADS-180A-F1: the first column there is Lead entries, never "Contacts".
+const LIFECYCLE_COLUMN_LABELS = {
+  lead: "Leads", mql: "MQLs", sql: "SQLs", opportunity: "Opportunities",
+  customer: "Moved to Customer stage",
+};
 
 /** A raw payload count as a reader-contract metric: null is unknown, never 0. */
 function funnelCountMetric(value, reason) {
@@ -2858,7 +2879,7 @@ function funnelBlockFamily(family) {
 const FUNNEL_FAMILY_LABELS = {
   lifecycle_stage_events: "Lifecycle stage events: contacts that entered each stage in the window",
   stage_entry_events: "Lifecycle stage events: contacts that entered each stage in the window",
-  acquisition_cohort_outcomes: "Acquisition cohort: contacts created in the window, by the furthest stage each has reached so far",
+  acquisition_cohort_outcomes: "Acquisition cohort: contacts created in the window; each stage counts every contact that has reached it so far",
   lead_entry_cohort: "Lead cohort: contacts that entered Lead in the window, followed through every later stage",
 };
 const FUNNEL_WINDOW_BASIS_LABELS = {
@@ -3062,7 +3083,8 @@ function dashActivityFunnelModel(activity) {
   const stages = Array.isArray(a.stages) ? a.stages : [];
   const family = { key: a.basis, basis: stageEntryWindowBasis(stages) };
   if (a.available !== true) {
-    return { family, verdict: { status: "unavailable", reason: dashActivityReasonLabel(a.reason) } };
+    return { family, verdict: { status: "unavailable", reason: dashActivityReasonLabel(a.reason) },
+      stages: lifecycleColumnLabels(stages) };
   }
   const bounds = stageEntryLowerBounds(a, stages.map((s) => s.event));
   const conversions = Array.isArray(a.conversions) ? a.conversions : [];
@@ -3078,7 +3100,12 @@ function dashActivityFunnelModel(activity) {
       sub: s.activity_label || "Entered during this period",
       sub_title: s.event_date_property ? `HubSpot property: ${s.event_date_property}` : "",
       // §5: the trend lives INSIDE the stage, never between two stages.
-      notes: [dashActivityTrend(s.previous_period, a.previous_period)],
+      // PR-ADS-180A-F1: an exact change beside "at least N" would claim a
+      // measurement the count is not; a bound stage gets no comparison.
+      notes: [bounds[s.event]
+        ? { text: "No comparison", tone: "none",
+            title: `This count is a lower bound (${bounds[s.event]}), so its change against the previous period is not measured.` }
+        : dashActivityTrend(s.previous_period, a.previous_period)],
     })),
     conversions: stages.slice(1).map((s, i) => dashActivityConversion(
       byPair[`${stages[i].event}>${s.event}`], bounds[stages[i].event], bounds[s.event])),
@@ -3254,6 +3281,11 @@ function renderDashLifecycleCohort(d) {
  * percentage is the service's: `previous_stage_conversion_pct` on the
  * connector, `rate_from_anchor_pct` inside the stage. There is no division
  * here, by design — a rate computed in the browser is a rate nobody governs.
+ *
+ * PR-ADS-180A-F1 (truth audit Major 1): the cohort's counts are lower bounds
+ * wherever evidence was excluded — a missing date can only hide a contact
+ * from a stage, never add one (dashCohortStageBounds). A bound stage is
+ * "at least N"; the connectors follow 178B-F2 with CUMULATIVE bounds.
  */
 function dashCohortFunnelModel(cohort) {
   const c = cohort || {};
@@ -3261,21 +3293,36 @@ function dashCohortFunnelModel(cohort) {
   const family = { key: c.anchor_event === "lead" ? "lead_entry_cohort" : null,
     basis: (stages[0] || {}).event_date_column || null };
   if (c.available !== true) {
-    return { family, verdict: { status: "unavailable", reason: dashCohortReasonLabel(c.reason) } };
+    // The columns keep their own names: the first one is Lead entries.
+    return { family, verdict: { status: "unavailable", reason: dashCohortReasonLabel(c.reason) },
+      stages: lifecycleColumnLabels(stages) };
   }
+  const bounds = dashCohortStageBounds(c);
+  const anchorBound = !!bounds[0];
   return {
     family,
     verdict: { status: "published" },
     stages: stages.map((s, i) => {
       const fromAnchor = s.rate_from_anchor_pct;
+      // The share of the Lead cohort: exact only when neither side is a
+      // bound; "at least" when only this stage is; unknown when Lead is.
+      let share = null;
+      if (i > 0 && anchorBound) {
+        share = { text: "Share of the Lead cohort unknown", tone: "none",
+          title: `The Lead cohort itself is a lower bound: ${bounds[0]}` };
+      } else if (!(i === 0 && anchorBound) && fromAnchor !== null && fromAnchor !== undefined) {
+        share = bounds[i]
+          ? { text: `at least ${fromAnchor}% of Lead cohort`, tone: "share", title: `Lower bound: ${bounds[i]}` }
+          : { text: `${fromAnchor}% of Lead cohort`, tone: "share" };
+      }
       return {
         slot: FUNNEL_EVENT_SLOTS[s.event], key: s.event, label: s.label || s.event || "",
         metric: funnelCountMetric(s.reached, null),
+        bound_reason: bounds[i] || null,
         sub: i === 0 ? "Entered Lead in this window" : "Of that same cohort",
         sub_title: s.event_date_property ? `HubSpot property: ${s.event_date_property}` : "",
         notes: [
-          (fromAnchor === null || fromAnchor === undefined) ? null
-            : { text: `${fromAnchor}% of Lead cohort`, tone: "share" },
+          share,
           s.excluded_contacts
             ? { text: `${s.excluded_contacts} excluded`, tone: "gap",
                 title: dashCohortExclusionTitle(s.exclusion_reasons) }
@@ -3284,15 +3331,64 @@ function dashCohortFunnelModel(cohort) {
       };
     }),
     // The connector carries the previous-stage conversion the SERVICE
-    // computed. A null rate is unavailable — never 0%.
-    conversions: stages.slice(1).map((s) => {
+    // computed. A null rate is unavailable — never 0%. Beside a bound
+    // (178B-F2, cumulative): any bound at or before the FROM stage leaves the
+    // rate unknown; a bound on the TO stage alone makes it "at least".
+    conversions: stages.slice(1).map((s, i) => {
       const step = s.previous_stage_conversion_pct;
-      return (step === null || step === undefined)
-        ? { kind: "unavailable", title: "The canonical service published no rate for this step." }
-        : { kind: "exact", pct: step,
-            title: `Of this cohort's contacts that reached the stage before, the share that reached ${s.label || s.event}` };
+      const earlier = bounds.slice(0, i + 1).find((b) => !!b);
+      if (step === null || step === undefined) {
+        return { kind: "unavailable", title: "The canonical service published no rate for this step." };
+      }
+      if (earlier) return { kind: "unknown", title: `Conversion unknown: an earlier stage is a lower bound (${earlier})` };
+      const title = `Of this cohort's contacts that reached the stage before, the share that reached ${s.label || s.event}`;
+      return bounds[i + 1]
+        ? { kind: "at_least", pct: step, title: `Lower bound: ${bounds[i + 1]}. ${title}` }
+        : { kind: "exact", pct: step, title };
     }),
   };
+}
+
+/**
+ * Which Lead-cohort stages are lower bounds, each with its reason in words
+ * (PR-ADS-180A-F1). `lead_cohort_progression` undercounts three ways:
+ *   1. anchorless contacts (`missing_lead_entry_date`): reached Lead with no
+ *      Lead-entry date, so no window's cohort holds them — EVERY stage,
+ *      Lead included, is a bound;
+ *   2. an exclusion at stage j (`missing_stage_entry_date`,
+ *      `prior_stage_entry_unproven`) — stage j is a bound;
+ *   3. a contact dropped at stage j is never followed further, and an undated
+ *      later stage is neither counted nor excluded — so ANY exclusion at an
+ *      earlier stage (whatever its reason) makes every later stage a bound.
+ * Presentation only: the counts are the service's, never adjusted.
+ */
+function dashCohortStageBounds(c) {
+  const stages = Array.isArray(c.stages) ? c.stages : [];
+  const records = Array.isArray(c.exclusion_reasons) ? c.exclusion_reasons : [];
+  let anchorless = 0;
+  records.forEach((r) => {
+    if (r && r.reason === "missing_lead_entry_date") anchorless += Number(r.contacts) || 0;
+  });
+  const out = [];
+  let earlierExcluded = null;
+  stages.forEach((s) => {
+    const own = s.exclusion_reasons || {};
+    const undated = (Number(own.missing_stage_entry_date) || 0)
+      + (Number(own.prior_stage_entry_unproven) || 0);
+    const why = [];
+    if (anchorless > 0) {
+      why.push(`${fmtCount(anchorless)} contact${anchorless === 1 ? "" : "s"} reached Lead with no Lead-entry date recorded in HubSpot, so no window's cohort holds them`);
+    }
+    if (earlierExcluded) why.push(earlierExcluded);
+    if (undated > 0) {
+      why.push(`${fmtCount(undated)} contact${undated === 1 ? "" : "s"} reached this stage with no proven entry date`);
+    }
+    out.push(why.length ? why.join("; ") : null);
+    if (!earlierExcluded && Number(s.excluded_contacts) > 0) {
+      earlierExcluded = `contacts excluded at ${s.label || s.event} are not followed into later stages`;
+    }
+  });
+  return out;
 }
 
 // The cohort's own description of itself. Never assembled from stage counts.

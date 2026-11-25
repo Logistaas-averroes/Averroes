@@ -1291,6 +1291,12 @@ RULES: list[dict] = [
     # The label constants follow funnelBlockFamily, which the scanner credits.
     _r("ui.funnel_block", "static/app.js", CLS_CANONICAL, _CHANNEL_FUNNEL,
        symbol="funnelBlockFamily", pattern="contact_created_at_ref"),
+    # PR-ADS-180A-F1: an unavailable Overview lifecycle block keeps its own
+    # column names — the canonical EVENT_LABELS ("SQLs" is the lifecycle SQL
+    # stage-entry / Lead-cohort column, never a count). The constant follows
+    # lifecycleColumnLabels, which the scanner credits.
+    _r("ui.funnel_block_columns", "static/app.js", CLS_CANONICAL, _OVW_LC,
+       symbol="lifecycleColumnLabels", pattern="frontend_sqls_label"),
     _r("ui.channels", "static/app.js", CLS_MIXED, _CHAN,
        symbol=["renderDashboardChannels", "renderChanKpiRow", "chanQualityBubbleSVG",
                "renderChanQualityPanel", "wireChanQualityHover", "renderChanPlatformMatrix",

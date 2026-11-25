@@ -866,3 +866,23 @@ truncated list. Verified by execution on exported copies of both commits.
   `snapshot_pinning` from the daily row.
 - 161E test_26 fails in a tar copy (no .git); rerun with GIT_DIR=<worktree gitdir>.
 - PR-ADS-179B-F1 fixed items 1–3 (`_undo` records; `snapshot_broken`; summarize/_render carry the note; callproc/copy_*/reset guarded).
+
+## PR-ADS-180A review (d48b6b7, 2026-11-25) — shared funnel block
+- One renderer funnelBlockHtml(model, opts) + adapters dashActivityFunnelModel /
+  dashCohortFunnelModel / pipelineFunnelModel / channelFunnelModel (static/app.js).
+  Under any verdict != published the block draws no stage figure and no connector
+  rate (also fixed a pre-existing Pipeline leak: cohort rates drawn between
+  "Reconciliation required" cells on mismatch).
+- Overview Activity Lead count == Overview Cohort Lead size == Pipeline all_source
+  Lead count (same events["lead"]; all_source scope always True). A bound on one
+  applies to all three.
+- Lead cohort (lead_cohort_progression) counts are monotone lower bounds:
+  anchorless (missing_lead_entry_date), missing_stage_entry_date and
+  prior_stage_entry_unproven undercount; plus a SILENT path (dropped at j, undated
+  later stage: neither counted nor excluded). Cohort stages after any exclusion
+  (all stages when anchorless > 0) are lower bounds; the 178B-F2 rule applies with
+  cumulative bounds.
+- Channels (channel_funnel_service.reached) stage counts are CUMULATIVE, not a
+  partition by furthest stage.
+- 161e test_26 needs a git checkout (fails in archive copies).
+- F1 fixed Major 1 and minors 2–5.

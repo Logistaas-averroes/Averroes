@@ -33,7 +33,7 @@ Every place that drew a lifecycle funnel or a stage strip:
 | A | Overview → Lifecycle Activity, `renderDashLifecycleActivity` (`dash-activity*`) | `/api/dashboard/overview` `lifecycle_activity` → `dashboard_overview_service._lifecycle_activity_block` over `canonical_crm_funnel_service.build` (all sources) | Lifecycle stage events. Five independent populations. The block declares `basis: "stage_entry_events"` and has no `metric_family` key. | Each stage's own HubSpot entry date (`event_date_property` `hs_v2_date_entered_*`) | Whole panel `Unavailable — <reason>`. A null count is `dashValue` → "Unavailable". | **Not marked.** A note "N without an entry date" plus the "Partial historical coverage" badge. | Canonical cohort conversions, whole: `rate_pct` plus "converted of cohort_size in the X cohort". Unavailable shows the word plus the reason. No browser arithmetic. | Backend `EVENT_LABELS` (Leads, MQLs, SQLs, Opportunities, Moved to Customer stage). The sub-line is `activity_label`. The trend is inside the card. |
 | B | Overview → Lifecycle Cohort, `renderDashLifecycleCohort` (`dash-funnel*`) | `lifecycle_cohort` → `canonical_crm_funnel_service.lead_cohort_progression` via `_lifecycle_funnel_block` | Lead-anchored cohort (`basis: "cohort"`, `anchor_event: "lead"`). Not the acquisition cohort. | Lead-entry date (`stages[0].event_date_column`). Later stages are counted whenever they happened. | Whole panel `Unavailable — <reason>`. `dashValue` per count. | Not marked. A note "N excluded", the "Partial lifecycle history" badge and a disclosure. | `previous_stage_conversion_pct` ("→ X%"). Null shows a muted arrow. `rate_from_anchor_pct` is shown inside the card. | `EVENT_LABELS`. The sub-line is "Entered Lead in this window" or "Of that same cohort". |
 | C | Pipeline, `pipelineFunnelHtml` (`dash-funnel*`, `pipeline-funnel*`) | `/api/pipeline` `funnel` → `pipeline_service._funnel` over `canonical_crm_funnel_service.build(scope, acquisition_group)` | `metric_family: "lifecycle_stage_events"` | Per event, `window_basis` `date_entered_<stage>` | Unreadable: "Unavailable" in every stage. Mismatch: "Reconciliation required" in every stage, plus the `leadsTruthStateHtml` banner. | "at least N" plus the reason under `reconciliation.status === "partial"` (178B-F1 o1). | Cohort-safe only. 178B-F2: into a bound "at least X%"; out of a bound "—" with the reason. A missing rate shows "—". | "Entered Lead / MQL / SQL / Opportunity", "Moved to Customer stage in HubSpot" plus help text. Stages are buttons. **It read the page global `_leadsView`.** |
-| D | Channels totals strip, `channelFunnelTotalsHtml` (`dash-outcomes` + `channel-funnel-totals`) | `/api/channel-funnel` `totals` / `stages` / `publication` → `channel_funnel_service.build_channel_funnel` | `metric_family: "acquisition_cohort_outcomes"` | `window_basis: "contact_created_at"`. Each stage is the furthest stage reached so far. | Page-level `<strong>Withheld</strong> — <reason>`. Totals are not read. | n/a | No step conversion. Each stage's share of contacts acquired is computed in the browser ("X% of contacts"). | "Contacts acquired", "Reached MQL / SQL / Opportunity / Customer stage". **A missing count rendered as "—".** |
+| D | Channels totals strip, `channelFunnelTotalsHtml` (`dash-outcomes` + `channel-funnel-totals`) | `/api/channel-funnel` `totals` / `stages` / `publication` → `channel_funnel_service.build_channel_funnel` | `metric_family: "acquisition_cohort_outcomes"` | `window_basis: "contact_created_at"`. Each stage is cumulative: it counts every contact that has reached it so far (`channel_funnel_service.reached()`), not a partition by furthest stage. | Page-level `<strong>Withheld</strong> — <reason>`. Totals are not read. | n/a | No step conversion. Each stage's share of contacts acquired is computed in the browser ("X% of contacts"). | "Contacts acquired", "Reached MQL / SQL / Opportunity / Customer stage". **A missing count rendered as "—".** |
 | E | Dashboard → Revenue "Customer Efficiency", `renderRevConversionStrip` (`dash-funnel*`) | `/api/dashboard/revenue` `kpis` → `dashboard_revenue_service.build_dashboard_revenue` | **Mixed, so not a lifecycle funnel.** SQLs are the acquisition cohort, gated by `cohortCountHtml(k.sqls, d.cohort, null)`. Deals, revenue and average deal value are close-date outcomes. | Two windows: contact creation date, and deal close date | `cohortCountHtml` / `canonicalMetricHtml` / `dashValue` | n/a | Arrows between the two populations. The arrows carried `sql_to_customer_rate` and `revenue_per_sql`, both unavailable by contract. | SQLs → Closed-Won Deals → Closed-Won Revenue → Avg Deal Value |
 
 These surfaces are **not** funnels. They were inventoried and left as they
@@ -114,8 +114,11 @@ absent. A model without a verdict fails closed as Unavailable.
 | `none` | A plain arrow and no rate. Used where the page publishes none (Channels). |
 
 An exact or at-least connector that has no rate is "Unavailable", never
-`0%`. The renderer has no division: every rate is the adapter's, read whole
-from the payload.
+`0%`. The renderer has no division: every rate is the adapter's. On
+Overview and Pipeline that rate is read whole from the payload. On Channels
+it is not: each stage's "X% of contacts" share is still divided in the
+browser (`channelFunnelRate`, count over contacts acquired, as on
+`9a09c6d`). The block publishes no Channels step conversion.
 
 `stageEntryConversion` is the single implementation of the F2 rule. It is
 shared by Pipeline and Overview → Activity. `stageEntryLowerBounds` (the old
@@ -198,16 +201,32 @@ stages.
    payload's existing `reconciliation` and `coverage`. The old
    "N without an entry date" note is replaced by the bound note; the count is
    in it, and the coverage disclosure still lists every gap.
-3. **Overview → Lifecycle Cohort exclusions are not marked as bounds.** I
-   stopped here. A contact excluded for `missing_stage_entry_date` or
-   `prior_stage_unproven` did reach the stage, so that stage's count, and
-   every later one, may be an undercount. But the cohort payload's exclusion
-   records do not say which later stages each excluded contact would have
-   reached. Turning "N excluded" into "at least N" would be a new semantic
-   for that contract. The block keeps the existing exact count, "N excluded"
-   note, badge and disclosure. **Proposal for the truth auditor:** decide
-   whether a cohort stage with a missing-date exclusion at or before it is a
-   lower bound.
+3. **Overview → Lifecycle Cohort stages are lower bounds where evidence was
+   excluded (decided by the truth audit, PR-ADS-180A-F1).** On `d48b6b7` the
+   same Lead population read "at least 13" on Activity and "13" on the
+   Cohort: Activity's Lead count and the cohort's Lead size are the same
+   `events["lead"]` (the cohort is always `all_source`). A missing date can
+   only hide a contact from a stage, never add one, so
+   `dashCohortStageBounds` marks stage k a bound when:
+   * any anchorless contact exists (`missing_lead_entry_date` above 0). That
+     makes every stage a bound, Lead included;
+   * any stage j < k has `excluded_contacts` above 0, for any reason. A
+     contact dropped at j is never followed further, and an undated later
+     stage is neither counted nor excluded (the silent path in
+     `lead_cohort_progression`);
+   * stage k itself has `missing_stage_entry_date` or
+     `prior_stage_entry_unproven` above 0.
+
+   A bound stage is "at least N", with the reason naming which of the three
+   applies. The connectors follow 178B-F2 with cumulative bounds: into stage
+   k the rate is "at least X%" when k is the only bound so far, and "—" with
+   the reason when k−1 or any earlier stage is a bound. The "% of Lead
+   cohort" note is "at least" when only stage k is a bound, and "unknown"
+   when Lead is a bound. The service's exact `previous_stage_conversion_pct`
+   is never printed for a bound pair.
+
+   **In production, any anchorless contact turns every cohort rate into
+   "—".** The durable alternative is a semantic change for a later PR (§8).
 4. **A missing conversion is "Unavailable", not "—".** This applies to
    Pipeline (no cohort-safe rate) and the Overview cohort (null
    `previous_stage_conversion_pct`, which was a muted arrow). Both now show
@@ -352,6 +371,68 @@ The 178B-F1 static scan, "every function app.js calls is defined"
   at-least title keeps the cohort description after the bound's reason, so
   the test passes unedited.
 
+## 7a. PR-ADS-180A-F1 — truth audit round 1
+
+The verdict was **fix first**: one Major and four minors. Choices 1, 2, 3, 4
+and 6 in §4 were confirmed as correct, and the original §4.3 open question
+was decided. All fixes are in one commit on top of `d48b6b7`.
+
+* **Major 1: one Lead population, one bound.** See §4.3 for the rule
+  (`dashCohortStageBounds`). Test `07_a` runs the auditor's fixture through
+  the REAL producers and renders both Overview panels with the real `app.js`:
+  `canonical_crm_funnel_service.build` →
+  `dashboard_overview_service._lifecycle_funnel_block` /
+  `_lifecycle_activity_block`, with the repository monkeypatched. The fixture
+  is 10 dated contacts, 3 at SQL with no MQL date and 5 with no Lead date.
+  The test asserts:
+  * Lead reads "at least 13" in both panels;
+  * the cohort's MQL reads "at least 10";
+  * Lead→MQL, and every cohort rate, is "—" with the reason;
+  * no exact service rate and no share is printed.
+
+  Supporting tests:
+  * `07_b` is the clean positive control: exact values in both panels.
+  * `07_c` covers a stage gap with no anchorless contact: Lead exact, "at
+    least 76.92%" into MQL, "—" after it.
+  * `07_d` covers the silent path: an earlier `stage_entry_before_lead_entry`
+    exclusion makes SQL a bound.
+* **minor 2.** A bound Activity stage no longer prints an exact "+X% vs
+  previous period". It prints "No comparison", with the reason in its title
+  (`07_e`). `155_f2` test_10's structural assertion (ported in `d48b6b7`)
+  now finds the trend as the non-bound branch of the stage note. Its
+  rendered check is unchanged: the trend is inside the stage and never in a
+  connector.
+* **minor 3.** The Channels family label now reads: "Acquisition cohort:
+  contacts created in the window; each stage counts every contact that has
+  reached it so far". The stages are cumulative (`07_f`, §2 row D).
+* **minor 4.** An unavailable Overview block keeps its own column names:
+  "Leads … Moved to Customer stage", from the payload's stage labels or the
+  canonical `EVENT_LABELS` (`lifecycleColumnLabels`). On `d48b6b7` the first
+  column fell back to the generic "Contacts", but on Activity, Cohort and
+  Pipeline that column holds Lead entries. Test `06_d` is updated to the
+  correct labels, with the same truth content: the word in every column and
+  no figure.
+* **minor 5.**
+  * §3.5 now says the Channels share is divided in the browser.
+  * `stageEntryWindowBasis` requires `date_entered_` in `event_date_property`
+    (`07_g`).
+* **Recorded: a Pipeline leak this PR fixed.** On `9a09c6d`, `/api/pipeline`
+  under `reconciliation.status = "mismatch"` drew cohort rates between
+  "Reconciliation required" cells, because `pipeline_service._funnel` passes
+  the conversions through. The shared block draws no connector rate under
+  any unpublished verdict. `07_h` renders the Pipeline page under mismatch and
+  asserts no rate. It fails on `9a09c6d`'s `app.js`.
+* **SQL-doctrine registry.** `ui.funnel_block_columns` classifies the
+  canonical column names ("SQLs") under `_OVW_LC`. The audit shows 0 unknown
+  occurrences.
+
+Fail-before:
+* On `d48b6b7`'s `app.js`, these fail: `06_d` and `07_a`, `07_c`, `07_d`,
+  `07_e`, `07_f`, `07_g`.
+* `07_b` is the positive control and passes on both commits.
+* `07_h` passes on `d48b6b7`, which is where the leak was fixed, and fails on
+  `9a09c6d`.
+
 ## 8. Proposals (not built)
 
 * **A block on Campaigns and Countries.** Neither page draws a funnel today.
@@ -364,7 +445,16 @@ The 178B-F1 static scan, "every function app.js calls is defined"
   (`marketing_outcome_cohort_service`, which Channels already computes per
   channel). That is a backend addition and is left for the owner to
   approve.
-* **Lead cohort lower bounds.** See §4.3.
+* **Lead cohort bounds from the backend.** With the presentation rule in
+  §4.3, one anchorless contact anywhere turns every cohort rate into "—".
+  There are two durable options:
+  * `lead_cohort_progression` publishes a per-stage bound: which stages each
+    exclusion can affect, and by how many contacts;
+  * narrow the anchorless set to contacts that could belong to the window.
+    A contact whose Lead date is missing but whose later stages all fall
+    before the window cannot be in it.
+
+  Both are semantic changes to the cohort contract and are not built here.
 
 ## 9. Not verified
 
