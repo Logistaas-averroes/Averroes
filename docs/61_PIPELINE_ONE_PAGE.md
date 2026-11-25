@@ -489,11 +489,20 @@ The runtime twin is in the enforcement layer: check 21
 `retired_readers_absent` of `scripts/audit_customer_revenue_reader_cutover.py`
 (`retired_reader_checks`, `RETIRED_READER_ROUTES`, `RETIRED_READER_SYMBOLS`),
 which runs in the production certification (`audit_platform_certification`
-`AUDITS`). It reads the server's route decorators by AST (a docstring naming
-a path is not a route), `app.js` requests, and every production module's code
-names. `test_03` shows it red for a re-registered route (either path), a page
-request and a module bringing `build_customers_won` back, and green for a
-comment that names them.
+`AUDITS`). It reads the server's routes by AST (a docstring naming a path is
+not a route): decorators and direct `add_api_route` calls, the path positional
+or `path=`, a literal, a module-level constant or a concatenation, trailing
+slash normalised. It reads `app.js` code with comments stripped, so a quoted,
+`${API_BASE}`-prefixed or concatenated request counts. It also reads every
+production module's code names. `test_03` shows it red for each of those
+forms of re-registration and request, and for a module bringing
+`build_customers_won` back. It shows it green for a comment that names them
+and for a longer path that merely starts with a retired one.
+
+The scan is static. A route built from a value computed at runtime would pass
+it. CI's `test_01`, which reads the live `app.routes`, is the complete guard
+(PR-ADS-178C-F1: the first version read positional decorators only, and the
+truth audit revived `/api/revenue-deals` past it with `add_api_route`).
 
 ### 13.3 Port table
 
@@ -685,5 +694,13 @@ weakened.
   pipeline; and `datasetRelatedPage('hubspot', 'contacts')` sends the legacy
   contacts dataset to the Pipeline page. Both are labels, not dependencies;
   left for a System Status pass.
+* **Frontend freshness maps still name the legacy deal scan.** `static/app.js`
+  `PAGE_DATASET_MAP.pipeline` and `PAGE_DEPENDENCIES.pipeline` name
+  `hubspot/deals`, the legacy non-authoritative scan that `hubspot/deal_ledger`
+  supersedes. The same holds for dashboard, campaigns and roas-countries. So a
+  page's freshness strip can show a rate-limited legacy scan as degraded, or
+  leave out the canonical ledger. No figure is affected: the KPIs themselves
+  go unavailable on a stale ledger (161F). This belongs to the System Status
+  pass.
 * Unused CSS from earlier retirements (Campaign Evidence, keyword / n-gram /
   quality badges — about 40 classes) is outside this PR's Deals-tab scope.

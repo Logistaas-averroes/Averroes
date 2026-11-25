@@ -190,6 +190,29 @@ def test_03_the_reader_cutover_audit_holds_the_retirement_and_fails_when_one_ret
         "\n\ndef build_customers_won(*a, **k):\n    return {}\n"
         if rel == "services/pipeline_service.py" else ""))
     assert ok is False and "services/pipeline_service.py defines or calls build_customers_won" in why[0]
+    # PR-ADS-178C-F1: every other way to bring a route or a request back.
+    server_back = (
+        '\napp.add_api_route("/api/revenue-deals", lambda: {})\n',
+        '\n@app.get(path="/api/crm-funnel/customers-won")\ndef f():\n    return {}\n',
+        '\n@app.get("/api/revenue-deals/")\ndef f():\n    return {}\n',
+        '\n_P = "/api/revenue-deals"\n@app.get(_P)\ndef f():\n    return {}\n',
+        '\n@app.get("/api/crm-funnel/" + "customers-won")\ndef f():\n    return {}\n',
+    )
+    for snippet in server_back:
+        ok, why = failing(lambda rel, s=snippet: real_text(rel) + (s if rel == audit.SERVER else ""))
+        assert ok is False and "registers /api/" in why[0], snippet
+    js_back = (
+        '\nfetchJSON(`${API_BASE}/api/revenue-deals`);\n',
+        '\nfetchJSON("/api/crm-funnel/" + "customers-won");\n',
+        "\nfetchJSON('/api/revenue-deals');\n",
+    )
+    for snippet in js_back:
+        ok, why = failing(lambda rel, s=snippet: real_text(rel) + (s if rel == audit.APP_JS else ""))
+        assert ok is False and "requests /api/" in why[0], snippet
+    # A path that merely starts with a retired one is not that route.
+    ok, why = failing(lambda rel: real_text(rel) + (
+        '\nfetchJSON("/api/revenue-deals-v2");\n' if rel == audit.APP_JS else ""))
+    assert ok is True, why
     # A comment that says it was retired is not a reader.
     ok, why = failing(lambda rel: real_text(rel) + (
         "\n# build_customers_won and /api/revenue-deals are retired.\n"

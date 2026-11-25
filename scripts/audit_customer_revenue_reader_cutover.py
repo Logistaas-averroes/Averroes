@@ -650,20 +650,58 @@ def structural_checks(a: Audit) -> dict:
     return {"readers": readers}
 
 
+_ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head", "options",
+                  "api_route", "add_api_route", "add_route", "websocket")
+
+
 def _registered_routes(src: str) -> set:
-    """Every path a FastAPI route decorator in ``src`` registers (AST: a
-    docstring or a comment that names a path is not a route)."""
+    """Every path a FastAPI route in ``src`` registers, by AST (a docstring or
+    a comment that names a path is not a route): a decorator OR a direct call
+    (``app.add_api_route(...)``), the path given positionally or as
+    ``path=``, as a literal or as a module-level string constant. Paths are
+    normalised without a trailing slash (``/x/`` answers ``/x`` by redirect).
+    PR-ADS-178C-F1: the decorator-only, positional-literal scan let
+    ``add_api_route``, ``path=`` and a named constant through."""
+    tree = ast.parse(src)
+    consts = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    consts[t.id] = node.value.value
+
+    def _value(arg):
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        if isinstance(arg, ast.Name):
+            return consts.get(arg.id)
+        if isinstance(arg, ast.JoinedStr) or isinstance(arg, ast.BinOp):
+            # An f-string or a concatenation: keep its literal parts joined,
+            # so a split path still reads as the path it builds.
+            return "".join(n.value for n in ast.walk(arg)
+                           if isinstance(n, ast.Constant) and isinstance(n.value, str))
+        return None
+
     routes = set()
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for dec in node.decorator_list:
-                if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
-                        and dec.func.attr in ("get", "post", "put", "patch",
-                                              "delete", "api_route")
-                        and dec.args and isinstance(dec.args[0], ast.Constant)
-                        and isinstance(dec.args[0].value, str)):
-                    routes.add(dec.args[0].value)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _ROUTE_METHODS):
+            continue
+        cands = list(node.args[:1]) + [k.value for k in node.keywords if k.arg == "path"]
+        for arg in cands:
+            v = _value(arg)
+            if v and v.startswith("/"):
+                routes.add(v.rstrip("/") or "/")
     return routes
+
+
+#: A retired path anywhere in app.js code (comments stripped), however the
+#: request is built: quoted, after a ``${API_BASE}`` template part, or split.
+def _js_requests(js: str, path: str) -> bool:
+    code = _strip_comments(js)
+    joined = re.sub(r"""["'`]\s*\+\s*["'`]""", "", code)
+    return re.search(re.escape(path) + r"(?![\w-])", joined) is not None
 
 
 def retired_reader_checks(a: Audit, js: str) -> None:
@@ -677,10 +715,8 @@ def retired_reader_checks(a: Audit, js: str) -> None:
     problems = [f"{SERVER} registers {r}" for r in RETIRED_READER_ROUTES
                 if r in _registered_routes(_text(SERVER))]
     for r in RETIRED_READER_ROUTES:
-        for quote in ('"', "'", "`"):
-            if f"{quote}{r}" in js:
-                problems.append(f"{APP_JS} requests {r}")
-                break
+        if _js_requests(js, r):
+            problems.append(f"{APP_JS} requests {r}")
     for rel in _production_py():
         if rel == AUDIT_FILE:
             continue

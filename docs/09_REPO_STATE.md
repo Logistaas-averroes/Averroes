@@ -7255,8 +7255,11 @@ HubSpot write added or removed.
   and a new PG case shows it failing on either side. The funnel service
   reads no closed-won deal now; its reader-inventory row is gone.
 * **Enforced:** check 21 `retired_readers_absent` of the reader-cutover audit
-  (in the production certification) fails if either route is registered or
-  requested again or `build_customers_won` returns.
+  (in the production certification) is a static scan. It fails if either
+  route is registered again (as a decorator or `add_api_route`, positional or
+  `path=`, a literal or a constant) or requested again from `app.js`, or if
+  `build_customers_won` returns. CI's live `app.routes` test is the complete
+  guard.
 * **Dead code removed:** `renderMartDiagnostics`, four retired "Customers
   won" reason labels, the Deals-tab / Leads-page / diagnostics CSS,
   `PAGE_PIPELINE_IMPACT` `leads` / `opportunities`. System Status now maps
