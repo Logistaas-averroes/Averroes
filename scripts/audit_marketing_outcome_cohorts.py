@@ -783,20 +783,30 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
     # PR-ADS-177A: the mart and the Dashboard payloads, every business window.
     # PR-ADS-177C: the Campaigns surface (``mart/campaign_settled``) is ALSO
     # certified against this audit's independent SQL over its own days.
+    #
+    # PR-ADS-179A: each window is read inside ONE snapshot
+    # (``services.snapshot_memo.certification_window``): every payload below,
+    # and this audit's own independent SQL, see the database at one instant —
+    # what a request at that instant would have served — and the inputs the
+    # payloads share (the mart core, the won-deal population) are built once
+    # per window instead of once per payload. Nothing is carried from one
+    # window to the next.
     from analysis.business_windows import WINDOW_KEYS
+    from services.snapshot_memo import certification_window
     report["business_windows"] = []
     for bw in WINDOW_KEYS:
-        payloads = _build_mart_payloads(bw, now)
-        report["business_windows"].append(audit_mart_window(
-            a, window=bw, payloads=payloads))
-        settled = payloads.get("mart/campaign_settled")
-        if settled is None:
-            a.cannot_check(f"[campaigns:{bw}] build", "the settled campaign view "
-                           "could not be built")
-            report["windows"].append({"window": bw, "available": False})
-            continue
-        instants = _settled_instants(settled)
-        independent = independent_counts(*instants) if instants else None
+        with certification_window():
+            payloads = _build_mart_payloads(bw, now)
+            report["business_windows"].append(audit_mart_window(
+                a, window=bw, payloads=payloads))
+            settled = payloads.get("mart/campaign_settled")
+            if settled is None:
+                a.cannot_check(f"[campaigns:{bw}] build", "the settled campaign view "
+                               "could not be built")
+                report["windows"].append({"window": bw, "available": False})
+                continue
+            instants = _settled_instants(settled)
+            independent = independent_counts(*instants) if instants else None
         report["windows"].append(audit_campaign_cohort(
             a, window=bw, payload=settled, independent=independent))
 

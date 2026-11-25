@@ -7278,3 +7278,58 @@ HubSpot write added or removed.
   PostgreSQL step and did-run list); 15 of 15 fail on `ea6a7ae`, each guard
   also under a named mutation (`docs/61` §13.7). SQL-doctrine inventory: 0
   unknown.
+
+## PR-ADS-179A — certification audits build each window once, in one snapshot
+
+`docs/62`. On top of `ea6a7ae`. Read-only. No check, window or payload
+removed.
+
+* **Why.** On 25 Nov 07:30 UTC the daily certification took 16.5 min:
+  `reader_cutover` 477 s and `marketing_outcome_cohorts` 430 s of a 900 s
+  per-audit limit. A timeout is recorded as crashed, which makes the day NOT
+  CERTIFIED with nothing wrong. Each window's pages rebuilt the same inputs:
+  per window, 16 mart cores came from 5 distinct inputs and 30
+  `load_won_deals` calls from 3.
+* **Pinned read snapshot** (`db/connection.py`). `pinned_read_snapshot()`
+  makes every `get_conn()` in the block one SAVEPOINT on one `REPEATABLE
+  READ, READ ONLY` transaction. A reader's own REPEATABLE READ / READ ONLY
+  request is absorbed. Any other transaction mode raises
+  `PinnedSnapshotError` (fail closed), and writes are refused by PostgreSQL.
+  Outside the block nothing changes.
+* **Snapshot memo** (`services/snapshot_memo.py`).
+  `certification_window()` opens one pinned snapshot, one closed-won
+  universe and one memo. `@memoised` applies to
+  `revenue_attribution_service._build_from_db`,
+  `canonical_revenue_service.load_won_deals`, `canonical_crm_funnel_service.build`
+  and `canonical_contact_outcome_service.build`. A value is cached only
+  inside a window, only while its own snapshot is active, and only when `now`
+  is explicit. Each caller gets a deep copy. Web requests never open a
+  window, so nothing is cached for them.
+* **Audits.** The three audits run each window (and each `reader_cutover`
+  evidence window) inside its own `certification_window()`. The cohort
+  audit's independent SQL now reads at the same instant as the payload it
+  reconciles. The campaigns audit now takes one `now` for the whole run.
+* **Measured** on a production-sized fixture: 22k contacts, 400 won deals,
+  40 campaigns, 19 months of spend and geo, both Meta accounts. Runs used
+  `certification_child --memory-mb 320`:
+
+  | Audit | Wall time | Peak RSS |
+  | --- | --- | --- |
+  | `reader_cutover` | 84–88 → 31–33 s | 109 → 114 MB |
+  | `marketing_outcome_cohorts` | 63–69 → 23–24 s | 104 → 108 MB |
+  | `campaigns` | 28–37 → 15–16 s | 100 → 105 MB |
+
+  The mart cores per window went from 16 to 6, `load_won_deals` from 30 to
+  2–4 and the funnel from 5 to 2.
+* **Equivalence.** Each audit's full report is identical before and after,
+  ignoring `generated_at`. Every payload each audit built is byte-identical
+  by (window, builder, arguments): 90, 212 and 277 payloads, 114 MB in all.
+  `test_06` keeps both comparisons, reports and every page payload, in CI.
+* **Tests.** `tests/test_pr_ads_179a_certification_runtime.py` has 11 cases
+  (10 PostgreSQL), and is added to CI's PG step and its did-run list. Every
+  case fails on `ea6a7ae`. Each guard also fails under a named mutation
+  (`docs/62` §6): a memo shared across windows, a READ COMMITTED pin, no
+  copy, caching outside a window, caching wall-clock calls, a key that drops
+  arguments, a dropped payload (Pipeline / the Meta table / Overview), one
+  snapshot for the whole audit, any SET TRANSACTION accepted, a universe
+  shared without a snapshot, and a key that ignores the window.

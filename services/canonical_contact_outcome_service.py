@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import logging
 import re
+from services.snapshot_memo import memoised as _snapshot_memoised  # PR-ADS-179A
 from datetime import date, datetime, timezone
 
 from analysis.account_time import account_today
@@ -624,6 +625,9 @@ def _window_block(window_type, window_key, start: date | None, end: date) -> dic
 
 
 # ── DB-backed entry point ────────────────────────────────────────────────────
+# PR-ADS-179A: built once per certification window, inside its one snapshot
+# (``services.snapshot_memo``). Outside a certification window: a plain call.
+@_snapshot_memoised
 def build(window_type: str, window_key: str, now: datetime | None = None, *,
           keep_contacts: bool = True) -> dict:
     """Resolve the window, fetch the read-only inputs, and build the canonical

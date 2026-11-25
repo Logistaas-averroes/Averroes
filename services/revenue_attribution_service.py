@@ -59,6 +59,7 @@ What is NOT in this file:
 from __future__ import annotations
 
 from services import canonical_revenue_service as _canonical_snapshot  # PR-ADS-161E: one snapshot per page
+from services.snapshot_memo import memoised as _snapshot_memoised  # PR-ADS-179A
 import json
 import logging
 from datetime import date, datetime, timezone
@@ -1792,6 +1793,9 @@ def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
     }
 
 
+# PR-ADS-179A: built once per certification window, inside its one snapshot
+# (``services.snapshot_memo``). Outside a certification window: a plain call.
+@_snapshot_memoised
 def _build_from_db(resolved, start_date, end_date, window=None, now=None, *,
                    settled_spend: bool = False) -> dict | None:
     """Build the contract from durable DB sources.

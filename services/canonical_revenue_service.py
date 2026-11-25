@@ -62,6 +62,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, time, timezone
 
+from services.snapshot_memo import memoised as _snapshot_memoised
 from analysis.deal_currency import (
     CURRENCY_UNAVAILABLE,
     SUMMABLE_CURRENCY_STATUSES,
@@ -358,6 +359,9 @@ def _settled_bounds_problem(named: dict, start, end, now) -> str | None:
     return None
 
 
+# PR-ADS-179A: built once per certification window, inside its one snapshot
+# (``services.snapshot_memo``). Outside a certification window: a plain call.
+@_snapshot_memoised
 def load_won_deals(window=None, *, start=None, end=None, now=None,
                    require_ready: bool = True, bounds=None,
                    window_type: str | None = None) -> dict:

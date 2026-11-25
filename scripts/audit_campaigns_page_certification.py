@@ -675,7 +675,20 @@ def run(windows, *, now=None) -> tuple[Findings, dict]:
     if why is not None:
         f.unavailable_now("database", f"the database answered no read: {why}")
         return f, {w: {"window": w, "available": False} for w in windows}
-    per_window = {w: audit_window(w, f, now=now) for w in windows}
+    # PR-ADS-179A: ONE instant for the whole audit (every builder used to read
+    # the wall clock on its own), and each window read inside ONE snapshot
+    # (``services.snapshot_memo.certification_window``): the settled view,
+    # Dashboard → Campaigns, Overview, the through-today view and the drawers
+    # see the database at one instant, and the inputs they share are built
+    # once per window. Nothing is carried from one window to the next.
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from services.snapshot_memo import certification_window  # noqa: PLC0415
+    now = now or datetime.now(tz=timezone.utc)
+    per_window = {}
+    for w in windows:
+        with certification_window():
+            per_window[w] = audit_window(w, f, now=now)
     return f, per_window
 
 

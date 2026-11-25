@@ -91,7 +91,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A + 172A + 173A)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A + 172A + 173A + 179A)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -138,6 +138,7 @@ jobs:
             tests/test_pr_ads_177b_campaigns_pg_integration.py \
             tests/test_pr_ads_177b_meta_adsets_pg_integration.py \
             tests/test_pr_ads_178b_pipeline_pg_integration.py \
+            tests/test_pr_ads_179a_certification_runtime.py \
             tests/test_pr_ads_177c_campaign_feed_port_pg_integration.py \
             tests/test_pr_ads_178c_leads_deals_port_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
@@ -312,6 +313,14 @@ jobs:
                            # same builder, parity, the reader-cutover and
                            # cohort audits, the route.
                            "tests.test_pr_ads_178b_pipeline_pg_integration",
+                           # PR-ADS-179A. The certification audits read each
+                           # window in ONE pinned REPEATABLE READ snapshot and
+                           # build its shared inputs once: the memo never
+                           # crosses a window, a window sees no concurrent
+                           # commit, every audit still builds every payload of
+                           # every window, and every report is identical with
+                           # and without the windows.
+                           "tests.test_pr_ads_179a_certification_runtime",
                            # PR-ADS-177C. The retired Campaign Evidence feed's
                            # truth properties, ported onto the settled campaign
                            # view, the Campaigns page and Dashboard →

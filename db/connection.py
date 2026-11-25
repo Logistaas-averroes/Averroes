@@ -82,7 +82,16 @@ def get_conn():
 
     Yields None (instead of raising) when the pool has not been initialised,
     so callers can use a simple ``if conn is None: return`` guard.
+
+    PR-ADS-179A: inside :func:`pinned_read_snapshot` this yields a view of
+    the block's ONE pinned connection instead (see there). Everywhere else —
+    every web request, every sync — nothing changes.
     """
+    pin = _PINNED.get()
+    if pin is not None:
+        with pin.enter() as view:
+            yield view
+        return
     if _pool is None:
         yield None
         return
@@ -105,6 +114,224 @@ def get_conn():
                 _pool.putconn(conn)
             except Exception:  # noqa: BLE001
                 pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-179A — one pinned READ snapshot for a block of reads
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A page builder makes dozens of reads, each through its own ``get_conn()``:
+# each is its own transaction, so under READ COMMITTED each sees the database
+# as of its own statement. ``pinned_read_snapshot()`` makes every ``get_conn()``
+# inside the block (in this thread / context) answer from ONE connection in
+# ONE ``REPEATABLE READ, READ ONLY`` transaction, so every read in the block
+# sees the database at one instant — and so a value computed inside the block
+# is a pure function of (that instant, its arguments), which is what lets the
+# certification audits build a shared input once per window
+# (``services.snapshot_memo``) and still check exactly what a request at that
+# instant would have served.
+#
+# Readers were written for a transaction of their own, so the pinned view
+# keeps that contract inside the shared one:
+#
+# * each ``get_conn()`` is a SAVEPOINT: a clean exit RELEASEs it; an exception
+#   (or the reader's own ``rollback()``) rolls back TO it — the reader's failed
+#   statement is undone, the snapshot is not; ``commit()`` releases and re-opens
+#   it (a READ ONLY transaction has nothing to commit);
+# * a reader's own ``SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`` /
+#   ``SET TRANSACTION READ ONLY`` is already satisfied, so it is not re-sent
+#   (PostgreSQL refuses SET TRANSACTION ISOLATION LEVEL after the first query);
+#   any OTHER transaction mode (READ COMMITTED, SERIALIZABLE, READ WRITE) is a
+#   request this snapshot cannot honour and raises ``PinnedSnapshotError`` —
+#   fail closed, never a silently weaker read;
+# * the transaction is READ ONLY: PostgreSQL itself refuses any write;
+# * on exit the transaction is rolled back and the connection returned.
+#
+# Only the certification audits open one. Threads do not inherit it (a
+# ContextVar), so a reader on another thread uses the pool exactly as before.
+import contextvars as _contextvars  # noqa: E402
+import itertools as _itertools  # noqa: E402
+import re as _re  # noqa: E402
+
+PINNED_SNAPSHOT_MODE = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
+_PINNED: _contextvars.ContextVar = _contextvars.ContextVar(
+    "pinned_read_snapshot", default=None)
+
+#: Transaction-mode statements a reader may send that the pinned snapshot
+#: already satisfies. Matched on the whole statement, case- and
+#: whitespace-insensitively; a comma between modes is optional.
+_SATISFIED_MODES = _re.compile(
+    r"^\s*SET\s+TRANSACTION\s+(?:"
+    r"ISOLATION\s+LEVEL\s+REPEATABLE\s+READ(?:\s*,?\s*READ\s+ONLY)?"
+    r"|READ\s+ONLY(?:\s*,?\s*ISOLATION\s+LEVEL\s+REPEATABLE\s+READ)?"
+    r")\s*;?\s*$", _re.IGNORECASE)
+_ANY_MODE = _re.compile(
+    r"^\s*(?:SET\s+TRANSACTION|SET\s+SESSION\s+CHARACTERISTICS|BEGIN\b|START\s+TRANSACTION"
+    r"|COMMIT\b|END\b|ROLLBACK\s*(?:WORK|TRANSACTION)?\s*;?\s*$)", _re.IGNORECASE)
+
+
+class PinnedSnapshotError(RuntimeError):
+    """A reader inside a pinned read snapshot asked for something the snapshot
+    cannot give it (another isolation level, a read-write transaction, its own
+    BEGIN / COMMIT), or the snapshot's savepoint bookkeeping failed."""
+
+
+class _PinnedCursor:
+    """A reader's cursor on the pinned connection. Statements pass through,
+    except transaction-mode statements (see the section comment)."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, query, vars=None):  # noqa: A002 — psycopg2's own name
+        if isinstance(query, str):
+            if _SATISFIED_MODES.match(query):
+                return None
+            if _ANY_MODE.match(query):
+                raise PinnedSnapshotError(
+                    f"inside a pinned REPEATABLE READ, READ ONLY snapshot a reader "
+                    f"may not run {query.strip()[:80]!r}")
+        return self._cursor.execute(query, vars)
+
+    def __enter__(self):
+        self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._cursor.__exit__(*exc)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __next__(self):
+        return next(self._cursor)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _PinnedView:
+    """What ``get_conn()`` yields inside a pinned snapshot: the shared
+    connection, seen through one SAVEPOINT."""
+
+    def __init__(self, pin, savepoint: str):
+        self._pin = pin
+        self._savepoint = savepoint
+
+    def cursor(self, *args, **kwargs):
+        return _PinnedCursor(self._pin.conn.cursor(*args, **kwargs))
+
+    def commit(self):
+        self._pin.run(f"RELEASE SAVEPOINT {self._savepoint}")
+        self._pin.run(f"SAVEPOINT {self._savepoint}")
+
+    def rollback(self):
+        self._pin.run(f"ROLLBACK TO SAVEPOINT {self._savepoint}")
+
+    def close(self):
+        raise PinnedSnapshotError("a reader may not close the pinned connection")
+
+    @property
+    def pinned_read_snapshot(self):
+        return self._pin
+
+    def __getattr__(self, name):
+        if name in ("autocommit", "set_session", "set_isolation_level", "tpc_begin"):
+            raise PinnedSnapshotError(
+                f"a reader may not use connection.{name} inside a pinned snapshot")
+        return getattr(self._pin.conn, name)
+
+
+_PIN_SERIALS = _itertools.count(1)
+
+
+class _Pin:
+    """One pinned READ ONLY transaction (``pinned_read_snapshot``).
+    ``serial`` names it uniquely for the life of the process."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.serial = next(_PIN_SERIALS)
+        self._names = _itertools.count(1)
+
+    def run(self, sql: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(sql)
+
+    @contextlib.contextmanager
+    def enter(self):
+        savepoint = f"pinned_read_{next(self._names)}"
+        self.run(f"SAVEPOINT {savepoint}")
+        view = _PinnedView(self, savepoint)
+        try:
+            yield view
+        except BaseException:
+            try:
+                self.run(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.run(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:  # noqa: BLE001 — the reader's error is the one to raise
+                pass
+            raise
+        try:
+            self.run(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception as exc:  # noqa: BLE001
+            raise PinnedSnapshotError(
+                f"savepoint {savepoint} could not be released ({safe_db_error(exc)}); "
+                "the reads inside it are not trusted") from None
+
+
+def current_read_snapshot():
+    """The active pinned read snapshot in this context, or None."""
+    return _PINNED.get()
+
+
+@contextlib.contextmanager
+def pinned_read_snapshot():
+    """Run every ``get_conn()`` in the block on ONE ``REPEATABLE READ, READ
+    ONLY`` transaction (see the section comment). Yields the pin, or None when
+    no database is configured (the block then runs exactly as it would
+    without it). Nested blocks share the outermost snapshot.
+
+    The snapshot is TAKEN when the block starts (its first statement), so
+    every read in the block sees the database as of that instant.
+    """
+    if _PINNED.get() is not None:
+        yield _PINNED.get()
+        return
+    if _pool is None:
+        yield None
+        return
+    conn = _pool.getconn()
+    broken = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(PINNED_SNAPSHOT_MODE)
+            # The snapshot is taken at the first query, not at BEGIN: take it
+            # now, so "the instant this window was read" is the block's start.
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            broken = True
+        _pool.putconn(conn, close=broken)
+        raise
+    pin = _Pin(conn)
+    token = _PINNED.set(pin)
+    try:
+        yield pin
+    finally:
+        _PINNED.reset(token)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            broken = True
+        try:
+            _pool.putconn(conn, close=broken)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def ensure_database_ready() -> tuple[bool, str | None]:
