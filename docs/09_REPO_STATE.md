@@ -6849,3 +6849,132 @@ Details and mutation evidence: `docs/58` §8.9.
 Cases 01–03, 05 and 06 fail on `5a9b5e9`.
 
 **Next.** None from this slice.
+
+---
+
+## PR-ADS-177A — One SQL count: the acquisition cohort everywhere
+
+**Owner decision 2026-11-24.** Every page shows the same SQLs — the stricter
+acquisition cohort Campaign Evidence already publishes — accepting that they
+are withheld when the contact sync is incomplete. This PR switches the
+Revenue Decision Mart and every page that republishes it; PR-ADS-177B builds
+the one Campaigns page, PR-ADS-177C retires the old ones. Doc: `docs/59`.
+
+* **The mart** (`revenue_attribution_service._build_from_db`) no longer reads
+  `fetch_lead_quality` (`leads.status_category = 'qualified'`). It builds the
+  window's acquisition cohort once (`_read_cohort` →
+  `marketing_outcome_cohort_service.build_window_outcomes`, freshness from the
+  real `assess`) and places each Google Ads contact by the mart's OWN campaign
+  identity rule (`_mart_label_resolver`, the key its revenue rows use) and by
+  the contact's own HubSpot country (`contact_country` →
+  `country_identity.country_key`; `build_cohort(group_key=…)` partitions and
+  `reconcile_cohort` re-checks it). Every row and total's `leads` / `sqls`,
+  `metrics.leads` / `metrics.sqls`, `sqls_status` / `sqls_reason`, and a
+  `cohort` block (verdict, `metric_family`, `window_basis`, metadata, totals,
+  `campaign_residual`) on every view and every Dashboard payload.
+* **Conservation.** Campaign rows + `cohort.campaign_residual` = the total;
+  country rows + the residual row = the total; Dashboard Countries
+  `kpis.sqls` + `residual.sqls` = the total (the residual is the mart
+  residual row's, no longer a subtraction from a legacy campaign total).
+* **Withheld means absent.** A non-published verdict leaves no lead or SQL
+  count anywhere in the mart or Dashboard payloads; leads are withheld with the
+  SQLs. A withheld cohort blocks no page (`revenue_decision_ready` no longer
+  waits on the leads).
+* **Verdicts.** `sqls_unknown` (mart rows) when the verdict depends on a
+  withheld count; "SQLs withheld" on Dashboard Campaigns / Countries / Deals
+  and the regional mix. `sqls_for_verdict = 0` is gone.
+* **Labels.** "SQLs · contacts acquired in window" / "Leads · contacts
+  acquired in window"; every mart / Dashboard SQL cell goes through
+  `cohortCountHtml(value, cohort, row)` with the response's own cohort.
+  Dashboard Deals' legacy backlog and source breakdown are relabelled
+  "Qualified (lead status)". Dashboard Campaigns' `revenue_scope` now says
+  `campaign_attributable` (it said `all_source`).
+* **Audits.** `audit_marketing_outcome_cohorts` scans the mart's two views and
+  the five Dashboard payloads for every business window
+  (`mart_withheld_exposures`, `mart_conservation_problems`).
+  `cross_page_parity_service`: identities `google_ads_cohort_sqls` /
+  `google_ads_cohort_leads`, the conservation rule over the cohort, and
+  `cohort_sql_parity` (Countries page = Dashboard Countries = Campaign Evidence
+  over the same settled days; Campaign Evidence gains `bounds=`). SQL-doctrine
+  inventory: 10 canonical / 11 legacy / 9 mixed, 0 unknown.
+* **Tests.** `tests/test_pr_ads_177a_one_sql_count.py` (41) and
+  `tests/test_pr_ads_177a_one_sql_count_pg_integration.py` (13, PG step and
+  did-run list). Mock-based mart tests feed the same contacts through the
+  canonical funnel (`tests/cohort_fixture.py`); each changed test is listed
+  in `docs/59` §9.2.
+
+**Next.** PR-ADS-177B (the one Campaigns page). Remaining legacy SQL readers,
+all labelled and none mart-derived, are listed in `docs/59` §8.
+
+## PR-ADS-177A-F1 — truth audit round 1 on the one SQL count
+
+Fixes on top of PR-ADS-177A; `docs/59` §10 has each finding, fix and the
+fail-before / mutation evidence.
+
+* **Stale cohort (MAJOR 1).** The mart's `cohort` block declares `stale`,
+  `as_of` and `window`. Every published cohort count prints "measured as of …"
+  over a `source_stale` funnel, via Campaign Evidence's `campaignCohortAsOf`
+  inside the one gate `cohortCountHtml`. `audit_marketing_outcome_cohorts`
+  fails a stale published payload without them (`stale_disclosed`).
+* **Two "SQLs" (MAJOR 2).** Dashboard Deals: the legacy backlog is out of the
+  funnel (`lead_status_backlog`, `kpis.lead_status_qualified_no_won_deal`,
+  was `sqls_not_closed_won`); its cards, statuses and headers say
+  "Qualified (lead status)"; the funnel's SQL stage under a withheld cohort
+  says "Withheld" and the reason. Dashboard Channels' lead-status counts are
+  labelled "Qualified (lead status)" everywhere
+  (`kpis.total_sqls_metric_family`).
+* **Windows (MINOR 1).** Each cohort label says its last day; §5's "same
+  total" corrected (campaign / deal views through today, country views
+  through yesterday); `cohort_sql_parity.campaign_view` compares the campaign
+  view's days with Campaign Evidence like for like.
+* **Delta (MINOR 2).** No SQL delta on an open window (`cohortDeltaChip`).
+* **Names (MINOR 4).** Overview `kpis.google_ads_cohort_sqls` /
+  `campaign_row_cohort_sqls` (were the names of two other scopes).
+* **Audit endpoint (MINOR 5).** `build_revenue_attribution_audit` judges the
+  lead window on the cohort verdict; the legacy table's grain is reported only.
+* **Flake (MINOR 6).** The 154c / 154c_f3 CLI cases run at a fixed instant;
+  both pass at 2026-10-01 08:00Z.
+* **Tests.** `tests/test_pr_ads_177a_f1_truth_audit.py` (14) and four PG cases
+  (`test_08`–`test_10`) in the 177A PG module. `cohort_sql_parity` still runs
+  only from the manual CLI — a follow-up.
+
+## PR-ADS-177A-F2 — truth audit round 2 on the one SQL count
+
+`docs/59` §11 has the findings, the fixes, the evidence and the measurements.
+
+* **Revenue Health (MAJOR).** F1's MINOR 5 fix made a withheld cohort an UNSAFE
+  revenue verdict ("Revenue is not ready", "Run Lead Event-Date
+  Reconciliation"). The revenue audit now reports the cohort in its own
+  `lead_cohort` field (never a blocker); Revenue Health shows a separate
+  "Leads / SQLs (acquisition cohort)" chip with the reason and the
+  contact-funnel sync as its remedy; its window comparison's leads go through
+  the gate.
+* **Gate / labels (MINOR 1).** The Revenue tab rate card, three Dashboard
+  sub-lines and the Revenue Health comparison print cohort counts through
+  `cohortCountHtml`; the Channels Momentum toggle says "Qualified (lead
+  status)". A source guard fails any bare-formatted cohort count.
+* **Parity.** The campaign-view violation's wiring is tested (MINOR 2). A
+  window's first day — `no_settled_day_in_window` from every settled-day
+  consumer — is `not_evaluable_no_settled_day`, not six violations (MINOR 3);
+  Channels reads its ledger at the page's `now`, not the wall clock.
+* **Certification cost.** The extended cohort audit: 11.5 s / 61 MB resident
+  (was 0.5 s / 46 MB) on a 21,750-contact fixture — within the memory budget;
+  the shared-core memoisation that halves it is deferred (single-snapshot
+  reader contract).
+* **Tests.** `tests/test_pr_ads_177a_f2_truth_audit.py` (12).
+
+## PR-ADS-177A-F3 — truth audit round 3 (verdict: merge)
+
+`docs/59` §12.
+
+* **Revenue audit.** Pseudo / email rows in the legacy `leads` table are
+  reported (`legacy_table_findings`), never a revenue blocker — no figure reads
+  that table. The audit's verdict has no legacy-table input left.
+* **Parity.** `not_evaluable_no_settled_day` requires the audit's own settled
+  range to be empty, not only the consumers' declaration
+  (`_no_settled_day_exempt`); a false declaration on a settled day is a
+  violation.
+* **UI.** The mapping workbench labels its legacy counts; the Revenue Health
+  cohort chip states the selected window's last day (every window) and its
+  as-of watermark when stale.
+* **Tests.** `tests/test_pr_ads_177a_f3_truth_audit.py` (12).

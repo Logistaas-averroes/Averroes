@@ -169,6 +169,12 @@ def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=No
                         lambda s, e: {"available": True, "rows": list(LEAD_ROWS),
                                       "event_date_safe": True, "missing_contact_created_at_count": 0,
                                       "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contacts, served from the canonical contact funnel (created in the
+    # window; healthy sync state assessed by the real freshness rule).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        LEAD_ROWS, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW)
     monkeypatch.setattr(repo, "fetch_won_revenue",
                         lambda s, e: {"available": True, "rows": list(WON_ROWS),
                                       "coverage_start": "2026-01-01", "coverage_end": "2026-06-22"})
@@ -429,9 +435,12 @@ def test_residual_never_mapped_never_period_ratio_never_drawer(monkeypatch):
 
 
 def test_build_residual_is_canonical_mart_minus_countries():
-    # Residual customers / revenue / SQLs are the mart window TOTAL minus the sum
-    # of the real country rows (canonical), NOT the drawer deal ledger. The geo
+    # Residual customers / revenue are the mart window TOTAL minus the sum of
+    # the real country rows (canonical), NOT the drawer deal ledger. The geo
     # spend residual is carried from spend_truth. Never spread across countries.
+    # PR-ADS-177A: residual SQLs are the mart residual ROW's own acquisition-
+    # cohort count (contacts whose own country is no listed market) — no longer
+    # a legacy campaign-attributable total minus the country rows.
     from services.dashboard_countries_service import _build_residual
     # PR-ADS-161E: the residual subtracts from the GOOGLE ADS-SOURCE totals.
     summary = {"google_ads_source_closed_won_deals": 5,
@@ -447,10 +456,15 @@ def test_build_residual_is_canonical_mart_minus_countries():
         "country_residual_reason":
             "Google Ads geographic view does not assign this spend to a country.",
     }
-    res = _build_residual(summary, real_rows, spend_truth, None, False, True)
+    mart_residual_row = {"is_residual": True, "sqls": 5, "leads": 9,
+                         "sqls_status": "published", "sqls_reason": None}
+    res = _build_residual(summary, real_rows, spend_truth, mart_residual_row, False, True,
+                          cohort={"sql_status": "published"})
     assert res["closed_won_deals"] == 1          # 5 − (3+1)
     assert res["won_revenue_usd"] == 15000.0   # 90000 − (60000+15000)
-    assert res["sqls"] == 5               # 40 − (25+10)
+    assert res["sqls"] == 5               # the residual row's own cohort SQLs
+    assert res["leads"] == 9
+    # The mart residual row's spend parts are not read here (spend_truth wins).
     assert res["spend_native"] == 500.0
     assert res["spend_usd"] == 640.0
     assert res["period_revenue_per_ad_spend"] is None and res["drawer_available"] is False
@@ -817,10 +831,14 @@ def test_countries_tab_calls_its_endpoint():
 
 
 def test_countries_kpi_cards_render_six_metrics():
-    fn = _slice(JS, "function renderCtryKpiRow", 4200)
+    # PR-ADS-177A: the SQL card's cohort gate made the function longer; the
+    # slice covers the whole card list again.
+    fn = _slice(JS, "function renderCtryKpiRow", 5200)
     # PR-ADS-161E: the country KPI is closed-won DEALS — customers are distinct
     # companies, not additive across countries, so no customer total is shown.
-    for label in ("Verified Geo Spend", "SQLs", "Closed-Won Deals", "Won Revenue",
+    # PR-ADS-177A: the SQL card's label says what the count is — the
+    # acquisition cohort ("SQLs · contacts acquired in window").
+    for label in ("Verified Geo Spend", "COHORT_SQLS_LABEL", "Closed-Won Deals", "Won Revenue",
                   '"Geo " + PERIOD_RATIO_LABEL', "Residual Revenue"):
         assert label in fn
     # PR-ADS-161E: the close-date ratio is never labelled ROAS.

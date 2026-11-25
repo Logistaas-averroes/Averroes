@@ -258,11 +258,10 @@ def _unavailable_waste_report() -> dict:
 # generated: they counted SQLs from an undated, undeduplicated JSON contact
 # pull — a third SQL definition no page reconciled against.
 #
-# One name survives because a live module imports it.
-
-#: HubSpot `mql_status` values that mean a contact is sales-qualified. Imported
-#: by services/revenue_attribution_service.py for its diagnostic JSON fallback.
-QUALIFIED = ["CLOSED - Sales Qualified", "CLOSED - Deal Created"]
+# PR-ADS-177A: `QUALIFIED` (the sales-qualified `mql_status` values) stood
+# here for its one importer, services/revenue_attribution_service.py's local-
+# JSON fallback. That fallback no longer counts SQLs (the one SQL count is the
+# acquisition cohort, unavailable without the database), so nothing imports it.
 
 
 if __name__ == "__main__":

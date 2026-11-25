@@ -58,6 +58,7 @@ from services.canonical_contract import (
     SOURCE_CANONICAL_SPEND,
     SOURCE_REVENUE_BY_SOURCE,
     SOURCE_REVENUE_DECISION_MART,
+    NO_SETTLED_DAY_IN_WINDOW,
     THROUGH_TODAY_NOT_SETTLED,
     TRUTH_READY,
     resolve_canonical_window,
@@ -86,6 +87,9 @@ V_CONTRACT_INCONSISTENT = "metric_contract_inconsistent"
 #: PR-ADS-154C-F2. A registered consumer that was built, published a window, and
 #: certified no metric identity. Building is not certification.
 V_CONSUMER_UNCERTIFIED = "consumer_certified_nothing"
+#: PR-ADS-177A-F2: an identity every consumer of which withholds with
+#: `no_settled_day_in_window` (the window's first day) — nothing to compare.
+STATUS_NO_SETTLED_DAY = "not_evaluable_no_settled_day"
 #: A consumer named in the registry that the audit never built at all.
 V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
 #: PR-ADS-154C-F3. A consumer published a NUMBER while its own contract says the
@@ -95,6 +99,10 @@ V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
 V_VALUE_OVER_UNAVAILABLE_SOURCE = "value_published_while_source_unavailable"
 #: Split identities that must add back up did not.
 V_CONSERVATION_BROKEN = "metric_conservation_broken"
+#: PR-ADS-177A: one SQL count. The Countries page, Dashboard Countries and
+#: Campaign Evidence publish the window's Google Ads acquisition-cohort SQLs
+#: over the same days; any two published values that differ is this.
+V_COHORT_SQL_PARITY_BROKEN = "cohort_sql_parity_broken"
 
 # ── PR-ADS-155 §7 — four reasons a metric is absent, told apart ──────────────
 # `canonical_source_unavailable` used to cover all of them. It is kept as the
@@ -200,6 +208,21 @@ _UNAVAILABLE_CLASSES = {
 }
 
 
+def _no_settled_day_exempt(readings: list, settled_empty: bool) -> bool:
+    """PR-ADS-177A-F2/F3 — is this absence the window's first day, and nothing
+    else?
+
+    True only when the audit's OWN settled window (``resolve_settled_window``
+    for the same key and instant) is empty AND every consumer of the identity
+    declares exactly ``NO_SETTLED_DAY_IN_WINDOW``. A consumer's word alone is
+    not enough (F3): one that declares it on a day with a settled range is
+    withholding something the audit can see exists. One consumer with another
+    reason, or none, means the absence is not only the first day."""
+    return bool(settled_empty and readings
+                and all(r.get("unavailable_reason") == NO_SETTLED_DAY_IN_WINDOW
+                        for r in readings))
+
+
 def _classify_unavailable(readings: list, metric_key: str):
     """Which of the four situations made every consumer withhold this metric.
 
@@ -268,7 +291,8 @@ CONSUMER_SETTLED_REFERENCE = "revenue_decision_mart/country"
 #: an explicit residual. 14 + 2 = 16 in the production current quarter.
 CONSERVATION_RULES = [
     {
-        "total": "campaign_attributable_sqls",
+        # PR-ADS-177A: the total is the Google Ads acquisition cohort.
+        "total": "google_ads_cohort_sqls",
         "parts": ["country_attributed_sqls", "country_unattributed_residual_sqls"],
         # PR-ADS-167A: the parts come from Dashboard Countries. When it declares
         # a settled-day window (it ends at yesterday), the total is read from
@@ -278,10 +302,11 @@ CONSERVATION_RULES = [
         "parts_consumer": "dashboard/countries",
         "settled_total": (CONSUMER_SETTLED_REFERENCE, "summary.sqls"),
         "reason": (
-            "Every campaign-attributable SQL is either assigned to a real "
-            "canonical country or held in the governed residual. The residual is "
-            "never spread across countries to make the parts match, and a real "
-            "country total is never inflated to swallow it."),
+            "Every Google Ads acquisition-cohort SQL is either placed on a real "
+            "canonical country (by the contact's own HubSpot country) or held in "
+            "the governed residual. The residual is never spread across countries "
+            "to make the parts match, and a real country total is never inflated "
+            "to swallow it."),
     },
 ]
 
@@ -463,10 +488,13 @@ METRIC_IDENTITIES = {
     # The mart's `summary.sqls` is the CAMPAIGN-ATTRIBUTABLE subset — it says so
     # in its own `sql_reconciliation` block — and every page that renders "SQLs"
     # beside campaign or country spend is rendering that same subset.
-    "campaign_attributable_sqls": {
-        "label": "SQLs attributable to a campaign",
+    # PR-ADS-177A: ONE SQL count — the window's Google Ads acquisition cohort
+    # (contacts created in the window, SQL proven as of the contact-funnel
+    # watermark). Every page that renders "SQLs" renders this.
+    "google_ads_cohort_sqls": {
+        "label": "SQLs · Google Ads contacts acquired in the window (acquisition cohort)",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
-        "scope": "campaign_attributable_sqls",
+        "scope": "google_ads_cohort_sqls",
         "coverage_proof": PROOF_MART_LEAD_FUNNEL,
         # PR-ADS-154C-F3: Dashboard Countries is NOT here. Its `kpis.sqls` sums
         # the REAL-COUNTRY rows only — 14 against the mart's 16 in the production
@@ -523,10 +551,10 @@ METRIC_IDENTITIES = {
             ("dashboard/channels", "kpis.total_sqls"),
         ],
     },
-    "campaign_attributable_leads": {
-        "label": "Leads attributable to a campaign",
+    "google_ads_cohort_leads": {
+        "label": "Leads · Google Ads contacts acquired in the window (acquisition cohort)",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
-        "scope": "campaign_attributable_leads",
+        "scope": "google_ads_cohort_leads",
         "coverage_proof": PROOF_MART_LEAD_FUNNEL,
         "consumers": [
             ("dashboard/overview", "kpis.leads"),
@@ -642,21 +670,22 @@ DISTINCT_BY_DESIGN = [
             "why an accepted residual is a truth-ready state rather than a mismatch."),
     },
     {
-        "left": "campaign_attributable_sqls",
+        "left": "google_ads_cohort_sqls",
         "right": "source_group_sqls",
         "reason": (
-            "Campaign-attributable SQLs count qualified leads reaching a canonical "
-            "Google Ads campaign; source-group SQLs count them by CRM acquisition "
-            "source across every channel. Different populations under one word."),
+            "Cohort SQLs count Google Ads-sourced contacts created in the window "
+            "that reached SQL; source-group SQLs count legacy qualified leads by "
+            "CRM acquisition source across every channel. Different populations "
+            "under one word."),
     },
     {
-        "left": "campaign_attributable_sqls",
+        "left": "google_ads_cohort_sqls",
         "right": "country_attributed_sqls",
         "reason": (
-            "Countries sums the SQLs it could assign to a REAL canonical country; "
-            "the mart counts every campaign-attributable SQL. The difference is "
-            "the governed residual, published separately — 14 + 2 = 16 in the "
-            "production current quarter — not a disagreement to reconcile away."),
+            "Countries sums the cohort SQLs whose contact's own country is a REAL "
+            "listed market; the mart counts every Google Ads cohort SQL. The "
+            "difference is the governed residual, published separately — not a "
+            "disagreement to reconcile away (PR-ADS-177A conservation)."),
     },
     {
         "left": "country_attributed_sqls",
@@ -678,17 +707,17 @@ DISTINCT_BY_DESIGN = [
         "right": "lifecycle_sqls",
         "reason": (
             "Lifecycle SQLs are all-source stage-entry events on their own "
-            "timestamp. Country-attributed SQLs are the mart's campaign "
-            "population narrowed to deals with a canonical country."),
+            "timestamp. Country-attributed SQLs are the acquisition cohort's "
+            "Google Ads contacts whose own country is a listed market."),
     },
     {
-        "left": "campaign_attributable_sqls",
+        "left": "google_ads_cohort_sqls",
         "right": "lifecycle_sqls",
         "reason": (
             "Lifecycle SQLs are stage-ENTRY events dated by the contact's own "
             "hs_v2_date_entered_salesqualifiedlead timestamp, all sources. The "
-            "campaign-attributable count is a mart lead population filtered to "
-            "campaign identity. Same word, different event and different date."),
+            "cohort count is Google Ads contacts CREATED in the window that have "
+            "reached SQL by any proof. Same word, different event and date."),
     },
     {
         "left": "lifecycle_customers",
@@ -700,12 +729,12 @@ DISTINCT_BY_DESIGN = [
             "the other."),
     },
     {
-        "left": "campaign_attributable_leads",
+        "left": "google_ads_cohort_leads",
         "right": "lifecycle_leads",
         "reason": (
-            "The mart's lead population is dated by contact_created_at and filtered "
-            "by campaign exclusions; the lifecycle lead count is a canonical funnel "
-            "stage-entry event. Two lead definitions, both legitimate."),
+            "The cohort's leads are Google Ads contacts created in the window; the "
+            "lifecycle lead count is a canonical funnel stage-entry event, all "
+            "sources. Two lead definitions, both legitimate."),
     },
 ]
 
@@ -1032,6 +1061,9 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
     # instant: a declaration the audit cannot reproduce (wrong days, or a
     # closed window claiming to be cut) is a window mismatch.
     settled = resolve_settled_window(window, now=now)
+    # PR-ADS-177A-F3: the audit's own answer to "has any day of this window
+    # ended?" — the only ground on which `no_settled_day_in_window` is exempt.
+    settled_empty = bool((settled.get("window_range") or {}).get("empty"))
     window_rows = []
     signatures: dict = {}
     for name, entry in consumers.items():
@@ -1189,6 +1221,17 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                     "unavailable_reason": (r["contract"] or {}).get("unavailable_reason"),
                     "canonical_source": (r["contract"] or {}).get("data_source"),
                 } for r in published_over_unavailable]})
+        elif not present and _no_settled_day_exempt(readings, settled_empty):
+            # PR-ADS-177A-F2 (truth audit round 2, MINOR 3): on a window's FIRST
+            # day (a quarter's, or the year's for YTD) no day of it has ended,
+            # so every settled-day consumer withholds every metric with
+            # `no_settled_day_in_window` — by contract, never a verified zero
+            # over no day (canonical_contract.NO_SETTLED_DAY_IN_WINDOW). That is
+            # a known, legitimate unavailability with nothing to compare, not
+            # an unexplained absence: no violation. Only when EVERY consumer of
+            # the identity says exactly this; one other reason, or one silent
+            # consumer, still falls through to the classification below.
+            status = STATUS_NO_SETTLED_DAY
         elif not present:
             # PR-ADS-155 §7. "No consumer published this metric" was one bucket
             # holding four situations an operator resolves in four different
@@ -1262,7 +1305,7 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         })
 
     # ── Conservation: do the parts of a split identity add back up? ─────────
-    # PR-ADS-154C-F3. Splitting `campaign_attributable_sqls` into a real-country
+    # PR-ADS-154C-F3. Splitting `google_ads_cohort_sqls` into a real-country
     # total and a governed residual is only honest if the two account for the
     # whole. If they do not, one of the three is wrong and the audit cannot tell
     # which — so it says so rather than certifying all three as identical.
@@ -1310,6 +1353,19 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                     "detail": row["detail"] + " — " + rule["reason"]})
         conservation.append(row)
 
+    # ── PR-ADS-177A: one SQL count across the Countries page, Dashboard
+    # Countries and Campaign Evidence, over the SAME days ─────────────────
+    cohort_sql_parity = _cohort_sql_parity(consumers, window, now)
+    if cohort_sql_parity["status"] == "broken":
+        violations.append({"code": V_COHORT_SQL_PARITY_BROKEN,
+                           "metric": "google_ads_cohort_sqls",
+                           "detail": cohort_sql_parity["detail"]})
+    # PR-ADS-177A-F1 (MINOR 1): the campaign view's days, like for like.
+    if (cohort_sql_parity.get("campaign_view") or {}).get("status") == "broken":
+        violations.append({"code": V_COHORT_SQL_PARITY_BROKEN,
+                           "metric": "google_ads_cohort_sqls",
+                           "detail": cohort_sql_parity["campaign_view"]["detail"]})
+
     # ── Certification: did every registered consumer actually answer? ────────
     # PR-ADS-154C-F2 §1. The audit built seven consumers and certified four
     # identities, then reported all seven as "inspected". Three pages passed by
@@ -1318,7 +1374,8 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
     # when at least one metric identity it is registered for came back with a
     # value AND a contract the registry accepts.
     certified: dict = {name: {"consumer": name, "identities_certified": 0,
-                              "identities_registered": 0, "certified": False}
+                              "identities_registered": 0, "certified": False,
+                              "identities_no_settled_day": 0}
                        for name in sorted(CERTIFIED_CONSUMERS)}
     for entry in metrics:
         for r in entry["readings"]:
@@ -1328,6 +1385,9 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             row["identities_registered"] += 1
             if r["value"] is not None and not r["contract_problem"]:
                 row["identities_certified"] += 1
+            elif (r["value"] is None
+                  and r.get("unavailable_reason") == NO_SETTLED_DAY_IN_WINDOW):
+                row["identities_no_settled_day"] += 1
     for name, row in certified.items():
         row["certified"] = row["identities_certified"] > 0
         if name not in consumers:
@@ -1335,6 +1395,13 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                 "code": V_CONSUMER_NOT_BUILT, "consumer": name,
                 "detail": ("registered in METRIC_IDENTITIES but not built by "
                            "_build_consumers, so nothing about it was checked")})
+        elif (not row["certified"] and settled_empty and row["identities_registered"]
+              and row["identities_no_settled_day"] == row["identities_registered"]):
+            # PR-ADS-177A-F2 (MINOR 3): a settled-day consumer on its window's
+            # first day has no ended day to measure — every identity says so by
+            # contract. Not certified (nothing was checked), and reported as
+            # such, but not a violation.
+            row["not_evaluable_reason"] = NO_SETTLED_DAY_IN_WINDOW
         elif not row["certified"]:
             violations.append({
                 "code": V_CONSUMER_UNCERTIFIED, "consumer": name,
@@ -1380,6 +1447,8 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         "metrics": metrics,
         # PR-ADS-154C-F3: the split identities and whether they add back up.
         "conservation": conservation,
+        # PR-ADS-177A: the one SQL count on three surfaces, the same days.
+        "cohort_sql_parity": cohort_sql_parity,
         # PR-ADS-155 §7: quantified source-system gaps. Reported, not counted as
         # violations — see the comment above the assignment.
         "coverage_disclosures": coverage_disclosures,
@@ -1388,6 +1457,125 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         "violation_codes": sorted({v["code"] for v in violations}),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+
+
+def _cohort_sql_total(rows_total, residual):
+    """``rows_total + residual`` when both are published integers, else None."""
+    if rows_total is None or residual is None:
+        return None
+    if not isinstance(rows_total, int) or not isinstance(residual, int):
+        return None
+    return rows_total + residual
+
+
+def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
+    """PR-ADS-177A — the window's Google Ads acquisition-cohort SQLs, read from
+    three surfaces over the SAME settled days, must be one number:
+
+    * the Countries page (the mart's country view): listed markets'
+      ``country_totals.sqls`` + the residual row's ``sqls``;
+    * Dashboard Countries: ``kpis.sqls`` + ``residual.sqls``;
+    * Campaign Evidence, built over exactly those days
+      (``build_campaign_evidence(bounds=…)``): ``summary.cohort_sqls_google_ads``.
+
+    A surface that withholds is ``not_evaluable`` (a withheld count cannot
+    disprove parity), never a pass; any two published values that differ is
+    ``broken``.
+    """
+    from datetime import date as _date  # noqa: PLC0415
+    page = (consumers.get(CONSUMER_SETTLED_REFERENCE) or {}).get("payload") or {}
+    dash = (consumers.get("dashboard/countries") or {}).get("payload") or {}
+    residual_row = next((r for r in (page.get("rows") or []) if r.get("is_residual")), None)
+    page_residual = ((residual_row or {}).get("sqls") if residual_row is not None
+                     else (0 if (page.get("cohort") or {}).get("sql_status") == "published"
+                           else None))
+    readings = {
+        "countries_page": _cohort_sql_total(
+            (page.get("country_totals") or {}).get("sqls"), page_residual),
+        "dashboard_countries": _cohort_sql_total(
+            (dash.get("kpis") or {}).get("sqls"), (dash.get("residual") or {}).get("sqls")),
+        "campaign_evidence": None,
+    }
+    w = page.get("window") or {}
+    ce_error = None
+    try:
+        start = _date.fromisoformat(w["start_date"]) if w.get("start_date") else None
+        end = _date.fromisoformat(w["end_date"]) if w.get("end_date") else None
+        if end is not None and not (w.get("window_range") or {}).get("empty"):
+            from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
+            ce = build_campaign_evidence(window, now=now, bounds=(start, end))
+            readings["campaign_evidence"] = (ce.get("summary") or {}).get(
+                "cohort_sqls_google_ads")
+    except Exception as exc:  # noqa: BLE001 - a finding, never a crash
+        ce_error = f"{type(exc).__name__}: {exc}"[:300]
+    present = {k: v for k, v in readings.items() if v is not None}
+    out = {"window": {"start_date": w.get("start_date"), "end_date": w.get("end_date")},
+           "readings": readings, "campaign_evidence_error": ce_error}
+    if len(set(present.values())) > 1:
+        out["status"] = "broken"
+        out["detail"] = ("the window's Google Ads acquisition-cohort SQLs differ across "
+                         "surfaces over the same days: "
+                         + ", ".join(f"{k}={v}" for k, v in sorted(present.items())))
+    elif len(present) < len(readings):
+        out["status"] = "not_evaluable"
+        out["detail"] = ("withheld or unavailable on: "
+                         + ", ".join(sorted(set(readings) - set(present))))
+    else:
+        out["status"] = "identical"
+    out["campaign_view"] = _cohort_sql_parity_campaign_view(consumers, window, now)
+    return out
+
+
+def _cohort_sql_parity_campaign_view(consumers: dict, window: str, now) -> dict:
+    """PR-ADS-177A-F1 (truth audit MINOR 1) — the SAME rule over the CAMPAIGN
+    view's days (the window's start through today).
+
+    The campaign view and the country view end on different days (today vs
+    the settled yesterday), so they are two groups, each like for like —
+    never one comparison across both. Over the campaign view's days:
+
+    * the mart (campaign view): ``summary.sqls``;
+    * the Dashboard Overview's SQL headline: ``kpis.google_ads_cohort_sqls``;
+    * Campaign Evidence, built over exactly those days.
+
+    The other campaign-view Dashboard pages (Revenue, Campaigns, Deals) are
+    already one identity with the mart (``google_ads_cohort_sqls``)."""
+    from datetime import date as _date  # noqa: PLC0415
+    mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
+    overview = (consumers.get("dashboard/overview") or {}).get("payload") or {}
+    published = (mart.get("cohort") or {}).get("sql_status") == "published"
+    readings = {
+        "mart_campaign_view": (mart.get("summary") or {}).get("sqls") if published else None,
+        "dashboard_overview": (overview.get("kpis") or {}).get("google_ads_cohort_sqls"),
+        "campaign_evidence": None,
+    }
+    w = mart.get("window") or {}
+    ce_error = None
+    try:
+        start = _date.fromisoformat(w["start_date"]) if w.get("start_date") else None
+        end = _date.fromisoformat(w["end_date"]) if w.get("end_date") else None
+        if end is not None:
+            from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
+            ce = build_campaign_evidence(window, now=now, bounds=(start, end))
+            readings["campaign_evidence"] = (ce.get("summary") or {}).get(
+                "cohort_sqls_google_ads")
+    except Exception as exc:  # noqa: BLE001 - a finding, never a crash
+        ce_error = f"{type(exc).__name__}: {exc}"[:300]
+    present = {k: v for k, v in readings.items() if v is not None}
+    out = {"window": {"start_date": w.get("start_date"), "end_date": w.get("end_date")},
+           "readings": readings, "campaign_evidence_error": ce_error}
+    if len(set(present.values())) > 1:
+        out["status"] = "broken"
+        out["detail"] = ("the campaign view's Google Ads acquisition-cohort SQLs differ "
+                         "across surfaces over the same days: "
+                         + ", ".join(f"{k}={v}" for k, v in sorted(present.items())))
+    elif len(present) < len(readings):
+        out["status"] = "not_evaluable"
+        out["detail"] = ("withheld or unavailable on: "
+                         + ", ".join(sorted(set(readings) - set(present))))
+    else:
+        out["status"] = "identical"
+    return out
 
 
 def _lifecycle_coverage_disclosures(consumers: dict) -> list[dict]:

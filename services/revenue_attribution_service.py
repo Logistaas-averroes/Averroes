@@ -13,7 +13,8 @@ Data doctrine:
     tables populated by the scheduler, NOT ephemeral local JSON files that only
     exist as a side effect of the weekly run on the box that ran it:
         geo                -> campaign + country spend (per-day, real country)
-        leads              -> leads + SQLs (status_category)
+        hubspot_contact_funnel -> leads + SQLs: the ACQUISITION COHORT
+                              (PR-ADS-177A, services.marketing_outcome_cohort_service)
         gclid_attribution  -> closed-won revenue/customers (by deal_close_date)
     Local JSON (data/ads_campaigns.json, etc.) is a DIAGNOSTIC FALLBACK only,
     used when the database is unavailable, and is clearly labeled as such.
@@ -29,8 +30,12 @@ Data doctrine:
 
 Metrics per row:
   - spend         Google Ads API spend in the window
-  - leads         attributed HubSpot paid-search contacts in the window
-  - sqls          contacts with an existing SQL-qualified status (analysis.core)
+  - leads         Google Ads-sourced HubSpot contacts CREATED in the window
+                  (acquisition cohort, PR-ADS-177A)
+  - sqls          of those, contacts canonical lifecycle evidence proves reached
+                  SQL as of the contact-funnel watermark. Both are None (with
+                  the cohort's reason) whenever the cohort verdict is not
+                  ``published`` — withheld means absent
   - closed_won_deals   canonical won deals closed in the window
   - customers     distinct proven HubSpot companies (never a deal count)
   - won_revenue   HubSpot closed-won amount (a total, or None when withheld)
@@ -69,7 +74,6 @@ from analysis.business_windows import get_window_bounds, resolve_window
 from services.canonical_contract import (
     resolve_canonical_window, resolve_settled_window, settled_revenue_bounds,
 )
-from analysis.core import QUALIFIED
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from analysis import country_identity
@@ -312,6 +316,13 @@ VERDICT_OUTCOME_WITHHELD = "outcome_withheld"
 #: ``verdict_reason``; none is one of the four decision filters.
 VERDICT_SPEND_UNKNOWN = "spend_unknown"
 VERDICT_REVENUE_UNKNOWN = "revenue_unknown"
+#: PR-ADS-177A: a row whose SQL count is withheld (the acquisition-cohort
+#: verdict is not ``published``) is not judged on SQLs nobody published. Set
+#: only when the verdict DEPENDS on the SQL count — ``classify_verdict`` gives
+#: a different answer for zero SQLs than for some — so a row judged on its
+#: revenue alone keeps that judgement. ``verdict_reason`` carries the cohort's
+#: reason. Not one of the four decision filters.
+VERDICT_SQLS_UNKNOWN = "sqls_unknown"
 
 
 def classify_verdict(
@@ -376,8 +387,12 @@ def _new_bucket(display_name: str) -> dict:
     }
 
 
-def _row_notes(bucket: dict, confidence: str) -> list:
-    """Build base attribution notes for a finished row."""
+def _row_notes(bucket: dict, confidence: str, *, sqls_published: bool = True) -> list:
+    """Build base attribution notes for a finished row.
+
+    ``sqls_published`` (PR-ADS-177A): a note drawn from the SQL count is
+    written only when that count is published — a note saying "SQLs present"
+    beside a withheld count publishes it by another route."""
     notes = []
     if confidence == "low":
         notes.append("Low-confidence attribution — campaign/country match inferred.")
@@ -391,7 +406,7 @@ def _row_notes(bucket: dict, confidence: str) -> list:
         notes.append(
             "Spend present but no HubSpot closed-won deal attributed in this window."
         )
-    if bucket["sqls"] > 0 and bucket["closed_won_deals"] == 0:
+    if sqls_published and bucket["sqls"] > 0 and bucket["closed_won_deals"] == 0:
         notes.append("SQLs present but no closed-won deal attributed yet.")
     return notes
 
@@ -407,7 +422,7 @@ def _finalize_row(
     extra_notes: list | None = None,
     revenue_available: bool = True,
     revenue_readable: bool = True,
-    lead_metrics_withheld: bool = False,
+    cohort_verdict: tuple | None = None,
     spend_trusted: bool = True,
     spend_mapping_unavailable: bool = False,
     spend_state: str | None = None,
@@ -486,16 +501,18 @@ def _finalize_row(
     downgraded = legacy_gclid and raw_confidence == "high"
     confidence = "medium" if downgraded else raw_confidence
 
-    leads_val = None if lead_metrics_withheld else bucket["leads"]
-    sqls_val = None if lead_metrics_withheld else bucket["sqls"]
-    sqls_for_verdict = 0 if lead_metrics_withheld else bucket["sqls"]
+    # PR-ADS-177A: leads and SQLs are the ACQUISITION COHORT's
+    # (``cohort_verdict`` = its one publication verdict). Not published →
+    # both are None with the cohort's status and reason: withheld means
+    # absent. ``cohort_verdict`` None is the local-JSON diagnostic path,
+    # whose counts ``_withhold_json_cohort`` removes after the fact.
+    cohort_status, cohort_reason = cohort_verdict or (cwt.PUBLISHED, None)
+    sqls_published = cohort_status == cwt.PUBLISHED
+    leads_val = bucket["leads"] if sqls_published else None
+    sqls_val = bucket["sqls"] if sqls_published else None
 
-    has_revenue = (deals or 0) > 0 or (won_revenue or 0) > 0
-    verdict = classify_verdict(spend, sqls_for_verdict, deals or 0,
+    verdict = classify_verdict(spend, sqls_val or 0, deals or 0,
                                won_revenue or 0.0, period_ratio)
-    if lead_metrics_withheld and not has_revenue:
-        # Without trusted lead/SQL signal we cannot call a spend-only row "waste".
-        verdict = "learning"
     # PR-ADS-161E: a withheld (or unreadable) deal count is UNKNOWN, not zero.
     # "waste" / "watch" would be a verdict on a number nobody published — a
     # revenue-producing campaign must never read "cut" because its deals are
@@ -511,17 +528,22 @@ def _finalize_row(
         verdict = VERDICT_REVENUE_UNKNOWN
         verdict_reason = (((metrics or {}).get("revenue_usd") or {}).get("reason")
                           or cwt.R_REVENUE_UNPROVEN)
+    elif sqls_val is None and verdict != classify_verdict(
+            spend, 1, deals or 0, won_revenue or 0.0, period_ratio):
+        # PR-ADS-177A: the verdict computed on "0 SQLs" differs from the one
+        # on "some SQLs", so it rests on a count nobody published.
+        verdict, verdict_reason = VERDICT_SQLS_UNKNOWN, cohort_reason
     # PR-ADS-120: an unmapped campaign has incomplete spend truth — it is never
     # classed winner/waste/watch; the decision is "mapping_required".
     if spend_mapping_unavailable or spend_state == "unmapped":
         verdict, verdict_reason = "mapping_required", None
 
-    notes = _row_notes(bucket, confidence)
-    if lead_metrics_withheld:
+    notes = _row_notes(bucket, confidence, sqls_published=sqls_published)
+    if not sqls_published:
         notes.append(
-            "Lead/SQL metrics withheld — HubSpot contact_created_at (business event "
-            "date) is not available, so this window is not lead-safe."
-        )
+            f"Leads and SQLs withheld ({cohort_reason}) — the acquisition cohort "
+            "(contacts created in this window) is not proven complete as of the "
+            "contact-funnel watermark, so no count is published.")
     if not revenue_available:
         notes.append(
             "Revenue attribution not wired for this window — period revenue / ad spend is unavailable, not zero."
@@ -557,12 +579,22 @@ def _finalize_row(
     if extra_notes:
         notes.extend(extra_notes)
 
+    if metrics is not None:
+        # PR-ADS-177A: the cohort figures as {value, status, reason}, so a
+        # total over rows takes the cohort's refusal, not a generic one.
+        metrics = {**metrics,
+                   "leads": cwt.metric(leads_val, cohort_status, cohort_reason),
+                   "sqls": cwt.metric(sqls_val, cohort_status, cohort_reason)}
     return {
         "spend": spend,
         # PR-ADS-176A: why ``spend`` is None when the zero rule withheld it.
         "spend_reason": spend_withheld_reason,
         "leads": leads_val,
         "sqls": sqls_val,
+        # PR-ADS-177A: the one cohort verdict, on every row that carries the
+        # count (``published`` | ``withheld`` | ``unavailable``).
+        "sqls_status": cohort_status,
+        "sqls_reason": cohort_reason,
         "closed_won_deals": deals,
         "customers": customers,
         "won_revenue": won_revenue,
@@ -651,7 +683,8 @@ def outside_market_items(items: dict | None) -> list:
 
 
 def _apply_geo_spend_residual(countries: list, residual_native, residual_usd,
-                              use_usd, bucketed_native=0.0, bucketed_usd=0.0) -> list:
+                              use_usd, bucketed_native=0.0, bucketed_usd=0.0,
+                              cohort_verdict: tuple | None = None) -> list:
     """Attach the Google Ads geo SPEND residual to the one residual country row.
 
     PR-ADS-153F. There is exactly ONE residual bucket per country view, and it
@@ -710,16 +743,24 @@ def _apply_geo_spend_residual(countries: list, residual_native, residual_usd,
             "Includes Google Ads spend the geographic view does not assign to any "
             "country. Shown separately; never spread across real countries.")
         return countries
-    countries.append(_geo_spend_only_residual_row(residual_native, residual_usd, use_usd))
+    countries.append(_geo_spend_only_residual_row(residual_native, residual_usd, use_usd,
+                                                  cohort_verdict=cohort_verdict))
     return countries
 
 
-def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd) -> dict:
+def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd,
+                                 cohort_verdict: tuple | None = None) -> dict:
     """The residual row when there is unattributed SPEND but no unattributed revenue.
 
     Zero customers / zero revenue is a MEASURED fact here — the country bucketing
     ran and produced no unidentifiable-geography deals — not an assumption.
+
+    PR-ADS-177A: zero leads / SQLs likewise — but only under a PUBLISHED
+    cohort verdict. A withheld cohort placed nobody anywhere that can be
+    published, so they are None with its reason, never 0.
     """
+    c_status, c_reason = cohort_verdict or (cwt.PUBLISHED, None)
+    c_published = c_status == cwt.PUBLISHED
     spend = residual_usd if use_usd else residual_native
     return {
         "country": country_identity.RESIDUAL_LABEL,
@@ -738,8 +779,10 @@ def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd) -> dict
         "outside_listed_market_countries": [],
         "outside_listed_market_items": [],
         "deal_ids": [],
-        "leads": 0,
-        "sqls": 0,
+        "leads": 0 if c_published else None,
+        "sqls": 0 if c_published else None,
+        "sqls_status": c_status,
+        "sqls_reason": c_reason,
         # A spend-only residual holds no deals. Customers stay None: no
         # company-level figure is published for a row with no population.
         "closed_won_deals": 0,
@@ -766,6 +809,13 @@ def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd) -> dict
     }
 
 
+#: PR-ADS-177A: the local-JSON diagnostic path reads no canonical contact
+#: funnel, so the acquisition cohort is unavailable there. Its old counts
+#: (``mql_status`` in ``analysis.core.QUALIFIED`` over data/crm_contacts.json)
+#: were a third SQL definition and are no longer computed.
+_JSON_COHORT_VERDICT = ("unavailable", "canonical_funnel_unreadable")
+
+
 def _build_campaign_rows(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> list:
     buckets: dict[str, dict] = {}
 
@@ -783,13 +833,8 @@ def _build_campaign_rows(deals: list, spend_rows: list, contacts: list, *, legac
         if not b["campaign_id"] and row.get("campaign_id"):
             b["campaign_id"] = str(row.get("campaign_id"))
 
-    for contact in contacts:
-        props = contact.get("properties", {}) if isinstance(contact, dict) else {}
-        b = bucket_for(props.get("hs_analytics_source_data_1"))
-        b["leads"] += 1
-        if props.get("mql_status") in QUALIFIED:
-            b["sqls"] += 1
-
+    # PR-ADS-177A: no lead / SQL count from data/crm_contacts.json — the
+    # acquisition cohort cannot be read on this path (``_JSON_COHORT_VERDICT``).
     for deal in deals:
         b = bucket_for(deal.get("campaign"))
         b["closed_won_deals"] += 1
@@ -800,7 +845,8 @@ def _build_campaign_rows(deals: list, spend_rows: list, contacts: list, *, legac
 
     rows = []
     for key, bucket in buckets.items():
-        finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid)
+        finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid,
+                                  cohort_verdict=_JSON_COHORT_VERDICT)
         finalized["campaign_id"] = bucket["campaign_id"] or (key or "unknown")
         finalized["campaign_name"] = bucket["display"] or "unknown"
         rows.append(finalized)
@@ -862,13 +908,7 @@ def _build_country_rows(
         b = bucket_for(country, country)
         b["spend"] += _spend_value(row)
 
-    for contact in contacts:
-        props = contact.get("properties", {}) if isinstance(contact, dict) else {}
-        b = bucket_for(props.get("ip_country"))
-        b["leads"] += 1
-        if props.get("mql_status") in QUALIFIED:
-            b["sqls"] += 1
-
+    # PR-ADS-177A: no lead / SQL count on this path (``_JSON_COHORT_VERDICT``).
     for deal in deals:
         b = bucket_for(deal.get("country"))
         b["closed_won_deals"] += 1
@@ -886,7 +926,8 @@ def _build_country_rows(
                 "country-resolved (geo country mapping not implemented). Spend shown "
                 "is 0; leads/SQLs/customers/revenue are HubSpot contact/deal-side."
             )
-        finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid, extra_notes=extra_notes)
+        finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid, extra_notes=extra_notes,
+                                  cohort_verdict=_JSON_COHORT_VERDICT)
         identity = bucket.get("country_identity")
         finalized["country_key"] = key
         finalized["country"] = identity.label if identity else bucket["display"]
@@ -932,13 +973,9 @@ def stamp_owner_labelled_countries(rows: list, owner_labelled_geo: dict,
 
 def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> dict:
     spend = round(sum(_spend_value(r) for r in spend_rows), 2)
-    leads = len(contacts)
-    sqls = sum(
-        1
-        for c in contacts
-        if (c.get("properties", {}) if isinstance(c, dict) else {}).get("mql_status")
-        in QUALIFIED
-    )
+    # PR-ADS-177A: unavailable on this path (``_JSON_COHORT_VERDICT``).
+    leads = None
+    sqls = None
     closed_won_deals = len(deals)
     won_revenue = round(sum(_deal_revenue(d) for d in deals), 2)
     tiers = [d.get("attribution_confidence") for d in deals if d.get("attribution_confidence")]
@@ -980,9 +1017,10 @@ def _scope_to_tier(attribution_scope) -> str:
     return "tier_3_spend_weighted"
 
 
-def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str,
+def _build_db_rows(spend_rows: list, cohort_slots: dict | None, revenue_rows: list, *,
+                   group_field: str,
                    revenue_available: bool = True, revenue_readable: bool = True,
-                   lead_metrics_withheld: bool = False,
+                   cohort_verdict: tuple | None = None,
                    spend_trusted: bool = True, spend_mapping_keys: set | None = None,
                    manual_target_keys: set | None = None, compute_spend_state: bool = False,
                    canonical_base: dict | None = None, gate: dict | None = None,
@@ -998,6 +1036,15 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
 
     group_field is "campaign_name" or "country". Buckets with an empty/unknown
     key are dropped — the ROAS truth table never shows an "unknown" row.
+
+    PR-ADS-177A — ``cohort_slots`` are the ACQUISITION COHORT's Google Ads
+    contacts for this grouping (``_cohort_slots``): campaign name → slot, or
+    country key (``code:XX`` / the residual key) → slot. Each slot's
+    ``contacts_acquired`` is the row's leads and its ``sqls`` the row's SQLs.
+    ``cohort_verdict`` is the cohort's ONE publication verdict; when it is not
+    ``published`` every row's leads and SQLs are None with its reason. A row
+    the cohort places nobody on reads 0 only under a published verdict — the
+    whole population was read, so its absence is a measured zero.
 
     PR-ADS-118 spend-truth gating:
       - spend_trusted=False → spend is diagnostic only, ROAS unavailable.
@@ -1060,13 +1107,17 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
                 if row.get("geo_provenance"):
                     item["provenance"].add(row.get("geo_provenance"))
 
-    # lead rows: {campaign_name, country, status_category, has_gclid}
-    # (empty when lead metrics are withheld for an unsafe date grain)
-    for row in lead_rows:
-        _, b = bucket_for(row.get(group_field), row.get("country_code"))
-        b["leads"] += 1
-        if row.get("status_category") == "qualified":
-            b["sqls"] += 1
+    # PR-ADS-177A: cohort slots (the legacy `leads.status_category` rows are
+    # no longer read). A country slot is keyed by the canonical country key,
+    # so it is bucketed by that key's code — the residual key has none.
+    for slot_key, slot in (cohort_slots or {}).items():
+        if by_country:
+            code = slot_key[5:] if str(slot_key).startswith("code:") else None
+            _, b = bucket_for(None, code)
+        else:
+            _, b = bucket_for(slot_key)
+        b["leads"] += int(slot.get("contacts_acquired") or 0)
+        b["sqls"] += int(slot.get("sqls") or 0)
 
     # revenue rows: canonical scoped deals (PR-ADS-153E-B). A deal whose currency
     # could not be proven is still a CUSTOMER — it is genuinely won — but it
@@ -1126,7 +1177,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             bucket, legacy_gclid=False,
             revenue_available=revenue_available,
             revenue_readable=revenue_readable,
-            lead_metrics_withheld=lead_metrics_withheld,
+            cohort_verdict=cohort_verdict,
             spend_trusted=spend_trusted,
             spend_mapping_unavailable=mapping_unavailable,
             spend_state=spend_state,
@@ -1187,7 +1238,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
                 # per-country here: they are in the residual's own figures.
                 finalized["outside_listed_market_items"] = outside_market_items(
                     bucket.get("outside_market_items"))
-                if bucket.get("closed_won_deals") or bucket.get("leads"):
+                if bucket.get("closed_won_deals") or finalized.get("leads"):
                     finalized.setdefault("attribution_notes", []).append(
                         "Deals and leads whose country is not one of the listed "
                         "markets, or could not be identified. Shown separately so "
@@ -1238,13 +1289,18 @@ def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> 
     return None
 
 
-def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
+def _build_db_summary(spend_rows: list, cohort_totals: dict, revenue_rows: list, *,
                       revenue_available: bool = True, revenue_readable: bool = True,
-                      lead_metrics_withheld: bool = False,
                       spend_trusted: bool = True,
                       canonical_base: dict | None = None) -> dict:
     """The campaign-attributable summary: spend, leads, SQLs, and the canonical
     closed-won fields of the deals the campaign table holds.
+
+    PR-ADS-177A: ``leads`` / ``sqls`` are the window's GOOGLE ADS acquisition
+    cohort (``cohort_totals``, already gated by the cohort verdict): every
+    Google Ads-sourced contact created in the window, placed on a campaign row
+    or held in the campaign view's residual (``cohort.campaign_residual``).
+    They are the same count every page publishes, not a campaign subset.
 
     PR-ADS-161E: revenue is the total of those deals or None — never the sum of
     the priced ones — customers are distinct HubSpot companies, and ROAS / CAC
@@ -1253,10 +1309,8 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
     native diagnostic figure.
     """
     spend = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
-    leads = None if lead_metrics_withheld else len(lead_rows)
-    sqls = None if lead_metrics_withheld else sum(
-        1 for r in lead_rows if r.get("status_category") == "qualified"
-    )
+    leads = cohort_totals.get("leads")
+    sqls = cohort_totals.get("sqls")
     tiers = [_scope_to_tier(r.get("attribution_scope")) for r in revenue_rows]
     known = [r for r in revenue_rows if r.get("deal_amount_usd") is not None]
     if canonical_base is None:
@@ -1480,6 +1534,186 @@ def spend_truth_inputs(block: dict) -> dict:
     }
 
 
+# ── PR-ADS-177A: the acquisition cohort, placed by the mart's own keys ───────
+
+#: The population behind every mart leads / SQLs figure.
+COHORT_POPULATION = "google_ads_sourced_contacts_acquired_in_window"
+#: Scope names for the cohort counts (cross-page parity, metric_truth).
+SCOPE_GOOGLE_ADS_COHORT_SQLS = "google_ads_cohort_sqls"
+SCOPE_GOOGLE_ADS_COHORT_LEADS = "google_ads_cohort_leads"
+#: The campaign view's residual: Google Ads contacts no campaign row holds.
+CAMPAIGN_RESIDUAL_LABEL = "Google Ads contacts on no campaign row"
+_COHORT_IDENTITIES = [
+    "google_ads_sqls = sum(campaign row sqls) + campaign_residual.sqls",
+    "google_ads_sqls = sum(country row sqls, residual row included)",
+]
+
+
+def _mart_label_resolver(resolution_map: dict, excluded_label_keys: set):
+    """The mart's campaign identity rule as a cohort ``resolve_label``.
+
+    The SAME rule ``_build_from_db`` applies to revenue rows: an approved "not
+    Google Ads" label is excluded; an approved manual mapping or an exact-
+    normalised match puts the contact on the canonical campaign NAME (the
+    mart keys campaign rows on ``_norm(name)``); any other label stays on its
+    own row, keyed by the label (spend mapping unavailable). No fuzzy match,
+    and no second identity rule.
+    """
+    def resolve(label):
+        nz = _ident_norm(label)
+        if not nz:
+            return ("unmatched", str(label or ""))
+        if nz in (excluded_label_keys or set()):
+            return ("not_google_ads", None)
+        canon = (resolution_map or {}).get(nz)
+        if canon:
+            return ("google_ads", canon)
+        return ("unmatched", str(label))
+    return resolve
+
+
+def _read_cohort(start_date, end_date, *, now, resolve_label) -> dict:
+    """The window's acquisition cohort, grouped a second time by the contact's
+    own country (``contact_country`` → ``country_identity.country_key``).
+
+    Freshness comes from the real ``analysis.sql_coverage_freshness.assess``
+    over the stored sync state (``cohort_svc.read_freshness``). A failure is
+    an unavailable cohort — never an empty one."""
+    from services import marketing_outcome_cohort_service as cohort_svc  # noqa: PLC0415
+    try:
+        return cohort_svc.build_window_outcomes(
+            start_date, end_date, resolve_label=resolve_label, now=now,
+            group_key=lambda row: country_identity.country_key(
+                name=cohort_svc.contact_country(row)))
+    except Exception as exc:  # noqa: BLE001 - fail closed, never a crash
+        logger.error("[revenue_attribution] acquisition cohort unreadable: %s", exc)
+        start_at, end_before = cohort_svc.window_instants(start_date, end_date)
+        return {"available": False, "cohort": None, "missing_created_at": None,
+                "reconciliation_problems": [], "freshness": {},
+                "sql_publication": (cohort_svc.STATUS_UNAVAILABLE,
+                                    cohort_svc.SQL_REASON_FUNNEL_UNREADABLE),
+                "start_at": start_at.isoformat() if start_at else None,
+                "end_before": end_before.isoformat()}
+
+
+def _cohort_slots(outcomes: dict) -> tuple[dict, dict]:
+    """``(campaign_slots, country_slots)`` from one cohort.
+
+    Campaign slots: every Google Ads contact the cohort placed on a campaign
+    (keyed by canonical name) or on an unmapped label (keyed by the label) —
+    the mart's campaign rows. A key the mart cannot form a row from (a label
+    that normalises to nothing) is left out, so it lands in the campaign
+    residual. Country slots: every Google Ads contact, by country key.
+    """
+    cohort = outcomes.get("cohort")
+    if cohort is None:
+        return {}, {}
+    fields = ("contacts_acquired", "sqls", "sqls_missing_event_timestamp")
+    campaign: dict = {}
+
+    def _add(key, slot):
+        if not _norm(key):
+            return
+        dst = campaign.setdefault(key, dict.fromkeys(fields, 0))
+        for f in fields:
+            dst[f] += int(slot.get(f) or 0)
+
+    for name, slot in (cohort.get("by_campaign") or {}).items():
+        _add(name, slot)
+    for key, slot in ((cohort.get("unattributed") or {}).get("by_label") or {}).items():
+        _add(str(key).split(":", 1)[1] if ":" in str(key) else key, slot)
+    return campaign, dict(cohort.get("by_group") or {})
+
+
+def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
+                           start_date=None, end_date=None) -> dict:
+    """The cohort contract every mart response carries (PR-ADS-177A).
+
+    One verdict (``sql_status`` / ``sql_reason``) for leads AND SQLs; the
+    metric family and window basis; the cohort metadata (``as_of``,
+    freshness, maturity) from ``sql_metric_metadata``; the window totals and
+    the campaign view's residual. When the verdict is not ``published`` every
+    count here is None — withheld means absent, not hidden.
+    """
+    from services import marketing_outcome_cohort_service as cohort_svc  # noqa: PLC0415
+    cohort = outcomes.get("cohort")
+    status, reason = tuple(outcomes.get("sql_publication")
+                           or (cohort_svc.STATUS_UNAVAILABLE,
+                               cohort_svc.SQL_REASON_FUNNEL_UNREADABLE))
+    published = cohort is not None and status == cohort_svc.STATUS_PUBLISHED
+    problems = outcomes.get("reconciliation_problems") or []
+    if problems:
+        # The strings quote raw counts: server log only (PR-ADS-161B round 3).
+        logger.error("[revenue_attribution] cohort reconciliation failed: %s", problems)
+    ga = (cohort or {}).get("google_ads") or {}
+
+    def _count(value):
+        return int(value) if (published and value is not None) else None
+
+    placed = {f: sum(s[f] for s in campaign_slots.values())
+              for f in ("contacts_acquired", "sqls")}
+    if cohort is None:
+        attribution = "unknown"
+    elif not published:
+        attribution = "withheld"
+    else:
+        attribution = "partial" if (cohort.get("unattributed") or {}).get("sqls") else "complete"
+    return {
+        "metric_family": cohort_svc.METRIC_FAMILY_COHORT,
+        "window_basis": cohort_svc.WINDOW_BASIS_COHORT,
+        "outcome_basis": cohort_svc.OUTCOME_BASIS_SQL,
+        "population": COHORT_POPULATION,
+        "sqls_scope": SCOPE_GOOGLE_ADS_COHORT_SQLS,
+        "sql_status": status,
+        "sql_reason": reason,
+        # Leads are the cohort's contacts: the same population, one verdict.
+        "leads_status": status,
+        "leads_reason": reason,
+        "basis_label": cohort_svc.COHORT_BASIS_LABEL,
+        "maturity_note": cohort_svc.COHORT_MATURITY_NOTE,
+        "metadata": cohort_svc.sql_metric_metadata(
+            cohort=cohort, freshness=outcomes.get("freshness") or {},
+            attribution_status=attribution,
+            missing_created_at=outcomes.get("missing_created_at"),
+            publication=(status, reason)),
+        "totals": {"leads": _count(ga.get("contacts_acquired")),
+                   "sqls": _count(ga.get("sqls")),
+                   "sqls_missing_event_timestamp": _count(
+                       ga.get("sqls_missing_event_timestamp"))},
+        "campaign_residual": {
+            "label": CAMPAIGN_RESIDUAL_LABEL,
+            "definition": ("Google Ads-sourced contacts created in the window "
+                           "whose HubSpot campaign label is missing, a pseudo- "
+                           "or email campaign, or conflicting across their "
+                           "rows: counted in the total, on no campaign row"),
+            "leads": (_count(ga.get("contacts_acquired") - placed["contacts_acquired"])
+                      if cohort is not None else None),
+            "sqls": (_count(ga.get("sqls") - placed["sqls"])
+                     if cohort is not None else None),
+        },
+        "reconciliation": {
+            "status": ("unavailable" if cohort is None else "failed" if problems
+                       else "reconciled" if published else "withheld"),
+            "problem_count": len(problems) if cohort is not None else None,
+            "identities": list(_COHORT_IDENTITIES),
+        },
+        "window_instants": {"start_at": outcomes.get("start_at"),
+                            "end_before": outcomes.get("end_before")},
+        # PR-ADS-177A-F1 (truth audit MINOR 1): the inclusive account-local
+        # days the cohort was measured over. The campaign and deal views run
+        # through today, the country view through yesterday; a page says
+        # which, beside the count.
+        "window": {"start_date": start_date.isoformat() if start_date else None,
+                   "end_date": end_date.isoformat() if end_date else None},
+        # PR-ADS-177A-F1 (truth audit MAJOR 1): a STALE source is published
+        # only as of its watermark — every surface that prints a published
+        # count prints this beside it (`cohortAsOfNote` in static/app.js).
+        "stale": bool(published and ((outcomes.get("freshness") or {}).get("reason")
+                                     == "source_stale")),
+        "as_of": (outcomes.get("freshness") or {}).get("last_successful_incremental_at"),
+    }
+
+
 def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dict | None:
     """Build the contract from durable DB sources.
 
@@ -1494,7 +1728,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     if not spend["available"]:
         return None  # DB unreachable — signal caller to fall back
 
-    leads = repo.fetch_lead_quality(start_date, end_date)
+    # PR-ADS-177A: no `leads` read. Leads and SQLs are the acquisition cohort,
+    # built below once the campaign identity rule is known.
     sync = repo.fetch_sync_state()
 
     # ── Revenue: canonical ledger, joined only through attribution evidence ──
@@ -1751,6 +1986,23 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     if resolution_map:
         revenue_rows = _apply_identity_map(revenue_rows, resolution_map, applied_identity_mappings)
 
+    # PR-ADS-177A — ONE SQL COUNT: the acquisition cohort (owner decision
+    # 2026-11-24). Leads and SQLs on every campaign row, country row and total
+    # are Google Ads-sourced HubSpot contacts CREATED in this window (the same
+    # account-local days as spend), with SQL proven by canonical lifecycle
+    # evidence as of the contact-funnel watermark — the population Campaign
+    # Evidence publishes. Placement uses THIS mart's identity rule, the one its
+    # revenue rows are keyed by (approved "not Google Ads" labels excluded,
+    # approved / exact-normalised labels onto the canonical campaign name, any
+    # other label onto its own unmapped row). Countries use the contact's own
+    # HubSpot country (``contact_country``) through ``country_identity``.
+    cohort_outcomes = _read_cohort(
+        start_date, end_date, now=now,
+        resolve_label=_mart_label_resolver(resolution_map, excluded_label_keys))
+    cohort_verdict = tuple(cohort_outcomes["sql_publication"])
+    cohort_published = cohort_verdict[0] == cwt.PUBLISHED
+    campaign_slots, country_slots = _cohort_slots(cohort_outcomes)
+
     # PR-ADS-124: the COUNTRY spend SOURCE. When the canonical Google Ads geo
     # table has rows, the Country Revenue & Spend table is built from the SAME canonical
     # source as the reconciliation total — never the legacy `geo` table. Each row
@@ -1763,8 +2015,9 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # account like the geo total it reconciles against (PR-ADS-154B), and it
     # reads the shared zero rule's evidence in the SAME snapshot.
     from services import country_spend_zero_rule as _zero_rule  # noqa: PLC0415
-    _zero_candidates: set = set()
-    for _r in list(leads.get("rows") or []) + list(country_revenue_rows or []):
+    _zero_candidates: set = {
+        str(k)[5:] for k in (country_slots or {}) if str(k).startswith("code:")}
+    for _r in list(country_revenue_rows or []):
         _ident = country_identity.resolve(name=_r.get("country"), code=_r.get("country_code"))
         if _ident.is_country and _ident.code:
             _zero_candidates.add(_ident.code)
@@ -1904,18 +2157,9 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             if m.get("approved_at") and m.get("canonical_campaign_name")
         }
 
-    # PR-ADS-109: lead metrics are trusted only when the business event date
-    # (HubSpot contact_created_at) is available. Otherwise withhold them — never
-    # compute SQLs from sync-date-contaminated rows.
-    lead_event_date_safe = bool(leads.get("event_date_safe"))
-    lead_metrics_withheld = not lead_event_date_safe
-    lead_rows = [] if lead_metrics_withheld else leads["rows"]
-    if excluded_label_keys and lead_rows:
-        lead_rows = [r for r in lead_rows
-                     if _ident_norm(r.get("campaign_name")) not in excluded_label_keys]
-    if resolution_map and lead_rows:
-        lead_rows = _apply_identity_map(lead_rows, resolution_map, applied_identity_mappings)
-
+    # PR-ADS-177A: the PR-ADS-109 lead-grain gate (legacy `leads` rows with no
+    # contact_created_at) is gone with the legacy read. The cohort's own
+    # verdict (``cohort_verdict``) withholds leads and SQLs instead.
     # Revenue is "wired" only when the canonical ledger is READABLE and the
     # scope actually contains attributed deals. An unreadable ledger is not an
     # empty one: ROAS stays null (never zero) and the status names the reason.
@@ -1933,10 +2177,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # summary) is exact for its scope and is not gated.
     campaign_gate = canonical_revenue.campaign_placement_gate(canonical_base)
     campaigns = _build_db_rows(
-        campaign_spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
+        campaign_spend_rows, campaign_slots, revenue_rows, group_field="campaign_name",
         revenue_available=revenue_available,
         revenue_readable=revenue_available_canonical,
-        lead_metrics_withheld=lead_metrics_withheld,
+        cohort_verdict=cohort_verdict,
         spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
         manual_target_keys=manual_target_keys, compute_spend_state=spend_identity_resolved,
         canonical_base=canonical_base, gate=campaign_gate,
@@ -1956,10 +2200,10 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     for c in campaigns:
         c["aliases"] = alias_by_canon.get(_norm(c.get("campaign_name")), [])
     countries = _build_db_rows(
-        country_spend_rows, lead_rows, country_revenue_rows, group_field="country",
+        country_spend_rows, country_slots, country_revenue_rows, group_field="country",
         revenue_available=revenue_available,
         revenue_readable=revenue_available_canonical,
-        lead_metrics_withheld=lead_metrics_withheld,
+        cohort_verdict=cohort_verdict,
         spend_trusted=country_spend_trusted,
         canonical_base=canonical_base,
         # PR-ADS-176A: the shared zero rule over the canonical geo rows the
@@ -1987,17 +2231,18 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         countries = _apply_geo_spend_residual(
             countries, _res_native, country_residual_usd, use_usd,
             bucketed_native=sum(_safe_float(r.get("spend")) for r in _outside),
-            bucketed_usd=_outside_usd)
+            bucketed_usd=_outside_usd, cohort_verdict=cohort_verdict)
     # PR-ADS-170A: a country row whose geo spend is under it on the owner's
     # word says so. Canonical geo rows only — the legacy table has no criteria.
     owner_labelled_geo = ((geo_by_country.get("owner_labelled_geo") or {})
                           if canonical_geo_country else {})
     countries = stamp_owner_labelled_countries(countries, owner_labelled_geo)
+    cohort_block = _cohort_contract_block(cohort_outcomes, campaign_slots,
+                                          start_date=start_date, end_date=end_date)
     summary = _build_db_summary(
-        campaign_spend_rows, lead_rows, revenue_rows,
+        campaign_spend_rows, cohort_block["totals"], revenue_rows,
         revenue_available=revenue_available,
         revenue_readable=revenue_available_canonical,
-        lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=campaign_spend_trusted,
         canonical_base=canonical_base,
     )
@@ -2007,13 +2252,18 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # whatever canonical spend said).
     campaign_spend_status = (("db" if canonical_rows else "db_empty")
                              if canonical_access else "source_unavailable")
-    contacts_status = "db" if leads.get("rows") else "db_empty"
+    _cohort_contacts = (cohort_outcomes.get("cohort") or {}).get("google_ads") or {}
+    contacts_status = ("source_unavailable" if cohort_outcomes.get("cohort") is None
+                       else "db" if _cohort_contacts.get("contacts_acquired") else "db_empty")
     deals_status = "db" if revenue_rows else "db_empty"
 
-    lead_date_grain_status = "event_date" if lead_event_date_safe else "unsafe_sync_date"
-    lead_metrics_status = "withheld" if lead_metrics_withheld else (
-        "db" if leads.get("rows") else "db_empty"
-    )
+    # PR-ADS-177A: the cohort is windowed on the contact's HubSpot creation
+    # date (the business event), so the grain is always the event date. Its
+    # metrics are "withheld" / "unavailable" by the cohort's own verdict.
+    lead_date_grain_status = "event_date"
+    lead_metrics_status = (cohort_verdict[0] if not cohort_published
+                           else "db" if _cohort_contacts.get("contacts_acquired")
+                           else "db_empty")
     revenue_attribution_status = (
         canonical_revenue.CANONICAL_SOURCE if revenue_available
         else ("canonical_ledger_unavailable" if not revenue_available_canonical
@@ -2034,7 +2284,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # Top-level attribution_source_status retained for backward compatibility.
     if revenue_available:
         attribution_status = canonical_revenue.CANONICAL_SOURCE
-    elif not lead_metrics_withheld and leads.get("rows"):
+    elif cohort_published and _cohort_contacts.get("contacts_acquired"):
         attribution_status = "hubspot_source_tags_only"
     else:
         attribution_status = "none"
@@ -2044,17 +2294,17 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # is not wired. NOTE: we no longer treat "first geo row starts after the window
     # start" as partial — that geo-first-row heuristic falsely flagged windows whose
     # earlier period was fetched and verified as zero spend.
-    data_is_partial = lead_metrics_withheld or not revenue_available
+    data_is_partial = (not cohort_published) or not revenue_available
     if canonical_access and not coverage_complete:
         data_is_partial = True
 
     warnings: list[str] = []
-    if lead_metrics_withheld:
+    if not cohort_published:
         warnings.append(
-            "Lead/SQL metrics withheld: HubSpot contact_created_at (business event "
-            "date) is missing for historical rows, so this window is not lead-safe. "
-            "Treat SQL counts as withheld until the audit passes."
-        )
+            f"Leads and SQLs withheld ({cohort_verdict[1]}): the acquisition cohort "
+            "— contacts created in this window — is not proven complete as of the "
+            "canonical contact-funnel watermark, so no lead or SQL count is "
+            "published on any row or total.")
     if not revenue_available:
         warnings.append(
             "Revenue attribution is not connected for this window — period revenue "
@@ -2095,7 +2345,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
 
     db_tables_used = [t for t, present in (
         ("geo", bool(spend_rows)),
-        ("leads", bool(leads.get("rows"))),
+        ("hubspot_contact_funnel", cohort_outcomes.get("cohort") is not None),
         # PR-ADS-153E-B: revenue is the canonical ledger, not gclid_attribution.
         ("hubspot_deal_ledger", bool(revenue_rows)),
     ) if present]
@@ -2205,9 +2455,9 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # the legacy `geo` snapshot's MIN/MAX(run_date) first.
         "coverage_start": canonical_base.get("window_start"),
         "coverage_end": canonical_base.get("window_end"),
-        "missing_contact_created_at_count": leads.get("missing_contact_created_at_count", 0),
-        "excluded_non_paid_count": leads.get("excluded_non_paid_count", 0),
-        "excluded_pseudo_campaign_count": leads.get("excluded_pseudo_campaign_count", 0),
+        # PR-ADS-177A: canonical contacts with no created date — in no
+        # acquisition window, disclosed by the cohort (None when unread).
+        "missing_contact_created_at_count": cohort_outcomes.get("missing_created_at"),
         "files_used": {},
         "db_tables_used": db_tables_used,
         "sync_state": sync.get("datasets", {}),
@@ -2219,6 +2469,9 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "summary": summary,
         "campaigns": campaigns,
         "countries": countries,
+        # PR-ADS-177A: the acquisition cohort behind every leads / SQLs figure
+        # above — its verdict, metadata and the campaign view's residual.
+        "cohort": cohort_block,
         "spend_source": "google_ads_api",
         "revenue_source": "hubspot_closed_won",
         "source_truth": "hubspot_closed_won_revenue",
@@ -2469,7 +2722,9 @@ def build_revenue_attribution(window: str, now: datetime | None = None, *,
     start_dt, end_dt = get_window_bounds(window, now=now)
     if resolved.get("through_reason"):
         start_dt, end_dt = settled_revenue_bounds(resolved)
-    return _withhold_json_revenue(_build_from_json(resolved, start_dt, end_dt))
+    return _withhold_json_cohort(
+        _withhold_json_revenue(_build_from_json(resolved, start_dt, end_dt)),
+        start_date, end_date)
 
 
 # Metrics that depend on the closed-won deal population, and are therefore
@@ -2508,6 +2763,46 @@ def _withhold_json_revenue(contract: dict) -> dict:
     contract.setdefault("warnings", []).append(
         "Closed-won revenue is unavailable: the canonical deal ledger could not "
         "be read and local JSON is not a permitted revenue source.")
+    return contract
+
+
+def _withhold_json_cohort(contract: dict, start_date=None, end_date=None) -> dict:
+    """PR-ADS-177A — the local-JSON diagnostic fallback publishes no leads or
+    SQLs.
+
+    Its counts come from ``data/crm_contacts.json`` (``mql_status`` in
+    ``QUALIFIED``): a third SQL definition, undeduplicated and undated by the
+    cohort's rule. With the database down the acquisition cohort cannot be
+    read, so every leads / SQLs figure is None with
+    ``canonical_funnel_unreadable`` — the one count is unavailable, not
+    replaced. A row whose deals are withheld (``_withhold_json_revenue``) is
+    not judged either."""
+    if not isinstance(contract, dict):
+        return contract
+    from services import marketing_outcome_cohort_service as cohort_svc  # noqa: PLC0415
+    status = cohort_svc.STATUS_UNAVAILABLE
+    reason = cohort_svc.SQL_REASON_FUNNEL_UNREADABLE
+    for key in ("leads", "sqls"):
+        if key in (contract.get("summary") or {}):
+            contract["summary"][key] = None
+    for bucket in ("campaigns", "countries"):
+        for row in contract.get(bucket) or []:
+            row["leads"] = None
+            row["sqls"] = None
+            row["sqls_status"], row["sqls_reason"] = status, reason
+            if row.get("closed_won_deals") is None and not row.get("is_residual"):
+                row["verdict"], row["verdict_reason"] = VERDICT_OUTCOME_WITHHELD, None
+    start_at = end_before = None
+    if end_date is not None:
+        _s, _e = cohort_svc.window_instants(start_date, end_date)
+        start_at, end_before = (_s.isoformat() if _s else None), _e.isoformat()
+    contract["cohort"] = _cohort_contract_block(
+        {"cohort": None, "sql_publication": (status, reason),
+         "missing_created_at": None, "freshness": {},
+         "start_at": start_at, "end_before": end_before}, {},
+        start_date=start_date, end_date=end_date)
+    for holder in (contract, contract.setdefault("source_health", {})):
+        holder["lead_metrics_status"] = status
     return contract
 
 
@@ -2999,7 +3294,45 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     # never report a window as revenue-safe using a lineage no page consumes.
     revenue_base = canonical_revenue.load_won_deals(window, now=now)
 
-    lead_window_safe = bool(grain.get("lead_window_safe"))
+    # PR-ADS-177A-F1 (truth audit MINOR 5): every lead / SQL figure a window
+    # publishes is the ACQUISITION COHORT (PR-ADS-177A); the legacy `leads`
+    # table feeds none of them, so its date grain is reported, never judged on.
+    #
+    # PR-ADS-177A-F2 (truth audit round 2, MAJOR): the cohort's verdict is
+    # reported in its OWN field (`lead_cohort`) and is NOT part of this
+    # audit's revenue verdict or blockers. A withheld cohort withholds leads
+    # and SQLs, one by one, with the reason — it blocks no page (owner
+    # decision, docs/59 §3). F1 made it `lead_window_safe`, which Revenue
+    # Health read as "Revenue is not ready".
+    _builds: dict = {}
+
+    def _build(wk):
+        # One build per window, shared by the cohort read and the comparison.
+        if wk not in _builds:
+            _builds[wk] = build_revenue_attribution(wk, now=now)
+        return _builds[wk]
+
+    cohort_block = None
+    try:
+        cohort_block = (_build(window) or {}).get("cohort")
+    except Exception:  # noqa: BLE001 - an unreadable cohort is not safe
+        logger.exception("[revenue_attribution] audit: the cohort could not be read")
+    cohort_status = (cohort_block or {}).get("sql_status")
+    cohort_reason = (cohort_block or {}).get("sql_reason")
+    lead_cohort = {
+        "label": "Leads / SQLs (acquisition cohort)",
+        "status": cohort_status or "unavailable",
+        "reason": cohort_reason if cohort_block is not None else "cohort_unreadable",
+        "published": cohort_status == "published",
+        "metric_family": (cohort_block or {}).get("metric_family"),
+        # The one remedy for a withheld cohort: the HubSpot contact-funnel sync.
+        "next_step": "contact_funnel_sync",
+        "blocks_revenue": False,
+        # PR-ADS-177A-F3: the selected window's own cohort block — whichever
+        # business window was selected — so the page states its last day and,
+        # over a stale funnel, its as-of watermark.
+        "cohort": cohort_block,
+    }
     spend_window_safe = True   # geo.run_date is the per-day source date
     # The canonical ledger is windowed by the canonical deal close date, never a
     # scheduler run date.
@@ -3007,10 +3340,13 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
 
     date_grain_health = {
         "spend_date_field": "geo.run_date",
-        "lead_date_field_current": "leads.contact_created_at",
+        "lead_date_field_current": "acquisition cohort · contact_created_at",
+        "lead_cohort_status": lead_cohort["status"],
+        "lead_cohort_reason": lead_cohort["reason"],
+        # The legacy table's own grain: reported for the record only.
+        "legacy_leads_table_window_safe": bool(grain.get("lead_window_safe")),
         "lead_event_date_field_available": bool(grain.get("lead_event_date_field_available")),
         "deal_date_field": "hubspot_deal_ledger.deal_close_date",
-        "lead_window_safe": lead_window_safe,
         "spend_window_safe": spend_window_safe,
         "revenue_window_safe": revenue_window_safe,
     }
@@ -3020,12 +3356,18 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     # all available data falls inside the current quarter. Window integrity is a
     # property of the resolved DATE BOUNDARIES (window_ranges), not the aggregates.
     window_comparison = {}
+    window_cohorts = {}
     window_ranges = {}
     for wk in ("current_quarter", "ytd", "all_time"):
         try:
-            window_comparison[wk] = build_revenue_attribution(wk, now=now)["summary"]
+            _built = _build(wk)
+            window_comparison[wk] = _built["summary"]
+            # PR-ADS-177A-F2: each window's leads are the cohort's — the page
+            # gates them on that window's own verdict.
+            window_cohorts[wk] = _built.get("cohort")
         except Exception:  # noqa: BLE001
             window_comparison[wk] = {}
+            window_cohorts[wk] = None
         try:
             wr = resolve_canonical_window(wk, now=now)
             window_ranges[wk] = {
@@ -3036,15 +3378,21 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         except Exception:  # noqa: BLE001
             window_ranges[wk] = {}
 
-    blockers: list[str] = []
-    if not grain.get("available"):
-        blockers.append("Database unavailable — cannot audit durable lead date grain.")
-    if not lead_window_safe:
-        blockers.append("leads.contact_created_at missing for historical rows")
+    # PR-ADS-177A-F3 (truth audit round 3, MINOR 1): pseudo / email campaign
+    # rows in the legacy `leads` table are a data-quality FINDING, reported —
+    # never a revenue blocker. No figure reads that table since PR-ADS-177A
+    # (leads and SQLs are the acquisition cohort; revenue is the canonical deal
+    # ledger), so they cannot make revenue unsafe. They were the last input to
+    # this verdict from that table.
+    legacy_table_findings: list[str] = []
     if pollution.get("pseudo_campaign_rows"):
-        blockers.append("Pseudo-traffic campaign rows present in the leads table.")
+        legacy_table_findings.append(
+            "Pseudo-traffic campaign rows present in the legacy leads table "
+            "(read by no figure).")
     if pollution.get("email_campaign_rows"):
-        blockers.append("Email-campaign rows present in the leads table.")
+        legacy_table_findings.append(
+            "Email-campaign rows present in the legacy leads table (read by no figure).")
+    blockers: list[str] = []
 
     verdict = "SAFE" if not blockers else "UNSAFE"
 
@@ -3083,8 +3431,14 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
                                      else "canonical_unavailable"),
         "revenue_window_status": "has_revenue" if window_has_revenue else "no_closed_won",
         "window_comparison": window_comparison,
+        "window_cohorts": window_cohorts,
+        # PR-ADS-177A-F2: the selected window's cohort verdict — reported,
+        # never a revenue blocker.
+        "lead_cohort": lead_cohort,
         "window_ranges": window_ranges,
         "verdict": verdict,
         "blockers": blockers,
+        # PR-ADS-177A-F3: reported, never blocking (see above).
+        "legacy_table_findings": legacy_table_findings,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

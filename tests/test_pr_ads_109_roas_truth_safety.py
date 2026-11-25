@@ -59,8 +59,18 @@ def _build(spend_rows, revenue_rows, lead_rows=None, safe=True, ledger_available
     rev = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None, "table": "gclid_attribution"}
     coverage = {"available": True,
                 "chunks": [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified"}]}
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort. The same
+    # contacts are served from the canonical funnel; "unsafe" (`safe=False`)
+    # is now the cohort's own withheld verdict (the real freshness rule over a
+    # sync state whose bootstrap is still running).
+    from tests.cohort_fixture import (cohort_patch, contacts_from_lead_rows,
+                                      healthy_sync_row, withheld_sync_row)
+    contacts = contacts_from_lead_rows(lead_rows, created=datetime(2026, 5, 15, 12,
+                                                                   tzinfo=timezone.utc))
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=_leads(lead_rows, safe)), \
+         cohort_patch(contacts, as_of=NOW, sync_row=(healthy_sync_row(NOW) if safe
+                                                     else withheld_sync_row(NOW))), \
          canonical_ledger_patch(from_legacy_deal_rows(rev.get("rows") or []),
                                 available=ledger_available), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=_canonical(spend_rows)), \
@@ -165,6 +175,7 @@ def test_unknown_blank_campaign_rows_excluded():
 
 
 def test_sql_withheld_when_event_date_unsafe():
+    # PR-ADS-177A: "unsafe" is the acquisition cohort's withheld verdict.
     r = _build(
         spend_rows=[{"campaign_name": "gulf", "country": "SA", "spend": 1000.0}],
         revenue_rows=[],

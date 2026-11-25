@@ -18,6 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.canonical_ledger_fixtures import (  # noqa: E402
     canonical_ledger_patch, from_legacy_deal_rows,
 )
+from tests.cohort_fixture import (  # noqa: E402
+    cohort_patch, healthy_sync_row, withheld_sync_row,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,7 +52,11 @@ def _pollution(clean=True):
     }
 
 
-def _audit(window="current_quarter", grain=None, pollution=None, rev=None):
+def _audit(window="current_quarter", grain=None, pollution=None, rev=None,
+           cohort_sync_row=None):
+    # PR-ADS-177A-F1 (truth audit MINOR 5): lead-window safety is the
+    # acquisition cohort's verdict, so the cohort is fed through the REAL
+    # freshness `assess` (healthy unless the case passes another sync row).
     grain = grain or _grain(True)
     pollution = pollution or _pollution(True)
     rev = rev or {"available": True, "rows": [], "coverage_start": None, "coverage_end": None}
@@ -62,7 +69,8 @@ def _audit(window="current_quarter", grain=None, pollution=None, rev=None):
          canonical_ledger_patch(from_legacy_deal_rows(rev.get("rows") or [])), \
          patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=lead_obj), \
-         patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
+         patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}), \
+         cohort_patch([], as_of=NOW, sync_row=cohort_sync_row or healthy_sync_row(NOW)):
         return build_revenue_attribution_audit(window, now=NOW)
 
 
@@ -81,7 +89,11 @@ def test_audit_contract_keys():
 def test_audit_date_grain_health_fields():
     dg = _audit()["date_grain_health"]
     assert dg["spend_date_field"] == "geo.run_date"
-    assert dg["lead_date_field_current"] == "leads.contact_created_at"
+    # PR-ADS-177A-F1 (MINOR 5): the leads every window publishes are the
+    # acquisition cohort's; the legacy table's grain is reported, not judged.
+    assert dg["lead_date_field_current"] == "acquisition cohort · contact_created_at"
+    assert dg["lead_cohort_status"] == "published"
+    assert dg["legacy_leads_table_window_safe"] is True
     # PR-ADS-153E-B: revenue is windowed by the CANONICAL deal close date.
     assert dg["deal_date_field"] == "hubspot_deal_ledger.deal_close_date"
     assert dg["spend_window_safe"] is True
@@ -89,9 +101,29 @@ def test_audit_date_grain_health_fields():
 
 
 def test_audit_verdict_unsafe_when_lead_grain_unsafe():
+    # PR-ADS-177A-F2 (truth audit round 2, MAJOR): F1 made a withheld cohort
+    # an UNSAFE revenue verdict, which Revenue Health rendered as "Revenue is
+    # not ready". A withheld cohort blocks no page (owner decision): it is
+    # reported in its own field, with its reason and next step, and the
+    # revenue verdict does not read it. (The name is kept for history: no
+    # lead grain makes the revenue verdict unsafe any more.)
+    a = _audit(cohort_sync_row=withheld_sync_row(NOW))
+    assert a["verdict"] == "SAFE" and a["blockers"] == []
+    lc = a["lead_cohort"]
+    assert (lc["status"], lc["reason"], lc["published"], lc["blocks_revenue"]) == (
+        "withheld", "source_bootstrap_incomplete", False, False)
+    assert "lead_window_safe" not in a["date_grain_health"]
+    assert a["date_grain_health"]["lead_cohort_status"] == "withheld"
+
+
+def test_audit_legacy_leads_grain_alone_no_longer_decides_the_verdict():
+    # PR-ADS-177A-F1 (MINOR 5): the legacy `leads` table feeds no window figure
+    # since PR-ADS-177A. Its grain is reported for the record, judged on
+    # nothing.
     a = _audit(grain=_grain(safe=False))
-    assert a["verdict"] == "UNSAFE"
-    assert any("contact_created_at" in b for b in a["blockers"])
+    assert a["date_grain_health"]["legacy_leads_table_window_safe"] is False
+    assert a["lead_cohort"]["published"] is True
+    assert a["verdict"] == "SAFE"
 
 
 def test_audit_verdict_safe_when_all_safe_and_clean():
@@ -101,9 +133,13 @@ def test_audit_verdict_safe_when_all_safe_and_clean():
 
 
 def test_audit_verdict_unsafe_when_pseudo_pollution_present():
+    # PR-ADS-177A-F3 (truth audit round 3, MINOR 1): pseudo rows in the
+    # LEGACY `leads` table are reported, never a revenue blocker — no figure
+    # reads that table since PR-ADS-177A. (The name is kept for history.)
     a = _audit(grain=_grain(True), pollution=_pollution(clean=False))
-    assert a["verdict"] == "UNSAFE"
-    assert any("pseudo" in b.lower() for b in a["blockers"])
+    assert a["verdict"] == "SAFE" and a["blockers"] == []
+    assert a["pseudo_campaign_rows"] == ["(direct)"]
+    assert any("pseudo" in f.lower() for f in a["legacy_table_findings"])
 
 
 def test_audit_window_comparison_has_three_windows():

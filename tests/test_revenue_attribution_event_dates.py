@@ -163,17 +163,37 @@ def _rev(rows=None):
             "coverage_start": None, "coverage_end": None}
 
 
+def _cohort(leads):
+    """PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort. The
+    fixture's contacts are served from the canonical funnel, created inside the
+    window; the fixture's "unsafe" is the cohort's own withheld verdict (the
+    real freshness rule over a sync state whose bootstrap is still running)."""
+    from tests.cohort_fixture import (cohort_patch, contacts_from_lead_rows,
+                                      healthy_sync_row, withheld_sync_row)
+    leads = leads or _leads()
+    return cohort_patch(
+        contacts_from_lead_rows(leads["rows"],
+                                created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)),
+        as_of=NOW, sync_row=(healthy_sync_row(NOW) if leads["event_date_safe"]
+                             else withheld_sync_row(NOW)))
+
+
 def _build(window="current_quarter", leads=None, spend=None, rev=None):
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend or _spend()), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads or _leads()), \
+         _cohort(leads), \
          canonical_ledger_patch(from_legacy_deal_rows((rev or _rev()).get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         return build_revenue_attribution(window, now=NOW)
 
 
 def test_lead_metrics_withheld_when_event_date_unsafe():
+    # PR-ADS-177A: the cohort is windowed on the contact's own creation date
+    # (always the event grain); "unsafe" is the cohort verdict withholding.
     r = _build(leads=_leads(safe=False))
-    assert r["lead_date_grain_status"] == "unsafe_sync_date"
+    assert r["lead_date_grain_status"] == "event_date"
+    assert (r["cohort"]["sql_status"], r["cohort"]["sql_reason"]) == (
+        "withheld", "source_bootstrap_incomplete")
     assert r["lead_metrics_status"] == "withheld"
     assert r["summary"]["leads"] is None
     assert r["summary"]["sqls"] is None
@@ -197,35 +217,40 @@ def test_backfilled_old_contacts_do_not_pollute_window():
 
 
 def test_windows_differ_when_event_dates_differ():
-    def fake_leads(start, end):
-        rows = [{"campaign_name": "gulf", "country": "Saudi Arabia", "status_category": "qualified", "has_gclid": True}]
-        if start is None:  # all_time -> broader set
-            rows = rows * 5
-        return {"available": True, "table": "leads", "rows": rows, "event_date_safe": True,
-                "lead_event_date_field_available": True, "missing_contact_created_at_count": 0,
-                "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0}
+    # PR-ADS-177A: the acquisition cohort, windowed by each contact's own
+    # creation date: one contact created this quarter, four created in 2025.
+    from tests.cohort_fixture import cohort_patch, contacts_from_lead_rows
+    row = {"campaign_name": "gulf", "country": "Saudi Arabia", "status_category": "qualified"}
+    contacts = (contacts_from_lead_rows([row], created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc))
+                + contacts_from_lead_rows([row] * 4,
+                                          created=datetime(2025, 5, 15, 12, tzinfo=timezone.utc)))
 
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=_spend()), \
-         patch("db.revenue_repository.fetch_lead_quality", side_effect=fake_leads), \
+         cohort_patch(contacts, as_of=NOW), \
          canonical_ledger_patch(from_legacy_deal_rows(_rev().get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         cq = build_revenue_attribution("current_quarter", now=NOW)["summary"]["leads"]
         at = build_revenue_attribution("all_time", now=NOW)["summary"]["leads"]
     assert cq != at, "windows must not be identical when event-date data differs"
+    assert (cq, at) == (1, 5)
 
 
 def test_service_passes_event_window_dates_to_repo():
+    # PR-ADS-177A: the window's days reach the acquisition-cohort read, as the
+    # account-local instants of [start, end] inclusive.
     captured = {}
 
-    def fake_leads(start, end):
-        captured["start"] = start
-        captured["end"] = end
-        return _leads()
+    def fake_contacts(start_at, end_before):
+        captured["start"] = start_at
+        captured["end"] = end_before
+        return {"available": True, "rows": [], "missing_created_at": 0}
 
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=_spend()), \
-         patch("db.revenue_repository.fetch_lead_quality", side_effect=fake_leads), \
+         patch("db.crm_funnel_repository.fetch_acquisition_cohort_contacts",
+               side_effect=fake_contacts), \
          canonical_ledger_patch(from_legacy_deal_rows(_rev().get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         build_revenue_attribution("current_quarter", now=NOW)
-    assert captured["start"] == date(2026, 4, 1)
-    assert captured["end"] == date(2026, 6, 20)
+    from services.marketing_outcome_cohort_service import window_instants
+    assert (captured["start"], captured["end"]) == window_instants(
+        date(2026, 4, 1), date(2026, 6, 20))

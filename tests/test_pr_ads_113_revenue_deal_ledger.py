@@ -372,10 +372,16 @@ def test_health_safe_alone_is_not_revenue_ready():
 def test_health_shows_checks_and_rails():
     region = _health_region()
     # PR-ADS-115: "Revenue attribution / Wired" split into integration + window.
-    for check in ("Lead date grain", "Revenue integration", "Selected window",
-                  "Campaign pollution", "Window integrity"):
+    # PR-ADS-177A-F2 (truth audit round 2, MAJOR): the "Lead date grain" check
+    # judged the legacy `leads` table, which feeds no figure since PR-ADS-177A;
+    # the window's leads are the acquisition cohort, its own check, never a
+    # revenue blocker. The Leads rail's fallback names the cohort likewise.
+    for check in ("Leads / SQLs (acquisition cohort)", "Revenue integration",
+                  "Selected window", "Campaign pollution", "Window integrity"):
         assert check in region, f"missing health check: {check}"
-    for rail in ("geo.run_date", "leads.contact_created_at", "gclid_attribution.deal_close_date"):
+    assert "Lead date grain" not in region and "sync date" not in region
+    for rail in ("geo.run_date", "acquisition cohort · contact_created_at",
+                 "gclid_attribution.deal_close_date"):
         assert rail in region, f"missing source-date rail: {rail}"
     for count in ("missing dates", "Excluded non-paid rows", "Excluded pseudo campaigns"):
         assert count in region

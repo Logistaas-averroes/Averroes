@@ -2101,6 +2101,8 @@ body.is-revenue-page #monitoring-banner {
 .campaign-decision-row:hover { background: rgba(18, 158, 245, 0.05); }
 .campaign-decision-row:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: -2px; }
 .td-sub { display: block; font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+/* PR-ADS-177A: a header's sub-label saying what the count is ("· contacts acquired in window"). */
+.th-sub { font-weight: 400; font-size: 11px; color: var(--text-muted); }
 .campaign-alias-hint, .campaign-map-note {
   display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 600;
   padding: 1px 6px; border-radius: 999px; vertical-align: middle;

@@ -314,21 +314,23 @@ CONSUMERS: list[dict] = [
     # one Countries page's SQLs are the mart's (_MART / _RAS below).
 
     # ── Executive / Revenue ─────────────────────────────────────────────────
-    _c("Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)",
-       "Headline Google Ads-source SQLs (legacy contract) and campaign-attributable "
-       "kpis.sqls from the Revenue Decision Mart.",
+    _c("Dashboard Overview KPI strip (google_ads_cohort_sqls + kpis.sqls)",
+       "PR-ADS-177A: the SQL headline and kpis.leads / kpis.sqls are the Revenue "
+       "Decision Mart's Google Ads acquisition cohort (the legacy "
+       "page_reconciliation headline is no longer read). The source mix's "
+       "leads are still the legacy source groups.",
        endpoint="GET /api/dashboard/overview",
        service_function="services.dashboard_overview_service.build_dashboard_overview",
-       repository_source="canonical_contact_outcome_service.page_reconciliation + revenue_decision_mart.summary",
-       source_table=LEGACY_TABLE, sql_definition=LEGACY_DEF, date_field=LEGACY_DATE,
-       dedup_key=LEGACY_DEDUP, windows=BUSINESS,
-       scope="google_ads_source (headline) | campaign_attributable (kpis.sqls)",
+       repository_source="revenue_decision_mart.summary / cohort + source_attribution_service groups",
+       source_table=LIFECYCLE_TABLE, sql_definition=COHORT_DEF, date_field=COHORT_DATE,
+       dedup_key=COHORT_DEDUP, windows=BUSINESS,
+       scope="google_ads_cohort (headline, kpis.sqls) | source group (source mix, legacy)",
        classification=CLS_MIXED,
        code_location="services/dashboard_overview_service.py:build_dashboard_overview",
-       migration_notes="Same page publishes legacy SQL KPIs beside the canonical "
-                       "lifecycle_sqls funnel (see next record). Decision cards and "
-                       "waste signals read legacy row sqls.",
-       truth_status="headline None on mismatch; kpis.sqls None when mart withholds",
+       migration_notes="Cohort headline beside the canonical lifecycle_sqls funnel (a "
+                       "different family, see next record). Decision cards and waste "
+                       "signals read cohort row sqls; the source mix is legacy.",
+       truth_status="headline and kpis None with the cohort reason when withheld",
        headline=True, decision=True, executive=True, operational=True),
     _c("Dashboard Overview lifecycle activity / cohort",
        "Lead-anchored lifecycle cohort and lifecycle_sqls from the canonical funnel.",
@@ -343,32 +345,41 @@ CONSUMERS: list[dict] = [
        truth_status="counts None when unavailable or mismatch",
        headline=True, row=True, executive=True),
     _c("Revenue Decision Mart summary.sqls / row sqls",
-       "Shared top-line SQL count consumed by Dashboard Revenue, Campaigns, Countries, Deals, Campaign / Country Revenue & Spend pages.",
+       "Shared top-line SQL count consumed by Dashboard Revenue, Campaigns, Countries, Deals, Campaign Revenue & Spend and Countries pages.",
        endpoint="GET /api/revenue-performance (mart views)",
        service_function="services.revenue_decision_mart.build_revenue_decision_mart / _summary_block",
-       repository_source="services.revenue_attribution_service._build_db_rows → db.revenue_repository.fetch_lead_quality",
-       source_table=LEGACY_TABLE, sql_definition="row.get('status_category') == 'qualified'",
-       date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=BUSINESS,
-       scope="campaign_attributable", classification=CLS_LEGACY,
+       repository_source="services.revenue_attribution_service._read_cohort → "
+                         "marketing_outcome_cohort_service.build_window_outcomes",
+       source_table=LIFECYCLE_TABLE, sql_definition=COHORT_DEF,
+       date_field=COHORT_DATE, dedup_key=COHORT_DEDUP, windows=BUSINESS,
+       scope="google_ads_cohort (campaign rows + campaign residual; country rows + residual row)",
+       classification=CLS_CANONICAL,
        code_location="services/revenue_decision_mart.py:_summary_block",
-       migration_notes="Attaches sql_reconciliation(SCOPE_CAMPAIGN_ATTRIBUTABLE, consumer_count). "
-                       "Cross-page parity asserts this count equal across five pages.",
-       truth_status="withheld wholesale via lead_metrics_withheld (None, never 0)",
+       migration_notes="PR-ADS-177A: was leads.status_category = 'qualified' "
+                       "(fetch_lead_quality, CLS_LEGACY). Now the acquisition cohort, "
+                       "one verdict (cohort.sql_status) on every row and total; the "
+                       "cohort's own reconciliation replaces the PR-ADS-152 legacy one. "
+                       "Cross-page parity asserts it equal across five pages and "
+                       "against Campaign Evidence over the same days.",
+       truth_status="None with the cohort reason when the verdict is not published (never 0)",
        headline=True, row=True, sorting=True, decision=True, executive=True, operational=True),
     _c("Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)",
-       "Row-level sqls and classify_verdict (watch/waste) on the legacy population; "
-       "JSON fallback path imports analysis.core.QUALIFIED.",
+       "Row-level leads / sqls from the acquisition cohort, placed by the mart's "
+       "campaign identity rule and the contact's own country; classify_verdict "
+       "(watch/waste) only on a published count.",
        endpoint="GET /api/revenue-attribution",
        service_function="services.revenue_attribution_service._build_db_rows / _finalize_row / classify_verdict",
-       repository_source="db.revenue_repository.fetch_lead_quality",
-       source_table=LEGACY_TABLE, sql_definition="row.get('status_category') == 'qualified'",
-       date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=BUSINESS,
-       scope="campaign_attributable | country", classification=CLS_MIXED,
+       repository_source="services.marketing_outcome_cohort_service.build_window_outcomes "
+                         "(db.crm_funnel_repository.fetch_acquisition_cohort_contacts)",
+       source_table=LIFECYCLE_TABLE, sql_definition=COHORT_DEF,
+       date_field=COHORT_DATE, dedup_key=COHORT_DEDUP, windows=BUSINESS,
+       scope="google_ads_cohort | by campaign | by contact country", classification=CLS_CANONICAL,
        code_location="services/revenue_attribution_service.py:_build_db_rows",
-       migration_notes="classify_verdict substitutes 0 for a withheld SQL count "
-                       "(sqls_for_verdict). _build_from_json (mql_status in QUALIFIED) "
-                       "is reachable only on the DB-unavailable fallback.",
-       truth_status="sqls None when lead metrics withheld; verdict uses 0 in that case",
+       migration_notes="PR-ADS-177A: fetch_lead_quality is no longer read; a withheld "
+                       "count is None and a verdict that depends on it is "
+                       "'sqls_unknown'. The JSON fallback publishes no lead or SQL "
+                       "count (its mql_status read is deleted).",
+       truth_status="sqls None with the cohort reason when withheld; verdict sqls_unknown",
        row=True, sorting=True, decision=True, executive=True, operational=True),
     _c("Source breakdown (source_attribution_service.build_revenue_by_source)",
        "Group/channel/platform sqls from contact_source_classification, with the "
@@ -406,46 +417,54 @@ CONSUMERS: list[dict] = [
     _c("Dashboard Campaigns", "Campaign rows sqls, kpis.sqls, SQL producer status, period delta.",
        endpoint="GET /api/dashboard/campaigns",
        service_function="services.dashboard_campaigns_service._build_campaign_rows / _campaign_status / _build_kpis",
-       repository_source="revenue_decision_mart rows", source_table=LEGACY_TABLE,
-       sql_definition=LEGACY_DEF, date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP,
-       windows=BUSINESS, scope="campaign_attributable", classification=CLS_LEGACY,
+       repository_source="revenue_decision_mart rows + cohort", source_table=LIFECYCLE_TABLE,
+       sql_definition=COHORT_DEF, date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
+       windows=BUSINESS, scope="google_ads_cohort (rows + campaign residual)",
+       classification=CLS_CANONICAL,
        code_location="services/dashboard_campaigns_service.py:_campaign_status",
-       migration_notes="Status vocabulary 'Spend without SQL / customer proof' differs from Campaign Evidence.",
-       truth_status="kpis.sqls None if any Google row withholds",
+       migration_notes="PR-ADS-177A: republishes the mart's cohort; 'SQLs withheld' "
+                       "status when the count is withheld. Status vocabulary still "
+                       "differs from Campaign Evidence.",
+       truth_status="kpis.sqls is the cohort total; None with its reason when withheld",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
     _c("Dashboard Countries", "Country rows sqls, residual sqls, SQL producer status, regional mix.",
        endpoint="GET /api/dashboard/countries",
        service_function="services.dashboard_countries_service._build_country_rows / _country_status / _build_residual",
-       repository_source="revenue_decision_mart country rows", source_table=LEGACY_TABLE,
-       sql_definition=LEGACY_DEF, date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP,
-       windows=BUSINESS, scope="country_attributed_sqls (campaign population narrowed to canonical country)",
-       classification=CLS_LEGACY,
+       repository_source="revenue_decision_mart country rows + cohort", source_table=LIFECYCLE_TABLE,
+       sql_definition=COHORT_DEF, date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
+       windows=BUSINESS, scope="country_attributed_sqls (the Google Ads cohort by the contact's own country)",
+       classification=CLS_CANONICAL,
        code_location="services/dashboard_countries_service.py:_country_status",
-       migration_notes="Residual SQLs derived by subtraction from summary.sqls.",
+       migration_notes="PR-ADS-177A: residual SQLs are the mart residual row's, no "
+                       "longer a subtraction from a legacy campaign total.",
        truth_status="kpis.sqls None if any row withholds",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
     _c("Dashboard Revenue", "kpis.sqls, sql_to_customer_rate, revenue_per_sql, SQL trend series.",
        endpoint="GET /api/dashboard/revenue",
        service_function="services.dashboard_revenue_service._build_kpis / _build_customer_trend",
        repository_source="revenue_decision_mart summary + db.revenue_repository.fetch_lead_daily_series",
-       source_table=LEGACY_TABLE,
-       sql_definition="SUM(CASE WHEN status_category = 'qualified' THEN 1 ELSE 0 END) (series)",
+       source_table=LEGACY_TABLE + " (series) | " + LIFECYCLE_TABLE + " (kpis.sqls, cohort)",
+       sql_definition="kpis.sqls: the acquisition cohort (PR-ADS-177A); series: "
+                      "SUM(CASE WHEN status_category = 'qualified' THEN 1 ELSE 0 END), "
+                      "declared legacy (customer_trend.sqls_metric_family), rendered nowhere",
        date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=BUSINESS,
-       scope="campaign_attributable", classification=CLS_LEGACY,
+       scope="google_ads_cohort (kpis.sqls) | legacy series", classification=CLS_MIXED,
        code_location="services/dashboard_revenue_service.py:_build_kpis",
        migration_notes="revenue_per_sql is an inverse-CPQL family metric on the legacy denominator.",
        truth_status="rates None on None/0 denominator",
        headline=True, row=True, executive=True),
-    _c("Dashboard Deals", "kpis.sqls, sqls_not_closed_won panel, source breakdown status.",
+    _c("Dashboard Deals", "kpis.sqls, lead_status_qualified_no_won_deal backlog (out of the funnel), source breakdown status.",
        endpoint="GET /api/dashboard/deals",
        service_function="services.dashboard_deals_service._build_kpis / _build_sql_no_deal / _source_status",
        repository_source="revenue_decision_mart summary + db.revenue_repository.fetch_sql_lead_details",
-       source_table=LEGACY_TABLE, sql_definition="WHERE d.status_category = 'qualified'",
+       source_table=LEGACY_TABLE + " (backlog, source groups) | " + LIFECYCLE_TABLE + " (kpis.sqls, campaign breakdown)",
+       sql_definition="kpis.sqls / campaign breakdown: the acquisition cohort (PR-ADS-177A); "
+                      "backlog: WHERE d.status_category = 'qualified', labelled 'Qualified (lead status)'",
        date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=BUSINESS,
-       scope="campaign_attributable | source group", classification=CLS_LEGACY,
+       scope="google_ads_cohort | source group (legacy)", classification=CLS_MIXED,
        code_location="services/dashboard_deals_service.py:_build_sql_no_deal",
        migration_notes="Per-contact SQL rows (contact id + company) in the drawer.",
-       truth_status="sqls_not_closed_won None when unavailable",
+       truth_status="lead_status_qualified_no_won_deal None when unavailable",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
 
     # ── Operational ─────────────────────────────────────────────────────────
@@ -667,7 +686,7 @@ _CE = "Campaign Evidence table + KPI strip"
 _CD = "Campaign drawer (headline, lead quality, countries, recent leads)"
 _KW = "Keyword Evidence table / drawer / CSV export"
 _ST = "Search Terms table / flagged tab / drawer / CSV export"
-_OVW = "Dashboard Overview KPI strip (google_ads_source_sqls + kpis.sqls)"
+_OVW = "Dashboard Overview KPI strip (google_ads_cohort_sqls + kpis.sqls)"
 _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
 _RAS = "Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)"
@@ -853,7 +872,7 @@ RULES: list[dict] = [
        symbol=["_build_decision_cards", "_build_period_change", "_build_signals",
                "_build_source_mix", "_build_unavailable", "build_dashboard_overview",
                "_build_kpis"]),
-    _r("mart", "services/revenue_decision_mart.py", CLS_LEGACY, _MART,
+    _r("mart", "services/revenue_decision_mart.py", CLS_CANONICAL, _MART,
        symbol=["_summary_block", "build_revenue_decision_mart", "_canonical_core",
                # PR-ADS-167A: withholds the country rows' SQL split with the gate.
                "_withhold_country_rows_when_geo_not_ready",
@@ -861,11 +880,15 @@ RULES: list[dict] = [
                # sums of the country rows' SQLs over the listed markets, from
                # the rows above; no SQL is recounted.
                "_sum_rows", "_country_page_blocks"]),
-    _m("ras.module", "services/revenue_attribution_service.py", CLS_MIXED, _RAS, ["sqls_field_ref"]),
+    _m("ras.module", "services/revenue_attribution_service.py", CLS_CANONICAL, _RAS, ["sqls_field_ref"]),
     _r("ras.json", "services/revenue_attribution_service.py", CLS_INACTIVE, _JSONFALLBACK,
        symbol=["_build_from_json", "_build_campaign_rows", "_build_country_rows", "_build_summary"]),
-    _r("ras", "services/revenue_attribution_service.py", CLS_MIXED, _RAS,
+    _r("ras", "services/revenue_attribution_service.py", CLS_CANONICAL, _RAS,
        symbol=["_build_db_rows", "_build_db_summary", "_build_from_db", "_finalize_row",
+               # PR-ADS-177A: the acquisition cohort, placed by the mart's keys,
+               # its contract block, and the JSON fallback's withholding.
+               "_cohort_slots", "_cohort_contract_block", "_read_cohort",
+               "_mart_label_resolver", "_withhold_json_cohort",
                "_geo_spend_only_residual_row", "_new_bucket", "_row_notes",
                "build_revenue_attribution_audit", "classify_verdict", "build_revenue_attribution",
                # PR-ADS-176A: the residual's outside-market sub-items say their
@@ -1007,11 +1030,14 @@ RULES: list[dict] = [
        symbol=["check_no_date_contamination", "check_no_write_paths",
                "_code_without_docstrings", "_function_sources", "audit_window",
                "withheld_exposures", "check_closed_won_not_published",
+               # PR-ADS-177A: the mart and Dashboard payloads.
+               "mart_withheld_exposures", "mart_conservation_problems",
+               "audit_mart_window", "_build_mart_payloads",
                "independent_counts", "global_population_split", "run",
                "_render", "main"]),
     # Module-level comments naming the withheld SQL / CPQL fields it checks for.
     _m("cohort.audit.module", "scripts/audit_marketing_outcome_cohorts.py",
-       CLS_DIAGNOSTIC, _COHORT, ["cpql_ref"]),
+       CLS_DIAGNOSTIC, _COHORT, ["cpql_ref", "sqls_field_ref"]),
     _r("sqlpublication.writer", "db/writers.py", CLS_DIAGNOSTIC,
        _SQL_PUBLICATION, symbol=["record_reader_reconciliation"]),
 
@@ -1234,6 +1260,11 @@ RULES: list[dict] = [
     # consumer of the customers / closed-won-deals identities. No SQL figure.
     _r("diag.parity.consumers", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="_build_consumers"),
+    # PR-ADS-177A: one SQL count across the Countries page, Dashboard
+    # Countries and Campaign Evidence over the same days. Reads, publishes nothing.
+    _r("diag.parity.cohort", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
+       # PR-ADS-177A-F1: and over the campaign view's days.
+       symbol=["_cohort_sql_parity", "_cohort_sql_parity_campaign_view"]),
     _r("diag.parity.cli", "scripts/audit_cross_page_canonical_parity.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="main"),
     # PR-ADS-161B round 3: the module-level regexes NAME the legacy fields in
@@ -1288,23 +1319,34 @@ RULES: list[dict] = [
        symbol=["renderDashboardChannels", "renderChanKpiRow", "chanQualityBubbleSVG",
                "renderChanQualityPanel", "wireChanQualityHover", "renderChanPlatformMatrix",
                "renderChanChannelList", "wireChanChannelDrawers", "renderChanTruthFooter"]),
-    _r("ui.campaigns_tab", "static/app.js", CLS_LEGACY, _CAMP,
+    _r("ui.campaigns_tab", "static/app.js", CLS_CANONICAL, _CAMP,
        symbol=["renderDashboardCampaigns", "renderCampKpiRow", "campBubbleSVG",
                "renderCampPerformanceMap", "wireCampBubbleHover", "renderCampLeaderboard",
                "wireCampDrawers", "renderCampKeywordThemes", "renderCampTruthFooter", "loadCampaigns"]),
-    _r("ui.countries_tab", "static/app.js", CLS_LEGACY, _CTRY,
+    _r("ui.countries_tab", "static/app.js", CLS_CANONICAL, _CTRY,
        symbol=["renderDashboardCountries", "renderCtryKpiRow", "wireCtryBubbleHover",
                "renderCtryLeaderboard", "wireCtryDrawers", "renderCtryResidualPanel",
                "renderCtryTruthFooter", "ctryStatusColor", "renderCountryRevenueBlockedState"]),
-    _r("ui.revenue_tab", "static/app.js", CLS_LEGACY, _REV,
+    _r("ui.revenue_tab", "static/app.js", CLS_MIXED, _REV,
        symbol=["renderRevKpiRow", "renderRevConversionStrip", "renderRevTruthFooter",
                "renderRevenueBlockedState", "renderRevenueHealth"]),
-    _r("ui.deals_tab", "static/app.js", CLS_LEGACY, _DEALS,
+    _r("ui.deals_tab", "static/app.js", CLS_MIXED, _DEALS,
        symbol=["renderDashboardDeals", "renderDealKpiRow", "renderDealSourcePipeline",
-               "renderDealCampaignPipeline", "renderDealSqlNoDeal", "renderDealTruthFooter"]),
-    _r("ui.mart", "static/app.js", CLS_LEGACY, _MART,
+               "renderDealCampaignPipeline", "renderDealSqlNoDeal", "renderDealTruthFooter",
+               # PR-ADS-177A-F1: the funnel's cohort SQL stage, and the legacy
+               # lead-status backlog out of it.
+               "renderDealFunnel", "renderDealLeadStatusBacklog"]),
+    _r("ui.mart", "static/app.js", CLS_CANONICAL, _MART,
        symbol=["renderMartSummaryStrip", "getBusinessVerdictBadge"]),
-    _r("ui.roas", "static/app.js", CLS_MIXED, _RAS,
+    # PR-ADS-177A: the one SQL-count gate for every mart / Dashboard leads and
+    # SQLs figure (cohortCountHtml over campaignSqlPublication(cohort)), its
+    # labels, and the blocked cards' cohort chip. The trailing comments and
+    # constants are attributed by the scanner to the function before them.
+    _r("ui.cohort_count", "static/app.js", CLS_CANONICAL, _MART,
+       symbol=["campaignRowSqlPublication", "cohortReasonText", "cohortCountHtml",
+               "cohortCountPublication", "cohortCountText", "campBlockerOpts",
+               "isRevenueDecisionReady", "cohortLeadsReady", "countryResidualSpendValue"]),
+    _r("ui.roas", "static/app.js", CLS_CANONICAL, _RAS,
        symbol=["renderRoasCampaignSummary", "renderRoasCampaignTable", "sortRoasCampaignRows",
                "renderRoasCountrySummary", "renderRoasCountryTable", "sortRoasCountryRows",
                # PR-ADS-176B: the one Countries page republishes the mart's
@@ -1468,25 +1510,32 @@ DECISION_SURFACES: list[dict] = [
      "kind": "alert", "gated": "insufficient_data guard", "evidence_kind": "row evidence"},
     {"surface": "Dashboard Overview decision cards / waste signals",
      "code_location": "services/dashboard_overview_service.py:_build_decision_cards",
-     "sql_definition": LEGACY_DEF, "scope": "campaign_attributable", "date_field": LEGACY_DATE,
+     "sql_definition": COHORT_DEF, "scope": "google_ads_cohort (campaign rows)", "date_field": COHORT_DATE,
      "kind": "decision-card", "gated": "explicit 'SQL truth unavailable' card when withheld",
      "evidence_kind": "row evidence"},
     {"surface": "Dashboard Campaigns _campaign_status (SQL producer)",
      "code_location": "services/dashboard_campaigns_service.py:_campaign_status",
-     "sql_definition": LEGACY_DEF, "scope": "campaign_attributable", "date_field": LEGACY_DATE,
-     "kind": "verdict", "gated": "none", "evidence_kind": "row evidence"},
+     "sql_definition": COHORT_DEF, "scope": "google_ads_cohort (campaign row)", "date_field": COHORT_DATE,
+     "kind": "verdict", "gated": "'SQLs withheld' under a withheld cohort (PR-ADS-177A)",
+     "evidence_kind": "row evidence"},
     {"surface": "Dashboard Countries _country_status (SQL producer)",
      "code_location": "services/dashboard_countries_service.py:_country_status",
-     "sql_definition": LEGACY_DEF, "scope": "country_attributed", "date_field": LEGACY_DATE,
-     "kind": "verdict", "gated": "none", "evidence_kind": "row evidence"},
+     "sql_definition": COHORT_DEF, "scope": "country_attributed (cohort by contact country)",
+     "date_field": COHORT_DATE,
+     "kind": "verdict", "gated": "'SQLs withheld' under a withheld cohort (PR-ADS-177A)",
+     "evidence_kind": "row evidence"},
     {"surface": "Dashboard Deals _source_status",
      "code_location": "services/dashboard_deals_service.py:_source_status",
-     "sql_definition": LEGACY_DEF, "scope": "source group", "date_field": LEGACY_DATE,
-     "kind": "verdict", "gated": "none", "evidence_kind": "row evidence"},
+     "sql_definition": LEGACY_DEF + " (source groups) | " + COHORT_DEF + " (campaign rows)",
+     "scope": "source group | campaign", "date_field": LEGACY_DATE,
+     "kind": "verdict", "gated": "'SQLs withheld' when a row's count is None (PR-ADS-177A)",
+     "evidence_kind": "row evidence"},
     {"surface": "Revenue attribution classify_verdict (watch/waste)",
      "code_location": "services/revenue_attribution_service.py:classify_verdict",
-     "sql_definition": LEGACY_DEF, "scope": "campaign_attributable / country", "date_field": LEGACY_DATE,
-     "kind": "verdict", "gated": "withheld count substituted by 0 (sqls_for_verdict)",
+     "sql_definition": COHORT_DEF, "scope": "google_ads_cohort (campaign / country row)",
+     "date_field": COHORT_DATE,
+     "kind": "verdict", "gated": "sqls_unknown when the verdict depends on a withheld "
+                                 "count (PR-ADS-177A; was: substituted by 0)",
      "evidence_kind": "row evidence"},
 ]
 
@@ -1543,10 +1592,10 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
      "summary": "renderCampaignDrawer reads drawerSqlPub before its const declaration "
                 "(temporal dead zone) — the drawer's SQL gate cannot execute as written.",
      "code_location": "static/app.js:renderCampaignDrawer"},
-    {"id": "verdict.withheld_sql_becomes_zero",
-     "summary": "revenue_attribution_service.classify_verdict uses sqls_for_verdict = 0 when "
-                "lead metrics are withheld.",
-     "code_location": "services/revenue_attribution_service.py:classify_verdict"},
+    # PR-ADS-177A: "verdict.withheld_sql_becomes_zero" stood here —
+    # classify_verdict used sqls_for_verdict = 0 when lead metrics were
+    # withheld. _finalize_row now gives a row whose verdict depends on a
+    # withheld cohort count the verdict `sqls_unknown`, with the reason.
     {"id": "label.search_term_waste_audit_says_lifecycle",
      "summary": "scripts/audit_search_term_waste_truth.py prints 'lifecycle SQLs' for a "
                 "status_category = qualified population.",

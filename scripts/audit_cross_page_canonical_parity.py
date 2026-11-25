@@ -59,7 +59,10 @@ def _render(outcome: dict) -> None:
         for c in cert:
             if not c.get("certified"):
                 print(f"             NOT CERTIFIED {c['consumer']:28} "
-                      f"0 of {c['identities_registered']} registered identities")
+                      f"0 of {c['identities_registered']} registered identities"
+                      # PR-ADS-177A-F2: say why when it is the window's first day.
+                      + (f" ({c['not_evaluable_reason']}: no day of the window has "
+                         "ended — not a violation)" if c.get("not_evaluable_reason") else ""))
 
         for m in result["metrics"]:
             # PR-ADS-154C-F1: `.get(status, "·")`, not `[status]`. This indexed

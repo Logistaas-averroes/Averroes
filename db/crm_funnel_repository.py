@@ -535,7 +535,9 @@ def fetch_acquisition_cohort_contacts(start_at, end_before) -> dict:
                            {recovered} AS sql_entered_recovered,
                            {a}.hs_analytics_source,
                            {a}.hs_analytics_source_data_1,
-                           {a}.gclid
+                           {a}.gclid,
+                           {a}.ip_country,
+                           {a}.country
                     FROM {FUNNEL_TABLE} {a}
                     {_recovery_join()}
                     WHERE {a}.created_at IS NOT NULL

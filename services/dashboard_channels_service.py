@@ -101,6 +101,11 @@ from services.dashboard_overview_service import (
 
 logger = logging.getLogger(__name__)
 
+#: PR-ADS-177A-F1 (truth audit MAJOR 2): the label and family of this page's
+#: lead counts — the legacy lead-status population, not the acquisition cohort.
+LEAD_STATUS_QUALIFIED_LABEL = "Qualified (lead status)"
+LEAD_STATUS_METRIC_FAMILY = "legacy_lead_status_category"
+
 # ── Executive channel buckets ────────────────────────────────────────────────
 # A PRESENTATION mapping from the PR-ADS-133 classifier channels to the eight
 # executive channel buckets this tab shows. This never changes the classifier;
@@ -495,7 +500,7 @@ def _utc_midnight(day):
     return datetime.combine(day, time.min, tzinfo=timezone.utc)
 
 
-def _canonical_daily_revenue(start_key, end_key) -> dict:
+def _canonical_daily_revenue(start_key, end_key, now=None) -> dict:
     """Canonical won deals for a date range, carrying a per-day ``close_date``.
 
     The bounds arrive as inclusive dates from the resolved window block, so the
@@ -507,9 +512,13 @@ def _canonical_daily_revenue(start_key, end_key) -> dict:
 
     if end_key is None:
         return {"available": False, "rows": []}
+    # PR-ADS-177A-F2: the page's own instant, never the wall clock — the
+    # ledger's staleness gate is judged at the same `now` as every other read
+    # of this page (it read the wall clock, so a page built for a fixed
+    # instant judged its ledger at another one).
     base = canonical_revenue.load_won_deals(
         start=_utc_midnight(start_key),
-        end=_utc_midnight(end_key + timedelta(days=1)))
+        end=_utc_midnight(end_key + timedelta(days=1)), now=now)
     if not base.get("available"):
         return {"available": False, "rows": [], "reason": base.get("reason")}
     rows = []
@@ -520,7 +529,8 @@ def _canonical_daily_revenue(start_key, end_key) -> dict:
     return {"available": True, "rows": rows}
 
 
-def _build_trend(window_block: dict, *, revenue_total_published: bool = True) -> dict:
+def _build_trend(window_block: dict, *, revenue_total_published: bool = True,
+                 now=None) -> dict:
     """Per-bucket SQLs (by created date) + won deals/revenue (by close date) per
     executive channel. Each metric uses its OWN business event date. A bucket
     whose revenue includes an unknown amount reports that channel's revenue as
@@ -534,7 +544,7 @@ def _build_trend(window_block: dict, *, revenue_total_published: bool = True) ->
     # by the canonical deal close date. `deal_source_attribution` supplied the
     # same shape but a different population and no currency contract, so the
     # trend and the KPI above it could disagree about the same quarter.
-    revenue = _canonical_daily_revenue(start_key, end_key)
+    revenue = _canonical_daily_revenue(start_key, end_key, now=now)
     if not leads.get("available") or not revenue.get("available"):
         return {"bucket": None, "points": [], "status": "unavailable",
                 "reason": "Per-day channel source series is unavailable."}
@@ -697,8 +707,10 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         top = max(watch, key=lambda c: c["sqls"])
         cards.append({
             "type": "watch", "title": "Watch",
-            "headline": f"{top['channel_label']} has SQLs but no connected spend",
-            "body": (f"It produced {top['sqls']} SQL{'s' if top['sqls'] != 1 else ''}"
+            "headline": (f"{top['channel_label']} has qualified (lead status) contacts "
+                         "but no connected spend"),
+            "body": (f"It produced {top['sqls']} contact{'s' if top['sqls'] != 1 else ''} "
+                     "qualified by HubSpot lead status"
                      + (" (its closed-won deals are withheld this window)"
                         if top.get("closed_won_deals") is None else
                         f" and {top['closed_won_deals']} won deal"
@@ -711,7 +723,8 @@ def _build_decision_cards(channel_rows: list, kpis: dict, google_spend: dict,
         cards.append({
             "type": "watch", "title": "Watch",
             "headline": "No unmeasured demand channels",
-            "body": "Every channel producing SQLs either has connected spend or no won deals yet.",
+            "body": ("Every channel producing qualified (lead status) contacts either has "
+                     "connected spend or no won deals yet."),
             "target_page": "channels", "target_label": canonical_contract.CHANNELS_LINK_LABEL,
         })
 
@@ -824,7 +837,8 @@ def _build_unavailable(kpis: dict, google_spend: dict, trend: dict,
                     "reason": "Revenue integration not connected for this window."})
     if kpis.get("total_sqls") is None:
         out.append({"metric": "total_sqls",
-                    "reason": "Lead metrics withheld — business event dates unavailable."})
+                    "reason": ("Qualified (lead status) counts withheld — business event "
+                               "dates unavailable.")})
     if google_spend["usd"] is None:
         out.append({"metric": "google_ads_spend_usd",
                     "reason": "Google Ads USD spend requires verified spend coverage and FX."})
@@ -901,7 +915,7 @@ def build_dashboard_channels(window: str = "current_quarter",
     # reported Unavailable rather than trusting a possibly-understated total.
     start_key = _parse_iso_date(window_block.get("start_date"))
     end_key = _parse_iso_date(window_block.get("end_date"))
-    raw_revenue = _canonical_daily_revenue(start_key, end_key) if end_key else {
+    raw_revenue = _canonical_daily_revenue(start_key, end_key, now=now) if end_key else {
         "available": True, "rows": []}
     amounts_verifiable = bool(raw_revenue.get("available"))
     exec_unknown, platform_unknown = _unknown_amount_maps(raw_revenue.get("rows") or [])
@@ -963,6 +977,12 @@ def build_dashboard_channels(window: str = "current_quarter",
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)
     kpis["top_channel"] = top_channel
     kpis["top_platform"] = top_platform
+    # PR-ADS-177A-F1 (truth audit MAJOR 2): this page's `sqls` / `total_sqls`
+    # are the LEGACY lead-status population (the source groups), not the
+    # acquisition cohort the Dashboard's SQL cards count. Declared, and
+    # labelled for what they are, so nothing reads them as "SQLs".
+    kpis["total_sqls_label"] = LEAD_STATUS_QUALIFIED_LABEL
+    kpis["total_sqls_metric_family"] = LEAD_STATUS_METRIC_FAMILY
     # PR-ADS-161E: channel rows count closed-won DEALS (additive across
     # channels). Customers — distinct proven HubSpot companies — are not
     # additive, so the page's customer figure is the canonical window metric.
@@ -979,7 +999,7 @@ def build_dashboard_channels(window: str = "current_quarter",
 
     period_change = _build_period_change(window, ref_now, kpis)
     trend = _build_trend(window_block, revenue_total_published=bool(
-        _revenue_verdict["publishable"])) if revenue_connected else {
+        _revenue_verdict["publishable"]), now=now) if revenue_connected else {
         "bucket": None, "points": [], "status": "unavailable",
         "reason": "The canonical closed-won population is unavailable — a channel series cannot be shown without fabricating zeros."}
     # The quality matrix plots customers (y) and revenue (bubble) — both unknown

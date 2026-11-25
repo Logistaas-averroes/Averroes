@@ -282,26 +282,39 @@ def test_dashboard_does_not_pass_summary_sqls_to_google_ads_source_scope():
 
 
 def test_dashboard_headline_is_google_ads_source_scope():
-    assert '"google_ads_source_sqls": _ga_source_display' in _DASH
-    assert '"google_ads_source_sqls_scope"' in _DASH
-    # The mart's campaign-attributable count is explicitly scoped, not a bare KPI.
-    assert '"sqls_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE' in _DASH
+    # PR-ADS-177A (owner decision 2026-11-24, one SQL count): the headline is
+    # the mart's Google Ads ACQUISITION COHORT — the count every page shows —
+    # no longer the legacy page_reconciliation. It is still explicitly scoped.
+    # PR-ADS-177A-F1 (truth audit MINOR 4): keyed by what it holds — the
+    # cohort — not by the canonical contact-outcome scope's name.
+    assert '"google_ads_cohort_sqls": summary.get("sqls")' in _DASH
+    assert '"google_ads_cohort_sqls_scope": _cohort.get("sqls_scope")' in _DASH
+    assert '"google_ads_source_sqls"' not in _DASH
+    assert '"sqls_scope": _cohort.get("sqls_scope")' in _DASH
+    assert "page_reconciliation(" not in _DASH
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # §1 — frontend contract (app.js)
 # ═════════════════════════════════════════════════════════════════════════════
 def test_app_renders_google_ads_source_sql_headline():
-    assert 'label: "Google Ads-source SQLs"' in _APP
-    assert "k.google_ads_source_sqls" in _APP
+    # PR-ADS-177A: the label says what the count is (the acquisition cohort).
+    card = _ga_source_card()
+    assert "label: COHORT_SQLS_LABEL" in card
+    assert "cohortCountHtml(k.google_ads_cohort_sqls, d.cohort" in card
     # The old generic "SQLs" KPI is no longer keyed/labelled generically as the
     # dashboard hero SQL metric.
     assert 'key: "sqls",\n      label: "SQLs",' not in _APP
 
 
 def test_app_renders_reconciliation_required_on_mismatch():
-    assert '"Reconciliation required"' in _APP
-    assert 'google_ads_source_sqls_status === "mismatch"' in _APP
+    # PR-ADS-177A: the cohort has no "mismatch" state — a reconciliation
+    # failure is its own withheld verdict (`cohort_reconciliation_failed`),
+    # rendered by the one gate as the withholding word and the reason, never
+    # as a number.
+    card = _ga_source_card()
+    assert "cohortCountHtml(" in card and "dashValue(k.google_ads_cohort_sqls" not in card
+    assert "cohort_reconciliation_failed:" in _APP
 
 
 # PR-ADS-168B: test_app_source_page_has_scoped_sql_chip is deleted with
@@ -309,7 +322,9 @@ def test_app_renders_reconciliation_required_on_mismatch():
 
 
 def test_app_disclosure_of_campaign_attributable_subset():
-    assert "safely campaign-attributable" in _APP
+    # PR-ADS-177A: the sub-line names the part of the cohort a campaign row
+    # holds (the rest is the campaign residual).
+    assert "on a campaign row" in _ga_source_card()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -355,22 +370,38 @@ def _ga_source_card():
     a case about a delta that had not moved. The card ends where the object
     literal ends, so slice there.
     """
-    i = _APP.index('key: "google_ads_source_sqls"')
+    i = _APP.index('key: "google_ads_cohort_sqls"')
     end = _APP.index("\n    },", i)
     return _APP[i:end]
 
 
 def test_dashboard_ga_source_card_has_no_campaign_attributable_delta():
+    # PR-ADS-177A: the 152 objection was a delta from a DIFFERENT scope. Both
+    # periods' `sqls` are now the same cohort as the headline, so the delta is
+    # like for like — and it is shown only under a published cohort.
+    # PR-ADS-177A-F1 (truth audit MINOR 2): AND only for a completed window. A
+    # cohort in an open window is still maturing; against a closed prior
+    # period it reads as a fall it is not. The one helper decides both.
     card = _ga_source_card()
-    assert 'delta: ""' in card                         # delta removed on this card
-    assert 'dashDeltaChip("sqls"' not in card          # never the campaign-attributable delta
+    assert 'delta: cohortDeltaChip("sqls", pc, d)' in card
+    assert "dashDeltaChip(" not in card
+    i = _APP.index("function cohortDeltaChip(")
+    helper = _APP[i:_APP.index("\n}\n", i)]
+    assert "cohortCountPublication(data.cohort).publish" in helper
+    assert "is_closed_window !== true" in helper
+    assert "maturity_note" in helper
 
 
 def test_dashboard_null_campaign_attributable_shows_unavailable_not_rate():
     card = _ga_source_card()
     # When campaign_attributable_sqls is null, the card shows an honest
     # "unavailable", NOT sqlRate (which belongs to the narrower population).
-    assert '? "Campaign attribution unavailable"' in card
+    # PR-ADS-177A: the null case names what the headline counts instead (the
+    # cohort's contacts); it never prints a number for the missing part.
+    assert '? "Google Ads contacts created in this window"' in card
+    # PR-ADS-177A-F1 (MINOR 4): the subset is named for what it is.
+    assert "k.campaign_row_cohort_sqls === null" in card
+    assert "campaign_attributable_sqls" not in card
     assert "? sqlRate" not in card                     # the old rate fallback is gone
 
 

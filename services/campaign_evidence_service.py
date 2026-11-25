@@ -320,7 +320,8 @@ def _reconcile(row_sum, source_total, *, available: bool) -> str:
 
 
 def build_campaign_evidence(window: str, now: datetime | None = None,
-                            days: int | None = None) -> dict[str, Any]:
+                            days: int | None = None,
+                            bounds: tuple | None = None) -> dict[str, Any]:
     """Genuine selected-window campaign evidence payload. Read-only.
 
     HubSpot lead labels are mapped to canonical Google Ads campaigns through the
@@ -331,12 +332,19 @@ def build_campaign_evidence(window: str, now: datetime | None = None,
     Google Ads SQL/CPQL scope; unmatched labels are preserved as Mapping Review.
 
     Pass ``days`` (1–365) instead of ``window`` for the exact-numeric legacy path.
+    ``bounds`` (PR-ADS-177A) — an explicit ``(start | None, end)`` of inclusive
+    account-local days — builds the SAME page over exactly those days; the
+    cross-page parity audit uses it to compare this page's cohort SQLs with the
+    Countries page and Dashboard Countries over THEIR settled-day window.
     Never raises for a DB outage (returns a db_unavailable shape); raises
     EvidenceWindowError for an unknown window / out-of-range days (caller → 400).
     """
     import db.revenue_repository as repo  # noqa: PLC0415
 
-    if days is not None:
+    if bounds is not None:
+        start, end = bounds
+        resolved = {"key": window, "days": None, "is_all_time": start is None}
+    elif days is not None:
         start, end, resolved = _numeric_window_bounds(days, now)
     else:
         start, end, resolved = _window_bounds(window, now)

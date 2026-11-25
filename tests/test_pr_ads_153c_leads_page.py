@@ -480,8 +480,11 @@ def test_dashboard_lifecycle_scope_is_all_source():
 def test_campaign_attributable_sqls_stay_explicitly_named():
     """§22 — a narrower subset may never sit under a bare "SQLs" label."""
     source = (_ROOT / "services" / "dashboard_overview_service.py").read_text()
-    assert '"sqls_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE' in source
-    assert '"google_ads_source_sqls"' in source
+    # PR-ADS-177A: `sqls` is the acquisition cohort, still explicitly scoped
+    # (its scope is the cohort's `google_ads_cohort_sqls`).
+    assert '"sqls_scope": _cohort.get("sqls_scope")' in source
+    # PR-ADS-177A-F1 (MINOR 4): the headline key names the cohort it holds.
+    assert '"google_ads_cohort_sqls"' in source
 
 
 # =============================================================================

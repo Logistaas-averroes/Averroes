@@ -206,7 +206,7 @@ def test_07_the_country_consumers_declare_a_window_the_audit_reproduces(monkeypa
     assert rows["dashboard/overview"]["window_end"] == "2026-06-22"
     assert parity.V_WINDOW_MISMATCH not in out["violation_codes"]
     # Conservation is evaluated over the countries' own days.
-    rule = next(c for c in out["conservation"] if c["total"] == "campaign_attributable_sqls")
+    rule = next(c for c in out["conservation"] if c["total"] == "google_ads_cohort_sqls")
     assert rule["total_source"] == f"{parity.CONSUMER_SETTLED_REFERENCE}:summary.sqls"
 
 
@@ -258,7 +258,7 @@ def test_10_conservation_against_the_full_window_would_be_unequal_windows(monkey
         return built
     monkeypatch.setattr(parity, "_build_consumers", drifted)
     out = parity.audit_window("ytd", now=NOW)
-    rule = next(c for c in out["conservation"] if c["total"] == "campaign_attributable_sqls")
+    rule = next(c for c in out["conservation"] if c["total"] == "google_ads_cohort_sqls")
     assert rule["total_value"] is None and rule["status"] == "not_evaluable"
     assert parity.V_WINDOW_MISMATCH in out["violation_codes"]
 

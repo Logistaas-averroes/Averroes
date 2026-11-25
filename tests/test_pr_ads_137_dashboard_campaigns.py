@@ -164,6 +164,12 @@ def _patch_durable(monkeypatch, *, canonical=None, deals=None, keyword_snapshot=
                         lambda s, e: {"available": True, "rows": list(LEAD_ROWS),
                                       "event_date_safe": True, "missing_contact_created_at_count": 0,
                                       "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0})
+    # PR-ADS-177A: the mart's leads / SQLs are the acquisition cohort — the
+    # SAME contacts, served from the canonical contact funnel (created in the
+    # window; healthy sync state assessed by the real freshness rule).
+    from tests.cohort_fixture import contacts_from_lead_rows, patch_cohort
+    patch_cohort(monkeypatch, contacts_from_lead_rows(
+        LEAD_ROWS, created=datetime(2026, 5, 15, 12, tzinfo=timezone.utc)), as_of=NOW)
     monkeypatch.setattr(repo, "fetch_won_revenue",
                         lambda s, e: {"available": True, "rows": list(WON_ROWS),
                                       "coverage_start": "2026-01-01", "coverage_end": "2026-06-22"})
@@ -667,7 +673,9 @@ def test_campaigns_tab_calls_its_endpoint():
 
 def test_campaigns_kpi_cards_render_five_metrics():
     fn = _slice(JS, "function renderCampKpiRow", 4000)
-    for label in ("Verified Google Ads Spend", "SQLs from Google Ads", "Customers",
+    # PR-ADS-177A: the SQL card's label says what the count is — the
+    # acquisition cohort ("SQLs · contacts acquired in window").
+    for label in ("Verified Google Ads Spend", "COHORT_SQLS_LABEL", "Customers",
                   "Won Revenue", "PERIOD_RATIO_LABEL"):
         assert label in fn
     # PR-ADS-161E: the close-date ratio is never labelled ROAS.

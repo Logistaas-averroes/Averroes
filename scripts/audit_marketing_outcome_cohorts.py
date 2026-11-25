@@ -30,6 +30,17 @@ and compares the payload against those numbers. The campaign-identity
 resolver is shared on purpose: it is the contract being applied, not the
 code under test.
 
+PR-ADS-177A — one SQL count
+---------------------------
+The Revenue Decision Mart (campaign and country views) and every Dashboard tab
+that republishes it (Overview, Campaigns, Countries, Revenue, Deals) now carry
+the SAME acquisition cohort. For every business window this audit also builds
+those payloads and requires: when the cohort verdict is not ``published``, no
+lead or SQL count is present anywhere they publish one
+(``mart_withheld_exposures``); when it is published, the rows conserve the
+total (campaign rows + campaign residual, country rows + residual row, and
+Dashboard Countries' markets + residual all equal ``summary.sqls``).
+
 Nothing here writes. Not to HubSpot, not to Google Ads, not to the local
 database.
 """
@@ -249,6 +260,211 @@ def withheld_exposures(payload: dict) -> list[str]:
             if lc.get(k) is not None]
     if summary.get("cohort_cpql_status") == "published" or cohort.get("cpql_status") == "published":
         out.append("cpql_status=published")
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-177A — the mart and the Dashboard payloads that republish the count
+# ═════════════════════════════════════════════════════════════════════════════
+#: Every lead / SQL count a mart- or Dashboard-shaped payload publishes from the
+#: acquisition cohort, by location. Named, not discovered by key: the same
+#: payloads ALSO carry other families on purpose (the Overview's lifecycle
+#: stage-entry counts, Dashboard Deals' legacy lead-status backlog, the source
+#: mix's legacy groups), each declared as such, and a key-name walk would call
+#: those exposures or — worse — be "fixed" by renaming them.
+_MART_SUMMARY_FIELDS = ("leads", "sqls")
+_MART_ROW_FIELDS = ("leads", "sqls")
+_COHORT_TOTAL_FIELDS = ("leads", "sqls", "sqls_missing_event_timestamp")
+_DASH_KPI_FIELDS = ("leads", "sqls", "sqls_residual", "leads_residual",
+                    "google_ads_cohort_sqls", "campaign_row_cohort_sqls")
+#: The marker an itemised outside-market sub-row carries instead of a count.
+_IN_RESIDUAL = "in_residual"
+
+
+def mart_withheld_exposures(payload: dict) -> list[str]:
+    """Every place a withheld acquisition-cohort count is still present in a
+    Revenue Decision Mart payload (any view) or a Dashboard payload built on it.
+
+    Empty when the payload's own ``cohort`` verdict is ``published`` (nothing
+    to withhold) — and when it is not, empty only if no lead / SQL count, no
+    cohort total, no campaign residual, no bucket count and no row claiming a
+    ``published`` SQL status survives anywhere the payload publishes one.
+    Applies to: the mart's ``summary`` (and its metrics), ``rows``,
+    ``country_totals``, ``regional_mix``, ``sql_reconciliation`` and
+    ``cohort``; a Dashboard's ``kpis``, ``campaigns`` / ``countries`` rows,
+    ``residual``, ``regional_mix`` and ``campaign_breakdown``.
+    """
+    cohort = payload.get("cohort") or {}
+    if cohort.get("sql_status") == "published":
+        return []
+    out: list[str] = []
+
+    def _num(v):
+        return v is not None and v != _IN_RESIDUAL
+
+    summary = payload.get("summary") or {}
+    out += [f"summary.{k}" for k in _MART_SUMMARY_FIELDS if _num(summary.get(k))]
+    for k in _MART_SUMMARY_FIELDS:
+        m = ((summary.get("metrics") or {}).get(k) or {})
+        if m.get("value") is not None or m.get("status") == "published":
+            out.append(f"summary.metrics.{k}")
+    out += [f"cohort.totals.{k}" for k in _COHORT_TOTAL_FIELDS
+            if (cohort.get("totals") or {}).get(k) is not None]
+    out += [f"cohort.campaign_residual.{k}" for k in ("leads", "sqls")
+            if (cohort.get("campaign_residual") or {}).get(k) is not None]
+    meta = cohort.get("metadata") or {}
+    out += [f"cohort.metadata.{k}" for k in _META_SQL_FIELDS if meta.get(k) is not None]
+    recon = payload.get("sql_reconciliation") or {}
+    out += [f"sql_reconciliation.{k}" for k in ("consumer_count", "campaign_residual_sqls")
+            if recon.get(k) is not None]
+
+    def _rows(label, rows):
+        found = []
+        for i, r in enumerate(rows or []):
+            name = r.get("campaign_name") or r.get("country") or r.get("country_name") or i
+            found += [f"{label}[{name}].{k}" for k in _MART_ROW_FIELDS if _num(r.get(k))]
+            if r.get("sqls_status") == "published":
+                found.append(f"{label}[{name}].sqls_status=published")
+            for k in _MART_ROW_FIELDS:
+                m = ((r.get("metrics") or {}).get(k) or {})
+                if m.get("value") is not None or m.get("status") == "published":
+                    found.append(f"{label}[{name}].metrics.{k}")
+            for item in r.get("outside_listed_market_items") or []:
+                found += [f"{label}[{name}].items[{item.get('country_code')}].{k}"
+                          for k in _MART_ROW_FIELDS if _num(item.get(k))]
+        return found
+
+    out += _rows("rows", payload.get("rows"))
+    out += _rows("campaigns", payload.get("campaigns"))
+    out += _rows("countries", payload.get("countries"))
+    out += _rows("campaign_breakdown", payload.get("campaign_breakdown"))
+    out += _rows("regional_mix", payload.get("regional_mix"))
+    totals = payload.get("country_totals") or {}
+    out += [f"country_totals.{k}" for k in _MART_ROW_FIELDS if _num(totals.get(k))]
+    for k in _MART_ROW_FIELDS:
+        m = ((totals.get("metrics") or {}).get(k) or {})
+        if m.get("value") is not None or m.get("status") == "published":
+            out.append(f"country_totals.metrics.{k}")
+    kpis = payload.get("kpis") or {}
+    out += [f"kpis.{k}" for k in _DASH_KPI_FIELDS if _num(kpis.get(k))]
+    if kpis.get("sqls_status") == "published":
+        out.append("kpis.sqls_status=published")
+    residual = payload.get("residual") or {}
+    out += [f"residual.{k}" for k in _MART_ROW_FIELDS if _num(residual.get(k))]
+    return out
+
+
+def mart_conservation_problems(payload: dict, *, view: str) -> list[str]:
+    """Under a PUBLISHED cohort, the rows must add back to ``summary.sqls``.
+
+    * campaign view: Σ campaign rows + ``cohort.campaign_residual``;
+    * country view: Σ country rows, the residual row included;
+    * Dashboard Countries (``view="dashboard/countries"``): ``kpis.sqls`` +
+      ``residual.sqls`` against the cohort's own total.
+
+    A row the country gate withholds makes the sum not evaluable (returns
+    nothing): a withheld part cannot disprove conservation.
+    """
+    cohort = payload.get("cohort") or {}
+    if cohort.get("sql_status") != "published":
+        return []
+    total = (cohort.get("totals") or {}).get("sqls")
+    problems = []
+    for field in ("sqls", "leads"):
+        want = (cohort.get("totals") or {}).get(field)
+        if view == "campaign":
+            parts = [r.get(field) for r in payload.get("rows") or []]
+            parts.append((cohort.get("campaign_residual") or {}).get(field))
+        elif view == "country":
+            parts = [r.get(field) for r in payload.get("rows") or []]
+        else:
+            k = payload.get("kpis") or {}
+            parts = [k.get(field), (payload.get("residual") or {}).get(field)]
+        if any(p is None for p in parts) or want is None:
+            continue
+        if sum(parts) != want:
+            problems.append(f"{view}: rows + residual {field} = {sum(parts)}, "
+                            f"but the cohort total is {want}")
+    if view in ("campaign", "country") and (payload.get("summary") or {}).get("sqls") != total:
+        problems.append(f"{view}: summary.sqls {(payload.get('summary') or {}).get('sqls')} "
+                        f"!= cohort total {total}")
+    return problems
+
+
+def mart_stale_disclosure_problems(payload: dict) -> list[str]:
+    """PR-ADS-177A-F1 (truth audit MAJOR 1) — a cohort published over a STALE
+    contact funnel is a count *as of* its watermark (`docs/44` §7). A payload
+    that publishes it must say so in machine-readable form: ``stale`` true and
+    an ``as_of`` on the block and in its metadata, from which every surface
+    prints "measured as of …". A stale published count without them reads as
+    current, which it is not.
+
+    Also (MINOR 1): a published cohort declares the last day it counts
+    (``window.end_date``) — the campaign and country views end on different
+    days and each count says which."""
+    c = payload.get("cohort") or {}
+    if c.get("sql_status") != "published":
+        return []
+    meta = c.get("metadata") or {}
+    reason = (meta.get("source_freshness") or {}).get("reason")
+    problems = []
+    if reason == "source_stale":
+        if c.get("stale") is not True:
+            problems.append("cohort.stale is not true over a source_stale funnel")
+        if not c.get("as_of"):
+            problems.append("cohort.as_of is missing over a source_stale funnel")
+        if not meta.get("as_of"):
+            problems.append("cohort.metadata.as_of is missing over a source_stale funnel")
+    elif c.get("stale"):
+        problems.append(f"cohort.stale is true but the funnel is {reason!r}")
+    if not ((c.get("window") or {}).get("end_date")):
+        problems.append("cohort.window.end_date is not declared")
+    return problems
+
+
+def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
+    """PR-ADS-177A — every mart / Dashboard payload of one business window.
+
+    ``payloads``: name → payload (``mart/campaign``, ``mart/country``,
+    ``dashboard/overview``, ``dashboard/campaigns``, ``dashboard/countries``,
+    ``dashboard/revenue``, ``dashboard/deals``)."""
+    w = f"[business:{window}]"
+    out = {"window": window, "surfaces": {}}
+    for name, payload in payloads.items():
+        if payload is None:
+            a.cannot_check(f"{w} {name}", "the payload could not be built")
+            continue
+        status = (payload.get("cohort") or {}).get("sql_status")
+        out["surfaces"][name] = {"sql_status": status,
+                                 "sql_reason": (payload.get("cohort") or {}).get("sql_reason")}
+        if status is None:
+            a.broken(f"{w} {name} cohort_declared",
+                     "the payload carries no acquisition-cohort verdict")
+            continue
+        exposed = mart_withheld_exposures(payload)
+        if exposed:
+            a.broken(f"{w} {name} withheld_not_exposed",
+                     f"the cohort is {status!r} but a count is present at: {exposed[:6]}")
+        elif status != "published":
+            a.holds(f"{w} {name} withheld_not_exposed",
+                    f"cohort {status} ({(payload.get('cohort') or {}).get('sql_reason')}); "
+                    "no lead or SQL count is present")
+        stale_problems = mart_stale_disclosure_problems(payload)
+        if stale_problems:
+            a.broken(f"{w} {name} stale_disclosed", "; ".join(stale_problems))
+        elif status == "published":
+            a.holds(f"{w} {name} stale_disclosed",
+                    "the published cohort declares its window end and, when "
+                    "the funnel is stale, its as-of watermark")
+        view = ("campaign" if name == "mart/campaign" else "country"
+                if name == "mart/country" else name)
+        if view in ("campaign", "country", "dashboard/countries"):
+            problems = mart_conservation_problems(payload, view=view)
+            if problems:
+                a.broken(f"{w} {name} conservation", "; ".join(problems))
+            elif status == "published":
+                a.holds(f"{w} {name} conservation",
+                        "rows plus residual equal the cohort total")
     return out
 
 
@@ -639,8 +855,42 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
         report["windows"].append(audit_window(
             a, window=window, payload=payload, independent=independent))
 
+    # PR-ADS-177A: the mart and the Dashboard payloads, every business window.
+    from analysis.business_windows import WINDOW_KEYS
+    report["business_windows"] = []
+    for bw in WINDOW_KEYS:
+        report["business_windows"].append(audit_mart_window(
+            a, window=bw, payloads=_build_mart_payloads(bw, now)))
+
     report["population_split"] = global_population_split()
     return a, report
+
+
+def _build_mart_payloads(window: str, now) -> dict:
+    """The surfaces that republish the one SQL count, built by production code.
+    A builder that raises yields None (``cannot_check``), never a crash."""
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    from services.dashboard_countries_service import build_dashboard_countries
+    from services.dashboard_deals_service import build_dashboard_deals
+    from services.dashboard_overview_service import build_dashboard_overview
+    from services.dashboard_revenue_service import build_dashboard_revenue
+    from services.revenue_decision_mart import build_revenue_decision_mart
+    builders = {
+        "mart/campaign": lambda: build_revenue_decision_mart(view="campaign", window=window, now=now),
+        "mart/country": lambda: build_revenue_decision_mart(view="country", window=window, now=now),
+        "dashboard/overview": lambda: build_dashboard_overview(window=window, now=now),
+        "dashboard/campaigns": lambda: build_dashboard_campaigns(window=window, now=now),
+        "dashboard/countries": lambda: build_dashboard_countries(window=window, now=now),
+        "dashboard/revenue": lambda: build_dashboard_revenue(window=window, now=now),
+        "dashboard/deals": lambda: build_dashboard_deals(window=window, now=now),
+    }
+    out = {}
+    for name, fn in builders.items():
+        try:
+            out[name] = json.loads(json.dumps(fn(), default=str))
+        except Exception:  # noqa: BLE001
+            out[name] = None
+    return out
 
 
 def _render(report: dict, a: Audit, exit_code: int) -> None:
