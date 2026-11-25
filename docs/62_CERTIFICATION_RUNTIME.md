@@ -563,11 +563,28 @@ The cost is one round trip per statement that names a verb, and per
 `executemany` call. Other reads cost nothing extra: the status check is
 local to libpq. A reader's own
 `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` / `READ ONLY` is still
-absorbed. What this does not cover: a reader that takes
-`cursor.connection.cursor()` and runs statements on psycopg2's own cursor
-bypasses the view entirely. No production reader does. If such a cursor ended
-the transaction, the block's savepoint release would still fail and mark the
-snapshot broken, but only after that cursor had read.
+absorbed.
+
+`callproc`, `copy_expert`, `copy_to` and `copy_from` are guarded like
+`execute`, and are always verified (PR-ADS-179B-F1, §9). Before that they
+passed straight through. A pinned view refuses `connection.reset()`.
+
+**The remaining, disclosed bypass.** A reader that takes psycopg2's OWN
+cursor (`cursor.connection.cursor()`, or anything reached through
+`cursor.connection` other than `commit()` / `rollback()`) bypasses the
+view's per-statement checks. Its statements are not checked before or after
+they run, so a read it makes after ending the pinned transaction is NOT
+prevented. No production reader does this.
+
+What catches such an escape is the reader's own savepoint: on the block's
+exit, the RELEASE fails, or on an exception the ROLLBACK TO fails, because
+the savepoint went with the transaction. Either failure is recorded as a
+refusal on the pin (`_Pin.violations`, PR-ADS-179B-F1). That is what the
+audits read (`snapshot_memo.refused_reads`): the window is then reported
+unavailable (exit 2), and its `snapshot` entry reads `snapshot_broken`.
+Before F1, the exception path set `broken` without recording anything, so
+a window whose last `get_conn()` escaped this way and then raised certified
+with exit 0 and read `pinned: true`.
 
 ### 8.4 An unpinned window is disclosed
 
@@ -583,7 +600,10 @@ window's entry, `{"pinned", "reason", "detail"}`, where `reason` is one of:
 * `snapshot_open_failed`;
 * `no_database`;
 * `not_recorded`. A window is pinned only when its scope carries a pin, and
-  a missing record is never read as pinned.
+  a missing record is never read as pinned;
+* `snapshot_broken` (PR-ADS-179B-F1): the window was pinned, but its snapshot
+  broke or refused a read. Such a window is also unavailable (exit 2); it is
+  never reported `pinned: true`.
 
 `snapshot_memo.pinning_summary` adds a report-level `snapshot_pinning`, with
 a note that names the unpinned windows and says that what was certified
@@ -596,8 +616,17 @@ there is NOT a snapshot-consistent build:
 | `campaigns` | `per_window[w].snapshot` | `Findings.snapshot_pinning`; `snapshot_pinning` in `--json` |
 
 `test_06` now compares the reports without these keys, because they differ
-by design. It asserts the disclosure itself: every window is pinned with the
-windows, and every window is `not_recorded` without them.
+by design. Since F1 it removes them only at the exact paths in this table.
+It asserts the disclosure itself: every window is pinned with the windows,
+and every window is `not_recorded` without them.
+
+Since PR-ADS-179B-F1 the disclosure also reaches the daily verdict. The
+stored `platform_certification_runs.summary` row
+(`platform_certification_service.summarize`) keeps each audit's
+`snapshot_pinning`: the counts, the windows not pinned with their reasons,
+and the note. The platform certification's human output prints the note
+under any audit with a window that was not pinned. Before F1 both dropped
+it, so an unpinned window was visible only in that audit's own report.
 
 ### 8.5 The shared lock never rides a pooled connection
 
@@ -634,3 +663,40 @@ The mutations, each applied alone to a copy of the fixed tree:
 * **M23**: the backfill CLI does not catch `SchemaMigrationBlocked`.
 * **M24**: a window with no record reads as pinned.
 * **M25**: only the template is checked for a verb, not the text sent.
+
+## 9. PR-ADS-179B-F1 (truth audit round 1)
+
+The verdict was merge with minors. Base and head reports were identical
+apart from the new `snapshot` / `snapshot_pinning` keys. 271 of 2,938
+statements triggered the CASE … END check, and every one passed. Three
+items were fixed:
+
+1. **A broken pin never certifies or reads as pinned.** `_Pin._undo`
+   records a refusal whenever it marks the snapshot broken.
+   `window_snapshot` reports `pinned: false`, `reason: "snapshot_broken"`
+   for a broken pin or a pin with any refusal. The summary note names such
+   a window and never calls it snapshot-consistent. The reader-cutover
+   audit now reads the entry after the window's block, as the other two
+   already did.
+2. **The disclosure reaches the daily verdict.** `summarize()` keeps
+   `snapshot_pinning` for each audit, and `_render` prints its note (§8.4).
+3. **The pass-through bypasses are closed.** `callproc`, `copy_*` and
+   `reset()` are guarded (§8.3). The one remaining bypass, psycopg2's own
+   cursor, is disclosed in §8.3.
+
+| Case | Proves | On `acb4f66` | Fails under |
+| --- | --- | --- | --- |
+| 06_a[raw_cursor_escape] | the auditor's probe as the window's LAST read: the escape read `('read committed', 'off')`, then raised; the window records a refusal, exits 2, reads `snapshot_broken`, and the note says NOT snapshot-consistent | exit 0, `pinned: true`, no refusal | M26, M27 |
+| 06_a[rollback_and_chain] | a swallowed `SELECT 1; ROLLBACK AND CHAIN`: exit 2 AND `snapshot_broken` | exit 2 but `pinned: true` and "snapshot-consistent" | M27 |
+| 06_b | `window_snapshot` reads the pin: a refusal alone makes it `snapshot_broken` | `pinned: true` | M27 |
+| 07 | `summarize()` stores the windows not pinned, with reasons and the note; `_render` prints it; an all-pinned audit prints nothing extra; an audit with no windows stores no key (no database needed) | `KeyError: 'snapshot_pinning'` | M28, M29 |
+| 08 | after `cursor.connection.commit()`, `copy_expert`, `copy_to` and `callproc` are refused before they read; in an intact snapshot they run in it; `reset()` is refused and recorded, and the snapshot stays intact | `copy_expert` read `read committed\toff` | M30–M33 |
+
+* **M26**: `_undo` sets `broken` without recording a refusal.
+* **M27**: `window_snapshot` ignores `broken` and the refusals.
+* **M28**: `summarize()` drops `snapshot_pinning`.
+* **M29**: `_render` prints nothing about it.
+* **M30**: `copy_expert` passes through unguarded.
+* **M31**: `callproc` passes through unguarded.
+* **M32**: `copy_to` passes through unguarded.
+* **M33**: the pinned view does not refuse `reset()`.

@@ -66,6 +66,9 @@ def summarize(report: dict) -> dict:
         kept = _drawer_populations(a.get("report"))
         if kept is not None:
             a = {**a, "drawer_populations": kept}
+        pinning = snapshot_pinning(a.get("report"))
+        if pinning is not None:
+            a = {**a, "snapshot_pinning": pinning}
         audits.append({k: a.get(k) for k in (
             "key", "module", "outcome", "exit_code", "seconds", "violations",
             "unavailable", "detail",
@@ -75,12 +78,37 @@ def summarize(report: dict) -> dict:
             "memory")
             # PR-ADS-177C-F1: present only for an audit that probes campaign
             # drawers (campaigns) — see `_drawer_populations`.
-            + (("drawer_populations",) if "drawer_populations" in a else ())})
+            + (("drawer_populations",) if "drawer_populations" in a else ())
+            # PR-ADS-179B-F1: present only for an audit that reads windows in
+            # pinned snapshots — see `snapshot_pinning`.
+            + (("snapshot_pinning",) if "snapshot_pinning" in a else ())})
     return {"verdict": report.get("verdict"),
             "exit_code": report.get("exit_code"),
             "generated_at": report.get("generated_at"),
             "audits": audits,
             "crm_data_to_fix": report.get("crm_data_to_fix")}
+
+
+def snapshot_pinning(audit_report) -> dict | None:
+    """PR-ADS-179B-F1 — an audit report's ``snapshot_pinning`` summary
+    (``services.snapshot_memo.pinning_summary``), or None for an audit that
+    reads no certification window.
+
+    The raw report is dropped from the stored summary. Without this, a
+    CERTIFIED day whose windows ran unpinned — or broke — stored the same row
+    as one read in intact snapshots. The windows that were not pinned are
+    named, with their reasons."""
+    if not isinstance(audit_report, dict):
+        return None
+    pinning = audit_report.get("snapshot_pinning")
+    if not isinstance(pinning, dict):
+        return None
+    return {"all_pinned": pinning.get("all_pinned") is True,
+            "windows": pinning.get("windows"), "pinned": pinning.get("pinned"),
+            "unpinned": [{"window": u.get("window"), "reason": u.get("reason")}
+                         for u in pinning.get("unpinned") or []
+                         if isinstance(u, dict)],
+            "note": pinning.get("note")}
 
 
 def _drawer_populations(audit_report) -> dict | None:

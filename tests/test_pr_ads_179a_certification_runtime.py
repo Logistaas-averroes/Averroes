@@ -441,17 +441,26 @@ def _run_all(now):
     return _strip(_json(out))
 
 
-#: PR-ADS-179B — the one part of a report that differs, by design, with and
-#: without the windows: whether each window was pinned.
-PINNING_KEYS = {"snapshot", "snapshot_pinning"}
-
-
-def _without_pinning(node):
-    if isinstance(node, dict):
-        return {k: _without_pinning(v) for k, v in node.items() if k not in PINNING_KEYS}
-    if isinstance(node, list):
-        return [_without_pinning(v) for v in node]
-    return node
+def _without_pinning(name: str, report: dict) -> dict:
+    """PR-ADS-179B — the one part of a report that differs, by design, with
+    and without the windows: whether each window was pinned. Removed at the
+    EXACT paths the three audits write it (PR-ADS-179B-F1), so a payload key
+    that happens to be named ``snapshot`` is still compared."""
+    import copy
+    out = copy.deepcopy(report)
+    out.pop("snapshot_pinning")
+    if name == "cohorts":
+        windows = [out["business_windows"]]
+    elif name == "reader_cutover":
+        windows = [out["windows"], out["evidence_windows"]]
+    else:
+        assert name == "campaigns", name
+        windows = [list(out["per_window"].values())]
+    for entries in windows:
+        assert entries, name
+        for entry in entries:
+            entry.pop("snapshot")
+    return out
 
 
 def _pinning(out) -> list:
@@ -515,7 +524,8 @@ def test_06_every_audit_reports_and_builds_exactly_the_same_with_and_without_the
     windowed = _run_all(now)
     windowed_pages = list(log)
     for name in plain:
-        assert _without_pinning(windowed[name]) == _without_pinning(plain[name]), name
+        assert _without_pinning(name, windowed[name]) == \
+            _without_pinning(name, plain[name]), name
     # PR-ADS-179B: the disclosure itself — every window pinned with the
     # windows; every window unpinned (never pinned by default) without them.
     for name, summary in _pinning(windowed):

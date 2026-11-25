@@ -852,3 +852,17 @@ truncated list. Verified by execution on exported copies of both commits.
   statement.
 - The unpinned fallback certifies exit 0 with only a log warning — no report
   field says the window was not snapshot-consistent.
+
+## PR-ADS-179B review (acb4f66 on 9a09c6d, 2026-11-25) — pin escapes, disclosure
+- Verdict: merge with minors. Base vs head reports identical apart from the new
+  `snapshot`/`snapshot_pinning` keys; all 19 windows pinned; exit 0.
+- Pin check: transaction-local marker `averroes.pinned_read_snapshot` + `_Pin.verify`
+  after any statement whose template OR sent `cursor.query` names
+  COMMIT|END|ROLLBACK|ABORT|PREPARE, and after every executemany; `check_open`
+  refuses IDLE before execute/executemany/get_conn. In the audits only CASE…END
+  triggers it (~9% of statements); every check passes when pinned.
+- Found: callproc/copy_*/reset bypassed check_open; `_undo` set `broken` without a
+  violation so a broken window could certify `pinned: true`; `summarize()` dropped
+  `snapshot_pinning` from the daily row.
+- 161E test_26 fails in a tar copy (no .git); rerun with GIT_DIR=<worktree gitdir>.
+- PR-ADS-179B-F1 fixed items 1–3 (`_undo` records; `snapshot_broken`; summarize/_render carry the note; callproc/copy_*/reset guarded).

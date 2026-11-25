@@ -1744,9 +1744,10 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                 if "revenue_decision_mart_campaign_settled" in built:
                     checked["campaign_settled"] = settled_mart_checks(
                         a, key, now, built["revenue_decision_mart_campaign_settled"])
-                checked["snapshot"] = window_snapshot(scope, disclosure)
-                pinning.append((key, checked["snapshot"]))
                 report["windows"].append(checked)
+            # PR-ADS-179B-F1: read once the window's reads are done.
+            checked["snapshot"] = window_snapshot(scope, disclosure)
+            pinning.append((key, checked["snapshot"]))
             report["pages_not_run"] += [
                 {"window": key, "page": "pinned_snapshot",
                  "detail": f"a read in this window was refused by its pinned "
@@ -1776,9 +1777,9 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                     pages=built, window_type="evidence",
                     page_pubs={n: settled_pub for n in built} if built else None)
                 checked["window"] = f"evidence/{key}"
-                checked["snapshot"] = window_snapshot(scope, disclosure)
-                pinning.append((f"evidence/{key}", checked["snapshot"]))
                 report["evidence_windows"].append(checked)
+            checked["snapshot"] = window_snapshot(scope, disclosure)
+            pinning.append((f"evidence/{key}", checked["snapshot"]))
             report["pages_not_run"] += [
                 {"window": f"evidence/{key}", "page": "pinned_snapshot",
                  "detail": f"a read in this window was refused by its pinned "

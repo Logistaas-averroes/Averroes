@@ -7426,3 +7426,33 @@ window or exit code changed.
 
   Every new guard fails on `9a09c6d`, or under a named mutation (M18–M25)
   where 179A already held.
+
+## PR-ADS-179B-F1 — truth audit round 1
+
+`docs/62` §9. On top of `acb4f66`. The verdict was merge with minors. Base
+and head reports were identical apart from the new keys. The CASE … END
+check found no false positives: 271 of 2,938 statements triggered it, and
+all passed.
+
+* **A broken pin never certifies or reads as pinned.** `_Pin._undo` marked
+  the snapshot broken without recording a refusal, and the audits read only
+  the refusals. So a reader that escaped through psycopg2's own cursor and
+  then raised, in the window's last read, certified with exit 0 and
+  `pinned: true` after reading `read committed`. Now:
+  * a refusal is recorded whenever the pin breaks, so the window exits 2;
+  * a broken pin, or one with any refusal, reads `snapshot_broken`;
+  * the summary note never calls such a window snapshot-consistent.
+* **The disclosure reaches the daily verdict.** 179B put `snapshot` and
+  `snapshot_pinning` in each audit's own report only. The stored
+  `platform_certification_runs.summary` row and the platform certification's
+  output dropped them, so the daily verdict did not show an unpinned window.
+  Now `summarize()` stores each audit's `snapshot_pinning`, and `_render`
+  prints its note.
+* **The pass-through bypasses are closed.** `callproc`, `copy_expert`,
+  `copy_to` and `copy_from` are guarded and verified like `execute`, and a
+  pinned view refuses `reset()`. The one remaining bypass, psycopg2's own
+  cursor via `cursor.connection.cursor()`, is disclosed in `docs/62` §8.3.
+* **Tests.** The 179b module gains 06_a (×2), 06_b, 07 and 08, for 15 cases.
+  Each fails on `acb4f66` and under a named mutation (M26–M33). `test_06`
+  in the 179a module now removes the pinning keys only at the audits' exact
+  report paths.

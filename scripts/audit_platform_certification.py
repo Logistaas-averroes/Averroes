@@ -514,6 +514,13 @@ _MARK = {HOLDS: "PASS", VIOLATION: "FAIL", UNAVAILABLE: "UNAVAILABLE",
          CRASHED: "CRASHED"}
 
 
+def _snapshot_pinning(audit_report):
+    from services.platform_certification_service import (  # noqa: PLC0415
+        snapshot_pinning,
+    )
+    return snapshot_pinning(audit_report)
+
+
 def _render(report: dict) -> None:
     print("=" * 78)
     print(f"  PLATFORM CERTIFICATION: {report['verdict']}"
@@ -533,6 +540,11 @@ def _render(report: dict) -> None:
             print(f"  {'':<12}  {r['detail']}")
             for line in r.get("stderr_tail") or []:
                 print(f"  {'':<12}  | {line[:200]}")
+        # PR-ADS-179B-F1: a window not read in one intact pinned snapshot is
+        # named here, whatever the verdict.
+        pinning = _snapshot_pinning(r.get("report"))
+        if pinning is not None and not pinning["all_pinned"]:
+            print(f"  {'':<12}  snapshot: {pinning['note']}")
         if r["outcome"] != HOLDS:
             print(f"  {'':<12}  details: python -m {r['module']}")
 

@@ -307,6 +307,27 @@ class _PinnedCursor:
     def execute(self, query, vars=None):  # noqa: A002 — psycopg2's own name
         return self._run(lambda: self._cursor.execute(query, vars), query)
 
+    # PR-ADS-179B-F1: the other ways a cursor sends a statement used to pass
+    # straight through ``__getattr__`` — no ``check_open``, no verification —
+    # so after ``cursor.connection.commit()`` a ``copy_expert`` read in a new
+    # READ COMMITTED transaction. Each is now guarded like ``execute``, and
+    # always verified (their sent text is not in ``cursor.query``).
+    def callproc(self, procname, *args, **kwargs):
+        return self._run(lambda: self._cursor.callproc(procname, *args, **kwargs),
+                         None, always_verify=True)
+
+    def copy_expert(self, sql, *args, **kwargs):
+        return self._run(lambda: self._cursor.copy_expert(sql, *args, **kwargs),
+                         sql, always_verify=True)
+
+    def copy_to(self, *args, **kwargs):
+        return self._run(lambda: self._cursor.copy_to(*args, **kwargs),
+                         None, always_verify=True)
+
+    def copy_from(self, *args, **kwargs):
+        return self._run(lambda: self._cursor.copy_from(*args, **kwargs),
+                         None, always_verify=True)
+
     def executemany(self, query, vars_list):
         # ``cursor.query`` holds only the LAST statement executemany sent, so
         # what the others carried is unknown: always verified (one round trip
@@ -357,7 +378,10 @@ class _PinnedView:
         return self._pin
 
     def __getattr__(self, name):
-        if name in ("autocommit", "set_session", "set_isolation_level", "tpc_begin"):
+        # PR-ADS-179B-F1: ``reset()`` rolls the transaction back and resets
+        # the session — it would end the pinned transaction without a statement.
+        if name in ("autocommit", "set_session", "set_isolation_level", "tpc_begin",
+                    "reset"):
             raise self._pin.refuse(
                 f"a reader may not use connection.{name} inside a pinned snapshot")
         return getattr(self._pin.conn, name)
@@ -457,14 +481,26 @@ class _Pin:
             raise self._ended(f"the session is now {isolation}, read only {read_only}")
         self.suspect = False
 
-    def _undo(self, savepoint: str) -> None:
+    def _undo(self, savepoint: str, *, record: bool = True) -> None:
         """Roll back to ``savepoint`` and drop it; mark the snapshot broken
-        when even that fails."""
+        when even that fails.
+
+        PR-ADS-179B-F1: and RECORD it (unless the caller records its own
+        refusal). Setting ``broken`` alone was invisible to the audits, which
+        read ``violations``: a reader that escaped the snapshot through
+        psycopg2's own cursor and then raised — in the window's last
+        ``get_conn()``, so no later read tripped over it — left the window
+        certifying, exit 0, reported pinned."""
         try:
             self.run(f"ROLLBACK TO SAVEPOINT {savepoint}")
             self.run(f"RELEASE SAVEPOINT {savepoint}")
-        except Exception:  # noqa: BLE001
-            self.broken = True
+        except Exception as exc:  # noqa: BLE001
+            if record:
+                self.refuse(f"savepoint {savepoint} could not be rolled back after "
+                            f"the reader's error ({safe_db_error(exc)}); the reads "
+                            "inside it are not trusted", broken=True)
+            else:
+                self.broken = True
 
     @contextlib.contextmanager
     def enter(self):
@@ -490,7 +526,7 @@ class _Pin:
             self.run(f"RELEASE SAVEPOINT {savepoint}")
         except Exception as exc:  # noqa: BLE001
             detail = safe_db_error(exc)
-            self._undo(savepoint)
+            self._undo(savepoint, record=False)      # recorded just below
             raise self.refuse(
                 f"savepoint {savepoint} could not be released ({detail}); "
                 "the reads inside it are not trusted", broken=True) from None

@@ -150,6 +150,10 @@ UNPINNED_NO_DATABASE = "no_database"
 #: The window recorded nothing (it was not opened by ``certification_window``):
 #: never read as pinned.
 UNPINNED_NOT_RECORDED = "not_recorded"
+#: PR-ADS-179B-F1 — the window WAS pinned, but its snapshot broke or refused a
+#: read: what it built is not proven to be the snapshot's (the audit reports
+#: the window unavailable, exit 2).
+UNPINNED_BROKEN = "snapshot_broken"
 
 
 def _unpinned_because(exc: BaseException) -> tuple[str, str]:
@@ -231,8 +235,22 @@ def window_snapshot(scope: MemoScope | None, disclosure: dict | None) -> dict:
     ``{"pinned", "reason", "detail"}``. Pinned only when the window's scope
     really carries a pin — the disclosure supplies the reason, never the
     verdict — so a window opened some other way reads unpinned
-    (``not_recorded``), never pinned by default."""
-    if scope is not None and getattr(scope, "pin", None) is not None:
+    (``not_recorded``), never pinned by default.
+
+    PR-ADS-179B-F1: and only when that pin held — never broken, nothing
+    refused. Read after the window's reads (the pin's record is final once
+    the block's reads are done)."""
+    pin = getattr(scope, "pin", None) if scope is not None else None
+    if pin is not None:
+        refused = list(getattr(pin, "violations", None) or [])
+        broken = bool(getattr(pin, "broken", False))
+        if broken or refused:
+            first = f": {refused[0][:200]}" if refused else ""
+            return {"pinned": False, "reason": UNPINNED_BROKEN,
+                    "detail": (f"the pinned snapshot {'broke' if broken else 'held'}"
+                               f" and refused {len(refused)} read(s) in this window"
+                               f"{first}; what it built is not proven to be the "
+                               f"snapshot's")}
         return {"pinned": True, "reason": None, "detail": None}
     d = disclosure or {}
     if d.get("pinned") is False and d.get("reason"):
@@ -257,10 +275,18 @@ def pinning_summary(windows) -> dict:
         note = (f"every window ({pinned}) was read inside one pinned REPEATABLE "
                 f"READ, READ ONLY snapshot: a snapshot-consistent build")
     else:
-        note = (f"{len(unpinned)} of {len(entries)} window(s) ran UNPINNED "
-                f"({', '.join(u['window'] for u in unpinned)}): each read there ran "
-                f"in its own READ COMMITTED transaction, as before PR-ADS-179A, so "
-                f"what was certified there is NOT a snapshot-consistent build. The "
-                f"exit code is unchanged by this.")
+        # PR-ADS-179B-F1: a broken window is named as such, never folded into
+        # "pinned", and the note never calls it snapshot-consistent.
+        named = ", ".join(f"{u['window']} ({u['reason']})" for u in unpinned)
+        note = (f"{len(unpinned)} of {len(entries)} window(s) were NOT read in one "
+                f"intact pinned snapshot ({named}): what was certified there is "
+                f"NOT a snapshot-consistent build.")
+        if any(u["reason"] != UNPINNED_BROKEN for u in unpinned):
+            note += (" An UNPINNED window read each statement in its own READ "
+                     "COMMITTED transaction, as before PR-ADS-179A; that alone "
+                     "does not change the exit code.")
+        if any(u["reason"] == UNPINNED_BROKEN for u in unpinned):
+            note += (" A window whose snapshot broke or refused a read is also "
+                     "reported unavailable (exit 2).")
     return {"all_pinned": bool(entries) and not unpinned, "windows": len(entries),
             "pinned": pinned, "unpinned": unpinned, "note": note}
