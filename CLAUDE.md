@@ -50,7 +50,10 @@ different interpreter than the one holding the dependencies).
 ### Reproducing CI locally
 
 CI is one workflow, `.github/workflows/pr-ads-153d-checks.yml`, with a blocking
-job of three pytest steps plus static checks. Run them in this order:
+job of three pytest steps plus static checks. It runs on pull requests only
+(not on the push to `main`), and the full-suite step skips the modules the
+PostgreSQL and contract steps already ran, so each test runs once per job
+(owner decision, 25 Nov 2026). Run them in this order:
 
 ```bash
 # static
