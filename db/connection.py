@@ -149,6 +149,13 @@ def get_conn():
 #   savepoint on a clean exit (as get_conn's commit does outside a window);
 # * every refusal is recorded on the pin (``_Pin.violations``) as it is
 #   raised, so a reader that swallows it cannot hide it from the audit;
+# * PR-ADS-179B: no statement runs once a reader's statement has ended the
+#   pinned transaction. The pin carries a transaction-local marker
+#   (``_PIN_MARKER_SETTING``, set at the top level, so it survives every
+#   savepoint rollback and vanishes with the transaction); after any
+#   statement that could end a transaction, the view asks the session for
+#   that marker and the modes, and before every statement it refuses a
+#   connection that is no longer in a transaction (see ``_Pin.check_open``);
 # * the transaction is READ ONLY: PostgreSQL itself refuses any write;
 # * a window first takes the shared schema lock (``SCHEMA_LOCK_KEY``) so it
 #   can never deadlock with ``init_db``'s DDL;
@@ -159,6 +166,7 @@ def get_conn():
 import contextvars as _contextvars  # noqa: E402
 import itertools as _itertools  # noqa: E402
 import re as _re  # noqa: E402
+import uuid as _uuid  # noqa: E402
 
 PINNED_SNAPSHOT_MODE = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 
@@ -190,7 +198,25 @@ _SATISFIED_MODES = _re.compile(
     r")\s*;?\s*$", _re.IGNORECASE)
 _ANY_MODE = _re.compile(
     r"^\s*(?:SET\s+TRANSACTION|SET\s+SESSION\s+CHARACTERISTICS|BEGIN\b|START\s+TRANSACTION"
-    r"|COMMIT\b|END\b|ROLLBACK\s*(?:WORK|TRANSACTION)?\s*;?\s*$)", _re.IGNORECASE)
+    r"|COMMIT\b|END\b|ABORT\b|PREPARE\s+TRANSACTION\b"
+    # Every ROLLBACK but a reader's own ``ROLLBACK [WORK|TRANSACTION] TO
+    # [SAVEPOINT] name`` — PR-ADS-179B: ``ROLLBACK AND CHAIN`` used to pass.
+    r"|ROLLBACK\b(?!\s+(?:(?:WORK|TRANSACTION)\s+)?TO\b))", _re.IGNORECASE)
+
+#: PR-ADS-179B — the only verbs by which a statement sent inside a
+#: transaction block can END it (``COMMIT``/``END``, ``ROLLBACK``/``ABORT``,
+#: their ``AND CHAIN`` forms, ``PREPARE TRANSACTION``). A procedure or ``DO``
+#: block cannot commit inside a transaction block, and a keyword cannot be
+#: quoted or escaped, so a statement whose text names none of these cannot
+#: end the pinned transaction. A statement that DOES name one (anywhere — a
+#: ``CASE … END`` included) is verified against the session after it runs.
+_TX_ENDING_WORD = _re.compile(r"\b(?:COMMIT|END|ROLLBACK|ABORT|PREPARE)\b",
+                              _re.IGNORECASE)
+
+#: PR-ADS-179B — the transaction-local setting that marks the pinned
+#: transaction (``set_config(..., is_local => true)``). A new transaction —
+#: however a reader opened it — does not carry it.
+_PIN_MARKER_SETTING = "averroes.pinned_read_snapshot"
 
 
 class PinnedSnapshotError(RuntimeError):
@@ -203,9 +229,22 @@ class _PinnedCursor:
     """A reader's cursor on the pinned connection. Statements pass through,
     except transaction-mode statements (see the section comment) — whether
     sent as ``str``, ``bytes`` or a ``psycopg2.sql`` composition, through
-    ``execute`` or ``executemany``. A statement that ENDS the pinned
-    transaction anyway (``SELECT 1; COMMIT``) is caught the moment it returns:
-    the snapshot is marked broken and every later read in it is refused."""
+    ``execute`` or ``executemany``.
+
+    A statement that ENDS the pinned transaction anyway is caught the moment
+    it returns, and the snapshot is marked broken: every later statement and
+    ``get_conn()`` in it is refused before it is sent. PR-ADS-179B: "ended" is
+    decided by the session, not by the client's transaction status alone —
+    ``SELECT 1; COMMIT; BEGIN ISOLATION LEVEL READ COMMITTED`` and
+    ``SELECT 1; ROLLBACK AND CHAIN`` leave the connection INTRANS, in a NEW
+    transaction (READ COMMITTED and writable; or the same modes with a new
+    snapshot). Any statement whose text — the template or the text psycopg2
+    actually sent — names a transaction-ending verb (``_TX_ENDING_WORD``),
+    whose text cannot be read, and every ``executemany``, is followed by
+    ``_Pin.verify``: the session must still carry the pin's marker, in
+    REPEATABLE READ, read only. A commit through the raw connection
+    (``cursor.connection.commit()``) sends no statement; it leaves the
+    connection IDLE, and the next statement is refused before it is sent."""
 
     def __init__(self, cursor, pin):
         self._cursor = cursor
@@ -220,11 +259,8 @@ class _PinnedCursor:
             return query.as_string(self._cursor)
         return None
 
-    def _absorbed(self, query) -> bool:
-        if self._pin.broken:
-            raise self._pin.refuse("this pinned snapshot is broken; no further read "
-                                   "in it is trusted")
-        text = self._text(query)
+    def _absorbed(self, query, text) -> bool:
+        self._pin.check_open()
         if text is None:
             return False
         if _SATISFIED_MODES.match(text):
@@ -235,26 +271,48 @@ class _PinnedCursor:
                 f"may not run {text.strip()[:80]!r}")
         return False
 
-    def _still_pinned(self) -> None:
-        from psycopg2.extensions import TRANSACTION_STATUS_IDLE  # noqa: PLC0415
-        if self._pin.conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
-            raise self._pin.refuse(
-                "a reader's statement ended the pinned transaction; nothing after "
-                "it in this window is read from the snapshot", broken=True)
+    def _sent_could_end(self) -> bool:
+        """Whether the text psycopg2 actually SENT names a transaction-ending
+        verb — a parameter (``AsIs``) can carry SQL the template does not
+        show. Unknown is treated as yes."""
+        sent = getattr(self._cursor, "query", None)
+        if sent is None:
+            return True
+        if isinstance(sent, (bytes, bytearray, memoryview)):
+            sent = bytes(sent).decode("utf-8", "replace")
+        return _TX_ENDING_WORD.search(sent) is not None
+
+    def _run(self, send, query, *, always_verify: bool = False):
+        """Send one reader statement and prove the pin survived it."""
+        text = self._text(query)
+        if self._absorbed(query, text):
+            return None
+        could_end = (always_verify or text is None
+                     or _TX_ENDING_WORD.search(text) is not None)
+        try:
+            out = send()
+        except BaseException:
+            if could_end or self._sent_could_end():
+                # It may have ended the transaction before it failed; the
+                # session cannot be asked while aborted, so the NEXT
+                # statement is verified first (``_Pin.check_open``).
+                self._pin.suspect = True
+            raise
+        if could_end or self._sent_could_end():
+            self._pin.verify()
+        else:
+            self._pin.check_open()
+        return out
 
     def execute(self, query, vars=None):  # noqa: A002 — psycopg2's own name
-        if self._absorbed(query):
-            return None
-        out = self._cursor.execute(query, vars)
-        self._still_pinned()
-        return out
+        return self._run(lambda: self._cursor.execute(query, vars), query)
 
     def executemany(self, query, vars_list):
-        if self._absorbed(query):
-            return None
-        out = self._cursor.executemany(query, vars_list)
-        self._still_pinned()
-        return out
+        # ``cursor.query`` holds only the LAST statement executemany sent, so
+        # what the others carried is unknown: always verified (one round trip
+        # per call, not per row).
+        return self._run(lambda: self._cursor.executemany(query, vars_list), query,
+                         always_verify=True)
 
     def __enter__(self):
         self._cursor.__enter__()
@@ -320,12 +378,17 @@ class _Pin:
     longer be trusted to be the snapshot; every later ``get_conn()`` in it is
     then refused."""
 
-    def __init__(self, conn):
+    def __init__(self, conn, marker: str | None = None):
         self.conn = conn
         self.serial = next(_PIN_SERIALS)
         self._names = _itertools.count(1)
         self.violations: list = []
         self.broken = False
+        #: PR-ADS-179B — the value of ``_PIN_MARKER_SETTING`` in the pinned
+        #: transaction, and whether a statement that may have ended it failed
+        #: before the session could be asked (``check_open`` asks next).
+        self.marker = marker
+        self.suspect = False
 
     def refuse(self, message: str, *, broken: bool = False) -> "PinnedSnapshotError":
         """Record a refusal and return the error to raise."""
@@ -339,6 +402,61 @@ class _Pin:
         with self.conn.cursor() as cur:
             cur.execute(sql)
 
+    def _ended(self, now: str) -> "PinnedSnapshotError":
+        return self.refuse(
+            f"a reader's statement ended the pinned transaction ({now}); nothing "
+            "after it in this window is read from the snapshot", broken=True)
+
+    def check_open(self) -> None:
+        """Before a statement: refuse a broken snapshot, and a connection that
+        is no longer in a transaction (a commit / rollback through the raw
+        connection sends no statement; psycopg2 would open a new READ
+        COMMITTED transaction for the next one). If an earlier statement that
+        could end the transaction failed, ask the session first."""
+        from psycopg2.extensions import (  # noqa: PLC0415
+            TRANSACTION_STATUS_IDLE, TRANSACTION_STATUS_INTRANS,
+        )
+        if self.broken:
+            raise self.refuse("this pinned snapshot is broken; no further read in "
+                              "it is trusted")
+        status = self.conn.get_transaction_status()
+        if status == TRANSACTION_STATUS_IDLE:
+            raise self._ended("the connection is no longer in a transaction")
+        if self.suspect and status == TRANSACTION_STATUS_INTRANS:
+            self.verify()
+
+    def verify(self) -> None:
+        """After a statement that could end a transaction: the session must
+        still be in THE pinned transaction — its marker, REPEATABLE READ, read
+        only. Otherwise the snapshot is broken (PR-ADS-179B). An aborted
+        transaction cannot be asked; it stays ``suspect`` and is asked before
+        the next statement (in an aborted transaction no read can succeed)."""
+        from psycopg2.extensions import (  # noqa: PLC0415
+            TRANSACTION_STATUS_IDLE, TRANSACTION_STATUS_INTRANS,
+        )
+        status = self.conn.get_transaction_status()
+        if status == TRANSACTION_STATUS_IDLE:
+            raise self._ended("the connection is no longer in a transaction")
+        if status != TRANSACTION_STATUS_INTRANS:
+            self.suspect = True
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT current_setting(%s, true), "
+                            "current_setting('transaction_isolation'), "
+                            "current_setting('transaction_read_only')",
+                            (_PIN_MARKER_SETTING,))
+                marker, isolation, read_only = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            raise self._ended(f"the session could not be asked: "
+                              f"{safe_db_error(exc)}") from None
+        if self.marker is None or marker != self.marker:
+            raise self._ended(f"the session is in another transaction: {isolation}, "
+                              f"read only {read_only}")
+        if isolation != "repeatable read" or read_only != "on":
+            raise self._ended(f"the session is now {isolation}, read only {read_only}")
+        self.suspect = False
+
     def _undo(self, savepoint: str) -> None:
         """Roll back to ``savepoint`` and drop it; mark the snapshot broken
         when even that fails."""
@@ -351,9 +469,10 @@ class _Pin:
     @contextlib.contextmanager
     def enter(self):
         from psycopg2.extensions import TRANSACTION_STATUS_INERROR  # noqa: PLC0415
-        if self.broken:
-            raise self.refuse("this pinned snapshot is broken; no further read in "
-                              "it is trusted")
+        # PR-ADS-179B: a broken snapshot, a connection no longer in a
+        # transaction (a SAVEPOINT would silently open a new READ COMMITTED
+        # one), or an unverified escape: refused before the savepoint.
+        self.check_open()
         savepoint = f"pinned_read_{next(self._names)}"
         self.run(f"SAVEPOINT {savepoint}")
         view = _PinnedView(self, savepoint)
@@ -401,6 +520,7 @@ def pinned_read_snapshot():
     conn = _pool.getconn()
     broken = False
     locked = False
+    marker = f"{os.getpid()}-{_uuid.uuid4().hex}"
     try:
         # The schema lock first (see SCHEMA_LOCK_KEY), at SESSION level and in
         # its own short transaction, so the snapshot below is taken AFTER any
@@ -417,11 +537,15 @@ def pinned_read_snapshot():
             # now, so "the instant this window was read" is the block's start.
             cur.execute("SELECT 1")
             cur.fetchone()
+            # PR-ADS-179B: mark THIS transaction (transaction-local, set before
+            # any savepoint, so no reader's savepoint rollback removes it).
+            cur.execute("SELECT set_config(%s, %s, true)",
+                        (_PIN_MARKER_SETTING, marker))
     except Exception:
         broken = _release_connection(conn, locked)
         _pool.putconn(conn, close=broken)
         raise
-    pin = _Pin(conn)
+    pin = _Pin(conn, marker)
     token = _PINNED.set(pin)
     try:
         yield pin

@@ -1668,10 +1668,12 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
     from services import canonical_customer_revenue_service as svc  # noqa: PLC0415
     from services import canonical_revenue_service as crs  # noqa: PLC0415
     from services.snapshot_memo import (  # noqa: PLC0415
-        certification_window, refused_reads,
+        certification_window, pinning_summary, refused_reads, window_snapshot,
     )
 
     now = now or datetime.now(tz=timezone.utc)
+    # PR-ADS-179B: whether each window was read inside its pinned snapshot.
+    pinning: list = []
     a = Audit()
     structural = structural_checks(a)
     pure_checks(a)
@@ -1712,8 +1714,12 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
         # page; a web request reads per statement (READ COMMITTED), so a torn
         # read inside one request is invisible here by construction. A read the
         # snapshot refused, even one a reader swallowed, is a page not run.
+        # PR-ADS-179B: a window that could not pin its snapshot runs unpinned
+        # (as before 179A); each window's ``snapshot`` and the report's
+        # ``snapshot_pinning`` say so. The exit code does not change.
         for key in WINDOW_KEYS:
-            with certification_window() as scope:
+            disclosure: dict = {}
+            with certification_window(disclosure) as scope:
                 base = crs.load_won_deals(key, now=now)
                 mart, built = None, {}
                 if pages:
@@ -1738,6 +1744,8 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                 if "revenue_decision_mart_campaign_settled" in built:
                     checked["campaign_settled"] = settled_mart_checks(
                         a, key, now, built["revenue_decision_mart_campaign_settled"])
+                checked["snapshot"] = window_snapshot(scope, disclosure)
+                pinning.append((key, checked["snapshot"]))
                 report["windows"].append(checked)
             report["pages_not_run"] += [
                 {"window": key, "page": "pinned_snapshot",
@@ -1749,7 +1757,8 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
             universe=universe)
         ev_by_key = {w["window"]["window_key"]: w for w in ev_truth["windows"]}
         for key in EVIDENCE_PASS_WINDOWS:
-            with certification_window() as scope:
+            disclosure = {}
+            with certification_window(disclosure) as scope:
                 base = crs.load_won_deals(key, window_type="evidence", now=now)
                 built = {}
                 if pages:
@@ -1767,12 +1776,15 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                     pages=built, window_type="evidence",
                     page_pubs={n: settled_pub for n in built} if built else None)
                 checked["window"] = f"evidence/{key}"
+                checked["snapshot"] = window_snapshot(scope, disclosure)
+                pinning.append((f"evidence/{key}", checked["snapshot"]))
                 report["evidence_windows"].append(checked)
             report["pages_not_run"] += [
                 {"window": f"evidence/{key}", "page": "pinned_snapshot",
                  "detail": f"a read in this window was refused by its pinned "
                            f"snapshot: {r}"[:300]} for r in refused_reads(scope)]
         after = _write_fingerprint()
+    report["snapshot_pinning"] = pinning_summary(pinning)
     # 16 — measured, not declared: the closed-won tables are byte-identical.
     report["database_writes_performed"] = (
         None if before is None or after is None else before != after)
@@ -1820,6 +1832,8 @@ def _render(report: dict) -> None:
     print("\n  CHECKS")
     for name, ok in sorted((report.get("checks") or {}).items()):
         print(f"    {'PASS' if ok else 'FAIL'}  {name}")
+    if report.get("snapshot_pinning"):
+        print(f"\n  SNAPSHOT: {report['snapshot_pinning'].get('note')}")
     if report.get("pages_not_run"):
         print("\n  PAGE CHECKS NOT RUN (exit 2 — a check that did not run proves nothing)")
         for p in report["pages_not_run"]:

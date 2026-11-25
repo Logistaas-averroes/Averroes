@@ -822,3 +822,33 @@ truncated list. Verified by execution on exported copies of both commits.
 - Certification checks a snapshot-consistent build of each page. A torn read
   within one web request (the 161E/173A class) is invisible to it by
   construction.
+
+## PR-ADS-179A-F1 review (fea87ac on 91290f7, 2026-11-25) — schema lock, refusals
+
+- Certification windows (`services.snapshot_memo.certification_window` →
+  `db.connection.pinned_read_snapshot`) take advisory key `SCHEMA_LOCK_KEY`
+  SHARED at SESSION level (own short txn, `lock_timeout` 60 s, then unpinned);
+  `db.schema.init_db` takes it EXCLUSIVE xact-level as its first statement,
+  180 s bound, then raises `SchemaMigrationBlocked` (the ONLY init_db error
+  that propagates; every other init_db error is still logged and swallowed).
+  Callers of init_db in production: `api/server.py` lifespan (before
+  `start_scheduler`) and `scripts/backfill_meta_ads_spend.py`.
+  `ensure_database_ready` does NOT call init_db.
+- Session lock release: `_release_connection` rolls back, unlocks, and CLOSES
+  the connection if either step fails or unlock returns non-True. Verified by
+  mutation: never unlocking makes test_08_a fail (init_db stuck). NB: a leaked
+  session lock does not block init_db if init_db happens to get the SAME
+  pooled connection (own-session locks never conflict) — tests can miss a
+  leak that way; 08_a catches it because init_db runs in another thread.
+- Audits run in subprocesses (`_run_capped`, SIGKILL on timeout/RSS), so a
+  killed audit drops its session lock with its connection.
+- Refusals are recorded on `_Pin.violations` and turned into exit 2 by all
+  three window audits. Verdict ordering: a violation in the same window still
+  wins (exit 1).
+- Known gap (verified by probe): `SELECT 1; COMMIT; BEGIN ...` leaves status
+  INTRANS, so `_still_pinned` (IDLE check) misses it; the next statement in
+  the same block runs READ COMMITTED and read-WRITE. Caught only at savepoint
+  release (recorded, broken, exit 2). Fail-closed at the verdict, not at the
+  statement.
+- The unpinned fallback certifies exit 0 with only a log warning — no report
+  field says the window was not snapshot-consistent.

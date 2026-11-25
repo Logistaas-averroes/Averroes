@@ -412,11 +412,13 @@ def test_05_c_the_campaigns_audit_builds_every_surface_of_every_window(ready, mo
 # ═════════════════════════════════════════════════════════════════════════════
 @contextmanager
 def _no_windows():
-    """The pre-179A behaviour: every read on its own, nothing cached."""
+    """The pre-179A behaviour: every read on its own, nothing cached.
+    (PR-ADS-179B: the audits pass a ``disclosure`` the stand-in never fills,
+    so each window then reports itself unpinned, ``not_recorded``.)"""
     import contextlib
     import services.snapshot_memo as sm
     real = sm.certification_window
-    sm.certification_window = lambda: contextlib.nullcontext(None)
+    sm.certification_window = lambda *a, **k: contextlib.nullcontext(None)
     try:
         yield
     finally:
@@ -434,8 +436,28 @@ def _run_all(now):
     _, out["reader_cutover"] = reader.run(now)
     f, per_window = camp.run(tuple(WINDOW_KEYS), now=now)
     out["campaigns"] = {"violations": f.violations, "unavailable": f.unavailable,
-                        "checks": f.checks, "per_window": per_window}
+                        "checks": f.checks, "per_window": per_window,
+                        "snapshot_pinning": f.snapshot_pinning}
     return _strip(_json(out))
+
+
+#: PR-ADS-179B — the one part of a report that differs, by design, with and
+#: without the windows: whether each window was pinned.
+PINNING_KEYS = {"snapshot", "snapshot_pinning"}
+
+
+def _without_pinning(node):
+    if isinstance(node, dict):
+        return {k: _without_pinning(v) for k, v in node.items() if k not in PINNING_KEYS}
+    if isinstance(node, list):
+        return [_without_pinning(v) for v in node]
+    return node
+
+
+def _pinning(out) -> list:
+    """Every (audit, snapshot_pinning) summary in a ``_run_all`` result."""
+    return [(name, out[name]["snapshot_pinning"])
+            for name in ("cohorts", "reader_cutover", "campaigns")]
 
 
 #: Every page builder the three audits call (each audit imports it from its
@@ -493,7 +515,14 @@ def test_06_every_audit_reports_and_builds_exactly_the_same_with_and_without_the
     windowed = _run_all(now)
     windowed_pages = list(log)
     for name in plain:
-        assert windowed[name] == plain[name], name
+        assert _without_pinning(windowed[name]) == _without_pinning(plain[name]), name
+    # PR-ADS-179B: the disclosure itself — every window pinned with the
+    # windows; every window unpinned (never pinned by default) without them.
+    for name, summary in _pinning(windowed):
+        assert summary["all_pinned"] is True and summary["windows"] >= 5, (name, summary)
+    for name, summary in _pinning(plain):
+        assert summary["pinned"] == 0 and summary["windows"] >= 5, (name, summary)
+        assert {u["reason"] for u in summary["unpinned"]} == {"not_recorded"}, name
     assert len(windowed_pages) == len(plain_pages)
     for got, want in zip(windowed_pages, plain_pages):
         assert got == want, got[:3]
@@ -697,10 +726,17 @@ def test_09_a_reader_that_swallows_its_own_error_does_not_poison_the_window(read
 def test_10_a_a_refused_statement_a_reader_swallowed_still_fails_the_window(ready):
     """F1 item 3. A reader that catches EVERY exception would turn a refused
     statement into "unavailable" — a withheld surface the audit would pass.
-    The refusal is recorded on the snapshot itself. A statement that ENDS the
-    pinned transaction (in a multi-statement string, as bytes, through
-    ``executemany``) is caught when it runs, and every later read in the
-    window is refused — never silently run outside the snapshot."""
+    The refusal is recorded on the snapshot itself. ``SELECT 1; COMMIT`` —
+    a statement that ends the pinned transaction and leaves the connection
+    IDLE — is caught when it returns, and every later read in the window is
+    refused.
+
+    PR-ADS-179B: this case covers the IDLE escape only. On 179A a statement
+    that ended the pinned transaction AND opened another
+    (``SELECT 1; COMMIT; BEGIN ISOLATION LEVEL READ COMMITTED``,
+    ``ROLLBACK AND CHAIN``) or a commit through the raw connection was NOT
+    caught when it ran: the next statement in the same block ran outside the
+    snapshot. Those are ``test_pr_ads_179b_…`` 03_a – 03_c."""
     from psycopg2 import sql
     from db.connection import PinnedSnapshotError, current_read_snapshot, get_conn
     from services.snapshot_memo import certification_window

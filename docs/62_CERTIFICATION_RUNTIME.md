@@ -137,9 +137,13 @@ block's start. Inside the block (a ContextVar, so this context only), every
   READ WRITE, `BEGIN`, `COMMIT` or a bare `ROLLBACK`. The check applies to a
   `str`, `bytes` or `psycopg2.sql` statement, through `execute` or
   `executemany`. This fails closed and is never a silently weaker read.
-* a statement that ends the transaction anyway (`SELECT 1; COMMIT`) is caught
-  when it returns. The snapshot is then marked broken, and every later
-  statement and `get_conn()` in it is refused.
+* a statement that ends the transaction anyway is caught when it returns.
+  The snapshot is then marked broken, and every later statement and
+  `get_conn()` in it is refused. On 179A this held only for a statement that
+  left the connection IDLE (`SELECT 1; COMMIT`). `SELECT 1; COMMIT; BEGIN
+  ISOLATION LEVEL READ COMMITTED`, `ROLLBACK AND CHAIN` and a commit through
+  the raw connection were not caught when they ran: the next statement in the
+  same block ran outside the snapshot. PR-ADS-179B closes that (§8.3).
 * a reader that catches its own failed statement leaves the transaction
   aborted. On the reader's clean exit, the view rolls back to the reader's
   savepoint (PR-ADS-179A-F1). Outside a window, `get_conn`'s commit already
@@ -180,7 +184,8 @@ lock:
   transaction, before its snapshot is taken. It waits at most
   `WINDOW_SCHEMA_LOCK_WAIT_SECONDS` (60 s) for a running migration. Past that
   it runs unpinned, which is the pre-179A behaviour: every read on its own,
-  nothing cached, and a warning logged.
+  nothing cached, and a warning logged. Since PR-ADS-179B each audit's report
+  also says so, per window (§8.4).
 * **`init_db`** takes it EXCLUSIVE as the first statement of its DDL
   transaction. It waits at most `SCHEMA_LOCK_WAIT_SECONDS` (180 s) for the
   windows already open. PostgreSQL queues lock requests in order, so a window
@@ -190,7 +195,9 @@ lock:
 * **Past the bound, `init_db` raises `SchemaMigrationBlocked`** and logs at
   ERROR. The lifespan hook then fails, the instance does not start, and
   Render's deploy health check fails the deploy and keeps the old release.
-  It is never a release running without its schema.
+  A lock wait past the bound therefore never yields a release running
+  without its schema. That is the only guarantee: every other `init_db`
+  error is still logged and swallowed, as before 179A (§8.2).
 
 Neither side ever waits while holding a table lock the other needs, so no
 cycle is possible. On this fixture the longest window is about 6 s; at
@@ -245,7 +252,9 @@ fields (`generated_at`) are the only exception.
 
 **What this certifies, exactly (PR-ADS-179A-F1).** Certification now checks
 a **snapshot-consistent build** of each page: every read the page makes,
-taken as of one instant. A web request does not run in a window. It still
+taken as of one instant. The exception is a window that ran unpinned (§3.2,
+"Locks"): there each read is its own transaction, as before 179A, and since
+PR-ADS-179B the report says so for that window (§8.4). A web request does not run in a window. It still
 reads statement by statement under READ COMMITTED, so its reads can straddle
 a sync's commit (the PR-ADS-161E / 173A class of torn read).
 
@@ -433,7 +442,7 @@ on `91290f7`, and each fails under a named mutation of the fixed tree:
 | 08_b | a window held past `SCHEMA_LOCK_WAIT_SECONDS` makes `init_db` raise `SchemaMigrationBlocked` and log at ERROR, and the window's reads are unaffected | no bound exists | M14 |
 | 08_c | a window that would start during a migration waits, bounded, then runs unpinned with a warning | no schema lock | — |
 | 09_a | a reader that swallows its own failed statement does not poison the window: the next read and the next page succeed | `PinnedSnapshotError` from the reader's clean exit | M15 |
-| 10_a | refusals of `sql.Composed`, `bytes` and `executemany` statements are recorded even when swallowed. A statement that ends the transaction is caught when it runs: the next statement in the same block never runs outside the snapshot, and the window refuses every later read | `_Pin` has no record | M17 |
+| 10_a | refusals of `sql.Composed`, `bytes` and `executemany` statements are recorded even when swallowed. A statement that ends the transaction and leaves the connection IDLE (`SELECT 1; COMMIT`) is caught when it runs: the next statement in the same block never runs, and the window refuses every later read. (It does not cover an escape that opens another transaction; see §8.3.) | `_Pin` has no record | M17 |
 | 10_b | in all three audits, a refusal any reader swallowed makes every window exit 2 (named as the snapshot's), and nothing else | **exit 0**: the swallowed refusal certified | M16 (cohort audit) |
 
 * **M14**: `init_db` takes no schema lock.
@@ -464,3 +473,164 @@ on `91290f7`, and each fails under a named mutation of the fixed tree:
   schema lock while holding nothing (§3.2). Any future DDL path must take
   `SCHEMA_LOCK_KEY` exclusive first in the same way, or it can deadlock with
   a window.
+
+## 8. 179B follow-ups
+
+PR-ADS-179B fixes the minors left by the independent re-audit of 179A. The
+cases are in `tests/test_pr_ads_179b_certification_runtime_followups.py`
+(10 cases, all on PostgreSQL; in CI's PG step and did-run list).
+
+### 8.1 `SchemaMigrationBlocked` names both holders; the backfill exits 2
+
+The schema lock is exclusive for every `init_db`, so it also serialises two
+migrations: `scripts/backfill_meta_ads_spend.py` runs `init_db`, and run
+during a deploy it holds the lock exactly as a window does. The message said
+"certification window(s) held the schema lock", which could be false. It now
+names both possible holders: certification window(s) (shared) or another
+migration (another `init_db`, exclusive). Which one held it is not known at
+that point: the transaction is aborted, and the holder may have changed.
+
+The backfill CLI did not catch the exception: a traceback and exit 1, which
+reads as a failed backfill. It now prints `{"status": "failed", "reason":
+"schema_migration_blocked"}` and exits 2 ("unavailable"), before reaching
+Meta. `api/server.py` still lets the exception fail the lifespan hook (§3.2).
+
+### 8.2 What `init_db` does and does not guarantee
+
+Only the lock-wait bound raises. Every other `init_db` error is logged at
+ERROR and swallowed, as before 179A, and the caller cannot tell that the
+migration did not run. That includes an unreachable database, a failed DDL
+statement, and a `QueryCanceled` from a role- or database-level
+`statement_timeout` that fires during the advisory wait itself, before
+`lock_timeout` does. The 179A docstring ("a migration that did not run is
+never reported as an applied schema") overclaimed and is corrected. Whether
+those errors should also raise is a separate decision, not taken here.
+
+### 8.3 No statement runs after a reader's statement ends the pinned transaction
+
+The 179A check after each statement was "is the connection IDLE?". Three
+escapes leave it in a transaction, a NEW one:
+
+* `SELECT 1; COMMIT; BEGIN ISOLATION LEVEL READ COMMITTED`: READ COMMITTED
+  and writable;
+* `SELECT 1; ROLLBACK AND CHAIN` (and a bare `ROLLBACK AND CHAIN`, which the
+  start-of-statement refusal missed): the SAME modes, repeatable read and
+  read only, but a new snapshot;
+* `cursor.connection.commit()`: psycopg2's own connection, which ends the
+  transaction without sending a statement. psycopg2 then opens a READ
+  COMMITTED transaction for the next one.
+
+On `9a09c6d` the next statement in the same block ran in that transaction.
+It was caught only at the block's savepoint release, after it had read.
+
+**Choice: ask the session, not the statement text.** Refusing any statement
+whose text contains a transaction-control verb cannot be made exact: `END`
+closes every `CASE`, and a verb can sit in a string literal or a comment. A
+text rule strict enough to be safe refuses ordinary reads; one loose enough
+to pass them can be evaded. So the text is only a cheap trigger, and the
+session decides:
+
+* the pinned transaction carries a **transaction-local marker**
+  (`set_config('averroes.pinned_read_snapshot', <token>, true)`), set at the
+  top level before any savepoint. No savepoint rollback removes it; any new
+  transaction, however it was opened, lacks it;
+* a statement can end a transaction block only by naming `COMMIT`, `END`,
+  `ROLLBACK`, `ABORT` or `PREPARE`. A procedure or `DO` block cannot commit
+  inside a transaction block, and a keyword cannot be quoted. The view checks
+  that against both the template and the text psycopg2 actually sent
+  (`cursor.query`), because a parameter (`AsIs`) can carry SQL the template
+  does not show. It asks the session for the marker and the modes after:
+  * any statement whose text names one of those verbs (a `CASE … END`
+    included);
+  * any statement whose text cannot be read;
+  * every `executemany`, whose `cursor.query` holds only its last statement.
+
+  The answer must be the pin's token, `repeatable read`, read only `on`;
+  otherwise the snapshot is broken. Modes alone would miss `ROLLBACK AND
+  CHAIN`, which is why the marker exists;
+* before every statement, and before every `get_conn()` savepoint, the view
+  refuses a connection that is no longer in a transaction. That catches the
+  raw-connection commit, which sends no statement;
+* a statement that names a verb and fails cannot be checked while the
+  transaction is aborted. The pin is then marked suspect, and the next
+  statement asks the session first. In an aborted transaction no read can
+  succeed in the meantime;
+* `ROLLBACK AND CHAIN`, `ABORT` and `PREPARE TRANSACTION` are now also
+  refused before they are sent. A reader's own `ROLLBACK [WORK] TO
+  [SAVEPOINT] name` still runs.
+
+The cost is one round trip per statement that names a verb, and per
+`executemany` call. Other reads cost nothing extra: the status check is
+local to libpq. A reader's own
+`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` / `READ ONLY` is still
+absorbed. What this does not cover: a reader that takes
+`cursor.connection.cursor()` and runs statements on psycopg2's own cursor
+bypasses the view entirely. No production reader does. If such a cursor ended
+the transaction, the block's savepoint release would still fail and mark the
+snapshot broken, but only after that cursor had read.
+
+### 8.4 An unpinned window is disclosed
+
+A window that cannot take the shared schema lock within
+`WINDOW_SCHEMA_LOCK_WAIT_SECONDS` runs unpinned. It still certifies, with
+exit 0, as before 179A, and that is unchanged. But the reports did not say
+so, while this document says certification checks a snapshot-consistent
+build. Now `certification_window(disclosure)` records whether the window was
+pinned and why not. `snapshot_memo.window_snapshot` turns that into each
+window's entry, `{"pinned", "reason", "detail"}`, where `reason` is one of:
+
+* `schema_lock_wait_exceeded`;
+* `snapshot_open_failed`;
+* `no_database`;
+* `not_recorded`. A window is pinned only when its scope carries a pin, and
+  a missing record is never read as pinned.
+
+`snapshot_memo.pinning_summary` adds a report-level `snapshot_pinning`, with
+a note that names the unpinned windows and says that what was certified
+there is NOT a snapshot-consistent build:
+
+| Audit | Per window | Summary |
+| --- | --- | --- |
+| `marketing_outcome_cohorts` | `business_windows[i].snapshot` | `snapshot_pinning` |
+| `reader_cutover` | `windows[i].snapshot`, `evidence_windows[i].snapshot` | `snapshot_pinning` |
+| `campaigns` | `per_window[w].snapshot` | `Findings.snapshot_pinning`; `snapshot_pinning` in `--json` |
+
+`test_06` now compares the reports without these keys, because they differ
+by design. It asserts the disclosure itself: every window is pinned with the
+windows, and every window is `not_recorded` without them.
+
+### 8.5 The shared lock never rides a pooled connection
+
+The window takes the schema lock SHARED at session level, which outlives its
+transaction. A connection pooled while still holding it would block every
+later migration for as long as the pool kept it. Only `08_a` guarded this,
+and only because `init_db` runs on another thread there. `05` reads
+`pg_locks` on the window connection's own backend pid. The lock is held
+during the window and gone once the window closes, and the pool then hands
+out that same connection again.
+
+### 8.6 Guards
+
+| Case | Proves | On `9a09c6d` | Fails under |
+| --- | --- | --- | --- |
+| 01_a (×2: shared, exclusive holder) | the backfill CLI exits 2 with `schema_migration_blocked` and never reaches Meta | `SchemaMigrationBlocked` escapes `main` | M23 |
+| 01_b | held by another migration, the message names both holders | names windows only | — |
+| 03_a | the re-audit's probe: the next statement is refused, never `read committed` | it ran: `('read committed', 'off')` | M19 |
+| 03_b | `SELECT 1; ROLLBACK AND CHAIN`: the next read is refused, never a new snapshot; a bare `ROLLBACK AND CHAIN` is refused before it is sent | it read a row committed after the window opened (7, not 6) | M19, M21 |
+| 03_c | `cursor.connection.commit()`: the next statement is refused | it ran: `('read committed', 'off')` | M20 |
+| 03_c2 | the same escape carried in an `AsIs` parameter (the template names no verb): the next statement is refused | it ran | M19, M25 |
+| 03_d | not an over-refusal: `CASE … END`, a reader's own savepoint and `ROLLBACK TO SAVEPOINT`, `executemany` and the satisfied `SET TRANSACTION` forms run in the snapshot, with nothing recorded | passes (a control) | — |
+| 04 | all three audits disclose every unpinned window (`schema_lock_wait_exceeded`) with a summary note, and exit 0 as before; a pinned window reads `pinned: true` | no disclosure | M22 |
+| 05 | the shared lock is gone from `pg_locks` for the window's backend pid once it closes, and that connection is pooled and reused | passes: 179A unlocks | M18 |
+| 179a `06` (amended) | the disclosure: all pinned with the windows, all `not_recorded` without | — | M24 |
+
+The mutations, each applied alone to a copy of the fixed tree:
+
+* **M18**: `_release_connection` skips `pg_advisory_unlock_shared`.
+* **M19**: no statement is verified against the session.
+* **M20**: an IDLE connection is not refused before a statement.
+* **M21**: the verification checks the modes only, not the marker.
+* **M22**: `certification_window` does not record why it ran unpinned.
+* **M23**: the backfill CLI does not catch `SchemaMigrationBlocked`.
+* **M24**: a window with no record reads as pinned.
+* **M25**: only the template is checked for a verb, not the text sent.
