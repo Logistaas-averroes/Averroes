@@ -28,8 +28,14 @@ closed-won snapshot and computes no business figure of its own:
     when the closed-won population is published AND the list has exactly that
     many deals; otherwise the list is absent (None) with the reason.
   * Customers won — one entry per distinct company, only when the customer
-    count is published AND the list numbers exactly that count. Unavailable,
-    with the reason, under any lead filter (the filter classifies contacts).
+    count is published AND the list numbers exactly that count. The lead
+    filters do not touch it (PR-ADS-178B-F1 m1). The block also carries the
+    closed-won reader contract's OWN verdicts for customers and closed-won
+    deals, read straight from ``load_won_deals`` in this snapshot — the
+    reading the retired ``/api/crm-funnel/customers-won`` published
+    (PR-ADS-166A), which the cross-page parity audit compares with the mart
+    deal view's figures beside it (consumer ``pipeline/customers_won``,
+    PR-ADS-178C).
   * The source breakdown — the deal list partitioned by the deal's OWN source
     group, each part through ``subset_metrics`` (the reader contract).
 
@@ -41,7 +47,7 @@ figure. Read-only: no write to HubSpot, Google Ads or the database.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from analysis import closed_won_truth as cwt
 from analysis import revenue_scope
@@ -82,6 +88,31 @@ SOURCE_NOT_RECORDED = "not_recorded"
 TRUTH_FOOTER = ("Open and lost deals are not in the deal ledger: only closed-won "
                 "deals are synced, so open pipeline, lost deals and opportunity "
                 "aging are not shown here.")
+
+# ── Customers won (PR-ADS-166A; moved here from the funnel service by
+#    PR-ADS-178C, which retired ``/api/crm-funnel/customers-won``) ──────────
+#: What the Customers won reading is, said on the payload itself: distinct
+#: HubSpot companies on closed-won deals by close date — never the lifecycle
+#: stage-move count ("Moved to Customer stage in HubSpot"), and never derived
+#: from it. Nothing in this reading touches the funnel.
+CUSTOMERS_WON_METRIC_FAMILY = "closed_won_customers"
+CUSTOMERS_WON_WINDOW_BASIS = "deal_close_date"
+CUSTOMERS_WON_DEDUP_KEY = "hubspot_company_id"
+CUSTOMERS_WON_LABEL = "Customers won"
+CUSTOMERS_WON_DEFINITION = (
+    "Distinct HubSpot companies with a closed-won deal whose close date is "
+    "in this period.")
+CUSTOMERS_WON_NOT_THE_SAME_AS = (
+    "Not the same as contacts moved to the Customer lifecycle stage: that "
+    "counts CRM stage changes, including old contacts updated by the team.")
+#: The list does not number the published customer count: not shown.
+REASON_ROWS_DO_NOT_MATCH = "closed_won_rows_do_not_match_count"
+#: What a won customer's name field supports.
+COMPANY_NAMED = "named"
+COMPANY_NO_NAME = "no_name_in_hubspot"      # read, and HubSpot holds none
+COMPANY_NAME_NOT_LOADED = "not_loaded"      # never asked
+COMPANY_NOT_RETURNED = "not_returned"       # asked; HubSpot did not return it
+COMPANY_NAME_UNAVAILABLE = "unavailable"    # the name store could not be read
 
 #: Deal fields the list and its drawer show. ``company`` is not one: the
 #: ledger never carries the contact's employer (it was always null).
@@ -187,22 +218,166 @@ def _source_breakdown(base: dict, deal_rows: list | None) -> list | None:
     return out
 
 
-def _customers_won(base: dict, customers: dict) -> dict:
-    """Section 6. A list only beside a PUBLISHED customer count and only when
-    it numbers exactly that count; absent otherwise, with the reason.
+def _iso(value):
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def _reader_verdict(base: dict, name: str) -> dict:
+    """The closed-won reader contract's own verdict for ``name``
+    (``load_won_deals``' ``canonical_metrics``), exactly as it carries it.
+
+    A missing or malformed verdict is ``unavailable`` — never a count, and
+    never the other metric's value. A value never survives a non-published
+    status; published with no number is not a publishable zero."""
+    m = (base.get("canonical_metrics") or {}).get(name)
+    if not isinstance(m, dict) or m.get("status") not in cwt.PUBLICATION_STATUSES:
+        return cwt.metric(None, cwt.UNAVAILABLE, base.get("reason") or REASON_VERDICT_MISSING)
+    if m["status"] == cwt.PUBLISHED:
+        if m.get("value") is None:
+            return cwt.metric(None, cwt.UNAVAILABLE, REASON_VERDICT_MISSING)
+        return cwt.metric(m["value"], cwt.PUBLISHED)
+    return cwt.metric(None, m["status"], m.get("reason"))
+
+
+def _won_customers_list(base: dict, customers: dict) -> tuple:
+    """``(rows | None, omitted_reason | None)`` for a PUBLISHED customer count.
+
+    One entry per distinct company on the window's won deals, from the
+    reader's own population and identity map (``deals`` and
+    ``company_ids_by_deal``) — the same members the published count was made
+    from. Nothing here decides who is a customer; it only lists them and adds
+    the name the platform holds. If the entries do not number exactly the
+    published count, there is no list (``closed_won_rows_do_not_match_count``):
+    a list that disagrees with its own headline is not shown beside it."""
+    if customers.get("status") != cwt.PUBLISHED or not base.get("available"):
+        return None, None
+    by_deal = base.get("company_ids_by_deal")
+    if not isinstance(by_deal, dict):
+        return None, REASON_ROWS_DO_NOT_MATCH
+    grouped: dict = {}
+    for deal in base.get("deals") or []:
+        ids = {str(c) for c in by_deal.get(str(deal.get("deal_id"))) or []}
+        if len(ids) != 1:
+            # A published count means every member resolves to one company.
+            return None, REASON_ROWS_DO_NOT_MATCH
+        entry = grouped.setdefault(ids.pop(), {"deals": 0, "latest": None})
+        entry["deals"] += 1
+        closed = _iso(deal.get("deal_close_date"))
+        if closed and (entry["latest"] is None or closed > entry["latest"]):
+            entry["latest"] = closed
+    if len(grouped) != customers.get("value"):
+        return None, REASON_ROWS_DO_NOT_MATCH
+
+    from db import hubspot_name_repository as names_repo  # noqa: PLC0415
+    stored = names_repo.fetch_company_names(list(grouped))
+    names = stored.get("names") or {}
+    rows = []
+    for company_id, entry in grouped.items():
+        if not stored.get("available"):
+            name, status = None, COMPANY_NAME_UNAVAILABLE
+        elif company_id not in names:
+            name, status = None, COMPANY_NAME_NOT_LOADED
+        elif names[company_id].get("name"):
+            name, status = names[company_id]["name"], COMPANY_NAMED
+        elif not names[company_id].get("read"):
+            name, status = None, COMPANY_NOT_RETURNED
+        else:
+            name, status = None, COMPANY_NO_NAME
+        rows.append({"company_id": company_id, "company_name": name,
+                     "company_name_status": status,
+                     "closed_won_deals": entry["deals"],
+                     "latest_close_date": entry["latest"]})
+    rows.sort(key=lambda r: (r["latest_close_date"] or "", r["company_id"]),
+              reverse=True)
+    return rows, None
+
+
+def _customers_won_reading(base: dict, resolved: dict) -> dict:
+    """The Customers won block's own reading of the closed-won reader
+    contract (PR-ADS-166A's ``/api/crm-funnel/customers-won`` payload, moved
+    into this builder by PR-ADS-178C): the window, the metric family, and the
+    reader's verdicts for customers and closed-won deals — two fields, never
+    summed, never derived from each other or from the funnel — with the
+    provenance the cross-page parity audit checks (consumer
+    ``pipeline/customers_won``, source: the canonical deal ledger)."""
+    customers = {**_reader_verdict(base, "customers"), "dedup_key": CUSTOMERS_WON_DEDUP_KEY}
+    deals = _reader_verdict(base, "closed_won_deals")
+    window = {k: resolved.get(k) for k in ("key", "start_date", "end_date", "timezone")}
+
+    def entry(metric, verdict):
+        return {"metric": metric,
+                "data_source": canonical_contract.SOURCE_CANONICAL_DEAL_LEDGER,
+                "scope": "all_source_business_revenue",
+                "truth_status": (canonical_contract.TRUTH_READY
+                                 if verdict["status"] == cwt.PUBLISHED
+                                 else canonical_contract.TRUTH_NOT_READY),
+                "unavailable_reason": verdict.get("reason")}
+    return {
+        "metric_family": CUSTOMERS_WON_METRIC_FAMILY,
+        "window_basis": CUSTOMERS_WON_WINDOW_BASIS,
+        "dedup_key": CUSTOMERS_WON_DEDUP_KEY,
+        "label": CUSTOMERS_WON_LABEL,
+        "definition": CUSTOMERS_WON_DEFINITION,
+        "not_the_same_as": CUSTOMERS_WON_NOT_THE_SAME_AS,
+        "source": "hubspot_deal_ledger",
+        "available": bool(base.get("available")),
+        "window": {**window, "window_type": "business",
+                   "start": base.get("window_start"),
+                   "end_exclusive": base.get("window_end"),
+                   "label": base.get("window_label")},
+        "as_of": base.get("as_of"),
+        "cohort": base.get("cohort"),
+        "customers": customers,
+        "closed_won_deals": deals,
+        "legacy_fallback_used": False,
+        canonical_contract.METRIC_TRUTH_KEY: canonical_contract.metric_truth_block(
+            window, [entry("customers", customers),
+                     entry("closed_won_deals", deals)]),
+    }
+
+
+def _customers_won(base: dict, customers: dict, resolved: dict) -> dict:
+    """Section 6. A list only beside a PUBLISHED customer count (``customers``:
+    the Customers card's verdict) and only when it numbers exactly that count;
+    absent otherwise, with the reason. Beside it, always, the block's own
+    reading of the reader contract (``_customers_won_reading``).
 
     The lead filters do not touch it: it is the window's all-source won-deal
     population, the same one the Customers card counts, whatever the funnel
     is narrowed to (PR-ADS-178B-F1 m1)."""
+    reading = _customers_won_reading(base, resolved)
     if customers["status"] != cwt.PUBLISHED:
-        return {"status": customers["status"], "reason": customers["reason"]}
-    block = crm_funnel._won_customers_block(base, customers)  # noqa: SLF001
-    rows = block.get("won_customers")
+        return {"status": customers["status"], "reason": customers["reason"], **reading}
+    rows, omitted = _won_customers_list(base, customers)
     if rows is None or len(rows) != customers["value"]:
-        return {"status": cwt.WITHHELD,
-                "reason": block.get("won_customers_omitted")
-                or crm_funnel.REASON_ROWS_DO_NOT_MATCH}
-    return {"status": cwt.PUBLISHED, "reason": None, "rows": rows}
+        return {"status": cwt.WITHHELD, "reason": omitted or REASON_ROWS_DO_NOT_MATCH,
+                **reading}
+    return {"status": cwt.PUBLISHED, "reason": None, "rows": rows, **reading}
+
+
+def _funnel_coverage(coverage, scope: str):
+    """``{"stage_reached_without_entry_date": {event: n | None}, "scope"}`` for
+    the selected scope, or None when the funnel reported no coverage.
+
+    The per-scope figures are the funnel's own; a scope it gives none for
+    (or a stage whose figure is unknown) is None, which the page reads as a
+    lower bound — never as complete. Without per-scope coverage at all the
+    whole-population figure is passed, which over-marks a narrow scope (it
+    fails safe: a stage can only be marked a lower bound it may not be)."""
+    if coverage is None:
+        return None
+    whole = coverage.get("stage_reached_without_entry_date")
+    by_scope = coverage.get("stage_reached_without_entry_date_by_scope")
+    if not isinstance(by_scope, dict):
+        return {"stage_reached_without_entry_date": whole, "scope": None}
+    events = whole.keys() if isinstance(whole, dict) else by_scope.keys()
+    return {"stage_reached_without_entry_date": {
+                e: (by_scope.get(e) or {}).get(scope) for e in events},
+            "scope": scope}
 
 
 def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
@@ -233,9 +408,10 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
         "conversions": f.get("conversions"),
         # Which stages were reached without an entry date: the page marks
         # those counts as lower bounds under partial evidence (F1 o1).
-        "coverage": ({"stage_reached_without_entry_date":
-                      (f.get("coverage") or {}).get("stage_reached_without_entry_date")}
-                     if f.get("coverage") is not None else None),
+        # PR-ADS-178C: for the SELECTED scope only (the counts shown are that
+        # scope's), so a narrow Scope no longer over-marks a stage that is
+        # complete for it.
+        "coverage": _funnel_coverage(f.get("coverage"), scope),
         "reconciliation": f.get("reconciliation"),
         "sync": f.get("sync"),
     }
@@ -294,7 +470,7 @@ def build_pipeline(window: str = "current_quarter", now: datetime | None = None,
     Raises:
         ValueError: an unsupported window, scope or acquisition group.
     """
-    resolve_canonical_window(window, now=now)
+    resolved = resolve_canonical_window(window, now=now)
     if scope not in crm_funnel.ORDERED_SCOPES:
         raise ValueError(f"Unknown scope '{scope}'")
     acquisition_group = acquisition_group or None
@@ -368,7 +544,7 @@ def build_pipeline(window: str = "current_quarter", now: datetime | None = None,
         "deals_status": deals_status,
         "deals_reason": deals_reason,
         "source_breakdown": _source_breakdown(base, deal_rows),
-        "customers_won": _customers_won(base, kpis["customers"]),
+        "customers_won": _customers_won(base or {}, kpis["customers"], resolved),
         "truth_footer": TRUTH_FOOTER,
         **_rates(),
         canonical_contract.METRIC_TRUTH_KEY: _metric_truth(window_block, kpis, summary, cohort),

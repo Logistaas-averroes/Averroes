@@ -364,11 +364,15 @@ PROOF_COUNTRY_SQLS = "mart_lead_population_and_country_assignment"
 #: Paths are asserted against real payloads in the test suite, so a renamed key
 #: fails a test rather than silently reporting the metric "unavailable" here —
 #: an audit that goes quiet when it loses its grip is worse than no audit.
-#: PR-ADS-166A — `GET /api/crm-funnel/customers-won`, the Leads page's
-#: "Customers won" block.
-CONSUMER_LEADS_CUSTOMERS_WON = "leads/customers_won"
 #: PR-ADS-178B: the one Pipeline page (leads and deals), ``build_pipeline``.
 CONSUMER_PIPELINE = "pipeline"
+#: PR-ADS-178C — the Pipeline page's "Customers won" block (``build_pipeline``'s
+#: ``customers_won``): its own reading of the closed-won reader contract
+#: (``load_won_deals``), inside the builder's snapshot. It replaces PR-ADS-166A's
+#: ``leads/customers_won`` consumer, which read the same contract through
+#: ``GET /api/crm-funnel/customers-won`` (retired): the one consumer of the
+#: customers / closed-won-deals identities that does NOT republish the mart.
+CONSUMER_PIPELINE_CUSTOMERS_WON = "pipeline/customers_won"
 
 METRIC_IDENTITIES = {
     # ── Google Ads spend, FULL account denominator ───────────────────────────
@@ -429,13 +433,14 @@ METRIC_IDENTITIES = {
             ("dashboard/deals", "kpis.closed_won_deals.value"),
             (CONSUMER_PIPELINE, "kpis.closed_won_deals.value"),
             ("revenue_decision_mart", "summary.closed_won_deals"),
-            # PR-ADS-166A: the Leads page's "Customers won" block reads the
-            # reader contract directly; it must show the Deals page's figures.
-            (CONSUMER_LEADS_CUSTOMERS_WON, "closed_won_deals.value"),
+            # PR-ADS-166A / PR-ADS-178C: the Pipeline page's Customers won
+            # block reads the reader contract directly (not the mart); it
+            # must show the deal cards' figures.
+            (CONSUMER_PIPELINE_CUSTOMERS_WON, "closed_won_deals.value"),
         ],
         "consumer_sources": {
             "dashboard/channels": SOURCE_REVENUE_BY_SOURCE,
-            CONSUMER_LEADS_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
+            CONSUMER_PIPELINE_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
     },
     "customers": {
         "label": "Customers (distinct HubSpot companies), ALL sources",
@@ -449,10 +454,10 @@ METRIC_IDENTITIES = {
             ("dashboard/deals", "kpis.customers.value"),
             (CONSUMER_PIPELINE, "kpis.customers.value"),
             ("revenue_decision_mart", "summary.customers"),
-            (CONSUMER_LEADS_CUSTOMERS_WON, "customers.value"),
+            (CONSUMER_PIPELINE_CUSTOMERS_WON, "customers.value"),
         ],
         "consumer_sources": {
-            CONSUMER_LEADS_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
+            CONSUMER_PIPELINE_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
     },
 
     # ── Campaign-ATTRIBUTABLE outcomes — a SUBSET, not the business total ────
@@ -1080,13 +1085,7 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
     from services.pipeline_service import build_pipeline  # noqa: PLC0415
     from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
 
-    from services.canonical_crm_funnel_service import (  # noqa: PLC0415
-        build_customers_won,
-    )
-
     builders = {
-        CONSUMER_LEADS_CUSTOMERS_WON: lambda: build_customers_won(
-            "business", window, now=now),
         "dashboard/overview": lambda: build_dashboard_overview(window=window, now=now),
         "dashboard/revenue": lambda: build_dashboard_revenue(window=window, now=now),
         "dashboard/channels": lambda: build_dashboard_channels(window=window, now=now),
@@ -1110,7 +1109,25 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
             built[name] = {"payload": fn(), "error": None}
         except Exception as exc:  # noqa: BLE001
             built[name] = {"payload": None, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    built[CONSUMER_PIPELINE_CUSTOMERS_WON] = _pipeline_customers_won_reading(
+        built[CONSUMER_PIPELINE])
     return built
+
+
+def _pipeline_customers_won_reading(pipeline: dict) -> dict:
+    """PR-ADS-178C — the Pipeline payload's ``customers_won`` block, as its own
+    consumer. The builder files the block's window, the reader contract's
+    verdicts and their provenance on the block itself, so this reads it as
+    published — it adds, derives and repairs nothing. A pipeline that could
+    not be built, or a payload with no such block, is a failed consumer
+    (reported), never a silent omission."""
+    if pipeline.get("error"):
+        return {"payload": None, "error": pipeline["error"]}
+    block = (pipeline.get("payload") or {}).get("customers_won")
+    if not isinstance(block, dict):
+        return {"payload": None,
+                "error": "the pipeline payload carries no customers_won block"}
+    return {"payload": block, "error": None}
 
 
 def _approved_not_google_ads_labels(start, end) -> tuple:

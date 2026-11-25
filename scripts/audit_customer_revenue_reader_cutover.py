@@ -49,6 +49,10 @@ decide any verdict. It proves:
                                           shows no figure without it
 20  no_rate_over_meta_spend               the Meta line carries no HubSpot count
                                           and no ratio; withheld means absent
+21  retired_readers_absent                PR-ADS-178C: /api/revenue-deals and
+                                          /api/crm-funnel/customers-won are not
+                                          registered or requested, and no module
+                                          defines or calls build_customers_won
 
 PR-ADS-168A: the same reader checks also run over the Channels page's
 EVIDENCE windows (30d / 60d / 180d / all_time, ``report["evidence_windows"]``):
@@ -112,7 +116,7 @@ INVENTORY = (
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "canonical_metrics", "status": "migrated"},
     {"consumer": "services/revenue_attribution_service.py",
-     "surface": "/api/revenue-attribution/audit, /api/revenue-deals, the mart it feeds (PR-ADS-177C retired /api/revenue-attribution)",
+     "surface": "/api/revenue-attribution/audit, the mart it feeds (PR-ADS-177C retired /api/revenue-attribution; PR-ADS-178C retired /api/revenue-deals — build_revenue_deals feeds the mart deal view and Overview)",
      "existing_source": "len(campaign deals), proven-amount sums",
      "existing_meaning": "per-campaign won deals as customers; partial sums",
      "canonical_replacement": "reader_row per campaign / country / summary; "
@@ -199,7 +203,11 @@ INVENTORY = (
                               "deals / customers / revenue / average; the deal "
                               "list only beside a published count it equals; "
                               "subset_metrics per deal source group; customers "
-                              "won only when the list numbers the published count",
+                              "won only when the list numbers the published count. "
+                              "PR-ADS-178C: the Customers won block also carries "
+                              "load_won_deals' own customers / closed-won-deals "
+                              "verdicts (the retired /api/crm-funnel/customers-won "
+                              "reading, moved here from the funnel service)",
      "window_cohort": "business window through today · close-date cohort",
      "ui_effect": "KPI cards = {value, status, reason}; Withheld / Unavailable "
                   "+ reason; customers never summed; SQL→customer unavailable",
@@ -235,25 +243,11 @@ INVENTORY = (
      "ui_effect": "Closed-won deals KPI; customers per country, not summed",
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "google_ads_source_closed_won_deals", "status": "migrated"},
-    # PR-ADS-166A: the Leads page showed contacts moved to the Customer
-    # lifecycle stage under the word "Customers" (219 for Q3 2026 against 8
-    # won deals). That count keeps its own name; customers won is read here.
-    {"consumer": "services/canonical_crm_funnel_service.py",
-     "surface": "/api/crm-funnel/customers-won; Leads page",
-     "existing_source": "hubspot_contact_funnel.date_entered_customer count",
-     "existing_meaning": "contacts moved to the Customer lifecycle stage, "
-                         "shown as Customers",
-     "canonical_replacement": "load_won_deals canonical customers + "
-                              "closed_won_deals, beside the relabelled "
-                              "stage-move count",
-     "window_cohort": "business window · close-date cohort",
-     "ui_effect": "Customers won = distinct companies or Withheld/Unavailable "
-                  "+ reason; unavailable under a Scope/Source filter. "
-                  "PR-ADS-178B: no page reads the route now (the Pipeline page "
-                  "reads build_pipeline, which reuses _won_customers_block); "
-                  "kept for the parity audit until PR-ADS-178C",
-     "families": ("customers",),
-     "canonical_via": "load_won_deals", "status": "migrated"},
+    # PR-ADS-166A's row for services/canonical_crm_funnel_service.py
+    # (`build_customers_won`, /api/crm-funnel/customers-won) stood here.
+    # PR-ADS-178C retired the route and moved the reading into the Pipeline
+    # builder (row above); the funnel service reads no closed-won deal now,
+    # and RETIRED_READER_ROUTES / RETIRED_READER_SYMBOLS keep it that way.
     {"consumer": "services/cross_page_parity_service.py",
      "surface": "/api/audit/cross-page-parity",
      "existing_source": "page `customers` fields",
@@ -380,6 +374,13 @@ READER_ENTRY_POINTS = (
     "fetch_source_deal_details", "fetch_sql_lead_details",
     "source_attribution_health_counts",
 )
+#: PR-ADS-178C — closed-won reader routes retired with the Leads / Deals pages
+#: (each answers 404; the Pipeline page, /api/pipeline, publishes both), and
+#: the builder only one of them served. A route registered under one of these
+#: paths, a page requesting one, or a production module that defines or calls
+#: the builder again is a violation (``retired_readers_absent``).
+RETIRED_READER_ROUTES = ("/api/revenue-deals", "/api/crm-funnel/customers-won")
+RETIRED_READER_SYMBOLS = ("build_customers_won",)
 #: The legacy gate this PR removes, by name.
 LEGACY_GATE = "revenue_integration_connected"
 FORBIDDEN_IMPORTS = ("db.writers", "writers", "connectors.hubspot_pull",
@@ -628,6 +629,9 @@ def structural_checks(a: Audit) -> dict:
         a.check("no_external_calls_no_writes", gone not in server,
                 f"{SERVER} references the deleted legacy ROAS chain: {gone}")
 
+    # 21 — PR-ADS-178C: the retired Leads / Deals readers stay retired.
+    retired_reader_checks(a, js)
+
     # 18 — no UI text presents a period ratio as ROAS or CAC.
     ui_bad = ui_ratio_label_violations(js, _text("static/index.html"))
     a.check("no_period_ratio_named_roas_or_cac", not ui_bad, "; ".join(ui_bad[:8]))
@@ -644,6 +648,86 @@ def structural_checks(a: Audit) -> dict:
             and "canonical_customer_revenue_service" not in body,
             "the independent derivation must not call the audited module")
     return {"readers": readers}
+
+
+_ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head", "options",
+                  "api_route", "add_api_route", "add_route", "websocket")
+
+
+def _registered_routes(src: str) -> set:
+    """Every path a FastAPI route in ``src`` registers, by AST (a docstring or
+    a comment that names a path is not a route): a decorator OR a direct call
+    (``app.add_api_route(...)``), the path given positionally or as
+    ``path=``, as a literal or as a module-level string constant. Paths are
+    normalised without a trailing slash (``/x/`` answers ``/x`` by redirect).
+    PR-ADS-178C-F1: the decorator-only, positional-literal scan let
+    ``add_api_route``, ``path=`` and a named constant through."""
+    tree = ast.parse(src)
+    consts = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    consts[t.id] = node.value.value
+
+    def _value(arg):
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        if isinstance(arg, ast.Name):
+            return consts.get(arg.id)
+        if isinstance(arg, ast.JoinedStr) or isinstance(arg, ast.BinOp):
+            # An f-string or a concatenation: keep its literal parts joined,
+            # so a split path still reads as the path it builds.
+            return "".join(n.value for n in ast.walk(arg)
+                           if isinstance(n, ast.Constant) and isinstance(n.value, str))
+        return None
+
+    routes = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _ROUTE_METHODS):
+            continue
+        cands = list(node.args[:1]) + [k.value for k in node.keywords if k.arg == "path"]
+        for arg in cands:
+            v = _value(arg)
+            if v and v.startswith("/"):
+                routes.add(v.rstrip("/") or "/")
+    return routes
+
+
+#: A retired path anywhere in app.js code (comments stripped), however the
+#: request is built: quoted, after a ``${API_BASE}`` template part, or split.
+def _js_requests(js: str, path: str) -> bool:
+    code = _strip_comments(js)
+    joined = re.sub(r"""["'`]\s*\+\s*["'`]""", "", code)
+    return re.search(re.escape(path) + r"(?![\w-])", joined) is not None
+
+
+def retired_reader_checks(a: Audit, js: str) -> None:
+    """21 — PR-ADS-178C: no retired Leads / Deals reader is back.
+
+    * no route is registered under a retired path (it would answer again);
+    * no page requests one (a fetch to a 404 is a page that never loads);
+    * no production module defines or calls a retired builder (code names,
+      not comments: a docstring that says it was retired is not a reader).
+    """
+    problems = [f"{SERVER} registers {r}" for r in RETIRED_READER_ROUTES
+                if r in _registered_routes(_text(SERVER))]
+    for r in RETIRED_READER_ROUTES:
+        if _js_requests(js, r):
+            problems.append(f"{APP_JS} requests {r}")
+    for rel in _production_py():
+        if rel == AUDIT_FILE:
+            continue
+        names = _code_names(rel)
+        tree = ast.parse(_text(rel))
+        defined = {n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for sym in RETIRED_READER_SYMBOLS:
+            if sym in names or sym in defined:
+                problems.append(f"{rel} defines or calls {sym}")
+    a.check("retired_readers_absent", not problems, "; ".join(problems[:8]))
 
 
 # ── 19 / 20: Meta spend (PR-ADS-171B) ─────────────────────────────────────────

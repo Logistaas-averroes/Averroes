@@ -1,9 +1,9 @@
 # 61 — One Pipeline page: leads and deals together
 
-**PR-ADS-178B** (this PR) builds one Pipeline page in the Dashboard design on
+**PR-ADS-178B** builds one Pipeline page in the Dashboard design on
 one builder, `build_pipeline`, and points Dashboard → Deals at the same
 builder. **PR-ADS-178C** retires the old routes after porting what parity and
-the audits still read from them (§8).
+the audits still read from them (§8 listed them; §13 is the record).
 
 Depends on: PR-ADS-177B (`d543dcc`, in CI as PR #233). Unblocks: 178C.
 
@@ -153,7 +153,10 @@ window, scope or group):
  deals: [...] | None, deals_status, deals_reason,
  source_breakdown: [{source_group, closed_won_deals, customers, won_revenue,
                      metrics, customers_additive: False}] | None,
- customers_won {status, reason, rows?},               # rows only when published
+ customers_won {status, reason, rows?,                # rows only when published
+                # PR-ADS-178C: + the reader contract's own reading (§13.3):
+                metric_family, window_basis, dedup_key, window, as_of, cohort,
+                customers, closed_won_deals, metric_truth, ...},
  truth_footer, sql_to_customer_rate (unavailable, R_SQL_TO_CUSTOMER_INCOMPATIBLE),
  metric_truth {closed_won_revenue_usd, closed_won_deals, customers,
                google_ads_cohort_sqls}}
@@ -233,6 +236,8 @@ section, so it lands right.
 
 ## 8. Not done here (178C)
 
+*PR-ADS-178C did these — see §13 for what was retired, kept and ported.*
+
 * Retire `/api/revenue-deals` (no caller), `/api/crm-funnel` (no page caller),
   `/api/crm-funnel/customers-won` (parity's `leads/customers_won` consumer
   and its 166A tests read it), the mart's `ledger_summary` UI use is gone but
@@ -258,8 +263,21 @@ The PG module is in the CI PostgreSQL step and its did-run list.
 ### 9.1 Fail-before evidence
 
 Both files copied unchanged onto a `git archive d543dcc` tree: **23 of 23**
-cases fail (no `services.pipeline_service`, no `/api/pipeline`, no Pipeline
-page or renderers).
+cases fail — but only because the feature was missing (no
+`services.pipeline_service`, no `/api/pipeline`, no Pipeline page or
+renderers: an `ImportError`, a 404 or an undefined function). That proves
+nothing about any guard: a case that fails for a missing module would fail
+for a wrong one too. *(Wording corrected by PR-ADS-178C, m8: this paragraph
+read as if the 23 cases failed because they caught wrong behaviour.)*
+
+What each case is evidence of:
+
+* **Proven by a named mutation** (the table below: the case fails when its
+  guard is broken on the finished tree) — one-page 03, 04, 06, 08, 09; PG 02
+  (×2), 04, 06, 07, 10.
+* **Feature presence only** (no mutation was run; the case shows the feature
+  exists and behaves on the fixture, not that it would catch a regression) —
+  one-page 01, 02, 05, 07, 10, 11, 12; PG 01, 03, 05, 08, 09.
 
 Named mutations on the finished tree (each makes the listed case fail; run by
 a scratch script that restores the file after each):
@@ -342,9 +360,18 @@ One Major, no blockers; fixed in place on the same branch.
 | o1 (pre-existing) under `reconciliation.status = partial` a stage with undated entries showed a plain number that is a lower bound | `pipelineFunnelLowerBounds` + `pipelineFunnelHtml`: "at least N" with the reason; every stage when the payload cannot say which (the builder now passes `coverage.stage_reached_without_entry_date`) | `f1::test_08` |
 
 Fail-before: `tests/test_pr_ads_178b_f1_truth_audit_round1.py` copied onto a
-`git archive 4d088cd` tree — the MAJOR-1, m3, m4, m5 and o1 cases fail; the
-three m2 counterfactuals pass there (the guards existed) and fail under their
-named mutation on the F1 tree:
+`git archive 4d088cd` tree (re-run by PR-ADS-178C, m8 — 11 fail, 9 pass):
+
+* **fail because the behaviour was wrong** — MAJOR-1 `01_a`, `01_b`, `01_c`,
+  `02` (the deleted `leadsCount` is called); m4 `06` (a raw reason code on the
+  page); m5 `07` (no note under a lead filter); o1 `08` (an exact-looking
+  lower bound); and F2's `09` (an exact rate beside a lower bound);
+* **fail only because a name was missing** — `02_b` (its probe text is not in
+  the older `app.js`) and m3 `05`, `05_b` (`REASON_AVERAGE_POPULATION_MISMATCH`
+  does not exist there). m3's behaviour is proven by mutation A3 below, not by
+  this run;
+* the three m2 counterfactuals pass there (the guards existed) and fail only
+  under their named mutation on the F1 tree:
 
 | Mutation | Fails |
 | --- | --- |
@@ -392,6 +419,288 @@ Two observations are carried, not fixed:
 
 * **Coverage is not split by attribution scope.** Under a narrow Scope this
   over-marks: a stage can be marked as a lower bound when it is complete for
-  that scope. It never under-marks.
+  that scope. It never under-marks. *(Fixed in PR-ADS-178C, §13.5: the funnel
+  now counts the gap per scope.)*
 * **Contacts with an unrecognised lifecycle stage are not counted as
   undated.** That gap is shown in words in the partial-evidence banner.
+
+## 13. PR-ADS-178C — the legacy Leads / Deals feeds retired
+
+On main `ea6a7ae` (178B + 177C). Read-only throughout: no Google Ads or
+HubSpot write is added or removed. The precedent is 176C (`docs/58` §8) and
+177C (`docs/60` §9): every truth property a retired surface's tests assert is
+first asserted on a live surface; a property the live surfaces did not hold
+is a finding, fixed — never pinned "as observed".
+
+### 13.1 What was retired, and what was kept
+
+| Route | Callers on `ea6a7ae` | Decision |
+| --- | --- | --- |
+| `GET /api/revenue-deals` | none (no page, no audit; `build_revenue_deals` is called by the mart deal view and Overview directly) | **retired** — answers 404 |
+| `GET /api/crm-funnel/customers-won` | the cross-page parity audit (`leads/customers_won`, via `build_customers_won`) and the 166A tests | **retired after porting** (§13.3) — answers 404 |
+| `GET /api/dashboard/deals` | `static/app.js` `loadDashboardDeals` (Dashboard → Deals); the cohort audit and parity build `build_dashboard_deals` directly | **kept** — the tab reads it. Its docstring now describes what it serves |
+| `GET /api/crm-funnel` | none in `static/` | **not in this PR's brief; left as is** (§13.9) |
+
+Deleted with them:
+
+| Kind | Deleted |
+| --- | --- |
+| Routes / handlers | `api.server.get_revenue_deals`, `api.server.api_crm_funnel_customers_won` and their docstring lines |
+| Builders only they used | `canonical_crm_funnel_service.build_customers_won`, `_build_customers_won`, `_cw_envelope`, `_cw_unavailable`, `_cw_parity_blocks`, `_cw_canonical_window`, `REASON_WINDOW_NOT_EXPRESSIBLE`, `REASON_FILTER_NOT_APPLICABLE`. **Moved** (not deleted) into `services/pipeline_service.py`: `_cw_metric` → `_reader_verdict`, `_won_customers_block` → `_won_customers_list`, the `CUSTOMERS_WON_*` / `COMPANY_*` constants. The funnel service reads no closed-won deal any more |
+| Parity | `CONSUMER_LEADS_CUSTOMERS_WON` (`leads/customers_won`) — replaced by `pipeline/customers_won` |
+| Audit inventory | the reader-cutover `INVENTORY` row for `services/canonical_crm_funnel_service.py` (it is no reader now; the Pipeline row names the moved reading) |
+| UI (178B's dead code) | `renderMartDiagnostics` (no caller since 178B); the four "Customers won" refusal labels only the retired route / Leads page sent (`customers_won_needs_a_business_window`, `…_not_split_by_contact_source`, `…_unreadable`, `…_window_mismatch`); the global `_pipelineDealSource` (§13.4) |
+| Registries | `system_status_service.PAGE_PIPELINE_IMPACT["leads"]` and `["opportunities"]` (retired page keys on the legacy `leads` snapshot); `freshness_service` `leads.page = "leads"` |
+| CSS | the Deals-tab panels' rules (`.deal-kpi-grid`, `.deal-dot*`, `.deal-status`, `.deal-funnel*`, `.deal-aging-*`, `.deal-campaign-panel`, `.deal-sql-panel`, `.deal-review-note`, `.deal-drawer__actions`, `.deal-drawer__link`, the `.deal-kpi-grid` media rules); the retired Leads page's `.leads-customer-figures`, `.leads-customer-figure`, `.leads-won-customers`; `.revenue-diagnostics` / `.revenue-diagnostic` (with `renderMartDiagnostics`). Every one was drawn only by code 178B deleted (checked against `07be622`) |
+
+Changed so they name nothing retired: the server and `/api/pipeline`
+docstrings; `db/revenue_repository.fetch_revenue_deals`' docstring; the
+`sql_doctrine_registry` `api.crm_funnel` rule (the retired handler's symbol
+removed; the inventory still reports **0 unknown**: 12 canonical / 11 legacy
+/ 6 mixed); `docs/API_CONTRACT.md` (a retired-route note).
+
+**Registries repointed, not just trimmed.** The Pipeline page does not read
+the legacy `leads` snapshot (`hubspot/contacts`): its funnel and lead list
+read the canonical contact funnel, which `PAGE_DATASET_MAP.pipeline` already
+names (`hubspot/contact_funnel`). So `PAGE_PIPELINE_IMPACT["pipeline"] =
+["contact_funnel", "lifecycle_events"]`, those two freshness datasets name
+`page: "pipeline"`, and the legacy `leads` dataset names **no** page (as the
+legacy `deals` snapshot has since 163B). Repointing `leads` itself to
+`pipeline` would have declared a dependency the page does not have.
+
+**Static scan.** No production code (AST names in `api`, `services`, `db`,
+`analysis`, `scripts`, `scheduler`, `connectors`; `app.js` without comments;
+`styles.css` without comments) names a deleted symbol, route request, reason
+label or class — `test_02`, `test_05` of the retired module. The names remain
+only in comments that record the retirement, and in the audit's own
+`RETIRED_READER_*` lists. 178B-F1 `test_02` (every function `app.js` calls is
+defined) passes.
+
+### 13.2 The guard, and its runtime twin
+
+`tests/test_pr_ads_178c_leads_deals_feeds_retired.py` `test_01` (the running
+app answers 404 on both retired routes, signed in or not, and 401 — served,
+gated — on `/api/dashboard/deals`, `/api/pipeline` and the two live
+`/api/crm-funnel/*` rows), `test_02` (no decorator registers them, no
+production module names a deleted symbol, no page requests them; the funnel
+service reads no closed-won deal).
+
+The runtime twin is in the enforcement layer: check 21
+`retired_readers_absent` of `scripts/audit_customer_revenue_reader_cutover.py`
+(`retired_reader_checks`, `RETIRED_READER_ROUTES`, `RETIRED_READER_SYMBOLS`),
+which runs in the production certification (`audit_platform_certification`
+`AUDITS`). It reads the server's routes by AST (a docstring naming a path is
+not a route): decorators and direct `add_api_route` calls, the path positional
+or `path=`, a literal, a module-level constant or a concatenation, trailing
+slash normalised. It reads `app.js` code with comments stripped, so a quoted,
+`${API_BASE}`-prefixed or concatenated request counts. It also reads every
+production module's code names. `test_03` shows it red for each of those
+forms of re-registration and request, and for a module bringing
+`build_customers_won` back. It shows it green for a comment that names them
+and for a longer path that merely starts with a retired one.
+
+The scan is static. A route built from a value computed at runtime would pass
+it. CI's `test_01`, which reads the live `app.routes`, is the complete guard
+(PR-ADS-178C-F1: the first version read positional decorators only, and the
+truth audit revived `/api/revenue-deals` past it with `add_api_route`).
+
+### 13.3 Port table
+
+"Live" = `build_pipeline` (`/api/pipeline`, the Pipeline page), and Dashboard
+→ Deals (`build_dashboard_deals`, which republishes it). 166A cases are
+`tests/test_pr_ads_166a_leads_page_names_and_customers.py`; "port n" is
+`tests/test_pr_ads_178c_leads_deals_port_pg_integration.py`; "retired n" is
+the non-PG 178C module.
+
+| Property asserted on the retired surface (source) | Where it holds now | Status |
+| --- | --- | --- |
+| Parity: the customers / closed-won-deals identities have ONE consumer that reads the closed-won reader contract directly, not the mart (166A review m4, `leads/customers_won`, 166A `31`) | `pipeline/customers_won`: `build_pipeline`'s `customers_won` block carries `load_won_deals`' own verdicts, window and deal-ledger provenance, read in the builder's snapshot; parity reads the block off the Pipeline payload (`_pipeline_customers_won_reading`) — no extra build. 166A `31`, port `01` | **ported** |
+| …and that leg can disagree with the mart (otherwise it is no check) | port `02`: a wrong reader verdict (block side) and a wrong mart summary (every republishing page) each make `consumer_values_differ` | **added** (the 166A suite never showed it failing) |
+| Customers won = distinct companies, never the deal count, never the stage-move count, reads nothing from the funnel (166A `02`, `03`) | the block (`_customers_won`, `_customers_won_reading`, `_reader_verdict`: no funnel token); the reading is unchanged when the funnel says 219 or 0 — 166A `03` | ported (behaviour added) |
+| Metric family / window basis / dedup key / close-date cohort / window bounds on the payload (166A `04`) | the same fields on the block; the window block's key is `key` (the parity signature field), was `window_key` | ported |
+| Withheld / unavailable / stale / no-companies: the reason, no number, no list (166A `05`, `06`, `27`) | the block's verdicts and `status`/`reason`; the Customers card; the whole page payload carries no company name or id when withheld — 166A `05`, `06`, `27` | ported |
+| A malformed or missing reader verdict fails closed; a withheld value loses its number (166A `09`) | `_reader_verdict`, through the real builder — 166A `09` | ported |
+| The list only beside a published count it numbers; names and their four states; names unavailable when the store is (166A `18`, `27`, `28`) | `_won_customers_list` / `_customers_won`, through the real builder; the client guard (`pipelineCustomersWonRows`) over faulty-server payloads — 166A `18`, `27`, `28` | ported |
+| Only admins get "View blockers" from the customer figure (166A `11`) | the Pipeline Customers card over the real payload — 166A `11` | ported |
+| The reader is inventoried; the audit fails without its row (166A `12`) | the reading moved, so the Pipeline row is the one that must stand: removing it fails `inventory_complete` naming `pipeline_service`; the funnel service is no reader — 166A `12` | ported |
+| The customers-won route is gated like the contact rows (166A `13`) | `/api/pipeline` and `/api/crm-funnel/contacts` answer 401 unauthenticated; the retired route 404 — 166A `13`, retired `01` | ported |
+| A non-business window is refused, never approximated (166A `08`) | `build_pipeline` raises `ValueError` (route 400) before any ledger read — 166A `08` | ported |
+| Under a Scope / Source filter: no customers-won figure, no ledger read (166A `07`) | **not ported — reversed by the 178B-F1 m1 owner decision**: the lead filters narrow the funnel only; customers won is the same all-source list, and the SQL card / funnel say the populations differ. 166A `07` asserts the decided behaviour (kind d) | superseded by decision |
+| `/api/revenue-deals`: business windows only, Current Quarter default, no day window (113 `test_endpoint_registered_business_window_only`) | `/api/pipeline`'s route (same defaults) and `build_revenue_deals` (still rejects a day window, 113 `test_service_rejects_invalid_window`) | ported |
+| `/api/revenue-deals` among the live sibling routes (165A `17`) | `/api/pipeline` and `/api/dashboard/deals` in its place | ported |
+| `/api/revenue-deals`' payload properties (164A population verdict, ledger summary, withheld = no rows) | not route properties: `build_revenue_deals` is unchanged and feeds the mart deal view, asserted by 113 / 164A / 178B on the live Pipeline payload | held (no change) |
+
+**Finding fixed while porting.** None of the 166A cases showed the
+independent leg failing; a parity consumer that republished the mart would
+have passed all of them. Port `02` is the missing counterfactual, and named
+mutation M2 (§13.7) — the block republishing the card instead of reading the
+reader — turns both of its cases red.
+
+### 13.4 m6 — the deal-source filter, per surface, from the payload
+
+`static/app.js`: `_pipelineDealSourceBySurface` (≈ line 6579) replaces the
+one global; `pipelineDealSurface` (≈ 6946: `surface: "dashboard_deals"` is
+Dashboard → Deals, anything else the Pipeline page), `pipelineDealSourceFor` /
+`pipelineSetDealSource` (≈ 6956 / 6962: each selection remembers the window
+it was made in), `pipelineDealSourceOptions` (≈ 6973), used by
+`pipelineDealsHtml` (≈ 6987) and the change handler in `pipelineWireDeals`
+(≈ 7098).
+
+* **Per surface.** A group picked on Dashboard → Deals never filters the
+  Pipeline page, nor the reverse; the two selects have distinct ids.
+* **Reset on a window change — chosen.** A group that exists in one quarter
+  may not in the next, and a page that opens filtered by a choice made for
+  another period shows fewer deals than its cards count with only a small
+  note to say so. Same window (a refresh, a lead-filter change) keeps it.
+* **Counts from the payload.** The options read `source_breakdown` (each
+  group's `metrics.closed_won_deals`, the reader contract through
+  `subset_metrics`) and the "All" option the card's published deal count. A
+  group whose count is not published reads "count not published"; with no
+  breakdown no filter is offered. The renderer counts no rows.
+
+Tests: retired `06` (surfaces, window), `07` (counts are the payload's even
+when they differ from the rows; unpublished; none).
+
+### 13.5 The round-2 observation — lower bounds per attribution scope
+
+Cheap, so done rather than disclosed: `build_populations` already knew each
+contact's scope membership when it counted an undated stage reach, so it now
+also files `coverage.stage_reached_without_entry_date_by_scope`
+(`services/canonical_crm_funnel_service.py` ≈ line 426, filled ≈ 492,
+published ≈ 513) — per stage, per scope; a narrow scope's figure is `None`
+(unknown, never 0) when campaign identity could not be consulted or a
+contact's membership is unknown. `pipeline_service._funnel_coverage` (≈ line
+362, used ≈ 414) passes the SELECTED scope's figures (and names the scope);
+an unknown figure reaches the page as `null`, which `pipelineFunnelLowerBounds`
+already reads as a bound. A funnel with no per-scope figure passes the
+all-source one (over-marking: it fails safe). `reconciliation.status` is
+unchanged (it still says `partial` for the whole funnel).
+
+Tests: retired `08` (the per-scope counts, nesting, `None` under an identity
+outage), `09` (the selection, the fall-backs and the rendered marks); port
+`05` on real tables: an ORGANIC contact at SQL with no SQL date marks SQL a
+lower bound under All Sources but not under Google Ads-source, where the
+Google Ads contact's own Opportunity gap stays marked; nothing is marked
+under Keyword-attributable.
+
+### 13.6 m7 and m8
+
+* **m7.** `tests/test_pr_ads_166a_leads_page_names_and_customers.py` no
+  longer has `_pipeline_from`. Its customer cases call the real builder
+  (`_pipeline` ≈ line 104, `_won` ≈ 127) over the same ledger fixtures and
+  render its real payload. The one substituted input is the funnel slice
+  (`crm_funnel.build` returns the 166A slice — or, in the database cases, the
+  real funnel's own payload). Non-database cases first apply PR-ADS-125's
+  coherent durable dataset (`_ledger(durable=True)`) so the mart deal view
+  runs without a database; the database cases read the real tables. Renderer
+  cases for states no builder sends (a verdict without a status, no block, a
+  withheld count carrying a list, a published list that does not number its
+  count) use builder-shaped payloads (`_shaped` ≈ 258), each named as a
+  faulty-server state. No assertion is weakened: every value, status, reason
+  and rendered text is asserted as before; `03` gains a behavioural check,
+  `05` / `27` / `28` assert the card and the whole page payload too.
+* **m8.** §9.1 now says the 23 cases fail on `d543dcc` because the feature
+  was missing, and lists which cases a named mutation proves and which are
+  feature-presence only. §11's fail-before was re-run on `4d088cd` and now
+  separates the cases that failed for wrong behaviour from those that failed
+  for a missing name (m3's two cases — proven by mutation A3).
+
+### 13.7 Tests
+
+New:
+
+| File | Cases | Kind |
+| --- | --- | --- |
+| `tests/test_pr_ads_178c_leads_deals_feeds_retired.py` | 9 | running app (404s), AST, the audit's check 21 and its mutations, registries, static scans, node-evaluated `app.js` |
+| `tests/test_pr_ads_178c_leads_deals_port_pg_integration.py` | 6 (5 functions) | PostgreSQL, real writers / builders / parity / reader-cutover audit / route / page |
+
+The PG module is in the CI PostgreSQL step and its did-run list. No module
+was deleted.
+
+**Fail-before.** Both copied onto a `git archive ea6a7ae` tree: **15 of 15**
+fail.
+
+* **Wrong behaviour on `ea6a7ae`:** retired `01` (`/api/revenue-deals` is a
+  route), `04` (`PAGE_PIPELINE_IMPACT` holds `leads`, `opportunities`), `05`
+  (`renderMartDiagnostics` present), `07` (the dropdown says "Organic (1)",
+  a row count, where the payload says 4); port `03` (`/api/revenue-deals`
+  answers 200).
+* **Missing feature only** (proven by the mutations below instead): retired
+  `02` (`_registered_routes`), `03` (`RETIRED_READER_ROUTES`), `06`
+  (`pipelineSetDealSource`), `08` / `09` (no per-scope coverage); port `01`,
+  `02` (no `pipeline/customers_won`), `04` (no check 21), `05` (no per-scope
+  coverage).
+
+Named mutations on the finished tree (a scratch script on a copy of the
+tree; each restored after its run; each makes every listed case fail, for the stated reason):
+
+| Mutation | Fails |
+| --- | --- |
+| M1 parity builds no `pipeline/customers_won` | port 01, 02 ×2 (`registered_consumer_not_built`, never a pass) |
+| M2 the block republishes the card instead of reading the reader | port 02 ×2 (block and pipeline agree: the leg is gone) |
+| M3 `structural_checks` skips check 21 | retired 03, port 04 |
+| M4 the route scan reads no decorator | retired 03 |
+| M5 one filter for both surfaces | retired 06 |
+| M6 the selection survives a window change | retired 06 |
+| M7 the dropdown counts rows again | retired 07 |
+| M8 the builder passes the whole-population coverage | retired 09, port 05 |
+| M9 per-scope gaps counted without membership | retired 08, port 05 |
+| M10 the customers-won route re-registered | retired 01, 02, 03; port 03 |
+| M11 a Deals-tab CSS rule comes back | retired 05 |
+| M12 the `leads` impact entry comes back | retired 04 |
+
+### 13.8 Existing tests changed
+
+Legend as §9.2: **(r)** the pinned surface is retired and the same property
+is asserted on its successor; **(b)** broadened; **(d)** behaviour changed by
+a recorded decision, the new behaviour asserted; **(x)** removed with the code
+it pinned, replaced by an assertion that it is gone; **(f)** fixture completed
+to production's shape. Nothing is skipped, deselected, quarantined or
+weakened.
+
+| Test | Kind | Why |
+| --- | --- | --- |
+| `113::test_endpoint_registered_business_window_only` | (r) | the route is retired; the same window contract is asserted on `/api/pipeline`, and its absence |
+| `126::test_all_revenue_pages_share_mart_renderers` | (x) | `renderMartDiagnostics` is deleted (no caller); asserted absent. The loop's diagnostics assertion was unreachable (both listed pages `continue` before it) and the dead `renderRevenueDealsPage` branch is removed; an unlisted page now raises instead of passing silently |
+| `126::test_parity_css_present` | (x) | the diagnostics CSS is deleted with its renderer; asserted absent; the parity panel's CSS still asserted |
+| `139::test_deals_responsive_classes_exist` | (r) / (x) | the tab draws the Pipeline panels; their classes asserted styled and drawn; the deleted panels' classes asserted gone |
+| `154c::_pipeline_payload`, `_customers_won_block`, `_payloads`, `test_f2_2d` | (r) | `leads/customers_won` → `pipeline/customers_won`, the block of the same pipeline payload (production's shape: `_build_consumers` derives it) |
+| `165a::test_17` | (r) / (b) | `/api/pipeline` and `/api/dashboard/deals` in place of `/api/revenue-deals`, which is asserted absent |
+| `166a` (module docstring; helpers `_pipeline`, `_won`, `_stable`, `_shaped`, `_ledger(durable)`; `_pipeline_from` deleted) | m7 | §13.6 |
+| `166a::02`, `03`, `04`, `05`, `06`, `09`, `11`, `18`, `23`, `28` | (r) / (b) | the real builder's block and page in place of the route's payload; same values, reasons and texts; `03` gains the funnel-independence check |
+| `166a::07` (renamed `…_narrows_the_funnel_and_never_the_customers_won_figure`) | (d) | 178B-F1 m1: the filter refusal is reversed by decision; the same list under every filter, the figures kept apart |
+| `166a::08` | (r) | the builder refuses a non-business window before any ledger read |
+| `166a::10` | (r) | the zero and moves-unknown cases from the real builder; no-verdict / no-block as faulty-server payloads |
+| `166a::12` | (r) | the reading's inventory row is `pipeline_service`'s |
+| `166a::13` | (r) / (x) | `/api/pipeline` gated like the contact rows; the retired route 404 |
+| `166a::27` | (r) / (d) | the real builder; the last case (a lead filter) asserts the decided same-list behaviour |
+| `166a::31` | (r) | the parity consumer is `pipeline/customers_won`; every assertion kept |
+| `178b_one_page::_payload` (`_breakdown`) | (f) | the builder always sends `source_breakdown` beside a published list; the filter reads it (m6) |
+| `178b_one_page::test_07` | (r) | the selection is set through `pipelineSetDealSource` (per surface, per window) |
+| `178b_one_page::test_08` | (r) | the carried-reason case uses a reason the builder sends (the 166A refusal label is deleted) |
+| `178b_pg::test_02`, `test_04` | (f) | the block carries provenance; compared with its build instant aside |
+| `178b_pg::test_03` | (b) | withheld: the block's own reader verdict says the same status and reason |
+
+### 13.9 Not done here
+
+* **`GET /api/crm-funnel`** has no page caller (178B §8 listed it). The brief
+  for this PR named three routes and not this one, so it is left. At least
+  `153c` inspects its handler, so retiring it needs its own port.
+* `db/revenue_repository.fetch_revenue_deals` (legacy `gclid_attribution`
+  read) has no production caller; it stays as one of the reader-cutover
+  audit's entry points. Removing it is its own change.
+* `system_status_service.PIPELINE_DEPENDENCIES["leads"]["page"]` still says
+  "Lead Quality" (a page retired in 153C) as the label of the legacy leads
+  pipeline; and `datasetRelatedPage('hubspot', 'contacts')` sends the legacy
+  contacts dataset to the Pipeline page. Both are labels, not dependencies;
+  left for a System Status pass.
+* **Frontend freshness maps still name the legacy deal scan.** `static/app.js`
+  `PAGE_DATASET_MAP.pipeline` and `PAGE_DEPENDENCIES.pipeline` name
+  `hubspot/deals`, the legacy non-authoritative scan that `hubspot/deal_ledger`
+  supersedes. The same holds for dashboard, campaigns and roas-countries. So a
+  page's freshness strip can show a rate-limited legacy scan as degraded, or
+  leave out the canonical ledger. No figure is affected: the KPIs themselves
+  go unavailable on a stale ledger (161F). This belongs to the System Status
+  pass.
+* Unused CSS from earlier retirements (Campaign Evidence, keyword / n-gram /
+  quality badges — about 40 classes) is outside this PR's Deals-tab scope.

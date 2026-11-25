@@ -3047,6 +3047,17 @@ Never writes to HubSpot or Google Ads.
 The Leads page consumes ONLY the canonical `/api/crm-funnel` family. No competing
 lead API was introduced.
 
+> **Retired in PR-ADS-178C** (`docs/61_PIPELINE_ONE_PAGE.md` §13):
+> `GET /api/crm-funnel/customers-won` (PR-ADS-166A, the Leads page's
+> "Customers won") and `GET /api/revenue-deals` (PR-ADS-113, the Closed-Won
+> Deals page's ledger) are deleted and answer **404**. The Leads and Deals
+> pages are one Pipeline page since PR-ADS-178B: `GET /api/pipeline` publishes
+> both (`deals`, and `customers_won` — the list beside the published customer
+> count, and the closed-won reader contract's own customers / closed-won-deals
+> verdicts). `GET /api/dashboard/deals` is kept: Dashboard → Deals reads it.
+> The contact rows (`/api/crm-funnel/contacts`) and the working-status
+> breakdown (`/api/crm-funnel/operational-status`) below are live.
+
 ## `GET /api/crm-funnel/contacts`
 
 Read-only. Auth required. One **bounded, server-side paginated** page of the

@@ -419,6 +419,14 @@ def build_populations(
     missing_stage_dates: dict[str, int] = {e: 0 for e in FUNNEL_EVENTS}
     unknown_stage_contacts = 0
     stage_reached_without_date: dict[str, int] = {e: 0 for e in FUNNEL_EVENTS}
+    # PR-ADS-178C: the same gap per attribution scope, so a page showing ONE
+    # scope's counts marks as a lower bound only the stages THAT scope is
+    # missing dates for. None = the scope's membership is unknown for an
+    # undated contact (identity outage): unknown, never 0.
+    stage_reached_without_date_by_scope: dict[str, dict] = {
+        e: {s: (None if not identity_available and s in IDENTITY_DEPENDENT_SCOPES else 0)
+            for s in ORDERED_SCOPES}
+        for e in FUNNEL_EVENTS}
 
     for raw in rows or []:
         contact_id = str(raw.get("contact_id") or "").strip()
@@ -481,6 +489,13 @@ def build_populations(
                 if _stage_reached(stage, event):
                     stage_reached_without_date[event] += 1
                     missing_stage_dates[event] += 1
+                    by_scope = stage_reached_without_date_by_scope[event]
+                    for s in ORDERED_SCOPES:
+                        member = contact["scopes"][s]
+                        if member is None:
+                            by_scope[s] = None
+                        elif member and by_scope[s] is not None:
+                            by_scope[s] += 1
                 continue
             if _in_window(event_date, start, end):
                 events[event].append(contact)
@@ -495,6 +510,7 @@ def build_populations(
         "contacts_considered": len(contacts),
         "missing_stage_entry_dates": missing_stage_dates,
         "stage_reached_without_entry_date": stage_reached_without_date,
+        "stage_reached_without_entry_date_by_scope": stage_reached_without_date_by_scope,
         "unknown_lifecycle_stage_contacts": unknown_stage_contacts,
     }
 
@@ -1591,247 +1607,13 @@ __all__ = [
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PR-ADS-166A — "Customers won" for the Leads page, from the reader contract
+# PR-ADS-166A "Customers won" — moved to the Pipeline builder (PR-ADS-178C)
 # ═════════════════════════════════════════════════════════════════════════════
-# The Leads page showed one figure under the word "Customers": the number of
-# contacts whose HubSpot lifecycle stage became Customer in the window. For Q3
-# 2026 that was about 219 — 206 of them offline-source contacts and 182 created
-# before the quarter, moved in bulk by the team — while 8 deals were
-# closed-won. The count was correct; the word was not.
-#
-# The page now shows two figures, each under its own name:
-#   * the stage-move count, from `build` above (lifecycle_stage_events, by
-#     date_entered_customer);
-#   * customers won, from `build_customers_won` below (closed_won_customers,
-#     by deal close date).
-#
-# `build_customers_won` decides nothing and reads NOTHING from the funnel: no
-# contact row, no stage date, no count from `build`. It reads the window's
-# population with `canonical_revenue_service.load_won_deals` inside one
-# snapshot and republishes the canonical {value, status, reason} for customers
-# and for closed-won deals — two fields, never summed, never derived from each
-# other or from the stage-move count. It lives in this file, not a new one,
-# because the reader-cutover audit evaluates its inventory against the
-# PR-ADS-161E base tree (test_26), where a file added later does not exist.
-#
-# What it refuses, rather than approximate:
-#   * a window that is not a business window — the reader contract's
-#     population is defined for business windows;
-#   * a Scope or Source filter — those classify CONTACTS by acquisition
-#     source; applying that taxonomy to won deals' companies would be a
-#     second, unreviewed attribution rule, so a filtered request gets
-#     `unavailable` with the reason, never the all-source number beside a
-#     filtered funnel.
-
-CUSTOMERS_WON_METRIC_FAMILY = "closed_won_customers"
-CUSTOMERS_WON_WINDOW_BASIS = "deal_close_date"
-CUSTOMERS_WON_DEDUP_KEY = "hubspot_company_id"
-
-_CW_WINDOW_BUSINESS = "business"
-
-#: The window cannot be expressed for the closed-won reader contract.
-REASON_WINDOW_NOT_EXPRESSIBLE = "customers_won_needs_a_business_window"
-#: The page is filtered by a contact-source rule that does not apply to deals.
-REASON_FILTER_NOT_APPLICABLE = "customers_won_not_split_by_contact_source"
-#: The reader returned no verdict for a metric: fail closed.
-REASON_VERDICT_MISSING = "closed_won_verdict_missing"
-
-CUSTOMERS_WON_LABEL = "Customers won"
-CUSTOMERS_WON_DEFINITION = (
-    "Distinct HubSpot companies with a closed-won deal whose close date is "
-    "in this period.")
-CUSTOMERS_WON_NOT_THE_SAME_AS = (
-    "Not the same as contacts moved to the Customer lifecycle stage: that "
-    "counts CRM stage changes, including old contacts updated by the team.")
-
-
-def _cw_unavailable(reason: str) -> dict:
-    return {"value": None, "status": "unavailable", "reason": reason}
-
-
-def _cw_metric(base: dict, name: str) -> dict:
-    """The canonical verdict for ``name``, exactly as the reader carries it.
-
-    A missing or malformed verdict is ``unavailable`` — never a count, and
-    never the other metric's value.
-    """
-    m = (base.get("canonical_metrics") or {}).get(name)
-    if not isinstance(m, dict) or m.get("status") not in (
-            "published", "withheld", "unavailable", "not_published"):
-        return _cw_unavailable(base.get("reason") or REASON_VERDICT_MISSING)
-    if m["status"] == "published":
-        if m.get("value") is None:
-            # "Published" with no number is not a publishable zero.
-            return _cw_unavailable(REASON_VERDICT_MISSING)
-        return {"value": m["value"], "status": "published", "reason": None}
-    # A value never survives a non-published status.
-    return {"value": None, "status": m["status"], "reason": m.get("reason")}
-
-
-def _cw_envelope(window_type, window_key, scope, acquisition_group) -> dict:
-    return {
-        "metric_family": CUSTOMERS_WON_METRIC_FAMILY,
-        "window_basis": CUSTOMERS_WON_WINDOW_BASIS,
-        "dedup_key": CUSTOMERS_WON_DEDUP_KEY,
-        "label": CUSTOMERS_WON_LABEL,
-        "definition": CUSTOMERS_WON_DEFINITION,
-        "not_the_same_as": CUSTOMERS_WON_NOT_THE_SAME_AS,
-        "source": "hubspot_deal_ledger",
-        "requested": {"window_type": window_type, "window_key": window_key,
-                      "scope": scope, "acquisition_group": acquisition_group},
-    }
-
-
-def build_customers_won(window_type: str, window_key: str, *,
-                        scope: str = SCOPE_ALL_SOURCE,
-                        acquisition_group: str | None = None,
-                        now: datetime | None = None) -> dict:
-    """Customers won and closed-won deals for one Leads-page window.
-
-    Every closed-won read happens inside ONE snapshot (``single_snapshot``).
-    """
-    from services import canonical_revenue_service as crs  # noqa: PLC0415
-    return crs.single_snapshot(_build_customers_won)(
-        window_type, window_key, scope=scope,
-        acquisition_group=acquisition_group, now=now)
-
-
-def _build_customers_won(window_type, window_key, *, scope, acquisition_group,
-                         now) -> dict:
-    from services import canonical_revenue_service as crs  # noqa: PLC0415
-    out = _cw_envelope(window_type, window_key, scope, acquisition_group)
-
-    def refused(reason):
-        return {**out, "available": False, "window": None, "as_of": None,
-                "customers": {**_cw_unavailable(reason),
-                              "dedup_key": CUSTOMERS_WON_DEDUP_KEY},
-                "closed_won_deals": _cw_unavailable(reason)}
-
-    if window_type != _CW_WINDOW_BUSINESS:
-        return refused(REASON_WINDOW_NOT_EXPRESSIBLE)
-    from analysis.business_windows import is_valid_window  # noqa: PLC0415
-    if not is_valid_window(window_key):
-        raise ValueError(f"Unknown business window '{window_key}'")
-    if scope != SCOPE_ALL_SOURCE or acquisition_group:
-        return refused(REASON_FILTER_NOT_APPLICABLE)
-
-    base = crs.load_won_deals(window_key, now=now)
-    customers = _cw_metric(base, "customers")
-    deals = _cw_metric(base, "closed_won_deals")
-    return {
-        # PR-ADS-166A (review m4): the cross-page parity audit reads this
-        # payload as one more consumer of the `customers` and
-        # `closed_won_deals` identities, beside Deals, Overview and the mart.
-        **_cw_parity_blocks(window_key, now, customers, deals),
-        # Present ONLY when the customer count is published. Withheld means
-        # absent: no key, no partial list.
-        **_won_customers_block(base, customers),
-        **out,
-        "available": bool(base.get("available")),
-        "window": {**_cw_canonical_window(window_key, now),
-                   "window_type": _CW_WINDOW_BUSINESS,
-                   "window_key": window_key,
-                   "start": base.get("window_start"),
-                   "end_exclusive": base.get("window_end"),
-                   "label": base.get("window_label")},
-        "as_of": base.get("as_of"),
-        "cohort": base.get("cohort"),
-        "customers": {**customers, "dedup_key": CUSTOMERS_WON_DEDUP_KEY},
-        "closed_won_deals": deals,
-    }
-
-
-#: What a won customer's name field supports.
-COMPANY_NAMED = "named"
-COMPANY_NO_NAME = "no_name_in_hubspot"      # read, and HubSpot holds none
-COMPANY_NAME_NOT_LOADED = "not_loaded"      # never asked
-COMPANY_NOT_RETURNED = "not_returned"       # asked; HubSpot did not return it
-COMPANY_NAME_UNAVAILABLE = "unavailable"    # the name store could not be read
-REASON_ROWS_DO_NOT_MATCH = "closed_won_rows_do_not_match_count"
-
-
-def _won_customers_block(base: dict, customers: dict) -> dict:
-    """``{"won_customers": [...]}`` for a PUBLISHED customer count, else ``{}``.
-
-    One entry per distinct company on the window's won deals, from the
-    reader's own population and identity map (``deals`` and
-    ``company_ids_by_deal``) — the same members the published count was made
-    from. Nothing here decides who is a customer; it only lists them and adds
-    the name the platform holds.
-
-    If the entries do not number exactly the published count, the list is
-    withheld (``won_customers_omitted``): a list that disagrees with its own
-    headline is not shown beside it.
-    """
-    if customers.get("status") != "published" or not base.get("available"):
-        return {}
-    by_deal = base.get("company_ids_by_deal")
-    if not isinstance(by_deal, dict):
-        return {"won_customers_omitted": REASON_ROWS_DO_NOT_MATCH}
-    grouped: dict = {}
-    for deal in base.get("deals") or []:
-        ids = {str(c) for c in by_deal.get(str(deal.get("deal_id"))) or []}
-        if len(ids) != 1:
-            # A published count means every member resolves to one company.
-            return {"won_customers_omitted": REASON_ROWS_DO_NOT_MATCH}
-        entry = grouped.setdefault(ids.pop(), {"deals": 0, "latest": None})
-        entry["deals"] += 1
-        closed = _iso(deal.get("deal_close_date"))
-        if closed and (entry["latest"] is None or closed > entry["latest"]):
-            entry["latest"] = closed
-    if len(grouped) != customers.get("value"):
-        return {"won_customers_omitted": REASON_ROWS_DO_NOT_MATCH}
-
-    from db import hubspot_name_repository as names_repo  # noqa: PLC0415
-    stored = names_repo.fetch_company_names(list(grouped))
-    names = stored.get("names") or {}
-    rows = []
-    for company_id, entry in grouped.items():
-        if not stored.get("available"):
-            name, status = None, COMPANY_NAME_UNAVAILABLE
-        elif company_id not in names:
-            name, status = None, COMPANY_NAME_NOT_LOADED
-        elif names[company_id].get("name"):
-            name, status = names[company_id]["name"], COMPANY_NAMED
-        elif not names[company_id].get("read"):
-            name, status = None, COMPANY_NOT_RETURNED
-        else:
-            name, status = None, COMPANY_NO_NAME
-        rows.append({"company_id": company_id, "company_name": name,
-                     "company_name_status": status,
-                     "closed_won_deals": entry["deals"],
-                     "latest_close_date": entry["latest"]})
-    rows.sort(key=lambda r: (r["latest_close_date"] or "", r["company_id"]),
-              reverse=True)
-    return {"won_customers": rows}
-
-
-def _cw_canonical_window(window_key, now) -> dict:
-    """The canonical business-window block every production consumer
-    publishes (``key`` / ``start_date`` / ``end_date`` / ``timezone``)."""
-    from services import canonical_contract  # noqa: PLC0415
-    resolved = canonical_contract.resolve_canonical_window(window_key, now=now)
-    return {"key": resolved.get("key") or window_key,
-            "start_date": resolved.get("start_date"),
-            "end_date": resolved.get("end_date"),
-            "timezone": resolved.get("timezone")}
-
-
-def _cw_parity_blocks(window_key, now, customers: dict, deals: dict) -> dict:
-    """Per-metric provenance, in the shape the parity audit checks."""
-    from services import canonical_contract  # noqa: PLC0415
-
-    def entry(metric, verdict):
-        published = verdict.get("status") == "published"
-        return {"metric": metric,
-                "data_source": canonical_contract.SOURCE_CANONICAL_DEAL_LEDGER,
-                "scope": "all_source_business_revenue",
-                "truth_status": (canonical_contract.TRUTH_READY if published
-                                 else canonical_contract.TRUTH_NOT_READY),
-                "unavailable_reason": verdict.get("reason")}
-    return {canonical_contract.METRIC_TRUTH_KEY:
-            canonical_contract.metric_truth_block(
-                _cw_canonical_window(window_key, now),
-                [entry("customers", customers),
-                 entry("closed_won_deals", deals)]),
-            "legacy_fallback_used": False}
+# The Leads page's "Customers won" figure (distinct HubSpot companies with a
+# closed-won deal closed in the window, from the closed-won reader contract)
+# was built here, by `build_customers_won`, and served at
+# `/api/crm-funnel/customers-won`. PR-ADS-178B made the Pipeline page its only
+# page; PR-ADS-178C retired the route and moved the reading into
+# `services/pipeline_service.py` (`_customers_won`, `_reader_verdict`,
+# `_won_customers_list`), inside the Pipeline builder's one closed-won
+# snapshot. This module — the lifecycle funnel — reads no closed-won deal.

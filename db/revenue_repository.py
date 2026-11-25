@@ -513,8 +513,10 @@ def fetch_country_deal_details(start: date | None, end: date, country: str,
 def fetch_revenue_deals(start: date | None, end: date) -> dict:
     """Closed-won deal ledger rows from the durable `gclid_attribution` table.
 
-    PR-ADS-113: powers the Closed-Won Revenue Ledger (/api/revenue-deals).
-    Windowed by the real deal_close_date (NEVER the scheduler run_date) and
+    PR-ADS-113: powered the Closed-Won Revenue Ledger (/api/revenue-deals)
+    until PR-ADS-153E-B moved it onto the canonical deal ledger; the route is
+    retired by PR-ADS-178C and this function has no production caller (it
+    stays a READER_ENTRY_POINT of the reader-cutover audit). Windowed by the real deal_close_date (NEVER the scheduler run_date) and
     deduped to the latest row per deal_id. Only closed-won deals count as
     revenue. Read-only.
 

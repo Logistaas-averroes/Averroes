@@ -139,6 +139,7 @@ jobs:
             tests/test_pr_ads_177b_meta_adsets_pg_integration.py \
             tests/test_pr_ads_178b_pipeline_pg_integration.py \
             tests/test_pr_ads_177c_campaign_feed_port_pg_integration.py \
+            tests/test_pr_ads_178c_leads_deals_port_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -319,6 +320,14 @@ jobs:
                            # display names never merged, the certification's
                            # port, spend withheld before the morning sync.
                            "tests.test_pr_ads_177c_campaign_feed_port_pg_integration",
+                           # PR-ADS-178C. The retired Leads / Deals feeds'
+                           # truth properties on the live surfaces: parity's
+                           # independent customers-won leg read off the
+                           # Pipeline payload (and shown failing on either
+                           # side), the retired routes 404 on a signed-in
+                           # app, the reader-cutover audit's retirement
+                           # check, funnel lower bounds per attribution scope.
+                           "tests.test_pr_ads_178c_leads_deals_port_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

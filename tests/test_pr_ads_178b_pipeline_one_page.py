@@ -79,6 +79,25 @@ _DEALS = [_deal(1, "google_ads", "2026-11-20T10:00:00+00:00", 4000.0, "brand - u
           _deal(4, None, "2026-10-02T09:00:00+00:00", 1000.0)]
 
 
+def _breakdown(deals):
+    """``source_breakdown`` in the builder's shape (``_source_breakdown``): the
+    deal list partitioned by each deal's own group, each part's figures as
+    reader-contract verdicts. PR-ADS-178C: the deal-source filter reads its
+    per-group counts from here (m6), so the fixture carries it whenever the
+    builder does — beside a published deal list."""
+    groups = {}
+    for d in deals:
+        groups.setdefault(d["acquisition_group"] or "not_recorded", []).append(d)
+    out = []
+    for g, members in groups.items():
+        n, rev = len(members), sum(d["deal_amount_usd"] or 0.0 for d in members)
+        out.append({"source_group": g, "closed_won_deals": n, "customers": 1,
+                    "won_revenue": rev, "customers_additive": False,
+                    "metrics": {"closed_won_deals": _m(n), "customers": _m(1),
+                                "revenue_usd": _m(rev)}})
+    return out
+
+
 def _payload(*, deals=None, deals_status="published", deals_reason=None, cohort=None,
              kpis=None, customers_won=None, funnel=None, population=None):
     deals = list(_DEALS) if deals is None else deals
@@ -106,7 +125,7 @@ def _payload(*, deals=None, deals_status="published", deals_reason=None, cohort=
             "sync": {"bootstrap_status": "complete"}},
         "deals": deals if deals_status == "published" else None,
         "deals_status": deals_status, "deals_reason": deals_reason,
-        "source_breakdown": None,
+        "source_breakdown": _breakdown(deals) if deals_status == "published" else None,
         "customers_won": customers_won or {
             "status": "published", "reason": None,
             "rows": [{"company_id": "co-1", "company_name": "Acme Freight",
@@ -286,7 +305,9 @@ def test_07_the_deal_source_filter_filters_on_the_deals_own_source_group_and_lea
     assert re.findall(r"<th[^>]*>(.*?)</th>", head) == [
         "Deal", "Closed", "Won Revenue", "Source", "Campaign", "Country"]
     assert "Source not recorded" in all_          # a deal with no group is shown as itself
-    summary, filtered = _page(_payload(), extra="_pipelineDealSource = 'google_ads';")
+    # PR-ADS-178C m6: the selection is per surface and per window.
+    summary, filtered = _page(_payload(), extra=(
+        "pipelineSetDealSource({window: {key: 'current_quarter'}}, 'google_ads');"))
     assert re.findall(r'data-pipeline-deal="(d-\d)"', filtered) == ["d-3", "d-1"]
     assert "Showing 2 of 4 closed-won deals" in filtered
     assert "The cards above count every deal." in filtered
@@ -313,10 +334,13 @@ def test_08_customers_won_is_a_list_only_when_published_and_equal_to_the_count()
     fc = fo[fo.index('id="pipeline-customers"'):]
     assert "Acme Freight" in fc and "Unavailable" not in fc
     # A status and reason the payload carries are said in words, no list.
+    # (PR-ADS-178C: a reason the builder can send — the PR-ADS-166A
+    # "not split by contact source" refusal is retired with its route.)
     _, uo = _page(_payload(customers_won={"status": "unavailable",
-                                          "reason": "customers_won_not_split_by_contact_source"}))
+                                          "reason": "company_associations_unreadable"}))
     uc = uo[uo.index('id="pipeline-customers"'):]
-    assert "Unavailable" in uc and "not split by contact source" in uc and "Acme Freight" not in uc
+    assert "Unavailable" in uc and "Acme Freight" not in uc
+    assert _run('canonicalReasonLabel("company_associations_unreadable")') in uc
     assert re.search(r'data-kpi="customers">.*?>2<', summary, re.DOTALL)
     assert re.search(r'data-kpi="revenue">.*?\$9', summary, re.DOTALL)
     # Never merged with the deal list: the deal section holds no customer table.

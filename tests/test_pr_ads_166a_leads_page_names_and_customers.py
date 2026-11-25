@@ -19,6 +19,18 @@ What these cases hold:
 The UI cases evaluate the real functions from ``static/app.js`` in ``node``
 (the repository has no JS harness). The database cases run the real schema,
 contact sync, funnel writer and readers on a throwaway PostgreSQL cluster.
+
+PR-ADS-178C (178B review m7): ``/api/crm-funnel/customers-won`` and its
+builder are retired; "Customers won" is the Pipeline page's, built by
+``services.pipeline_service.build_pipeline`` (one closed-won snapshot). The
+customer cases run the REAL builder over the same ledger fixtures and render
+its real payload — no test-side adapter re-implements the block. The funnel
+slice is the one input substituted (``crm_funnel.build`` returns the
+production-shaped slice, or the real funnel's own output in the database
+cases); the Customers card, the block's reader verdicts and the list are the
+builder's. A few renderer cases still feed a hand-built payload in the
+builder's shape for states the builder cannot send (a faulty server), and
+say so.
 """
 from __future__ import annotations
 
@@ -65,8 +77,16 @@ def _won_rows():
 
 
 def _ledger(monkeypatch, *, companies=True, sync_state=None, available=True,
-            scan_age_hours=2):
-    """The deal ledger of Q3 2026: eight won deals, seven companies."""
+            scan_age_hours=2, durable=True):
+    """The deal ledger of Q3 2026: eight won deals, seven companies.
+
+    PR-ADS-178C: ``durable`` first patches the rest of the durable repository
+    (PR-ADS-125's coherent dataset) so the Pipeline builder's mart deal view
+    can run with no database; the database cases pass ``durable=False`` and
+    read the real (empty) tables beside this ledger."""
+    if durable:
+        from tests import test_pr_ads_125_revenue_decision_mart as t125
+        t125._patch_durable(monkeypatch)
     rows = _won_rows()
     evidence = None
     if companies:
@@ -81,9 +101,35 @@ def _ledger(monkeypatch, *, companies=True, sync_state=None, available=True,
     return rows
 
 
-def _won(monkeypatch=None, **kwargs):
-    from services import canonical_crm_funnel_service as funnel
-    return funnel.build_customers_won("business", WINDOW, now=NOW, **kwargs)
+def _pipeline(monkeypatch, funnel=None, **kwargs) -> dict:
+    """PR-ADS-178C (m7): the REAL Pipeline builder's payload for the window,
+    JSON-normalised as the route serves it. Its one substituted input is the
+    lifecycle funnel slice (``crm_funnel.build``): the production-shaped
+    slice by default, or the real funnel's own payload (database cases)."""
+    from services import canonical_crm_funnel_service as crm_funnel
+    from services.pipeline_service import build_pipeline
+    slice_ = _funnel_payload() if funnel is None else funnel
+    monkeypatch.setattr(crm_funnel, "build", lambda *a, **k: slice_)
+    return json.loads(json.dumps(build_pipeline(WINDOW, now=NOW, **kwargs),
+                                 default=str))
+
+
+def _stable(value):
+    """``value`` without its build instants (``generated_at`` in provenance):
+    two builds of the same evidence are equal when everything else is."""
+    if isinstance(value, dict):
+        return {k: _stable(v) for k, v in value.items() if "generated" not in k}
+    if isinstance(value, list):
+        return [_stable(v) for v in value]
+    return value
+
+
+def _won(monkeypatch, **kwargs) -> dict:
+    """The Pipeline payload's Customers won block (the retired route's
+    reading, moved into the builder): the reader contract's own verdicts,
+    the window and metric family, and the list only beside a published
+    count it numbers."""
+    return _pipeline(monkeypatch, **kwargs)["customers_won"]
 
 
 def _funnel_payload(count=STAGE_MOVES, window_key=WINDOW):
@@ -184,36 +230,9 @@ def _figure(markup: str, which: str) -> str:
     return _text(markup.split(marker)[1].split("<!--end-->")[0])
 
 
-def _pipeline_from(funnel, won):
-    """PR-ADS-178B — the Pipeline builder's payload for one window, shaped
-    from the funnel slice and the customers-won verdicts the builder
-    republishes (``pipeline_service._customers_won``: the list only beside a
-    published count; withheld = no list, with the reason)."""
-    won = won or {}
-
-    def verdict(key):
-        m = won.get(key)
-        if isinstance(m, dict) and m.get("status") in (
-                "published", "withheld", "unavailable", "not_published"):
-            return m
-        return {"value": None, "status": "unavailable",
-                "reason": "closed_won_verdict_missing"}
-    cust, deals = verdict("customers"), verdict("closed_won_deals")
-    if cust["status"] == "published" and "won_customers" in won:
-        cw = {"status": "published", "reason": None, "rows": won["won_customers"]}
-    elif cust["status"] == "published":
-        cw = {"status": "withheld",
-              "reason": won.get("won_customers_omitted") or "closed_won_rows_do_not_match_count"}
-    else:
-        cw = {"status": cust["status"], "reason": cust.get("reason")}
-    return {"window": {"key": WINDOW}, "cohort": None, "funnel": funnel,
-            "kpis": {"customers": cust, "closed_won_deals": deals},
-            "customers_won": cw}
-
-
-def _figures_calls(funnel, won, key="p"):
-    """The renderers that draw the two figures on the Pipeline page."""
-    payload = _pipeline_from(funnel, won)
+def _figures_calls(payload, key="p"):
+    """The renderers that draw the two figures on the Pipeline page, over ONE
+    Pipeline payload (the builder's, or a builder-shaped one)."""
     return {f"{key}__moves": ["pipelineFunnelHtml", [payload]],
             f"{key}__cards": ["pipelineKpiCardsHtml", [payload, None]],
             f"{key}__list": ["pipelineCustomersWonHtml", [payload]]}
@@ -232,8 +251,21 @@ def _figures_markup(out: dict, key="p") -> str:
             "<!--customers_won--><x " + card + out[f"{key}__list"] + "<!--end-->")
 
 
-def _figures(funnel, won, *, role=None) -> str:
-    return _figures_markup(_node(_figures_calls(funnel, won), role=role))
+def _figures(payload, *, role=None) -> str:
+    return _figures_markup(_node(_figures_calls(payload), role=role))
+
+
+def _shaped(customers, customers_won, *, funnel=None):
+    """A Pipeline payload in the builder's shape, for renderer states the
+    builder cannot send (a faulty or older server): the Customers card's
+    verdict, the Customers won block as sent, and the funnel slice. It decides
+    nothing — every field is given."""
+    return {"window": {"key": WINDOW}, "cohort": None,
+            "funnel": _funnel_payload() if funnel is None else funnel,
+            "kpis": {"customers": customers,
+                     "closed_won_deals": {"value": 8, "status": "published",
+                                          "reason": None}},
+            "customers_won": customers_won}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -255,16 +287,21 @@ def test_01_the_customer_stage_is_named_as_a_stage_move_on_the_strip_tab_and_tab
 def test_02_the_production_quarter_shows_219_stage_moves_and_customers_won_separately(monkeypatch):
     """219 contacts moved to the Customer stage; 8 deals won by 7 companies."""
     _ledger(monkeypatch)
-    won = _won()
+    p = _pipeline(monkeypatch)
+    won = p["customers_won"]
     assert won["customers"] == {"value": WON_COMPANIES, "status": "published",
                                 "reason": None,
                                 "dedup_key": "hubspot_company_id"}
     assert won["closed_won_deals"] == {"value": WON_DEALS,
                                        "status": "published", "reason": None}
+    # PR-ADS-178C: the Customers card beside it says the same (the mart deal
+    # view's verdict over the same snapshot).
+    assert (p["kpis"]["customers"]["value"], p["kpis"]["closed_won_deals"]["value"]) \
+        == (WON_COMPANIES, WON_DEALS)
 
     # PR-ADS-178B: on the Pipeline page — the funnel's Customer-stage cell,
     # and the Customers card beside the Customers won list.
-    markup = _figures(_funnel_payload(), won)
+    markup = _figures(p)
     moves, customers = _figure(markup, "stage_moves"), _figure(markup, "customers_won")
     assert moves == (
         # PR-ADS-178B-F1 m4: the stage's date-property sub-label is gone from the
@@ -284,33 +321,43 @@ def test_02_the_production_quarter_shows_219_stage_moves_and_customers_won_separ
 
 def test_03_customers_won_is_distinct_companies_never_the_deal_count_or_the_stage_moves(monkeypatch):
     _ledger(monkeypatch)
-    won = _won()
+    won = _won(monkeypatch)
     assert won["customers"]["value"] == WON_COMPANIES != WON_DEALS
     assert won["customers"]["value"] != STAGE_MOVES
-    # The reader takes no stage-move input and reads nothing from the funnel:
+    # The reading takes no stage-move input and reads nothing from the funnel:
     # no repository, no contact row, no population, no call to `build`.
+    # PR-ADS-178C: the reading is the Pipeline builder's (`_customers_won`,
+    # `_customers_won_reading`, `_reader_verdict`); `build_customers_won` is
+    # retired with its route.
     import inspect
-    from services import canonical_crm_funnel_service as svc
-    assert set(inspect.signature(svc.build_customers_won).parameters) == {
-        "window_type", "window_key", "scope", "acquisition_group", "now"}
+    from services import pipeline_service as svc
     code = "".join(inspect.getsource(fn) for fn in (
-        svc.build_customers_won, svc._build_customers_won, svc._cw_metric,
-        svc._cw_envelope, svc._cw_unavailable))
+        svc._customers_won, svc._customers_won_reading, svc._reader_verdict))
     for forbidden in ("repo.", "crm_funnel_repository", "build_populations",
                       "fetch_funnel", "date_entered", "EVENT_", "counts[",
-                      " build(", "contacts("):
+                      " build(", "contacts(", "crm_funnel."):
         assert forbidden not in code, forbidden
-    assert "load_won_deals(" in code and "single_snapshot" in code
+    # ... and inside ONE closed-won snapshot, over the window's own read.
+    source = inspect.getsource(svc)
+    assert "@canonical_revenue.single_snapshot\ndef build_pipeline(" in source
+    builder = source[source.index("def build_pipeline("):]
+    assert "base = canonical_revenue.load_won_deals(window, now=now)" in builder
+    assert '"customers_won": _customers_won(base or {}, kpis["customers"], resolved)' in builder
+    # Behaviour, not only text: the stage-move count moves, the reading does
+    # not (219 contacts or none moved — the same customers won).
+    assert _stable(_won(monkeypatch, funnel=_funnel_payload(count=0))) == _stable(won)
 
 
 def test_04_both_figures_say_which_metric_family_and_window_basis_they_are(monkeypatch):
     _ledger(monkeypatch)
-    won = _won()
+    won = _won(monkeypatch)
     assert won["metric_family"] == "closed_won_customers"
     assert won["window_basis"] == "deal_close_date"
     assert won["dedup_key"] == "hubspot_company_id"
     assert won["cohort"] == "closed_won_close_date"
-    assert won["window"]["window_key"] == WINDOW
+    # PR-ADS-178C: the canonical window block's `key` (the parity audit's
+    # signature field) — the retired payload called it `window_key`.
+    assert won["window"]["key"] == WINDOW
     assert won["window"]["start"].startswith("2026-07-01")
     assert won["window"]["end_exclusive"].startswith("2026-10-01")
     # The stage-move side is asserted against the real funnel in test_23.
@@ -322,15 +369,21 @@ def test_04_both_figures_say_which_metric_family_and_window_basis_they_are(monke
 def test_05_withheld_customers_render_the_word_and_the_reason_never_a_number(monkeypatch):
     """Eight won deals, one of which HubSpot associates with no company."""
     _ledger(monkeypatch, companies={"d3": []})
-    won = _won()
+    p = _pipeline(monkeypatch)
+    won = p["customers_won"]
     assert won["customers"]["value"] is None
     assert won["customers"]["status"] == cwt.WITHHELD
     assert won["customers"]["reason"] == cwt.R_CUSTOMER_IDENTITY
     # The deal count is a different metric with its own verdict.
     assert won["closed_won_deals"] == {"value": WON_DEALS,
                                        "status": "published", "reason": None}
+    # The card and the section say the same (PR-ADS-178C: the builder's).
+    assert {k: p["kpis"]["customers"][k] for k in ("value", "status", "reason")} \
+        == {"value": None, "status": cwt.WITHHELD, "reason": cwt.R_CUSTOMER_IDENTITY}
+    assert (won["status"], won["reason"]) == (cwt.WITHHELD, cwt.R_CUSTOMER_IDENTITY)
+    assert "rows" not in won
 
-    markup = _figures(_funnel_payload(), won)
+    markup = _figures(p)
     customers = _figure(markup, "customers_won")
     # PR-ADS-178B: the Customers card and the Customers won section.
     assert customers == (
@@ -350,7 +403,8 @@ def test_05_withheld_customers_render_the_word_and_the_reason_never_a_number(mon
 
 def test_06_an_unreadable_or_stale_ledger_is_unavailable_with_its_reason(monkeypatch):
     _ledger(monkeypatch, available=False)
-    unreadable = _won()
+    p_unreadable = _pipeline(monkeypatch)
+    unreadable = p_unreadable["customers_won"]
     assert unreadable["available"] is False
     for key in ("customers", "closed_won_deals"):
         assert unreadable[key]["value"] is None
@@ -358,7 +412,8 @@ def test_06_an_unreadable_or_stale_ledger_is_unavailable_with_its_reason(monkeyp
         assert unreadable[key]["reason"] == "canonical_ledger_unreadable"
 
     _ledger(monkeypatch, sync_state=fresh_sync_state(NOW, hours_ago=72))
-    stale = _won()
+    p_stale = _pipeline(monkeypatch)
+    stale = p_stale["customers_won"]
     for key in ("customers", "closed_won_deals"):
         assert stale[key]["value"] is None
         assert stale[key]["status"] == cwt.UNAVAILABLE
@@ -367,14 +422,14 @@ def test_06_an_unreadable_or_stale_ledger_is_unavailable_with_its_reason(monkeyp
     # Company associations unreadable: the deals are known, the customers
     # are not — and that is "unavailable", not seven and not eight.
     _ledger(monkeypatch, companies=False)
-    no_companies = _won()
+    no_companies = _won(monkeypatch)
     assert no_companies["customers"]["value"] is None
     assert no_companies["customers"]["status"] == cwt.UNAVAILABLE
     assert no_companies["customers"]["reason"] == cwt.R_COMPANY_ASSOCIATIONS_UNREADABLE
     assert no_companies["closed_won_deals"]["value"] == WON_DEALS
 
-    out = _node({**_figures_calls(_funnel_payload(), unreadable, "u"),
-                 **_figures_calls(_funnel_payload(), stale, "s")})
+    out = _node({**_figures_calls(p_unreadable, "u"),
+                 **_figures_calls(p_stale, "s")})
     out = {k: _figures_markup(out, k) for k in ("u", "s")}
     assert _figure(out["u"], "customers_won").startswith(
         "Customers Unavailable the deal ledger could not be read ")
@@ -384,57 +439,69 @@ def test_06_an_unreadable_or_stale_ledger_is_unavailable_with_its_reason(monkeyp
         assert not re.search(r"\d", _figure(markup, "customers_won"))
 
 
-def test_07_a_scope_or_source_filter_gets_no_customers_won_figure_and_no_ledger_read(monkeypatch):
-    """Scope and Source classify CONTACTS. Showing the all-source customers
-    beside a filtered funnel would be the same mistake in a new place."""
-    from services import canonical_revenue_service as crs
-    from services import canonical_crm_funnel_service as svc
-
-    def boom(*a, **k):
-        raise AssertionError("the ledger must not be read for a filtered page")
-    monkeypatch.setattr(crs, "load_won_deals", boom)
-
+def test_07_a_scope_or_source_filter_narrows_the_funnel_and_never_the_customers_won_figure(monkeypatch):
+    """Scope and Source classify CONTACTS; customers won is a closed-won
+    (deal) figure. PR-ADS-166A refused the figure under a lead filter (the
+    route answered ``customers_won_not_split_by_contact_source``). PR-ADS-178B-F1
+    m1 (owner decision, docs/61 §3) reversed that on the one Pipeline page:
+    the lead filters narrow the funnel and the lead list only, and customers
+    won is the window's all-source won population whatever they are — the
+    page says the populations differ rather than blanking a figure no filter
+    changes. Kind (d): this case asserts the decided behaviour."""
+    _ledger(monkeypatch)
+    whole = _pipeline(monkeypatch)
+    assert whole["customers_won"]["status"] == "published"
+    assert len(whole["customers_won"]["rows"]) == WON_COMPANIES
     for kwargs in ({"scope": "google_ads_source"},
                    {"acquisition_group": "offline"},
                    {"scope": "keyword_attributable", "acquisition_group": "google_ads"}):
-        out = svc.build_customers_won("business", WINDOW, now=NOW, **kwargs)
-        assert out["available"] is False
-        for key in ("customers", "closed_won_deals"):
-            assert out[key]["value"] is None
-            assert out[key]["status"] == "unavailable"
-            assert out[key]["reason"] == svc.REASON_FILTER_NOT_APPLICABLE
-        assert out["metric_family"] == "closed_won_customers"
-
-    # The 166A route still answers this reason, and the Customers won renderer
-    # says it in words. (PR-ADS-178B-F1 m1: the Pipeline builder no longer
-    # sends it — under a lead filter its list is the same all-source won
-    # population; the Customers card is never blanked either way.)
-    markup = _figures(_funnel_payload(count=206), out)
-    assert ("Customers won Distinct companies with a closed-won deal closed in "
-            "this period. Not the same as contacts moved to the Customer stage. "
-            "Unavailable customers won is not split by contact source — clear "
-            "the Scope and Source filters") in _figure(markup, "customers_won")
+        out = _pipeline(monkeypatch, funnel=_funnel_payload(count=206), **kwargs)
+        assert out["filters"]["lead_filtered"] is True, kwargs
+        # The same block — verdicts, window, list — and the same cards.
+        assert _stable(out["customers_won"]) == _stable(whole["customers_won"]), kwargs
+        assert out["kpis"]["customers"] == whole["kpis"]["customers"], kwargs
+        assert out["customers_won"]["metric_family"] == "closed_won_customers"
+        # The two figures stay apart: the funnel says 206, customers won 7.
+        markup = _figures(out)
+        assert _figure(markup, "stage_moves").startswith(
+            "Moved to Customer stage in HubSpot 206 ")
+        assert _figure(markup, "customers_won").startswith("Customers 7 ")
+        assert "Unavailable" not in _figure(markup, "customers_won")
+    # The retired refusal is not sent by any server, and its words are gone.
+    assert "customers_won_not_split_by_contact_source" not in APP_JS
 
 
 def test_08_a_window_the_reader_contract_cannot_express_is_refused_not_approximated(monkeypatch):
+    """PR-ADS-178C: the Pipeline builder takes business windows only. An
+    evidence window is refused before any ledger read (the route answers
+    400) — never re-expressed as a business window, never approximated."""
     from services import canonical_revenue_service as crs
-    from services import canonical_crm_funnel_service as svc
+    from services.pipeline_service import build_pipeline
 
     monkeypatch.setattr(crs, "load_won_deals", lambda *a, **k: pytest.fail(
         "an evidence window must not be re-expressed as a business window"))
-    out = svc.build_customers_won("evidence", "90d", now=NOW)
-    assert out["customers"]["status"] == "unavailable"
-    assert out["customers"]["value"] is None
-    assert out["customers"]["reason"] == svc.REASON_WINDOW_NOT_EXPRESSIBLE
-    assert out["window"] is None
-
-    with pytest.raises(ValueError):
-        svc.build_customers_won("business", "not_a_window", now=NOW)
+    for window in ("90d", "30d", "not_a_window"):
+        with pytest.raises(ValueError):
+            build_pipeline(window, now=NOW)
 
 
 def test_09_a_reader_that_sends_no_usable_verdict_fails_closed(monkeypatch):
+    """The Customers won block republishes the reader's verdicts exactly; a
+    missing or malformed one is unavailable, never a count. PR-ADS-178C: run
+    through the real builder, whose block reads ``load_won_deals`` itself."""
     from services import canonical_revenue_service as crs
-    from services import canonical_crm_funnel_service as svc
+    from services import pipeline_service as svc
+
+    _ledger(monkeypatch)
+    real = crs.load_won_deals
+
+    def serve(base):
+        # Only the block's own read is replaced; the mart deal view beside it
+        # reads the real (patched) ledger, so the builder still runs whole.
+        def load(*a, **k):
+            caller = __import__("inspect").stack()[1].function
+            return base if caller == "build_pipeline" else real(*a, **k)
+        monkeypatch.setattr(crs, "load_won_deals", load)
 
     for base in (
         {"available": True, "deals": [{"deal_id": "1"}] * 8},          # no verdict
@@ -442,46 +509,58 @@ def test_09_a_reader_that_sends_no_usable_verdict_fails_closed(monkeypatch):
             "customers": {"value": 8, "status": "certainly"},          # unknown status
             "closed_won_deals": {"value": None, "status": "published"}}},
     ):
-        monkeypatch.setattr(crs, "load_won_deals", lambda *a, _b=base, **k: _b)
-        out = svc.build_customers_won("business", WINDOW, now=NOW)
+        serve(base)
+        out = _won(monkeypatch)
         for key in ("customers", "closed_won_deals"):
             assert out[key]["value"] is None, (key, out[key])
             assert out[key]["status"] == "unavailable"
             assert out[key]["reason"] == svc.REASON_VERDICT_MISSING
 
     # A withheld metric that still carried a number loses the number.
-    monkeypatch.setattr(crs, "load_won_deals", lambda *a, **k: {
-        "available": True, "canonical_metrics": {
-            "customers": {"value": 8, "status": "withheld",
-                          "reason": cwt.R_CUSTOMER_IDENTITY},
-            "closed_won_deals": {"value": 8, "status": "published"}}})
-    out = svc.build_customers_won("business", WINDOW, now=NOW)
+    serve({"available": True, "canonical_metrics": {
+        "customers": {"value": 8, "status": "withheld",
+                      "reason": cwt.R_CUSTOMER_IDENTITY},
+        "closed_won_deals": {"value": 8, "status": "published"}}})
+    out = _won(monkeypatch)
     assert out["customers"] == {"value": None, "status": "withheld",
                                 "reason": cwt.R_CUSTOMER_IDENTITY,
                                 "dedup_key": "hubspot_company_id"}
 
 
-def test_10_the_page_never_falls_back_to_the_stage_moves_when_customers_won_is_missing():
+def test_10_the_page_never_falls_back_to_the_stage_moves_when_customers_won_is_missing(monkeypatch):
     """PR-ADS-178B: the Pipeline page reads ONE response, so the old
     cross-response cases (no customers-won payload, another metric family,
     another window) cannot arise; what remains is the page's own fall-backs:
-    no verdict, a published zero, an unknown stage-move count."""
-    published = {"metric_family": "closed_won_customers",
-                 "requested": {"window_key": WINDOW},
-                 "customers": {"value": 7, "status": "published", "reason": None},
-                 "closed_won_deals": {"value": 8, "status": "published", "reason": None}}
+    no verdict, a published zero, an unknown stage-move count.
+
+    PR-ADS-178C (m7): the published zero and the unknown stage-move count are
+    the real builder's payloads; "no verdict" and "no block" are states no
+    builder sends (a faulty server), so they are builder-shaped payloads."""
+    # A published zero: the ledger is current and certified, and no deal
+    # closed in the quarter (the one won deal closed in May).
+    from tests import test_pr_ads_125_revenue_decision_mart as t125
+    t125._patch_durable(monkeypatch)
+    old = [ledger_row("d-may", deal_close_date="2026-05-10T09:00:00+00:00")]
+    patch_canonical_ledger(
+        monkeypatch, old, sync_state=fresh_sync_state(NOW),
+        company_associations=company_evidence(
+            old, companies={"d-may": ["co-may"]},
+            scan_started_at=(NOW - timedelta(hours=2)).isoformat()))
+    zero = _pipeline(monkeypatch, funnel=_funnel_payload(count=0))
+    assert zero["kpis"]["customers"]["value"] == 0
+    assert zero["customers_won"]["status"] == "published"
+    assert zero["customers_won"]["rows"] == []
+    _ledger(monkeypatch)
+    moves_unknown = _pipeline(monkeypatch, funnel={
+        "available": False, "window": {"window_key": WINDOW}})
+    assert moves_unknown["kpis"]["customers"]["value"] == WON_COMPANIES
+
     raw = _node({
-        **_figures_calls(_funnel_payload(), {
-            "metric_family": "closed_won_customers",
-            "requested": {"window_key": WINDOW}, "customers": {"value": 7}}, "no_verdict"),
-        **_figures_calls(_funnel_payload(), None, "no_payload"),
-        **_figures_calls(_funnel_payload(count=0), {
-            **published,
-            "customers": {"value": 0, "status": "published", "reason": None},
-            "closed_won_deals": {"value": 0, "status": "published", "reason": None},
-            "won_customers": []}, "zero"),
-        **_figures_calls({"available": False, "window": {"window_key": WINDOW}},
-                         published, "moves_unknown"),
+        **_figures_calls(_shaped({"value": 7}, {"status": "published", "reason": None,
+                                                "rows": []}), "no_verdict"),
+        **_figures_calls(_shaped(None, None), "no_payload"),
+        **_figures_calls(zero, "zero"),
+        **_figures_calls(moves_unknown, "moves_unknown"),
     })
     out = {k: _figures_markup(raw, k) for k in ("no_verdict", "no_payload", "zero",
                                                  "moves_unknown")}
@@ -504,11 +583,13 @@ def test_10_the_page_never_falls_back_to_the_stage_moves_when_customers_won_is_m
 
 def test_11_only_an_admin_gets_the_view_blockers_link_from_the_leads_figure(monkeypatch):
     _ledger(monkeypatch, companies={"d3": []})
-    won = _won()
+    p = _pipeline(monkeypatch)
+    won = p["customers_won"]
     assert won["customers"]["reason"] == cwt.R_CUSTOMER_IDENTITY   # a CRM finding
+    assert p["kpis"]["customers"]["reason"] == cwt.R_CUSTOMER_IDENTITY
     # PR-ADS-178B: the Pipeline page's Customers card and section.
-    viewer = _figures(_funnel_payload(), won, role="viewer")
-    admin = _figures(_funnel_payload(), won, role="admin")
+    viewer = _figures(p, role="viewer")
+    admin = _figures(p, role="admin")
     assert "View blockers" not in viewer
     assert "View blockers" in admin
     assert "cte_window=business%2Flast_quarter" in admin
@@ -516,35 +597,49 @@ def test_11_only_an_admin_gets_the_view_blockers_link_from_the_leads_figure(monk
 
 
 def test_12_the_new_reader_is_inventoried_and_the_audit_fails_without_its_row(monkeypatch):
+    """PR-ADS-178C: the reading moved from the funnel service into the
+    Pipeline builder, so the builder's row is the one that must stand; the
+    funnel service reads no closed-won deal and has no row."""
     from scripts import audit_customer_revenue_reader_cutover as audit
 
     def inventory_ok():
         a = audit.Audit()
-        audit.structural_checks(a)
-        return [v for v in a.violations if v.startswith("inventory_complete")]
+        report = audit.structural_checks(a)
+        return [v for v in a.violations if v.startswith("inventory_complete")], report
 
-    assert inventory_ok() == []
+    failures, report = inventory_ok()
+    assert failures == []
+    assert "services/pipeline_service.py" in report["readers"]
+    assert "services/canonical_crm_funnel_service.py" not in report["readers"]
+    assert not [r for r in audit.INVENTORY
+                if r["consumer"] == "services/canonical_crm_funnel_service.py"]
     rows = [r for r in audit.INVENTORY
-            if r["consumer"] == "services/canonical_crm_funnel_service.py"]
-    assert len(rows) == 1 and rows[0]["canonical_via"] == "load_won_deals"
+            if r["consumer"] == "services/pipeline_service.py"]
+    assert len(rows) == 1 and rows[0]["canonical_via"] == "subset_metrics"
+    assert "customers" in rows[0]["families"]
     monkeypatch.setattr(audit, "INVENTORY", tuple(
         r for r in audit.INVENTORY if r not in rows))
-    failures = inventory_ok()
-    assert failures and "canonical_crm_funnel_service" in failures[0]
+    failures, _ = inventory_ok()
+    assert failures and "pipeline_service" in failures[0]
 
 
 def test_13_the_customers_won_route_is_gated_like_the_contact_rows_it_sits_beside():
+    """PR-ADS-178C: the customers-won route is retired (404); customers won is
+    served by the Pipeline route, gated like the contact rows it sits
+    beside."""
     def route(path):
         block = SERVER_PY.split(f'@app.get("{path}")')[1].split("\n@app.")[0]
         return block
-    for path in ("/api/crm-funnel/customers-won", "/api/crm-funnel/contacts"):
-        assert "user: dict = Depends(require_auth)" in route(path), path
+    assert '@app.get("/api/crm-funnel/customers-won")' not in SERVER_PY
+    assert "user: dict = Depends(require_auth)" in route("/api/crm-funnel/contacts")
+    assert "_user=Depends(require_auth)" in route("/api/pipeline")
 
     from fastapi.testclient import TestClient
     from api.server import app
     client = TestClient(app, raise_server_exceptions=False)
-    for path in ("/api/crm-funnel/customers-won", "/api/crm-funnel/contacts"):
+    for path in ("/api/pipeline", "/api/crm-funnel/contacts"):
         assert client.get(path).status_code == 401, path
+    assert client.get("/api/crm-funnel/customers-won").status_code == 404
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -832,12 +927,16 @@ def test_23_the_production_quarter_over_the_real_funnel_219_moves_beside_8_won_d
     assert db.scalar("SELECT COUNT(*) FROM hubspot_contact_funnel "
                      "WHERE hs_analytics_source = 'OFFLINE'") == 206
 
-    _ledger(monkeypatch)
-    won = _won()
+    _ledger(monkeypatch, durable=False)
+    # PR-ADS-178C (m7): the real Pipeline builder over the real funnel's
+    # payload and this ledger.
+    p = _pipeline(monkeypatch, funnel=payload)
+    won = p["customers_won"]
     assert won["customers"]["value"] == WON_COMPANIES
     assert won["closed_won_deals"]["value"] == WON_DEALS
+    assert p["funnel"]["events"]["customer"]["count"] == STAGE_MOVES
 
-    markup = _figures(payload, won)
+    markup = _figures(p)
     assert _figure(markup, "stage_moves").startswith(
         "Moved to Customer stage in HubSpot 219 ")
     assert _figure(markup, "customers_won").startswith("Customers 7 ")
@@ -938,30 +1037,35 @@ _WON_LIST = [
 ]
 
 
-def _won_payload(customers, rows=None):
-    payload = {"metric_family": "closed_won_customers",
-               "requested": {"window_key": WINDOW}, "customers": customers,
-               "closed_won_deals": {"value": 4, "status": "published", "reason": None}}
-    if rows is not None:
-        payload["won_customers"] = rows
-    return payload
+def _won_payload(customers, cw):
+    """A builder-shaped Pipeline payload (PR-ADS-178C: no adapter): the
+    Customers card's verdict and the Customers won block exactly as sent."""
+    return _shaped(customers, cw)
 
 
 def test_18_the_won_customers_list_is_shown_only_for_a_published_count_that_it_matches():
     published = {"value": 3, "status": "published", "reason": None}
     withheld = {"value": None, "status": "withheld",
                 "reason": cwt.R_CUSTOMER_IDENTITY}
+    # PR-ADS-178C (m7): each case is the payload a server sends — the
+    # builder's states (published with its list; withheld with no list; a
+    # published count whose list the builder could not reconcile), and the
+    # faulty-server states the page must still refuse (a withheld count that
+    # carries a list; a "published" list that does not number its count).
+    ok = {"status": "published", "reason": None}
+    unmatched = {"status": "withheld", "reason": "closed_won_rows_do_not_match_count"}
     cases = {
-        "published": _won_payload(published, _WON_LIST),
+        "published": _won_payload(published, {**ok, "rows": _WON_LIST}),
         # A withheld count that (wrongly) still carried a list: nothing shown.
-        "withheld": _won_payload(withheld, _WON_LIST),
-        "withheld_no_list": _won_payload(withheld),
+        "withheld": _won_payload(withheld, {**ok, "rows": _WON_LIST}),
+        "withheld_no_list": _won_payload(withheld, {"status": "withheld",
+                                                    "reason": cwt.R_CUSTOMER_IDENTITY}),
         # A list that disagrees with its own headline is not shown beside it.
-        "mismatch": _won_payload(published, _WON_LIST[:2]),
-        "no_list": _won_payload(published),
+        "mismatch": _won_payload(published, {**ok, "rows": _WON_LIST[:2]}),
+        "no_list": _won_payload(published, unmatched),
     }
     raw = _node({k: v for key, won in cases.items()
-                 for k, v in _figures_calls(_funnel_payload(), won, key).items()})
+                 for k, v in _figures_calls(won, key).items()})
     out = {key: _figures_markup(raw, key) for key in cases}
     shown = _figure(out["published"], "customers_won")
     # PR-ADS-178B: the Customers card, then the Customers won section's list.
@@ -1400,10 +1504,12 @@ def test_27_the_customers_won_payload_lists_the_won_customers_only_when_they_are
         read_at=NOW)
     db_writers.mark_company_names_not_returned(["co-d3"], asked_at=NOW)
 
-    _ledger(monkeypatch)
-    won = _won()
+    _ledger(monkeypatch, durable=False)
+    p = _pipeline(monkeypatch)
+    won = p["customers_won"]
     assert won["customers"]["value"] == WON_COMPANIES
-    listed = won["won_customers"]
+    assert won["status"] == "published"
+    listed = won["rows"]
     assert len(listed) == WON_COMPANIES
     assert sum(r["closed_won_deals"] for r in listed) == WON_DEALS
     by_id = {r["company_id"]: r for r in listed}
@@ -1420,7 +1526,7 @@ def test_27_the_customers_won_payload_lists_the_won_customers_only_when_they_are
     # Newest close first.
     assert [r["company_id"] for r in listed][0] == "co-d7"
 
-    markup = _figures(_funnel_payload(), won)
+    markup = _figures(p)
     text = _figure(markup, "customers_won")
     # PR-ADS-178B: the Pipeline page's Customers won table (no fold).
     assert text.startswith("Customers 7 ") and markup.count("<tr>") == 1 + 7
@@ -1430,35 +1536,41 @@ def test_27_the_customers_won_payload_lists_the_won_customers_only_when_they_are
     assert "Company not returned by HubSpot 1 2026-08-13" in text
 
     # Withheld: one won deal has no company. No list, no key, no name.
-    _ledger(monkeypatch, companies={"d3": []})
-    withheld = _won()
+    # (PR-ADS-178C: the whole page payload, not only the block.)
+    _ledger(monkeypatch, companies={"d3": []}, durable=False)
+    withheld_page = _pipeline(monkeypatch)
+    withheld = withheld_page["customers_won"]
     assert withheld["customers"]["status"] == cwt.WITHHELD
-    assert "won_customers" not in withheld
-    assert "Shared Logistics" not in json.dumps(withheld, default=str)
-    assert "co-shared" not in json.dumps(withheld, default=str)
-    markup = _figures(_funnel_payload(), withheld)
+    assert "rows" not in withheld
+    assert (withheld["status"], withheld["reason"]) == (cwt.WITHHELD, cwt.R_CUSTOMER_IDENTITY)
+    assert "Shared Logistics" not in json.dumps(withheld_page, default=str)
+    assert "co-shared" not in json.dumps(withheld_page, default=str)
+    markup = _figures(withheld_page)
     assert "<table" not in markup and "Shared Logistics" not in markup
 
     # Withheld with every deal still resolving to one company (the last full
     # association scan is five days old). The list COULD be built — and is not.
-    _ledger(monkeypatch, scan_age_hours=120)
-    stale = _won()
+    _ledger(monkeypatch, scan_age_hours=120, durable=False)
+    stale_page = _pipeline(monkeypatch)
+    stale = stale_page["customers_won"]
     assert stale["customers"]["value"] is None
     assert stale["customers"]["status"] == cwt.WITHHELD
     assert stale["customers"]["reason"] == cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT
-    assert "won_customers" not in stale and "won_customers_omitted" not in stale
-    assert "Shared Logistics" not in json.dumps(stale, default=str)
+    # The block says the count's reason, not "the rows do not match".
+    assert "rows" not in stale
+    assert stale["reason"] == cwt.R_CUSTOMER_IDENTITY_SCAN_NOT_CURRENT
+    assert "Shared Logistics" not in json.dumps(stale_page, default=str)
 
-    # Unreadable ledger or a filter: no list either.
-    _ledger(monkeypatch, available=False)
-    assert "won_customers" not in _won()
-    from services import canonical_crm_funnel_service as funnel
-    assert "won_customers" not in funnel.build_customers_won(
-        "business", WINDOW, scope="google_ads_source", now=NOW)
+    # Unreadable ledger: no list either.
+    _ledger(monkeypatch, available=False, durable=False)
+    assert "rows" not in _won(monkeypatch)
+    # PR-ADS-178B-F1 m1 (decision, kind (d)): a lead filter does not touch the
+    # list — it is the same all-source list, never a narrowed or blanked one.
+    _ledger(monkeypatch, durable=False)
+    assert _stable(_won(monkeypatch, scope="google_ads_source")) == _stable(_won(monkeypatch))
 
 
 def test_28_a_list_that_cannot_be_reconciled_with_the_published_count_is_left_out(monkeypatch):
-    from services import canonical_crm_funnel_service as funnel
     from services import canonical_revenue_service as crs
 
     real = crs.load_won_deals
@@ -1470,11 +1582,13 @@ def test_28_a_list_that_cannot_be_reconciled_with_the_published_count_is_left_ou
                                        "d5": ["co-d5", "co-other"]}
         return base
     monkeypatch.setattr(crs, "load_won_deals", tampered)
-    out = funnel.build_customers_won("business", WINDOW, now=NOW)
+    p = _pipeline(monkeypatch)
+    out = p["customers_won"]
     assert out["customers"]["value"] == WON_COMPANIES
-    assert "won_customers" not in out
-    assert out["won_customers_omitted"] == "closed_won_rows_do_not_match_count"
-    markup = _figures(_funnel_payload(), out)
+    assert p["kpis"]["customers"]["value"] == WON_COMPANIES
+    assert "rows" not in out
+    assert (out["status"], out["reason"]) == ("withheld", "closed_won_rows_do_not_match_count")
+    markup = _figures(p)
     # PR-ADS-178B: the Customers card keeps its published 7; the section
     # says why there is no list (the rows do not match the count).
     assert _figure(markup, "customers_won").startswith("Customers 7 ")
@@ -1488,9 +1602,10 @@ def test_28_a_list_that_cannot_be_reconciled_with_the_published_count_is_left_ou
     from db import hubspot_name_repository as repo
     monkeypatch.setattr(repo, "fetch_company_names",
                         lambda ids: {"available": False, "names": {}})
-    out = funnel.build_customers_won("business", WINDOW, now=NOW)
-    assert {r["company_name_status"] for r in out["won_customers"]} == {"unavailable"}
-    markup = _figures(_funnel_payload(), out)
+    p = _pipeline(monkeypatch)
+    out = p["customers_won"]
+    assert {r["company_name_status"] for r in out["rows"]} == {"unavailable"}
+    markup = _figures(p)
     assert _figure(markup, "customers_won").count("Company name unavailable") == 7
 
 
@@ -1786,16 +1901,24 @@ def test_31_the_leads_customers_won_block_is_a_registered_parity_consumer_of_the
     Both are built over ONE ledger fixture for the same window. They read the
     same canonical verdict, so customers and closed-won deals agree in every
     state — published, withheld, unavailable.
+
+    PR-ADS-178C: the block is the Pipeline page's Customers won (its route is
+    retired); the parity consumer is ``pipeline/customers_won``, which reads
+    the block off the real Pipeline payload. Every assertion is kept.
     """
     from services import canonical_contract
+    from services import canonical_crm_funnel_service as crm_funnel
     from services import cross_page_parity_service as parity
     from services import dashboard_deals_service as deals_page
+    real_funnel = crm_funnel.build
 
     # No spend is stored here: the account time zone every window block carries is
     # read from stored spend, so it is supplied.
     monkeypatch.setattr(canonical_contract, "configured_account_time_zone",
                         lambda: "Europe/London")
-    consumer = parity.CONSUMER_LEADS_CUSTOMERS_WON
+    consumer = parity.CONSUMER_PIPELINE_CUSTOMERS_WON
+    assert consumer == "pipeline/customers_won"
+    assert not hasattr(parity, "CONSUMER_LEADS_CUSTOMERS_WON")
     assert (consumer, "customers.value") in parity.METRIC_IDENTITIES["customers"]["consumers"]
     assert (consumer, "closed_won_deals.value") in \
         parity.METRIC_IDENTITIES["closed_won_deals"]["consumers"]
@@ -1804,8 +1927,8 @@ def test_31_the_leads_customers_won_block_is_a_registered_parity_consumer_of_the
     for kwargs in ({}, {"companies": {"d3": []}}, {"scan_age_hours": 24 * 30},
                    {"companies": False},
                    {"sync_state": fresh_sync_state(NOW, hours_ago=120)}):
-        _ledger(monkeypatch, **kwargs)
-        won = _won()
+        _ledger(monkeypatch, durable=False, **kwargs)
+        won = _won(monkeypatch)
         # PR-ADS-178B: Dashboard → Deals publishes {value, status, reason}
         # (the Pipeline builder's KPIs).
         kpis = deals_page.build_dashboard_deals(WINDOW, now=NOW)["kpis"]
@@ -1813,8 +1936,8 @@ def test_31_the_leads_customers_won_block_is_a_registered_parity_consumer_of_the
         assert won["customers"]["status"] == kpis["customers"]["status"], kwargs
         assert won["customers"]["reason"] == kpis["customers"]["reason"], kwargs
         assert won["closed_won_deals"]["value"] == kpis["closed_won_deals"]["value"], kwargs
-    _ledger(monkeypatch)
-    won = _won()
+    _ledger(monkeypatch, durable=False)
+    won = _won(monkeypatch)
     assert (won["customers"]["value"], won["closed_won_deals"]["value"]) == (
         WON_COMPANIES, WON_DEALS)
 
@@ -1828,9 +1951,11 @@ def test_31_the_leads_customers_won_block_is_a_registered_parity_consumer_of_the
                                         consumer=consumer, window=WINDOW) is None
         assert parity._dig(won, dict(spec["consumers"])[consumer]) == \
             won[metric]["value"]
-    # And the audit itself, end to end: it builds the Leads block beside the
-    # Deals page, reads the same two numbers from both, and finds nothing
-    # wrong with the Leads consumer.
+    # And the audit itself, end to end: it builds the Pipeline page beside
+    # Dashboard → Deals, reads the same two numbers from both, and finds
+    # nothing wrong with the Customers won consumer.
+    # (Every consumer reads the real funnel here, as in production.)
+    monkeypatch.setattr(crm_funnel, "build", real_funnel)
     outcome = parity.audit_window(WINDOW, now=NOW)
     by_metric = {m["metric"]: m for m in outcome["metrics"]}
     for metric, expected in (("customers", WON_COMPANIES),
@@ -1843,8 +1968,8 @@ def test_31_the_leads_customers_won_block_is_a_registered_parity_consumer_of_the
                 if v.get("consumer") == consumer], outcome["violations"]
 
     # A withheld customer count declares itself not ready, with the reason.
-    _ledger(monkeypatch, companies={"d3": []})
-    withheld = _won()
+    _ledger(monkeypatch, companies={"d3": []}, durable=False)
+    withheld = _won(monkeypatch)
     assert withheld["metric_truth"]["customers"]["truth_status"] == "not_ready"
     assert withheld["metric_truth"]["customers"]["unavailable_reason"] == \
         cwt.R_CUSTOMER_IDENTITY

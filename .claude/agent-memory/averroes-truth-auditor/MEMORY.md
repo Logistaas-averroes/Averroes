@@ -772,3 +772,32 @@ truncated list. Verified by execution on exported copies of both commits.
   `Retry(3)` in place, so one call to an unreachable host can take ~4x that.
 - Render installs hubspot-api-client 13.0.0 (build log 2026-11-18), the
   version the signatures were checked against.
+
+## PR-ADS-178C review (681566d on ea6a7ae, 2026-11-25; reviewed in a worktree)
+- `/api/revenue-deals` and `/api/crm-funnel/customers-won` are retired. The
+  customers-won reading now lives in `pipeline_service._customers_won_reading`
+  (`_reader_verdict` = the old `_cw_metric`). Parity consumer
+  `pipeline/customers_won` is the `customers_won` block of the SAME
+  `build_pipeline` payload (one snapshot). It is still a reader-vs-mart-republish
+  check (port test_02 shows it fails on either side), not tautological. The
+  Customers won LIST is gated on the MART verdict (`kpis.customers`); the block's
+  own reader verdict is audit plumbing that the UI never renders.
+- Per-scope undated coverage (`stage_reached_without_entry_date_by_scope`) is
+  counted after the acquisition-group filter, with the same scope flags as the
+  counts, and None when membership is unknown. I found no under-marking. The
+  fallback (whole) only over-marks.
+- Check 21 `retired_readers_absent` is lexical/AST. Verified by execution that
+  it MISSES `app.add_api_route(...)`, `@app.get(path=...)`, a trailing-slash
+  path, a constant-variable path, a `${base}/api/...` template, and a renamed
+  revived builder. The CI test (178c retired test_01, the live `app.routes`)
+  catches every route form. The production-certification "runtime twin" does not.
+- The Pipeline page's frontend freshness maps (`PAGE_DATASET_MAP`,
+  `PAGE_DEPENDENCIES`) name `hubspot/deals`. That is the LEGACY non-authoritative
+  scan (`LEGACY_NON_AUTHORITATIVE_DATASETS`, superseded_by `hubspot/deal_ledger`),
+  and dashboard/campaigns/roas-countries do the same. This was pre-existing in
+  178B and was not fixed by 178C.
+- The Pipeline page does not read the legacy `leads` table: 177A removed the
+  mart's leads read (`_build_from_db` comment). Verified by grep.
+- Runs: 426 tests (178c, 166a, 178b*, 154c*, 113, 126, 139, 161e, 165a) plus 942
+  tests (funnel, freshness, system-status, doctrine, certification) all passed.
+  PG ran, with no skips (python3.11; postgres 16 + sudo -n available).

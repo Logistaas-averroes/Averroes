@@ -1146,10 +1146,13 @@ def test_17_the_endpoint_is_gone_from_the_running_app(monkeypatch):
     paths = {r.path for r in server.app.routes}
     # PR-ADS-168B deleted /api/revenue-by-source with its page; PR-ADS-177C
     # deleted /api/revenue-attribution (no page read it) and kept its /audit,
-    # which the Revenue Health page reads.
-    assert {"/api/revenue-attribution/audit",
-            "/api/revenue-deals", "/api/dashboard/overview"} <= paths
+    # which the Revenue Health page reads. PR-ADS-178C deleted
+    # /api/revenue-deals (no page read it after PR-ADS-178B); the deal list's
+    # page route is /api/pipeline, and Dashboard → Deals' is kept.
+    assert {"/api/revenue-attribution/audit", "/api/pipeline",
+            "/api/dashboard/deals", "/api/dashboard/overview"} <= paths
     assert "/api/revenue-attribution" not in paths
+    assert "/api/revenue-deals" not in paths
 
 
 def test_18_an_old_bookmark_lands_on_the_dashboard():

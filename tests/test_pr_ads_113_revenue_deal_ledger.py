@@ -243,14 +243,22 @@ def test_service_rejects_invalid_window():
 
 
 def test_endpoint_registered_business_window_only():
-    assert '"/api/revenue-deals"' in SERVER
-    assert "async def get_revenue_deals(" in SERVER
-    assert "from services.revenue_attribution_service import build_revenue_deals" in SERVER
-    idx = SERVER.find("async def get_revenue_deals(")
+    # PR-ADS-178C: `/api/revenue-deals` is retired (it answers 404; no page
+    # called it after PR-ADS-178B). The deal list is served by the Pipeline
+    # page's route, which holds the same contract: business windows only,
+    # Current Quarter by default, never an ad-style day window. The builder
+    # (`build_revenue_deals`, which the mart deal view reads) still rejects a
+    # day window (test_service_rejects_invalid_window).
+    assert '"/api/revenue-deals"' not in SERVER
+    assert "async def get_revenue_deals(" not in SERVER
+    assert '@app.get("/api/pipeline")' in SERVER
+    idx = SERVER.find("async def get_pipeline(")
     region = SERVER[idx:idx + 400]
     assert 'default="current_quarter"' in region
     assert 'default="60d"' not in region
     assert "_parse_window(" not in region
+    route = SERVER[idx:SERVER.find("\n@app.", idx)]
+    assert "build_pipeline(window=window" in route
 
 
 # ════════════════════════════ FRONTEND — DEALS ════════════════════════════
