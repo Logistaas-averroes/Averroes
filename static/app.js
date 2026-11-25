@@ -1884,10 +1884,6 @@ const DASH_DONUT_COLORS = {
   offline: "#94a3b8",
   unclassified: "#b45309",
 };
-// Ordinal ramp for the funnel stages (validated with --ordinal). Five steps:
-// the lifecycle cohort has five stages (Lead → MQL → SQL → Opportunity →
-// the Customer stage) and each needs its own rung.
-const DASH_FUNNEL_RAMP = ["#6db8f8", "#3f9df0", "#1a80cf", "#0b5f92", "#08425f"];
 
 // Metric valence for delta chips: up is good for revenue/pipeline, neutral for
 // spend (more spend is neither win nor loss without revenue proof).
@@ -2746,6 +2742,289 @@ function wireDashChartHover(root, d) {
   wrap.addEventListener("pointerleave", hide);
 }
 
+// ══ PR-ADS-180A — the ONE lifecycle funnel block (docs/63) ═══════════════════
+//
+// Every page that shows the lifecycle funnel draws it here and nowhere else:
+// Overview (Lifecycle Activity, Lifecycle Cohort), Pipeline and Channels. The
+// block is the Dashboard's design (the owner's standard): five stage columns in
+// one row, a connector between each pair, the same classes on every page.
+//
+// The block DRAWS; it decides nothing. Each page has an adapter that reads its
+// OWN response and builds a model, and the block takes that model as its only
+// data argument. It reads no page state — no cohort, verdict or selection from
+// another response — and it computes no rate: every percentage it shows is one
+// the adapter read from the payload. A shared design must never erase a
+// per-page distinction, so the model carries the payload's own metric family
+// and window basis and the block prints them on its face.
+//
+// The model:
+//   family       {key, basis}: the payload's metric_family (or basis) and its
+//                window basis. Labelled from FUNNEL_FAMILY_LABELS; a key the
+//                block does not know is "not stated", never guessed.
+//   verdict      {status, reason, word, note}: the whole funnel's publication.
+//                Anything but "published" puts the word in every stage and no
+//                figure anywhere (withheld means absent).
+//   stages       up to five, each {slot, key, label, metric, bound_reason,
+//                not_on_page, sub, sub_title, notes, help, action_title}.
+//                `metric` is a reader-contract {value, status, reason} rendered
+//                by canonicalMetricHtml: a published 0 is "0", anything else the
+//                word and its reason. `bound_reason` (the reason, in words) makes
+//                a published count "at least N". A slot the page does not
+//                carry is "Not available on this page" — never 0, never a dash.
+//   conversions  four, between adjacent slots: {kind, pct, basis, title}.
+//                exact "X%" · at_least "at least X%" (PR-ADS-178B-F2: the TO
+//                stage is a lower bound) · unknown "—" with the reason (the FROM
+//                stage is a lower bound or unknown) · unavailable the word and
+//                its reason · none: a plain connector, no rate published.
+// opts           {ariaLabel, selectable, activeKey}: presentation only. A
+//                selectable block (Pipeline) makes each stage a button carrying
+//                data-funnel-event; the selected stage is an ARGUMENT.
+const FUNNEL_BLOCK_SLOTS = ["contacts", "mql", "sql", "opportunity", "customer"];
+// A column's caption when the adapter gives no label of its own (a withheld or
+// unavailable funnel): the owner's five columns. The last is the lifecycle
+// Customer STAGE — contacts — never customers won (distinct companies).
+const FUNNEL_BLOCK_SLOT_LABELS = {
+  contacts: "Contacts", mql: "MQL", sql: "SQL", opportunity: "Opportunity", customer: "Customer stage",
+};
+const FUNNEL_BLOCK_NOT_ON_PAGE = "Not available on this page";
+// Ordinal ramp for the five columns (validated with --ordinal; the Dashboard's
+// funnel ramp, now the block's): each column has its own rung on every page.
+const FUNNEL_BLOCK_RAMP = ["#6db8f8", "#3f9df0", "#1a80cf", "#0b5f92", "#08425f"];
+// The canonical lifecycle events, by the column each one occupies. The first
+// column is the population the funnel starts from: Lead entries on the
+// stage-entry funnels, contacts acquired on the acquisition cohort.
+const FUNNEL_EVENT_SLOTS = {
+  lead: "contacts", mql: "mql", sql: "sql", opportunity: "opportunity", customer: "customer",
+};
+/**
+ * The window basis of a stage-entry funnel, from the payload's own per-stage
+ * metadata: "stage_entry_date" only when EVERY stage names its own entry date
+ * (`window_basis` date_entered_<stage>, or the HubSpot date_entered_ property
+ * it is read from). Anything less is not stated — never assumed.
+ */
+function stageEntryWindowBasis(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  const dated = list.length > 0 && list.every((b) => !!b && (
+    (typeof b.window_basis === "string" && b.window_basis.indexOf("date_entered_") === 0)
+    || (typeof b.event_date_property === "string"
+      && b.event_date_property.indexOf("date_entered_") !== -1)));
+  return dated ? "stage_entry_date" : null;
+}
+
+/** Label-only column models for an unpublished lifecycle block: the payload's
+ * own stage labels where it sent them, the canonical names otherwise. */
+function lifecycleColumnLabels(stages) {
+  const byEvent = {};
+  (Array.isArray(stages) ? stages : []).forEach((st) => {
+    if (st && st.event && st.label) byEvent[st.event] = st.label;
+  });
+  return Object.keys(FUNNEL_EVENT_SLOTS).map((event) => ({
+    slot: FUNNEL_EVENT_SLOTS[event], key: event,
+    label: byEvent[event] || LIFECYCLE_COLUMN_LABELS[event] }));
+}
+
+// The lifecycle events' own column names (analysis/crm_lifecycle EVENT_LABELS),
+// for an Overview block whose payload carried none (an unavailable verdict).
+// PR-ADS-180A-F1: the first column there is Lead entries, never "Contacts".
+const LIFECYCLE_COLUMN_LABELS = {
+  lead: "Leads", mql: "MQLs", sql: "SQLs", opportunity: "Opportunities",
+  customer: "Moved to Customer stage",
+};
+
+/** A raw payload count as a reader-contract metric: null is unknown, never 0. */
+function funnelCountMetric(value, reason) {
+  const known = value !== null && value !== undefined;
+  return { value: known ? value : null, status: known ? "published" : "unavailable",
+    reason: known ? null : (reason || null) };
+}
+
+function funnelBlockHtml(model, opts) {
+  const m = model || {};
+  const o = opts || {};
+  // Fail closed: a model that states no verdict is not evidence of one.
+  const verdict = m.verdict && m.verdict.status ? m.verdict
+    : { status: "unavailable", reason: "this response states no publication verdict for the funnel" };
+  const given = Array.isArray(m.stages) ? m.stages : [];
+  const conversions = Array.isArray(m.conversions) ? m.conversions : [];
+  const cells = FUNNEL_BLOCK_SLOTS.map((slot, i) => {
+    const stage = given.find((s) => s && s.slot === slot)
+      || { slot, key: slot, not_on_page: "this page's response carries no figure for this stage" };
+    const link = i === 0 ? "" : funnelBlockConvHtml(conversions[i - 1], verdict);
+    return `${link}${funnelBlockStageHtml(stage, i, verdict, o)}`;
+  }).join("");
+  const family = funnelBlockFamily(m.family);
+  return `
+    <div class="funnel-block" data-metric-family="${escapeHtml(family.key)}" data-window-basis="${escapeHtml(family.basis)}">
+      <p class="funnel-block__family"><span class="funnel-block__family-label">${escapeHtml(family.label)}</span> · <span class="funnel-block__basis">${escapeHtml(family.basisLabel)}</span></p>
+      ${funnelBlockVerdictHtml(verdict)}
+      <div class="dash-funnel" role="group" aria-label="${escapeHtml(o.ariaLabel || family.label)}">${cells}</div>
+    </div>`;
+}
+
+// The family and window basis exactly as the payload stated them. Missing or
+// unknown is said so — the block never supplies a family the payload did not.
+function funnelBlockFamily(family) {
+  const f = family || {};
+  const key = f.key ? String(f.key) : "";
+  const basis = f.basis ? String(f.basis) : "";
+  return {
+    key: key || "not_stated", basis: basis || "not_stated",
+    label: FUNNEL_FAMILY_LABELS[key] || "Metric family not stated by this response",
+    basisLabel: FUNNEL_WINDOW_BASIS_LABELS[basis] || "window basis not stated by this response",
+  };
+}
+// What each published metric family IS. The key comes from the payload; the
+// block only names it. Two pages may show two different families — the block
+// says which, and never relabels one as the other.
+const FUNNEL_FAMILY_LABELS = {
+  lifecycle_stage_events: "Lifecycle stage events: contacts that entered each stage in the window",
+  stage_entry_events: "Lifecycle stage events: contacts that entered each stage in the window",
+  acquisition_cohort_outcomes: "Acquisition cohort: contacts created in the window; each stage counts every contact that has reached it so far",
+  lead_entry_cohort: "Lead cohort: contacts that entered Lead in the window, followed through every later stage",
+};
+const FUNNEL_WINDOW_BASIS_LABELS = {
+  stage_entry_date: "each stage counted on its own HubSpot stage-entry date",
+  contact_created_at: "windowed on the contact's creation date",
+  date_entered_lead: "windowed on the Lead-entry date",
+};
+
+
+function funnelBlockVerdictHtml(verdict) {
+  if (verdict.status === "published") return "";
+  const word = verdict.word || (verdict.status === "withheld" ? "Withheld" : "Unavailable");
+  const reason = verdict.reason ? ` — ${escapeHtml(verdict.reason)}.` : ".";
+  const note = verdict.note ? ` ${escapeHtml(verdict.note)}` : "";
+  return `<p class="funnel-block__verdict" data-funnel-verdict="${escapeHtml(verdict.status)}"><strong>${escapeHtml(word)}</strong>${reason}${note}</p>`;
+}
+
+function funnelBlockStageHtml(stage, index, verdict, o) {
+  const s = stage || {};
+  const notes = (verdict.status === "published" && Array.isArray(s.notes) ? s.notes : [])
+    .filter((n) => n && n.text)
+    .map((n) => `<span class="dash-funnel__note${n.tone ? ` dash-funnel__note--${escapeHtml(n.tone)}` : ""}"${
+      n.title ? ` title="${escapeHtml(n.title)}"` : ""}>${escapeHtml(n.text)}</span>`).join("");
+  const m = s.metric || {};
+  const bounded = verdict.status === "published" && !s.not_on_page && !!s.bound_reason
+    && m.status === "published" && m.value !== null && m.value !== undefined;
+  const boundNote = bounded
+    ? `<span class="dash-funnel__note dash-funnel__note--bound">Lower bound: ${escapeHtml(s.bound_reason)}</span>` : "";
+  const help = s.help ? `<span class="dash-funnel__help">${escapeHtml(s.help)}</span>` : "";
+  const sub = (verdict.status === "published" && s.sub) ? escapeHtml(s.sub) : "";
+  const body = `
+        <span class="dash-funnel__stage-label">${escapeHtml(s.label || FUNNEL_BLOCK_SLOT_LABELS[s.slot] || "")}</span>
+        <span class="dash-funnel__stage-value">${funnelBlockValueHtml(s, verdict)}</span>
+        <span class="dash-funnel__stage-sub"${s.sub_title ? ` title="${escapeHtml(s.sub_title)}"` : ""}>${sub}</span>
+        ${boundNote}${notes}${help}`;
+  const accent = `--funnel-accent:${FUNNEL_BLOCK_RAMP[index % FUNNEL_BLOCK_RAMP.length]}`;
+  if (o.selectable) {
+    const active = o.activeKey !== null && o.activeKey !== undefined && o.activeKey === s.key;
+    return `
+      <button type="button" class="dash-funnel__stage dash-funnel__stage--selectable${active ? " is-active" : ""}" style="${accent}"
+        data-funnel-slot="${escapeHtml(s.slot)}" data-funnel-event="${escapeHtml(s.key)}" aria-pressed="${active ? "true" : "false"}"${
+        s.action_title ? ` title="${escapeHtml(s.action_title)}"` : ""}>${body}
+      </button>`;
+  }
+  return `
+      <div class="dash-funnel__stage" style="${accent}" data-funnel-slot="${escapeHtml(s.slot)}">${body}
+      </div>`;
+}
+
+// One stage value. Withheld means absent: under an unpublished verdict no
+// figure is read at all. A published count goes through the reader-contract
+// renderer; a lower bound is "at least N" with its reason.
+function funnelBlockValueHtml(stage, verdict) {
+  if (verdict.status !== "published") {
+    if (verdict.word) return `<span class="dash-unavailable">${escapeHtml(verdict.word)}</span>`;
+    return canonicalMetricHtml({ value: null, status: verdict.status, reason: null }, fmtCount, null);
+  }
+  if (stage.not_on_page) {
+    return `<span class="dash-unavailable funnel-block__not-on-page" title="${escapeHtml(stage.not_on_page)}">${FUNNEL_BLOCK_NOT_ON_PAGE}</span>`
+      + ` <small class="metric-reason">${escapeHtml(stage.not_on_page)}</small>`;
+  }
+  const m = stage.metric || {};
+  const published = m.status === "published" && m.value !== null && m.value !== undefined;
+  if (published && stage.bound_reason) {
+    return `<span class="dash-lower-bound" data-lower-bound="${escapeHtml(stage.key)}" title="${escapeHtml(stage.bound_reason)}">at least ${escapeHtml(fmtCount(m.value))}</span>`;
+  }
+  return canonicalMetricHtml(m, fmtCount, null);
+}
+
+// One connector. The rate is the adapter's, read whole from the payload.
+function funnelBlockConvHtml(conv, verdict) {
+  const c = (verdict.status === "published" && conv) ? conv : { kind: "none" };
+  const pct = c.pct === null || c.pct === undefined ? null : escapeHtml(String(c.pct));
+  const title = c.title ? ` title="${escapeHtml(c.title)}"` : "";
+  let chip = "";
+  if (c.kind === "exact" && pct !== null) {
+    chip = `<span class="dash-funnel__conv"${title}>${pct}%</span>`;
+  } else if (c.kind === "at_least" && pct !== null) {
+    chip = `<span class="dash-funnel__conv" data-conv-bound="at_least"${title}>at least ${pct}%</span>`;
+  } else if (c.kind === "unknown") {
+    chip = `<span class="dash-funnel__conv dash-funnel__conv--muted" data-conv-bound="unknown"${title}>—</span>`;
+  } else if (c.kind === "unavailable" || c.kind === "exact" || c.kind === "at_least") {
+    // An exact or at-least chip without its rate is unavailable, never 0%.
+    chip = `<span class="dash-funnel__conv dash-funnel__conv--muted" data-conv-unavailable${title}>Unavailable</span>`;
+  }
+  const basis = chip && c.basis ? `<span class="dash-funnel__basis">${escapeHtml(c.basis)}</span>` : "";
+  return `
+      <div class="dash-funnel__link${chip ? "" : " dash-funnel__link--plain"}"${chip ? "" : ' aria-hidden="true"'}><span class="dash-funnel__arrow" aria-hidden="true">→</span>${chip}${basis}</div>`;
+}
+
+/**
+ * Which stage-entry counts are lower bounds, each with its reason in words
+ * (PR-ADS-178B-F1 o1; shared by the two stage-entry adapters, Pipeline and
+ * Overview's Lifecycle Activity, since PR-ADS-180A).
+ *
+ * Under `reconciliation.status === "partial"` a stage some contacts reached
+ * with no recorded entry date counts only the dated entries: the undated ones
+ * may belong to this window. The payload's coverage names the stages; when it
+ * does not (no per-stage coverage), EVERY stage is a lower bound — never
+ * assume exactness the evidence does not carry.
+ */
+function stageEntryLowerBounds(f, events) {
+  const out = {};
+  const recon = (f && f.reconciliation) || {};
+  if (recon.status !== "partial") return out;
+  const missing = (((f && f.coverage) || {}).stage_reached_without_entry_date);
+  const perStage = missing && typeof missing === "object";
+  events.forEach((event) => {
+    if (!perStage) {
+      out[event] = canonicalReasonLabel("missing_stage_entry_date")
+        + " (the evidence does not say which stages)";
+      return;
+    }
+    const n = missing[event];
+    if (n === null || n === undefined) {
+      out[event] = canonicalReasonLabel("missing_stage_entry_date")
+        + " (not reported for this stage)";
+    } else if (Number(n) > 0) {
+      out[event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot`;
+    }
+  });
+  return out;
+}
+
+/**
+ * One cohort-safe conversion as a connector model, under 178B-F2's rule. An
+ * undated FROM stage leaves the cohort itself incomplete: the rate is unknown
+ * ("—" with the reason). An undated TO stage only undercounts the converted
+ * contacts: the rate is "at least X%". `conv` is the canonical funnel's own
+ * conversion object; nothing here divides.
+ */
+function stageEntryConversion(conv, fromBound, toBound, exactTitle, basis) {
+  const ok = !!conv && conv.available === true && conv.basis === "cohort"
+    && conv.rate_pct !== null && conv.rate_pct !== undefined;
+  if (!ok) return null;
+  if (fromBound) return { kind: "unknown", title: `Conversion unknown: ${fromBound}` };
+  if (toBound) {
+    return { kind: "at_least", pct: conv.rate_pct,
+      title: exactTitle ? `Lower bound: ${toBound}. ${exactTitle}` : `Lower bound: ${toBound}`,
+      basis: basis ? `at least ${basis}` : "" };
+  }
+  return { kind: "exact", pct: conv.rate_pct, title: exactTitle, basis: basis || "" };
+}
+// ══ end of the funnel block ══════════════════════════════════════════════════
+
 /**
  * PR-ADS-155-F2 §1/§2 — lifecycle ACTIVITY in the selected window.
  *
@@ -2767,50 +3046,14 @@ function wireDashChartHover(root, d) {
  * Previous-period movement is a third, separate thing. It sits INSIDE a stage
  * card, labelled as a comparison, never between two cards where a reader would
  * take it for progression.
+ *
+ * PR-ADS-180A: drawn by the shared funnel block (funnelBlockHtml) from
+ * dashActivityFunnelModel. A count some contacts reached with no entry date is
+ * a lower bound, by the same rule as the Pipeline funnel.
  */
 function renderDashLifecycleActivity(d) {
   const activity = d.lifecycle_activity || null;
-  if (!activity || !activity.available) {
-    return `
-      <section class="dash-panel dash-activity-panel dash-anim" aria-label="Lifecycle activity">
-        <div class="dash-panel__header">
-          <div>
-            <h3 class="dash-panel__title">Lifecycle Activity</h3>
-            <p class="dash-panel__sub">${escapeHtml(DASH_ACTIVITY_SUBTITLE)}</p>
-          </div>
-        </div>
-        <p class="empty-state">${dashValue(null)} — ${escapeHtml(
-          dashActivityReasonLabel((activity || {}).reason))}</p>
-      </section>`;
-  }
-
-  const stages = Array.isArray(activity.stages) ? activity.stages : [];
-  const conversions = Array.isArray(activity.conversions) ? activity.conversions : [];
-  const byPair = {};
-  conversions.forEach((c) => { byPair[`${c.from_event}>${c.to_event}`] = c; });
-
-  const cells = stages.map((s, i) => {
-    const previous = i === 0 ? null : stages[i - 1];
-    const chip = previous
-      ? dashActivityConversion(byPair[`${previous.event}>${s.event}`])
-      : "";
-    const gap = s.missing_entry_date_contacts
-      ? `<div class="dash-activity__gap" title="These contacts reached ${escapeHtml(
-          s.label)} but HubSpot holds no entry timestamp, so no window can count them. No substitute date is used.">${escapeHtml(
-          String(s.missing_entry_date_contacts))} without an entry date</div>`
-      : "";
-    return `
-      ${chip}
-      <div class="dash-activity__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i % DASH_FUNNEL_RAMP.length]}">
-        <div class="dash-activity__stage-label">${escapeHtml(s.label || s.event || "")}</div>
-        <div class="dash-activity__stage-value">${dashValue(s.entered, fmtCount)}</div>
-        <div class="dash-activity__stage-sub">${escapeHtml(
-          s.activity_label || "Entered during this period")}</div>
-        ${dashActivityTrend(s.previous_period, activity.previous_period)}
-        ${gap}
-      </div>`;
-  }).join("");
-
+  const available = !!activity && activity.available === true;
   return `
     <section class="dash-panel dash-activity-panel dash-anim" aria-label="Lifecycle activity">
       <div class="dash-panel__header">
@@ -2818,14 +3061,55 @@ function renderDashLifecycleActivity(d) {
           <h3 class="dash-panel__title">Lifecycle Activity</h3>
           <p class="dash-panel__sub">${escapeHtml(DASH_ACTIVITY_SUBTITLE)}</p>
         </div>
-        ${dashActivityCoverageBadge(activity)}
+        ${available ? dashActivityCoverageBadge(activity) : ""}
       </div>
-      <div class="dash-activity">${cells}</div>
-      <p class="dash-activity__legend">Percentages between stages are cohort
+      ${funnelBlockHtml(dashActivityFunnelModel(activity), { ariaLabel: "Lifecycle activity" })}
+      ${available ? `<p class="lifecycle-legend">Percentages between stages are cohort
         conversions from the canonical CRM funnel, each measured over the cohort
         named beside it — never one card divided by another.</p>
-      ${dashActivityCoverageDisclosure(activity)}
+      ${dashActivityCoverageDisclosure(activity)}` : ""}
     </section>`;
+}
+
+/**
+ * PR-ADS-180A — the activity block's model, read from `lifecycle_activity`
+ * alone. The family is the block's own `basis` ("stage_entry_events"); a count
+ * some contacts reached with no entry date is a lower bound (the Pipeline rule,
+ * one function for both stage-entry funnels); every connector is the canonical
+ * cohort conversion, whole.
+ */
+function dashActivityFunnelModel(activity) {
+  const a = activity || {};
+  const stages = Array.isArray(a.stages) ? a.stages : [];
+  const family = { key: a.basis, basis: stageEntryWindowBasis(stages) };
+  if (a.available !== true) {
+    return { family, verdict: { status: "unavailable", reason: dashActivityReasonLabel(a.reason) },
+      stages: lifecycleColumnLabels(stages) };
+  }
+  const bounds = stageEntryLowerBounds(a, stages.map((s) => s.event));
+  const conversions = Array.isArray(a.conversions) ? a.conversions : [];
+  const byPair = {};
+  conversions.forEach((c) => { byPair[`${c.from_event}>${c.to_event}`] = c; });
+  return {
+    family,
+    verdict: { status: "published" },
+    stages: stages.map((s) => ({
+      slot: FUNNEL_EVENT_SLOTS[s.event], key: s.event, label: s.label || s.event || "",
+      metric: funnelCountMetric(s.entered, null),
+      bound_reason: bounds[s.event] || null,
+      sub: s.activity_label || "Entered during this period",
+      sub_title: s.event_date_property ? `HubSpot property: ${s.event_date_property}` : "",
+      // §5: the trend lives INSIDE the stage, never between two stages.
+      // PR-ADS-180A-F1: an exact change beside "at least N" would claim a
+      // measurement the count is not; a bound stage gets no comparison.
+      notes: [bounds[s.event]
+        ? { text: "No comparison", tone: "none",
+            title: `This count is a lower bound (${bounds[s.event]}), so its change against the previous period is not measured.` }
+        : dashActivityTrend(s.previous_period, a.previous_period)],
+    })),
+    conversions: stages.slice(1).map((s, i) => dashActivityConversion(
+      byPair[`${stages[i].event}>${s.event}`], bounds[stages[i].event], bounds[s.event])),
+  };
 }
 
 const DASH_ACTIVITY_SUBTITLE =
@@ -2843,30 +3127,25 @@ function dashActivityReasonLabel(reason) {
 }
 
 /**
- * One connector. Fails closed: an unavailable conversion says so, and is never
- * rendered as 0%. A genuine zero — cohort proven, nobody progressed — renders
- * as 0%, because that is a measurement and withholding it would be its own lie.
+ * One connector's model. Fails closed: an unavailable conversion says so, and
+ * is never rendered as 0%. A genuine zero — cohort proven, nobody progressed —
+ * renders as 0%, because that is a measurement and withholding it would be its
+ * own lie. Beside a lower-bound stage the 178B-F2 rule applies (at least X%, or
+ * unknown). The rate is `conversion.rate_pct`, whole; nothing here computes.
  */
-function dashActivityConversion(conversion) {
+function dashActivityConversion(conversion, fromBound, toBound) {
   if (!conversion || !conversion.available
       || conversion.rate_pct === null || conversion.rate_pct === undefined
       || conversion.cohort_size === null || conversion.cohort_size === undefined
       || conversion.converted === null || conversion.converted === undefined) {
     const reason = dashActivityConversionReason((conversion || {}).reason);
-    return `
-      <div class="dash-activity__conv dash-activity__conv--muted" title="${escapeHtml(reason)}">
-        <span class="dash-activity__conv-rate">Unavailable</span>
-        <span class="dash-activity__conv-basis">${escapeHtml(reason)}</span>
-      </div>`;
+    return { kind: "unavailable", title: reason, basis: reason };
   }
-  return `
-    <div class="dash-activity__conv" title="Cohort conversion from the canonical CRM funnel: of the ${escapeHtml(
-      String(conversion.cohort_size))} contacts that entered ${escapeHtml(conversion.from_label || "")} in this window, ${escapeHtml(
-      String(conversion.converted))} went on to enter ${escapeHtml(conversion.to_label || "")}.">
-      <span class="dash-activity__conv-rate">${escapeHtml(String(conversion.rate_pct))}%</span>
-      <span class="dash-activity__conv-basis">${escapeHtml(String(conversion.converted))} of ${escapeHtml(
-        String(conversion.cohort_size))} ${escapeHtml(conversion.cohort_label || "")}</span>
-    </div>`;
+  const basis = `${conversion.converted} of ${conversion.cohort_size} ${conversion.cohort_label || ""}`.trim();
+  const title = `Cohort conversion from the canonical CRM funnel: of the ${conversion.cohort_size} contacts `
+    + `that entered ${conversion.from_label || ""} in this window, ${conversion.converted} went on to enter ${conversion.to_label || ""}.`;
+  return stageEntryConversion(conversion, fromBound, toBound, title, basis)
+    || { kind: "unavailable", title: dashActivityConversionReason(null), basis: dashActivityConversionReason(null) };
 }
 
 function dashActivityConversionReason(reason) {
@@ -2878,23 +3157,21 @@ function dashActivityConversionReason(reason) {
 }
 
 /**
- * §5 — a trend, labelled as a trend. It lives inside the card, not between two
- * cards, and a missing or zero baseline is stated rather than turned into a
- * percentage: a decline against nothing is not a decline.
+ * §5 — a trend, labelled as a trend: a note INSIDE the stage, never a
+ * connector between two stages. A missing or zero baseline is stated rather
+ * than turned into a percentage: a decline against nothing is not a decline.
  */
 function dashActivityTrend(metric, previousPeriod) {
   const label = (previousPeriod && previousPeriod.label) || "vs previous period";
   if (!metric || metric.status !== "ok"
       || metric.delta_pct === null || metric.delta_pct === undefined) {
-    return '<div class="dash-activity__trend dash-activity__trend--none">No comparison</div>';
+    return { text: "No comparison", tone: "none" };
   }
   const pct = metric.delta_pct * 100;
   const magnitude = Math.abs(pct) >= 100 ? 0 : 1;
   const text = `${pct > 0 ? "+" : ""}${pct.toFixed(magnitude)}%`;
-  const tone = metric.direction === "up"
-    ? "dash-activity__trend--up"
-    : (metric.direction === "down" ? "dash-activity__trend--down" : "");
-  return `<div class="dash-activity__trend ${tone}">${escapeHtml(text)} ${escapeHtml(label)}</div>`;
+  const tone = metric.direction === "up" ? "up" : (metric.direction === "down" ? "down" : "");
+  return { text: `${text} ${label}`, tone };
 }
 
 /** §6 — partial historical coverage, stated on the face of the panel. */
@@ -2982,61 +3259,136 @@ function dashActivityCoverageDisclosure(activity) {
  */
 function renderDashLifecycleCohort(d) {
   const cohort = d.lifecycle_cohort || null;
-  if (!cohort || !cohort.available) {
-    return `
-      <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Lifecycle cohort">
-        <div class="dash-panel__header">
-          <div>
-            <h3 class="dash-panel__title">Lifecycle Cohort</h3>
-            <p class="dash-panel__sub">${escapeHtml(dashCohortSubtitle(cohort))}</p>
-          </div>
-        </div>
-        <p class="empty-state">${dashValue(null)} — ${escapeHtml(
-          dashCohortReasonLabel((cohort || {}).reason))}</p>
-      </section>`;
-  }
-
-  const stages = Array.isArray(cohort.stages) ? cohort.stages : [];
-  const cells = stages.map((s, i) => {
-    // The arrow chip carries the previous-stage conversion the SERVICE computed.
-    const step = s.previous_stage_conversion_pct;
-    const chip = i === 0 ? "" : (
-      step === null || step === undefined
-        ? '<span class="dash-funnel__conv dash-funnel__conv--muted" aria-hidden="true">→</span>'
-        : `<span class="dash-funnel__conv">→ ${escapeHtml(String(step))}%</span>`
-    );
-    const fromAnchor = s.rate_from_anchor_pct;
-    const share = (fromAnchor === null || fromAnchor === undefined)
-      ? "" : `<div class="dash-funnel__stage-share">${escapeHtml(String(fromAnchor))}% of Lead cohort</div>`;
-    const gap = s.excluded_contacts
-      ? `<div class="dash-funnel__stage-gap" title="${escapeHtml(
-          dashCohortExclusionTitle(s.exclusion_reasons))}">${escapeHtml(
-          String(s.excluded_contacts))} excluded</div>`
-      : "";
-    return `
-      ${chip}
-      <div class="dash-funnel__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i % DASH_FUNNEL_RAMP.length]}">
-        <div class="dash-funnel__stage-label">${escapeHtml(s.label || s.event || "")}</div>
-        <div class="dash-funnel__stage-value">${dashValue(s.reached, fmtCount)}</div>
-        <div class="dash-funnel__stage-sub">${escapeHtml(
-          i === 0 ? "Entered Lead in this window" : "Of that same cohort")}</div>
-        ${share}
-        ${gap}
-      </div>`;
-  }).join("");
-
+  const available = !!cohort && cohort.available === true;
   return `
-    <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Lifecycle cohort funnel">
+    <section class="dash-panel dash-cohort-panel dash-anim" aria-label="Lifecycle cohort funnel">
       <div class="dash-panel__header">
         <div>
           <h3 class="dash-panel__title">Lifecycle Cohort</h3>
           <p class="dash-panel__sub">${escapeHtml(dashCohortSubtitle(cohort))}</p>
         </div>
-        ${dashCohortCoverageBadge(cohort)}
+        ${available ? dashCohortCoverageBadge(cohort) : ""}
       </div>
-      <div class="dash-funnel">${cells}</div>
-      ${dashCohortCoverageDisclosure(cohort)}
+      ${funnelBlockHtml(dashCohortFunnelModel(cohort), { ariaLabel: "Lifecycle cohort" })}
+      ${available ? dashCohortCoverageDisclosure(cohort) : ""}
     </section>`;
+}
+
+/**
+ * PR-ADS-180A — the cohort block's model, read from `d.lifecycle_cohort`
+ * alone. The family is the Lead-anchored cohort the payload declares
+ * (`anchor_event`), windowed on the anchor stage's own entry date. Every
+ * percentage is the service's: `previous_stage_conversion_pct` on the
+ * connector, `rate_from_anchor_pct` inside the stage. There is no division
+ * here, by design — a rate computed in the browser is a rate nobody governs.
+ *
+ * PR-ADS-180A-F1 (truth audit Major 1): the cohort's counts are lower bounds
+ * wherever evidence was excluded — a missing date can only hide a contact
+ * from a stage, never add one (dashCohortStageBounds). A bound stage is
+ * "at least N"; the connectors follow 178B-F2 with CUMULATIVE bounds.
+ */
+function dashCohortFunnelModel(cohort) {
+  const c = cohort || {};
+  const stages = Array.isArray(c.stages) ? c.stages : [];
+  const family = { key: c.anchor_event === "lead" ? "lead_entry_cohort" : null,
+    basis: (stages[0] || {}).event_date_column || null };
+  if (c.available !== true) {
+    // The columns keep their own names: the first one is Lead entries.
+    return { family, verdict: { status: "unavailable", reason: dashCohortReasonLabel(c.reason) },
+      stages: lifecycleColumnLabels(stages) };
+  }
+  const bounds = dashCohortStageBounds(c);
+  const anchorBound = !!bounds[0];
+  return {
+    family,
+    verdict: { status: "published" },
+    stages: stages.map((s, i) => {
+      const fromAnchor = s.rate_from_anchor_pct;
+      // The share of the Lead cohort: exact only when neither side is a
+      // bound; "at least" when only this stage is; unknown when Lead is.
+      let share = null;
+      if (i > 0 && anchorBound) {
+        share = { text: "Share of the Lead cohort unknown", tone: "none",
+          title: `The Lead cohort itself is a lower bound: ${bounds[0]}` };
+      } else if (!(i === 0 && anchorBound) && fromAnchor !== null && fromAnchor !== undefined) {
+        share = bounds[i]
+          ? { text: `at least ${fromAnchor}% of Lead cohort`, tone: "share", title: `Lower bound: ${bounds[i]}` }
+          : { text: `${fromAnchor}% of Lead cohort`, tone: "share" };
+      }
+      return {
+        slot: FUNNEL_EVENT_SLOTS[s.event], key: s.event, label: s.label || s.event || "",
+        metric: funnelCountMetric(s.reached, null),
+        bound_reason: bounds[i] || null,
+        sub: i === 0 ? "Entered Lead in this window" : "Of that same cohort",
+        sub_title: s.event_date_property ? `HubSpot property: ${s.event_date_property}` : "",
+        notes: [
+          share,
+          s.excluded_contacts
+            ? { text: `${s.excluded_contacts} excluded`, tone: "gap",
+                title: dashCohortExclusionTitle(s.exclusion_reasons) }
+            : null,
+        ],
+      };
+    }),
+    // The connector carries the previous-stage conversion the SERVICE
+    // computed. A null rate is unavailable — never 0%. Beside a bound
+    // (178B-F2, cumulative): any bound at or before the FROM stage leaves the
+    // rate unknown; a bound on the TO stage alone makes it "at least".
+    conversions: stages.slice(1).map((s, i) => {
+      const step = s.previous_stage_conversion_pct;
+      const earlier = bounds.slice(0, i + 1).find((b) => !!b);
+      if (step === null || step === undefined) {
+        return { kind: "unavailable", title: "The canonical service published no rate for this step." };
+      }
+      if (earlier) return { kind: "unknown", title: `Conversion unknown: an earlier stage is a lower bound (${earlier})` };
+      const title = `Of this cohort's contacts that reached the stage before, the share that reached ${s.label || s.event}`;
+      return bounds[i + 1]
+        ? { kind: "at_least", pct: step, title: `Lower bound: ${bounds[i + 1]}. ${title}` }
+        : { kind: "exact", pct: step, title };
+    }),
+  };
+}
+
+/**
+ * Which Lead-cohort stages are lower bounds, each with its reason in words
+ * (PR-ADS-180A-F1). `lead_cohort_progression` undercounts three ways:
+ *   1. anchorless contacts (`missing_lead_entry_date`): reached Lead with no
+ *      Lead-entry date, so no window's cohort holds them — EVERY stage,
+ *      Lead included, is a bound;
+ *   2. an exclusion at stage j (`missing_stage_entry_date`,
+ *      `prior_stage_entry_unproven`) — stage j is a bound;
+ *   3. a contact dropped at stage j is never followed further, and an undated
+ *      later stage is neither counted nor excluded — so ANY exclusion at an
+ *      earlier stage (whatever its reason) makes every later stage a bound.
+ * Presentation only: the counts are the service's, never adjusted.
+ */
+function dashCohortStageBounds(c) {
+  const stages = Array.isArray(c.stages) ? c.stages : [];
+  const records = Array.isArray(c.exclusion_reasons) ? c.exclusion_reasons : [];
+  let anchorless = 0;
+  records.forEach((r) => {
+    if (r && r.reason === "missing_lead_entry_date") anchorless += Number(r.contacts) || 0;
+  });
+  const out = [];
+  let earlierExcluded = null;
+  stages.forEach((s) => {
+    const own = s.exclusion_reasons || {};
+    const undated = (Number(own.missing_stage_entry_date) || 0)
+      + (Number(own.prior_stage_entry_unproven) || 0);
+    const why = [];
+    if (anchorless > 0) {
+      why.push(`${fmtCount(anchorless)} contact${anchorless === 1 ? "" : "s"} reached Lead with no Lead-entry date recorded in HubSpot, so no window's cohort holds them`);
+    }
+    if (earlierExcluded) why.push(earlierExcluded);
+    if (undated > 0) {
+      why.push(`${fmtCount(undated)} contact${undated === 1 ? "" : "s"} reached this stage with no proven entry date`);
+    }
+    out.push(why.length ? why.join("; ") : null);
+    if (!earlierExcluded && Number(s.excluded_contacts) > 0) {
+      earlierExcluded = `contacts excluded at ${s.label || s.event} are not followed into later stages`;
+    }
+  });
+  return out;
 }
 
 // The cohort's own description of itself. Never assembled from stage counts.
@@ -3515,7 +3867,7 @@ function renderDashboardRevenue() {
         ${renderRevConcentration(d)}
       </aside>
     </div>
-    ${renderRevConversionStrip(d)}
+    ${renderRevCustomerEfficiency(d)}
     ${renderRevBreakdowns(d)}
     <section class="dash-panel dash-anim rev-deals-panel" aria-label="Top closed-won deals">
       ${renderRevTopDeals(d)}
@@ -3766,46 +4118,48 @@ function wireRevChartHover(root, d) {
   wrap.addEventListener("pointerleave", hide);
 }
 
-function renderRevConversionStrip(d) {
+// PR-ADS-180A — "Customer Efficiency" is NOT a lifecycle funnel: its SQL count
+// is the acquisition cohort, its deals and revenue are counted by close date. It
+// was drawn as a stage strip with arrows between those two populations; it is
+// now the Dashboard's outcome cells, side by side with no connector, and its
+// two cross-cohort ratios are their own labelled cells (unavailable by
+// contract, with the reason). Every value renders through the same renderer
+// as before.
+function renderRevCustomerEfficiency(d) {
   const k = d.kpis || {};
-  // PR-ADS-161E: both ratios are unavailable by contract — SQLs are an
-  // acquisition cohort, won deals a close-date one — and say why.
-  const rate = canonicalMetricHtml(
-    { value: k.sql_to_customer_rate, status: k.sql_to_customer_rate_status,
-      reason: k.sql_to_customer_rate_reason }, (v) => `${(v * 100).toFixed(1)}%`);
-  const stages = [
+  const cells = [
     // PR-ADS-177A: the acquisition cohort, gated on THIS response's cohort.
-    { label: COHORT_SQLS_LABEL, value: cohortCountHtml(k.sqls, d.cohort, null), sub: `Google Ads contacts${escapeHtml(cohortThroughSuffix(d.cohort))}` },
+    { label: COHORT_SQLS_LABEL, value: cohortCountHtml(k.sqls, d.cohort, null),
+      sub: `Google Ads contacts${cohortThroughSuffix(d.cohort)}` },
+    // PR-ADS-161E: both ratios are unavailable by contract — SQLs are an
+    // acquisition cohort, won deals a close-date one — and say why.
+    { label: "SQL-to-customer rate", value: canonicalMetricHtml(
+      { value: k.sql_to_customer_rate, status: k.sql_to_customer_rate_status,
+        reason: k.sql_to_customer_rate_reason }, (v) => `${(v * 100).toFixed(1)}%`),
+      sub: "Across two populations" },
     { label: "Closed-Won Deals", value: dashValue(k.closed_won_deals, fmtCount), sub: "By close date" },
     { label: "Closed-Won Revenue", value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }), sub: "USD · HubSpot" },
-    { label: "Avg Deal Value", value: dashValue(k.average_deal_value_usd, fmtMoney), sub: "Per won deal" },
-  ];
-  const conns = [
-    rate,
-    canonicalMetricHtml(
+    { label: "Revenue per SQL", value: canonicalMetricHtml(
       { value: k.revenue_per_sql_usd, status: k.revenue_per_sql_status,
         reason: k.revenue_per_sql_reason }, (v) => `${fmtMoney(v)} / SQL`),
-    "",
+      sub: "Across two populations" },
+    { label: "Avg Deal Value", value: dashValue(k.average_deal_value_usd, fmtMoney), sub: "Per won deal" },
   ];
-  const cells = stages.map((s, i) => {
-    const conv = i > 0 ? conns[i - 1] : null;
-    const chip = i === 0 ? "" : `<span class="dash-funnel__conv">→ ${conv}</span>`;
-    return `${chip}
-      <div class="dash-funnel__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i]}">
-        <div class="dash-funnel__stage-label">${escapeHtml(s.label)}</div>
-        <div class="dash-funnel__stage-value">${s.value}</div>
-        <div class="dash-funnel__stage-sub">${escapeHtml(s.sub)}</div>
-      </div>`;
-  }).join("");
   return `
-    <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Customer conversion">
+    <section class="dash-panel dash-outcomes-panel dash-anim rev-efficiency-panel" aria-label="Customer efficiency">
       <div class="dash-panel__header">
         <div>
           <h3 class="dash-panel__title">Customer Efficiency</h3>
-          <p class="dash-panel__sub">SQLs · Closed-won deals → Closed-Won Revenue → Avg Deal Value</p>
+          <p class="dash-panel__sub">SQLs are contacts acquired in this window; deals and revenue are counted by close date. Two populations, so no arrow or rate joins them.</p>
         </div>
       </div>
-      <div class="dash-funnel">${cells}</div>
+      <div class="dash-outcomes">${cells.map((c) => `
+        <div class="dash-outcomes__cell">
+          <div class="dash-outcomes__label">${escapeHtml(c.label)}</div>
+          <div class="dash-outcomes__value">${c.value}</div>
+          <div class="dash-outcomes__sub">${escapeHtml(c.sub)}</div>
+        </div>`).join("")}
+      </div>
     </section>`;
 }
 
@@ -6654,7 +7008,7 @@ function renderPipelinePage() {
   summary.innerHTML = `
     ${pipelineKpiCardsHtml(d, null)}
     <section class="dash-panel dash-anim pipeline-funnel-panel" id="pipeline-funnel" aria-label="Lifecycle funnel">
-      ${pipelineFunnelHtml(d)}
+      ${pipelineFunnelHtml(d, _leadsView)}
     </section>`;
   outcomes.innerHTML = `
     <section class="dash-panel dash-anim deal-table-panel" id="pipeline-deals" aria-label="Closed-won deals" data-pipeline-deals>
@@ -6725,99 +7079,12 @@ function pipelineKpiCardsHtml(d, pc) {
 
 // ── The lifecycle funnel: stage ENTRIES in the window ───────────────────────
 /**
- * Which stage counts are lower bounds, each with its reason in words.
- *
- * Under `reconciliation.status === "partial"` a stage some contacts reached
- * with no recorded entry date counts only the dated entries: the undated ones
- * may belong to this window. The payload's coverage names the stages; when it
- * does not (no per-stage coverage), EVERY stage is a lower bound — never
- * assume exactness the evidence does not carry.
+ * The Pipeline funnel panel. `activeEvent` is the stage whose contacts the
+ * leads list shows — an ARGUMENT (the caller passes its selection), so the
+ * shared block never reads page state. The block itself is funnelBlockHtml.
  */
-function pipelineFunnelLowerBounds(f) {
-  const out = {};
-  const recon = (f && f.reconciliation) || {};
-  if (recon.status !== "partial") return out;
-  const missing = ((f.coverage || {}).stage_reached_without_entry_date);
-  const perStage = missing && typeof missing === "object";
-  LEADS_STAGES.forEach((stage) => {
-    if (!perStage) {
-      out[stage.event] = canonicalReasonLabel("missing_stage_entry_date")
-        + " (the evidence does not say which stages)";
-      return;
-    }
-    const n = missing[stage.event];
-    if (n === null || n === undefined) {
-      out[stage.event] = canonicalReasonLabel("missing_stage_entry_date")
-        + " (not reported for this stage)";
-    } else if (Number(n) > 0) {
-      out[stage.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot`;
-    }
-  });
-  return out;
-}
-
-function pipelineFunnelHtml(d) {
+function pipelineFunnelHtml(d, activeEvent) {
   const f = (d && d.funnel) || {};
-  const events = f.events || {};
-  const available = f.available === true;
-  const mismatch = (f.reconciliation || {}).status === "mismatch";
-  const convByPair = {};
-  const lowerBound = pipelineFunnelLowerBounds(f);
-  (f.conversions || []).forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
-
-  const cells = LEADS_STAGES.map((stage, i) => {
-    const block = events[stage.event] || {};
-    const count = (!available || mismatch) ? null : block.count;
-    const prev = i > 0 ? LEADS_STAGES[i - 1] : null;
-    const conv = prev ? convByPair[`${prev.event}->${stage.event}`] : null;
-    let convChip = "";
-    if (prev) {
-      // Only a cohort-safe rate is ever shown. Otherwise "—".
-      const ok = conv && conv.available && conv.basis === "cohort" && conv.rate_pct !== null;
-      // PR-ADS-178B-F2: a rate beside a lower-bound stage is never shown as
-      // exact. An undated FROM stage leaves the cohort itself incomplete, so
-      // the rate is unknown ("—" with the reason). An undated TO stage only
-      // undercounts the converted contacts, so the rate is "at least X%".
-      const fromBound = lowerBound[prev.event];
-      const toBound = lowerBound[stage.event];
-      if (ok && fromBound) {
-        convChip = `<span class="dash-funnel__conv dash-funnel__conv--muted" data-conv-bound="unknown" title="${escapeHtml(`Conversion unknown: ${fromBound}`)}">—</span>`;
-      } else if (ok && toBound) {
-        convChip = `<span class="dash-funnel__conv" data-conv-bound="at_least" title="${escapeHtml(`Lower bound: ${toBound}`)}">at least ${conv.rate_pct}%</span>`;
-      } else {
-        convChip = ok
-          ? `<span class="dash-funnel__conv" title="Cohort-safe: of contacts entering ${escapeHtml(prev.stage)} in this window, the share that later entered ${escapeHtml(stage.stage)}">${conv.rate_pct}%</span>`
-          : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
-      }
-    }
-    const dateProp = block.event_date_property || "";
-    const bound = lowerBound[stage.event];
-    // o1 (PR-ADS-178B-F1): under partial evidence a stage with contacts that
-    // reached it with no entry date is a LOWER BOUND — "at least N", with
-    // the reason — never a plain, exact-looking number.
-    const value = (count === null || count === undefined)
-      ? `<span class="dash-unavailable">${mismatch ? "Reconciliation required" : "Unavailable"}</span>`
-      : (bound
-        ? `<span class="dash-lower-bound" data-lower-bound="${stage.event}" title="${escapeHtml(bound)}">at least ${escapeHtml(fmtCount(count))}</span>`
-        : escapeHtml(fmtCount(count)));
-    const boundNote = (bound && count !== null && count !== undefined)
-      ? `<span class="dash-funnel__stage-sub pipeline-funnel__bound">Lower bound: ${escapeHtml(bound)}</span>` : "";
-    const help = stage.event === "customer"
-      ? `<p class="leads-customer-figure__help">${escapeHtml(LEADS_STAGE_MOVE_HELP)}</p>` : "";
-    const active = _leadsView === stage.event;
-    return `
-      ${convChip}
-      <button type="button" class="dash-funnel__stage pipeline-funnel__stage${active ? " is-active" : ""}"
-        data-funnel-event="${stage.event}" aria-pressed="${active ? "true" : "false"}"
-        title="List the contacts that entered ${escapeHtml(stage.stage)} in this window">
-        <span class="dash-funnel__stage-label">${escapeHtml(stage.label)}</span>
-        <span class="dash-funnel__stage-value">${value}</span>
-        ${dateProp ? `<span class="dash-funnel__stage-sub" title="HubSpot property: ${escapeHtml(dateProp)}">HubSpot stage-entry date</span>` : ""}
-        ${boundNote}
-        ${help}
-      </button>`;
-  }).join("");
-
   const scopeLabel = f.scope_label || "All Sources";
   const groupLabel = f.acquisition_group_label || "All sources";
   return `
@@ -6828,13 +7095,61 @@ function pipelineFunnelHtml(d) {
       </div>
     </div>
     ${leadsTruthStateHtml(f.available === undefined ? null : f)}
-    <div class="dash-funnel pipeline-funnel" role="group" aria-label="${escapeHtml(PIPELINE_FUNNEL_LABEL)}">${cells}</div>
+    ${funnelBlockHtml(pipelineFunnelModel(f), {
+      ariaLabel: PIPELINE_FUNNEL_LABEL, selectable: true, activeKey: activeEvent })}
     <div class="pipeline-other-view">
-      <button type="button" class="search-terms-tab search-terms-tab--muted${_leadsView === LEADS_VIEW_OTHER ? " active" : ""}"
+      <button type="button" class="search-terms-tab search-terms-tab--muted${activeEvent === LEADS_VIEW_OTHER ? " active" : ""}"
         data-leads-view="${LEADS_VIEW_OTHER}">Disqualified / Other — working status, not a funnel stage</button>
     </div>
     <p class="grace-note">Lead filters — Scope: ${escapeHtml(scopeLabel)} · Source: ${escapeHtml(groupLabel)} ·
       A contact counts in every stage it entered; a current Customer still counts in the period it became an SQL.</p>`;
+}
+
+/**
+ * PR-ADS-180A — the Pipeline funnel's model, read from `d.funnel` alone.
+ * An unreadable funnel is Unavailable and a scope-nesting mismatch is
+ * "Reconciliation required" — never a count. Only a cohort-safe conversion is
+ * ever shown, under the 178B-F2 lower-bound rule (stageEntryConversion).
+ */
+function pipelineFunnelModel(f) {
+  const events = f.events || {};
+  const available = f.available === true;
+  const mismatch = (f.reconciliation || {}).status === "mismatch";
+  const family = { key: f.metric_family,
+    basis: stageEntryWindowBasis(LEADS_STAGES.map((s) => events[s.event])) };
+  const convByPair = {};
+  const lowerBound = stageEntryLowerBounds(f, LEADS_STAGES.map((s) => s.event));
+  (f.conversions || []).forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
+  const verdict = mismatch
+    ? { status: "withheld", word: "Reconciliation required",
+        reason: "a scope invariant of the lifecycle funnel broke, so its counts are withheld until it holds" }
+    : (available ? { status: "published" }
+      : { status: "unavailable", reason: f.reason ? canonicalReasonLabel(f.reason) : "the lifecycle funnel could not be read" });
+
+  const stages = LEADS_STAGES.map((stage) => {
+    const block = events[stage.event] || {};
+    const count = (!available || mismatch) ? null : block.count;
+    const dateProp = block.event_date_property || "";
+    return {
+      slot: FUNNEL_EVENT_SLOTS[stage.event], key: stage.event, label: stage.label,
+      metric: funnelCountMetric(count, "the funnel sent no count for this stage"),
+      // o1 (PR-ADS-178B-F1): under partial evidence a stage with contacts that
+      // reached it with no entry date is a LOWER BOUND — "at least N".
+      bound_reason: lowerBound[stage.event] || null,
+      sub: dateProp ? "HubSpot stage-entry date" : "",
+      sub_title: dateProp ? `HubSpot property: ${dateProp}` : "",
+      help: stage.event === "customer" ? LEADS_STAGE_MOVE_HELP : "",
+      action_title: `List the contacts that entered ${stage.stage} in this window`,
+    };
+  });
+  const conversions = LEADS_STAGES.slice(1).map((stage, i) => {
+    const prev = LEADS_STAGES[i];
+    const conv = convByPair[`${prev.event}->${stage.event}`];
+    return stageEntryConversion(conv, lowerBound[prev.event], lowerBound[stage.event],
+      `Cohort-safe: of contacts entering ${prev.stage} in this window, the share that later entered ${stage.stage}`, "")
+      || { kind: "unavailable", title: "Cohort-safe conversion unavailable for this window" };
+  });
+  return { family, verdict, stages, conversions };
 }
 
 function pipelineWireFunnel(root) {
@@ -8867,21 +9182,51 @@ function channelOutcomeStripHtml(o) {
   return `<div class="dash-outcomes channel-outcome-totals">${html.join("")}</div>`;
 }
 
-// The totals strip: how many contacts were acquired, and how far they got.
-function channelFunnelTotalsHtml(totals, stages) {
-  const cells = [`<div class="dash-outcomes__cell">
-      <div class="dash-outcomes__label">Contacts acquired</div>
-      <div class="dash-outcomes__value">${channelFunnelNum(totals.contacts)}</div>
-      <div class="dash-outcomes__sub">in this period</div></div>`];
-  stages.forEach((st, i) => {
-    const color = CHANNEL_FUNNEL_STAGE_COLORS[i % CHANNEL_FUNNEL_STAGE_COLORS.length];
-    const rate = channelFunnelRate(totals[st.key], totals.contacts);
-    cells.push(`<div class="dash-outcomes__cell channel-funnel-stat" style="border-top-color:${color}">
-      <div class="dash-outcomes__label">Reached ${escapeHtml(st.label)}</div>
-      <div class="dash-outcomes__value">${channelFunnelNum(totals[st.key])}</div>
-      <div class="dash-outcomes__sub">${rate === null ? "share unknown" : `${rate.toFixed(1)}% of contacts`}</div></div>`);
-  });
-  return `<div class="dash-outcomes channel-funnel-totals">${cells.join("")}</div>`;
+// PR-ADS-180A — the Channels funnel as the shared block: the acquisition
+// cohort's totals, read from THIS response's `totals`, `stages` and
+// `publication` alone. A withheld cohort is the word and its reason in every
+// stage — the totals are never read. The block shows no step conversion here
+// (the page publishes none); each stage's share of the contacts acquired stays
+// in its sub-line, as before.
+const CHANNEL_STAGE_SLOTS = {
+  reached_mql: "mql", reached_sql: "sql",
+  reached_opportunity: "opportunity", reached_customer_stage: "customer",
+};
+
+function channelFunnelModel(data) {
+  const d = data || {};
+  const pub = d.publication || {};
+  const stages = (d.stages || []).filter((st) => CHANNEL_STAGE_SLOTS[st.key]);
+  const family = { key: d.metric_family, basis: d.window_basis };
+  const funnelOk = pub.status === "published" && !!d.channels && !!d.totals;
+  const head = { slot: "contacts", key: "contacts", label: "Contacts acquired" };
+  if (!funnelOk) {
+    return {
+      family,
+      verdict: { status: pub.status === "unavailable" ? "unavailable" : "withheld",
+        reason: CHANNEL_FUNNEL_REASON_LABELS[pub.reason]
+          || String(pub.reason || "the cohort could not be published").replace(/_/g, " "),
+        note: "No figures are shown until the contact data is complete and current." },
+      stages: [head].concat(stages.map((st) => ({
+        slot: CHANNEL_STAGE_SLOTS[st.key], key: st.key, label: `Reached ${st.label}` }))),
+    };
+  }
+  const totals = d.totals;
+  const missing = "the server sent no count for this stage";
+  return {
+    family,
+    verdict: { status: "published" },
+    stages: [{ ...head, metric: funnelCountMetric(channelFunnelCount(totals.contacts), missing),
+      sub: "in this period" }].concat(stages.map((st) => {
+      const rate = channelFunnelRate(totals[st.key], totals.contacts);
+      return {
+        slot: CHANNEL_STAGE_SLOTS[st.key], key: st.key, label: `Reached ${st.label}`,
+        metric: funnelCountMetric(channelFunnelCount(totals[st.key]), missing),
+        sub: rate === null ? "share unknown" : `${rate.toFixed(1)}% of contacts`,
+      };
+    })),
+    conversions: [],
+  };
 }
 
 // Two rankings for one stage: who brings the most, and who converts best.
@@ -8968,15 +9313,13 @@ function renderChannelFunnel(data, view) {
   const o = data.outcomes || null;
   const outRows = channelOutcomesPublished(o) ? o.channels : null;
   const oOpts = channelOutcomeOpts(o);
-  let withheld = "";
-  if (!funnelOk) {
-    const word = pub.status === "unavailable" ? "Unavailable" : "Withheld";
-    const reason = CHANNEL_FUNNEL_REASON_LABELS[pub.reason]
-      || String(pub.reason || "the cohort could not be published").replace(/_/g, " ");
-    withheld = `<div class="panel"><p class="empty-state" style="padding:var(--space-5)">
-      <strong>${word}</strong> — ${escapeHtml(reason)}. No figures are shown until the contact data is complete and current.</p></div>`;
-    if (!o) return withheld;
-  }
+  // PR-ADS-180A: the funnel is the shared block, published or not. Withheld,
+  // it is the word and the reason in every stage and no figure anywhere.
+  const funnelPanel = `
+    <div class="dash-panel dash-anim channel-funnel-block-panel">
+      ${funnelBlockHtml(channelFunnelModel(data), { ariaLabel: "Channel funnel" })}
+    </div>`;
+  if (!funnelOk && !o) return funnelPanel;
   const stage = funnelOk ? (stages.find((st) => st.key === v.stage)
     || stages.find((st) => st.key === "reached_sql") || stages[0]) : null;
   const sortKey = v.sort || "contacts";
@@ -9110,10 +9453,9 @@ function renderChannelFunnel(data, view) {
     `${PERIOD_RATIO_LABEL} and ${PERIOD_SPEND_PER_CUSTOMER_LABEL}: ${PERIOD_RATIO_DISCLOSURE}.`,
   ] : ["Deals, revenue and spend by channel could not be loaded."];
   return `
-    ${withheld}
     ${funnelOk ? `<p class="channel-funnel-context">Contacts acquired <strong>${escapeHtml(range)}</strong> · stage reached so far${
-      asOf ? ` · measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</p>
-    ${channelFunnelTotalsHtml(data.totals, stages)}` : ""}
+      asOf ? ` · measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</p>` : ""}
+    ${funnelPanel}
     ${outcomeContext}
     ${o ? channelOutcomeStripHtml(o) : ""}
     ${stage ? `<div class="channel-funnel-compare"><span class="channel-funnel-compare__label">Compare channels on:</span>${stagePicker}</div>` : ""}

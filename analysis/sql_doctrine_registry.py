@@ -1285,6 +1285,18 @@ RULES: list[dict] = [
     # `channelfunnel.service`; the page computes no SQL figure of its own.
     _r("ui.channelfunnel", "static/app.js", CLS_CANONICAL, _CHANNEL_FUNNEL,
        symbol="channelFunnelPlural", pattern="frontend_sqls_label"),
+    # PR-ADS-180A: the one funnel block names the window basis its payload
+    # declares. `contact_created_at` is the Channels acquisition cohort's
+    # (channel_funnel_service `window_basis`); the block computes nothing on it.
+    # The label constants follow funnelBlockFamily, which the scanner credits.
+    _r("ui.funnel_block", "static/app.js", CLS_CANONICAL, _CHANNEL_FUNNEL,
+       symbol="funnelBlockFamily", pattern="contact_created_at_ref"),
+    # PR-ADS-180A-F1: an unavailable Overview lifecycle block keeps its own
+    # column names — the canonical EVENT_LABELS ("SQLs" is the lifecycle SQL
+    # stage-entry / Lead-cohort column, never a count). The constant follows
+    # lifecycleColumnLabels, which the scanner credits.
+    _r("ui.funnel_block_columns", "static/app.js", CLS_CANONICAL, _OVW_LC,
+       symbol="lifecycleColumnLabels", pattern="frontend_sqls_label"),
     _r("ui.channels", "static/app.js", CLS_MIXED, _CHAN,
        symbol=["renderDashboardChannels", "renderChanKpiRow", "chanQualityBubbleSVG",
                "renderChanQualityPanel", "wireChanQualityHover", "renderChanPlatformMatrix",
@@ -1301,7 +1313,10 @@ RULES: list[dict] = [
                "renderCtryLeaderboard", "wireCtryDrawers", "renderCtryResidualPanel",
                "renderCtryTruthFooter", "ctryStatusColor", "renderCountryRevenueBlockedState"]),
     _r("ui.revenue_tab", "static/app.js", CLS_MIXED, _REV,
-       symbol=["renderRevKpiRow", "renderRevConversionStrip", "renderRevTruthFooter",
+       # PR-ADS-180A: the Customer Efficiency strip (renderRevConversionStrip)
+       # is outcome cells, renamed renderRevCustomerEfficiency — same figures,
+       # the cohort SQL count still through cohortCountHtml(…, d.cohort, …).
+       symbol=["renderRevKpiRow", "renderRevCustomerEfficiency", "renderRevTruthFooter",
                "renderRevenueBlockedState", "renderRevenueHealth"]),
     # PR-ADS-178B: Dashboard → Deals renders the Pipeline page's own
     # renderers; the KPI cards gate the cohort SQL figure on the response's

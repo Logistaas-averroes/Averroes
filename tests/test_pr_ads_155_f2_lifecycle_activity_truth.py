@@ -201,6 +201,15 @@ def _strip_comments(src):
     return re.sub(r"//.*|/\*[\s\S]*?\*/", "", src)
 
 
+def _render_activity(activity):
+    """PR-ADS-180A: the real Lifecycle Activity panel (the shared funnel
+    block), rendered in node from a backend-built block."""
+    import json
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app("renderDashLifecycleActivity({lifecycle_activity: %s})"
+                    % json.dumps(activity, default=str))
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # §1 — activity counts are activity counts, and may rise
 # ═════════════════════════════════════════════════════════════════════════════
@@ -290,10 +299,20 @@ def test_4_connectors_come_from_canonical_conversions_not_a_quotient_of_cards(
     # derived beside it. Checking only that `rate_pct` appears somewhere in the
     # renderer would pass on a file that guards on it and then prints its own
     # quotient, so the assertion is on the span that the reader actually sees.
+    #
+    # PR-ADS-180A: the activity is drawn by the shared funnel block. The
+    # adapter hands the canonical conversion object itself to
+    # stageEntryConversion, whose rate is `conv.rate_pct` whole, and the
+    # block prints that `pct` and nothing else in the chip.
     src = _activity_renderer()
-    rate_span = src[src.index('class="dash-activity__conv-rate">${'):]
-    rate_span = rate_span[:rate_span.index("</span>")]
-    assert "conversion.rate_pct" in rate_span, rate_span
+    adapter = src[src.index("function dashActivityConversion("):]
+    assert "stageEntryConversion(conversion, fromBound, toBound" in adapter
+    shared = _APP[_APP.index("function stageEntryConversion("):]
+    shared = shared[:shared.index("\n}\n")]
+    assert "pct: conv.rate_pct" in shared and "/" not in shared.replace("</", "<")
+    chip = _APP[_APP.index("function funnelBlockConvHtml("):]
+    chip = chip[:chip.index("\n}\n")]
+    assert "const pct = c.pct === null || c.pct === undefined ? null : escapeHtml(String(c.pct));" in chip
     for field in ("cohort_size", "converted", "cohort_label"):
         assert field in src, field
 
@@ -380,9 +399,13 @@ def test_8_an_unavailable_conversion_renders_unavailable_not_zero(monkeypatch):
     assert lead_to_mql["basis"] == funnel.BASIS_UNAVAILABLE
     assert lead_to_mql["reason"] == "empty_cohort"
 
+    # PR-ADS-180A: the adapter makes it an "unavailable" connector with the
+    # reason in words; the shared block draws that as the muted word.
     src = _activity_renderer()
-    assert "Unavailable" in src
-    assert "dash-activity__conv--muted" in src
+    assert 'return { kind: "unavailable", title: reason, basis: reason };' in src
+    chip = _APP[_APP.index("function funnelBlockConvHtml("):]
+    chip = chip[:chip.index("\n}\n")]
+    assert "dash-funnel__conv--muted" in chip and ">Unavailable</span>" in chip
     assert "empty_cohort" in src, "the reason is given a human label, not shown raw"
 
 
@@ -399,9 +422,12 @@ def test_9_a_missing_cohort_denominator_fails_closed(monkeypatch):
     # Not a single zero anywhere in the withheld block.
     assert 0 not in _entered(activity)
 
-    # The renderer refuses to draw the panel body at all in this state.
+    # The renderer refuses to draw any count in this state: anything but
+    # `available === true` is an unavailable verdict for the whole block
+    # (PR-ADS-180A: every stage the word, no figure read).
     src = _activity_renderer()
-    assert "!activity.available" in src
+    assert "if (a.available !== true) {" in src
+    assert 'verdict: { status: "unavailable"' in src
 
 
 def test_9b_a_mismatch_withholds_the_conversions_as_well_as_the_counts(monkeypatch):
@@ -511,13 +537,24 @@ def test_10_previous_period_trend_is_distinct_from_cohort_conversion(monkeypatch
 
     # In the markup they are different elements with different classes, and the
     # trend is rendered INSIDE the stage cell, never between two cells.
+    # PR-ADS-180A: the trend is a stage NOTE of the shared block's model and
+    # the conversion a connector; rendered, each lands where it belongs.
     src = _activity_renderer()
-    assert "dash-activity__trend" in src and "dash-activity__conv" in src
-    stage_cell = src[src.index('<div class="dash-activity__stage"'):]
-    stage_cell = stage_cell[:stage_cell.index("</div>`;")]
-    assert "dashActivityTrend(" in stage_cell
-    assert "dashActivityConversion(" not in stage_cell
+    model = src[src.index("function dashActivityFunnelModel("):]
+    model = model[:model.index("\n}\n")]
+    stages_part = model[model.index("stages: stages.map("):model.index("conversions: stages.slice(1)")]
+    # PR-ADS-180A-F1: a lower-bound stage gets "No comparison" instead of
+    # the trend, so the trend is the note's non-bound branch.
+    assert "notes: [" in stages_part
+    assert ": dashActivityTrend(s.previous_period, a.previous_period)]" in stages_part
+    assert "dashActivityConversion(" not in stages_part
     assert "vs previous period" in src
+    html = _render_activity(activity)
+    links = re.findall(r'<div class="dash-funnel__link[^"]*"[^>]*>(.*?)</div>', html, re.S)
+    assert len(links) == 4 and not any("vs Last Quarter" in l for l in links)
+    cells = re.findall(r'<div class="dash-funnel__stage"[^>]*>(.*?)</div>', html, re.S)
+    assert len(cells) == 5 and "+17.3% vs Last Quarter" in cells[0], cells[0]
+    assert all("dash-funnel__conv" not in c for c in cells)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -829,26 +866,29 @@ def test_21_the_activity_panel_is_responsive_on_desktop_and_mobile():
     the stage it belonged to at the start of the next, which is the reading-order
     confusion this panel exists to remove.
     """
-    row = _CSS[_CSS.index(".dash-activity {"):]
+    # PR-ADS-180A: this layout is now the ONE funnel block's (.dash-funnel),
+    # on every page; the activity panel's own .dash-activity rules are gone.
+    row = _CSS[_CSS.index(".dash-funnel {"):]
     row = row[:row.index("}")]
     assert "display: grid" in row
     assert "repeat(4, minmax(0, 1fr) auto) minmax(0, 1fr)" in row
     assert "flex-wrap" not in row
 
-    stage = _CSS[_CSS.index(".dash-activity__stage {"):]
+    stage = _CSS[_CSS.index(".dash-funnel__stage {"):]
     stage = stage[:stage.index("}")]
     assert "min-width: 0" in stage, "a grid child must be allowed to shrink"
 
     # Anchor on the rule itself and walk BACK to its media query: the stylesheet
     # holds more than one 900px block, and indexing the first would assert
     # against somebody else's breakpoint.
-    stack_at = _CSS.index(".dash-activity { grid-template-columns: minmax(0, 1fr); }")
+    stack_at = _CSS.index(".dash-funnel { grid-template-columns: minmax(0, 1fr); }")
     guard = _CSS.rfind("@media", 0, stack_at)
     assert _CSS[guard:guard + 40].startswith("@media (max-width: 900px)"), \
         _CSS[guard:guard + 60]
     narrow = _CSS[guard:_CSS.index("\n}", stack_at)]
-    assert ".dash-activity__stage { width: 100%; }" in narrow
-    assert ".dash-activity__conv" in narrow
+    assert ".dash-funnel__stage { width: 100%; }" in narrow
+    assert ".dash-funnel__link" in narrow
+    assert ".dash-activity {" not in _CSS and ".dash-activity__" not in _CSS
 
 
 def test_22_the_lifecycle_sections_still_render_in_order_and_do_no_arithmetic():

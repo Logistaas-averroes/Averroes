@@ -29,8 +29,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -623,15 +621,6 @@ def test_20_the_funnel_service_stays_free_of_reader_terms():
 # ═════════════════════════════════════════════════════════════════════════════
 # The page, evaluated in node
 # ═════════════════════════════════════════════════════════════════════════════
-_JS_PIECES = ("escapeHtml", "dashValue", "canonicalReasonLabel", "crmBlockerFamily",
-              "crmBlockersHref", "canonicalBlockingReason", "canonicalMetricHtml",
-              "rowMetricHtml")
-_JS_CONSTS = ("CANONICAL_REASON_LABELS", "CRM_BLOCKER_FAMILY", "ROW_METRIC_KEYS",
-              "CANONICAL_BASIS_LABELS")
-_JS_STRINGS = ("PERIOD_RATIO_LABEL", "PERIOD_SPEND_PER_CUSTOMER_LABEL",
-               "PERIOD_RATIO_DISCLOSURE")
-
-
 def _js_extract(source: str, head: str) -> str:
     i = source.index(head)
     j = source.index("{", i)
@@ -645,26 +634,22 @@ def _js_extract(source: str, head: str) -> str:
 
 
 def _render(payload, *, role=None, view=None, mutate=None) -> str:
-    node = shutil.which("node")
-    assert node, "node is a CI dependency (node --check static/app.js)"
+    """The real renderChannelFunnel, evaluated in node. ``mutate`` replaces
+    text inside the Channels span only (each old string must be there).
+    PR-ADS-180A: the page's funnel is the shared block (funnelBlockHtml),
+    defined outside the Channels span, so the real app.js is evaluated WHOLE
+    (the 161B vm harness) instead of the span plus hand-picked helpers."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
     src = APP_JS
-    parts = [re.search(rf"const {c} =[\s\S]*?\";", src).group(0) for c in _JS_STRINGS]
-    parts += [_js_extract(src, f"const {c} = ") for c in _JS_CONSTS]
-    parts += [_js_extract(src, f"function {f}(") for f in _JS_PIECES]
-    span = src[src.index("const CHANNEL_FUNNEL_REASON_LABELS = {"):
-               src.index("async function loadChannels()")]
+    start = src.index("const CHANNEL_FUNNEL_REASON_LABELS = {")
+    end = src.index("async function loadChannels()")
+    span = src[start:end]
     for old, new in (mutate or {}).items():
         assert old in span, old
         span = span.replace(old, new)
     user = "null" if role is None else json.dumps({"role": role})
-    script = (f"let _currentUser = {user};\n"
-              "const window = { location: { hash: '' } };\n"
-              + "\n".join(parts) + "\n" + span
-              + f"\nprocess.stdout.write(renderChannelFunnel({json.dumps(payload)}, "
-                f"{json.dumps(view or {})}));")
-    res = subprocess.run([node, "-e", script], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
-    return res.stdout
+    return _run_app(f"_currentUser = {user}; renderChannelFunnel({json.dumps(payload)}, "
+                    f"{json.dumps(view or {})})", js=src[:start] + span + src[end:])
 
 
 def _text(html: str) -> str:

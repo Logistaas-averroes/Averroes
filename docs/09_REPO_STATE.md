@@ -7456,3 +7456,99 @@ all passed.
   Each fails on `acb4f66` and under a named mutation (M26–M33). `test_06`
   in the 179a module now removes the pinning keys only at the audits' exact
   report paths.
+
+## PR-ADS-180A — one lifecycle funnel block on every page
+
+`docs/63`. On top of `9a09c6d`. Presentation only: no backend figure,
+builder, endpoint or payload changes. Owner task #13: "One funnel, one design,
+every page."
+
+* **One renderer.** `funnelBlockHtml(model, opts)` in `static/app.js`, and
+  one CSS block. It draws the Contacts → MQL → SQL → Opportunity → Customer
+  stage funnel the same way on every surface that has one:
+  * Overview → Lifecycle Activity;
+  * Overview → Lifecycle Cohort;
+  * Pipeline;
+  * Channels.
+
+  The Dashboard's design is the standard: one grid row of five columns and
+  four connectors. Each page's adapter reads only its own response:
+  * `dashActivityFunnelModel`;
+  * `dashCohortFunnelModel`;
+  * `pipelineFunnelModel`;
+  * `channelFunnelModel`.
+* **Truth kept.**
+  * Values go through `canonicalMetricHtml`. A published 0 is "0". Withheld
+    or unavailable shows the word and the reason, never a dash.
+  * A lower bound is "at least N". 178B-F2 conversions are kept: into a
+    bound "at least X%", out of a bound "—" with the reason
+    (`stageEntryConversion`, `stageEntryLowerBounds`, shared).
+  * The payload's own metric family and window basis are printed on the
+    block: lifecycle stage events (Overview, Pipeline), Lead cohort
+    (Overview), acquisition cohort (Channels). An unknown family is "not
+    stated".
+  * Withheld means absent: under an unpublished verdict no stage figure is
+    read. A column a page does not carry is "Not available on this page".
+  * The block reads no page state. Pipeline's selected stage is now an
+    argument; it was the global `_leadsView`.
+* **Choices** (`docs/63` §4).
+  * The Customer column stays the lifecycle Customer *stage* (contacts),
+    never companies. Customers, as distinct companies, stay outside the
+    funnel (PR-ADS-155 §2, 166A).
+  * Overview → Activity now marks lower bounds like Pipeline.
+  * A missing conversion, and a missing Channels total, is "Unavailable",
+    not "—".
+* **Not a funnel.** Dashboard → Revenue "Customer Efficiency" joined the
+  acquisition cohort to close-date outcomes with arrows. It is now outcome
+  cells: same figures, the two cross-cohort ratios as labelled unavailable
+  cells. It is renamed `renderRevCustomerEfficiency` (SQL-doctrine registry
+  updated).
+* **Deleted.**
+  * `channelFunnelTotalsHtml`, `renderRevConversionStrip`,
+    `pipelineFunnelLowerBounds`, `DASH_FUNNEL_RAMP`.
+  * The activity / cohort / Pipeline markup.
+  * CSS: `.dash-activity*`, `.pipeline-funnel*`, `.channel-funnel-totals*`
+    and the dead `.dash-funnel__stage-delta`.
+* **Tests.** `tests/test_pr_ads_180a_shared_funnel_block.py` has 29 cases, all
+  failing on `9a09c6d`. They cover:
+  * one renderer, no other emitter;
+  * node evaluation of the extracted block;
+  * the family taken from the payload;
+  * no page-global reads.
+
+  Named mutations M1–M9 are in `docs/63` §6. Existing tests ported with the
+  same truth content are listed in `docs/63` §7. The Channels test harnesses
+  now evaluate the whole `app.js`.
+* **Proposals, not built.** A block on Campaigns and Countries needs the
+  acquisition cohort's MQL, Opportunity and Customer-stage counts in the
+  mart contract, which is a backend addition. Whether a Lead-cohort stage
+  after a missing-date exclusion is a lower bound is for the truth auditor
+  (`docs/63` §4.3, §8).
+
+### PR-ADS-180A-F1 — truth audit round 1 on the shared funnel block
+
+A second commit on the same branch (`docs/63` §4.3, §7a).
+
+* **Major.** On `d48b6b7` one Lead population read "at least 13" on Overview
+  Activity and "13" on Overview Cohort; the two counts are the same
+  `events["lead"]`.
+  * Lead-cohort stages are now lower bounds (`dashCohortStageBounds`) in
+    three cases: any anchorless contact (then every stage); any exclusion at
+    an earlier stage (the silent path in `lead_cohort_progression`); or an
+    undated or unproven entry at the stage itself.
+  * Connectors follow 178B-F2 with cumulative bounds.
+  * The test runs real producers and renders both panels with the real
+    `app.js`.
+* **Minors.**
+  * No exact trend is shown beside "at least N".
+  * The Channels family label now says the stages are cumulative.
+  * An unavailable Overview block keeps its Lead-entry column names.
+  * The Channels share is documented as divided in the browser.
+  * `stageEntryWindowBasis` requires a `date_entered_` property.
+* **Recorded.** This PR fixed a 9a09c6d Pipeline leak: under a mismatch,
+  cohort rates were drawn between "Reconciliation required" cells.
+* **Tests.** `test_pr_ads_180a_shared_funnel_block.py` now has 37 cases
+  (07_a–07_h added; 06_d updated).
+* **Proposal, not built.** A backend per-stage bound, or narrowing the
+  anchorless set to contacts that could belong to the window. Today any
+  anchorless contact makes every cohort rate "—".

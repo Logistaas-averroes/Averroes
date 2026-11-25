@@ -866,3 +866,43 @@ truncated list. Verified by execution on exported copies of both commits.
   `snapshot_pinning` from the daily row.
 - 161E test_26 fails in a tar copy (no .git); rerun with GIT_DIR=<worktree gitdir>.
 - PR-ADS-179B-F1 fixed items 1–3 (`_undo` records; `snapshot_broken`; summarize/_render carry the note; callproc/copy_*/reset guarded).
+
+## PR-ADS-180A review (d48b6b7, 2026-11-25) — shared funnel block
+- One renderer funnelBlockHtml(model, opts) + adapters dashActivityFunnelModel /
+  dashCohortFunnelModel / pipelineFunnelModel / channelFunnelModel (static/app.js).
+  Under any verdict != published the block draws no stage figure and no connector
+  rate (also fixed a pre-existing Pipeline leak: cohort rates drawn between
+  "Reconciliation required" cells on mismatch).
+- Overview Activity Lead count == Overview Cohort Lead size == Pipeline all_source
+  Lead count (same events["lead"]; all_source scope always True). A bound on one
+  applies to all three.
+- Lead cohort (lead_cohort_progression) counts are monotone lower bounds:
+  anchorless (missing_lead_entry_date), missing_stage_entry_date and
+  prior_stage_entry_unproven undercount; plus a SILENT path (dropped at j, undated
+  later stage: neither counted nor excluded). Cohort stages after any exclusion
+  (all stages when anchorless > 0) are lower bounds; the 178B-F2 rule applies with
+  cumulative bounds.
+- Channels (channel_funnel_service.reached) stage counts are CUMULATIVE, not a
+  partition by furthest stage.
+- 161e test_26 needs a git checkout (fails in archive copies).
+
+## PR-ADS-180A-F1 re-audit (a528ae3, 2026-11-25) — merge with minors
+- dashCohortStageBounds verified on real producers: anchorless>0 bounds every
+  stage; any earlier excluded_contacts>0 bounds later stages (silent path);
+  own missing_stage_entry_date/prior_stage_entry_unproven bounds stage k.
+  Bounds are monotone, so cumulative == FROM-bound (a non-cumulative mutant
+  is equivalent, not a test gap). 07_a/c/d/e fail on d48b6b7 and on the
+  matching mutants.
+- Minor 2 is closed for the CURRENT period only. _lifecycle_previous_period
+  keeps "partial" counts; an exact "+X% vs prior" is printed against a
+  lower-bound baseline (probe: +20% where the truth is -25%..+20%). Open.
+- The anchorless / stage_reached_without_entry_date counts cover only
+  fetch_funnel_contacts' window population (contacts with ANY dated stage in
+  the window). Undated contacts outside it are invisible, so "0 anchorless"
+  does NOT prove a Lead count exact. Masked in production (about 60% of MQLs
+  lack a Lead date). Any "narrow the anchorless set" proposal must also widen
+  it.
+- Production (owner query, 25 Nov): about 9,000 contacts at MQL+ have no
+  date_entered_lead (6,105 of 10,285 MQLs). Anchorless is always > 0, so every
+  Overview cohort stage reads "at least N" and every cohort rate reads "—".
+  This is intended.
