@@ -783,20 +783,40 @@ def run(now: datetime | None = None) -> tuple[Audit, dict]:
     # PR-ADS-177A: the mart and the Dashboard payloads, every business window.
     # PR-ADS-177C: the Campaigns surface (``mart/campaign_settled``) is ALSO
     # certified against this audit's independent SQL over its own days.
+    #
+    # PR-ADS-179A: each window is read inside ONE snapshot
+    # (``services.snapshot_memo.certification_window``): every payload below,
+    # and this audit's own independent SQL, read the database as of one
+    # instant, and the inputs the payloads share (the mart core, the won-deal
+    # population) are built once per window instead of once per payload.
+    # Nothing is carried from one window to the next.
+    #
+    # PR-ADS-179A-F1: what this certifies is a SNAPSHOT-CONSISTENT build of
+    # each page. A web request reads statement by statement under READ
+    # COMMITTED, so a read torn by a sync committing mid-request is invisible
+    # here by construction (before, it was visible only by chance). A read the
+    # snapshot refused — even one a reader swallowed — makes the window
+    # cannot_check (``refused_reads``).
     from analysis.business_windows import WINDOW_KEYS
+    from services.snapshot_memo import certification_window, refused_reads
     report["business_windows"] = []
     for bw in WINDOW_KEYS:
-        payloads = _build_mart_payloads(bw, now)
+        with certification_window() as scope:
+            payloads = _build_mart_payloads(bw, now)
+            settled = payloads.get("mart/campaign_settled")
+            instants = _settled_instants(settled) if settled is not None else None
+            independent = independent_counts(*instants) if instants else None
+        for refusal in refused_reads(scope):
+            a.cannot_check(f"[business:{bw}] pinned snapshot",
+                           f"a read in this window was refused by its pinned "
+                           f"snapshot: {refusal}")
         report["business_windows"].append(audit_mart_window(
             a, window=bw, payloads=payloads))
-        settled = payloads.get("mart/campaign_settled")
         if settled is None:
             a.cannot_check(f"[campaigns:{bw}] build", "the settled campaign view "
                            "could not be built")
             report["windows"].append({"window": bw, "available": False})
             continue
-        instants = _settled_instants(settled)
-        independent = independent_counts(*instants) if instants else None
         report["windows"].append(audit_campaign_cohort(
             a, window=bw, payload=settled, independent=independent))
 

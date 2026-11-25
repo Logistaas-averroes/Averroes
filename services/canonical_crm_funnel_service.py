@@ -52,6 +52,7 @@ unit-testable without a database. Only ``build`` touches the repository.
 from __future__ import annotations
 
 import logging
+from services.snapshot_memo import memoised as _snapshot_memoised  # PR-ADS-179A
 from datetime import date, datetime, timezone
 
 from analysis.crm_lifecycle import (
@@ -1019,6 +1020,9 @@ def _cohort_block(populations: dict, scope: str, window: dict, *,
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
+# PR-ADS-179A: built once per certification window, inside its one snapshot
+# (``services.snapshot_memo``). Outside a certification window: a plain call.
+@_snapshot_memoised
 def build(
     window_type: str,
     window_key: str,

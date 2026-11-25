@@ -1667,6 +1667,9 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
     from analysis.business_windows import WINDOW_KEYS  # noqa: PLC0415
     from services import canonical_customer_revenue_service as svc  # noqa: PLC0415
     from services import canonical_revenue_service as crs  # noqa: PLC0415
+    from services.snapshot_memo import (  # noqa: PLC0415
+        certification_window, refused_reads,
+    )
 
     now = now or datetime.now(tz=timezone.utc)
     a = Audit()
@@ -1697,56 +1700,78 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
             [("business", k) for k in WINDOW_KEYS], now=now, universe=universe)
         by_key = {w["window"]["window_key"]: w for w in truth["windows"]}
         before = _write_fingerprint()
+        # PR-ADS-179A: each window is read inside ONE snapshot
+        # (``services.snapshot_memo.certification_window``): its pages, its
+        # reader-contract read and its settled publication read the database
+        # as of one instant, and the inputs the pages share (the mart core, the
+        # won-deal population) are built once per window. The closed-won
+        # universe is NOT read in that snapshot: it is the one read above,
+        # outside every window, and shared with the truth service (the outer
+        # one_snapshot) — as before 179A.
+        # PR-ADS-179A-F1: this certifies a snapshot-consistent build of each
+        # page; a web request reads per statement (READ COMMITTED), so a torn
+        # read inside one request is invisible here by construction. A read the
+        # snapshot refused, even one a reader swallowed, is a page not run.
         for key in WINDOW_KEYS:
-            base = crs.load_won_deals(key, now=now)
-            mart, built = None, {}
-            if pages:
-                for name, build in _page_builders():
-                    try:
-                        payload = build(key, now)
-                    except Exception as exc:  # noqa: BLE001
-                        report["pages_not_run"].append(
-                            {"window": key, "page": name,
-                             "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
-                        continue
-                    if name == "revenue_decision_mart":
-                        mart = payload
-                    else:
-                        built[name] = payload
-            settled_pub = (settled_publication(key, now)
-                           if any(n in SETTLED_DAY_PAGES for n in built) else None)
-            checked = window_checks(
-                a, key, universe, by_key[key], base, mart, now=now, pages=built,
-                page_pubs=({n: settled_pub for n in built if n in SETTLED_DAY_PAGES}
-                           if settled_pub is not None else None))
-            if "revenue_decision_mart_campaign_settled" in built:
-                checked["campaign_settled"] = settled_mart_checks(
-                    a, key, now, built["revenue_decision_mart_campaign_settled"])
-            report["windows"].append(checked)
+            with certification_window() as scope:
+                base = crs.load_won_deals(key, now=now)
+                mart, built = None, {}
+                if pages:
+                    for name, build in _page_builders():
+                        try:
+                            payload = build(key, now)
+                        except Exception as exc:  # noqa: BLE001
+                            report["pages_not_run"].append(
+                                {"window": key, "page": name,
+                                 "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                            continue
+                        if name == "revenue_decision_mart":
+                            mart = payload
+                        else:
+                            built[name] = payload
+                settled_pub = (settled_publication(key, now)
+                               if any(n in SETTLED_DAY_PAGES for n in built) else None)
+                checked = window_checks(
+                    a, key, universe, by_key[key], base, mart, now=now, pages=built,
+                    page_pubs=({n: settled_pub for n in built if n in SETTLED_DAY_PAGES}
+                               if settled_pub is not None else None))
+                if "revenue_decision_mart_campaign_settled" in built:
+                    checked["campaign_settled"] = settled_mart_checks(
+                        a, key, now, built["revenue_decision_mart_campaign_settled"])
+                report["windows"].append(checked)
+            report["pages_not_run"] += [
+                {"window": key, "page": "pinned_snapshot",
+                 "detail": f"a read in this window was refused by its pinned "
+                           f"snapshot: {r}"[:300]} for r in refused_reads(scope)]
         # PR-ADS-168A — the evidence windows (Channels page outcomes).
         ev_truth = svc.get_closed_won_truth(
             [("evidence", k) for k in EVIDENCE_PASS_WINDOWS], now=now,
             universe=universe)
         ev_by_key = {w["window"]["window_key"]: w for w in ev_truth["windows"]}
         for key in EVIDENCE_PASS_WINDOWS:
-            base = crs.load_won_deals(key, window_type="evidence", now=now)
-            built = {}
-            if pages:
-                for name, build in _evidence_page_builders():
-                    try:
-                        built[name] = build(key, now)
-                    except Exception as exc:  # noqa: BLE001
-                        report["pages_not_run"].append(
-                            {"window": f"evidence/{key}", "page": name,
-                             "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
-            settled_pub = (settled_evidence_publication(key, now)
-                           if built else None)
-            checked = window_checks(
-                a, key, universe, ev_by_key[key], base, None, now=now,
-                pages=built, window_type="evidence",
-                page_pubs={n: settled_pub for n in built} if built else None)
-            checked["window"] = f"evidence/{key}"
-            report["evidence_windows"].append(checked)
+            with certification_window() as scope:
+                base = crs.load_won_deals(key, window_type="evidence", now=now)
+                built = {}
+                if pages:
+                    for name, build in _evidence_page_builders():
+                        try:
+                            built[name] = build(key, now)
+                        except Exception as exc:  # noqa: BLE001
+                            report["pages_not_run"].append(
+                                {"window": f"evidence/{key}", "page": name,
+                                 "detail": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                settled_pub = (settled_evidence_publication(key, now)
+                               if built else None)
+                checked = window_checks(
+                    a, key, universe, ev_by_key[key], base, None, now=now,
+                    pages=built, window_type="evidence",
+                    page_pubs={n: settled_pub for n in built} if built else None)
+                checked["window"] = f"evidence/{key}"
+                report["evidence_windows"].append(checked)
+            report["pages_not_run"] += [
+                {"window": f"evidence/{key}", "page": "pinned_snapshot",
+                 "detail": f"a read in this window was refused by its pinned "
+                           f"snapshot: {r}"[:300]} for r in refused_reads(scope)]
         after = _write_fingerprint()
     # 16 — measured, not declared: the closed-won tables are byte-identical.
     report["database_writes_performed"] = (

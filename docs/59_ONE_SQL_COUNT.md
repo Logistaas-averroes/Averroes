@@ -650,6 +650,10 @@ the 177A PG fixture plus 21,750 canonical-funnel contacts over 18 months and
   builders inside one REPEATABLE READ transaction. That is a follow-up if
   production time demands it. The absolute cost (seconds) is well inside the
   900 s per-audit timeout.
+* **Implemented in PR-ADS-179A** (`docs/62`), after production reached
+  430 s for this audit and 477 s for the reader cutover: each window's
+  payloads are built in one pinned REPEATABLE READ, READ ONLY snapshot, and
+  the shared inputs are memoised inside it only.
 
 ### 11.6 Existing tests changed in F2
 
