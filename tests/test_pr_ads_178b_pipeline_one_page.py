@@ -378,7 +378,8 @@ def test_11_dashboard_deals_renders_the_pipeline_builders_figures_with_the_same_
 def test_12_links_to_the_old_pages_are_relabelled_and_the_window_change_reloads_pipeline():
     related = _run("[datasetRelatedPage('hubspot', 'contacts'), datasetRelatedPage('hubspot', 'deals')]")
     assert related == [{"page": "pipeline", "label": "Pipeline"}] * 2
-    for fn in ("renderCountryDrawer",):
+    # PR-ADS-177C (rebased on 178B): the Campaigns page drawer too.
+    for fn in ("renderCountryDrawer", "renderCampaignsPageDrawer"):
         assert '["pipeline", "Open Pipeline"]' in _fn(fn) and '"Open Deals"' not in _fn(fn)
     rev = (ROOT / "services" / "dashboard_revenue_service.py").read_text()
     assert '"target_page": "deals"' not in rev and '"target_page": "pipeline"' in rev

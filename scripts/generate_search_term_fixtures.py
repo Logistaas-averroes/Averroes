@@ -196,8 +196,16 @@ def main() -> int:
         patterns = svc.build_search_pattern_evidence("30d", n=1, now=NOW)
         pattern_drawer = svc.build_search_pattern_drawer("30d", "freight", 1, now=NOW)
 
-    base_path = os.path.join(ROOT, "scripts", "campaign_evidence_fixtures.json")
-    base = json.load(open(base_path, encoding="utf-8"))
+    # PR-ADS-177C: these two entries were read from the retired
+    # scripts/campaign_evidence_fixtures.json (deleted with Campaign Evidence).
+    base = {
+        "/auth/me": {"authenticated": True, "username": "viewer", "role": "viewer"},
+        "/api/config/ui-thresholds": {
+            "junk_rate": {"low_pct": 15, "high_pct": 30},
+            "spend": {"high_spend_usd": 100},
+            "quality_score": {"strong_min": 8, "medium_min": 5},
+        },
+    }
     fixtures = {
         "/auth/me": base["/auth/me"],
         "/api/config/ui-thresholds": base["/api/config/ui-thresholds"],

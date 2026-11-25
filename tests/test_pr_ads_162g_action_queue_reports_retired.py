@@ -284,7 +284,8 @@ def test_09_every_remaining_sidebar_page_still_routes():
     # PR-ADS-176B: 16 until the Countries evidence page (#/geo) was deleted.
     # PR-ADS-177B: 15 until Campaign Revenue & Spend merged into Campaigns.
     # PR-ADS-178B: 14 until Leads and Deals merged into Pipeline.
-    assert len(nav) == 13
+    # PR-ADS-177C: 13 until Keywords became a tab of Keywords & Search Terms.
+    assert len(nav) == 12
     assert set(nav) <= pages, sorted(set(nav) - pages)
     for page in sorted(nav):
         assert f'id="page-{page}"' in HTML, page
@@ -296,8 +297,9 @@ def test_09_every_remaining_sidebar_page_still_routes():
     # is now the Campaigns item's strip, with Countries an item of its own
     # (PR-ADS-174A)
     group = HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
+    # PR-ADS-177C: Keywords is a tab of the one Keywords & Search Terms page.
     assert re.findall(r'data-page="([a-z0-9-]+)"', group) == [
-        "campaigns", "keywords", "search-terms"]
+        "campaigns", "search-terms"]
 
 
 def test_10_the_doctrine_registry_holds_no_entry_for_the_deleted_surfaces():

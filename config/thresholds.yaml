@@ -220,10 +220,12 @@ platform_certification:
   min_audit_budget_mb: 96
   # Address-space backstop (RLIMIT_AS, set by the child on itself) for a
   # spike faster than the watchdog. High on purpose: RLIMIT_AS also counts
-  # reserved, never-touched mappings (~35 MB above resident here), and the
-  # campaign_evidence child imports api.server (~97 MB of address space
-  # before it reads a row). Measured peak on a production-sized dataset:
-  # 131 MB of address space, 98 MB resident (docs/09 PR-ADS-169A).
+  # reserved, never-touched mappings (~35 MB above resident here). The
+  # retired campaign_evidence child imported api.server (~97 MB of address
+  # space before it read a row; its measured peak on a production-sized
+  # dataset was 131 MB of address space, 98 MB resident — docs/09
+  # PR-ADS-169A). Its successor, campaigns (PR-ADS-177C), is measured in
+  # docs/60 §9.11.
   audit_address_space_mb: 320
   # Per audit. A run that exceeds it is killed and recorded crashed.
   audit_timeout_seconds: 900

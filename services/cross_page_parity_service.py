@@ -99,8 +99,9 @@ V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
 V_VALUE_OVER_UNAVAILABLE_SOURCE = "value_published_while_source_unavailable"
 #: Split identities that must add back up did not.
 V_CONSERVATION_BROKEN = "metric_conservation_broken"
-#: PR-ADS-177A: one SQL count. The Countries page, Dashboard Countries and
-#: Campaign Evidence publish the window's Google Ads acquisition-cohort SQLs
+#: PR-ADS-177A: one SQL count. The Countries page, Dashboard Countries, the
+#: Campaigns page, Dashboard Campaigns and (PR-ADS-177C) the independent
+#: campaign-ID reading publish the window's Google Ads acquisition-cohort SQLs
 #: over the same days; any two published values that differ is this.
 V_COHORT_SQL_PARITY_BROKEN = "cohort_sql_parity_broken"
 
@@ -288,6 +289,18 @@ CONSUMER_SETTLED_REFERENCE = "revenue_decision_mart/country"
 #: the ``*_settled_days`` identities below — never with the campaign view
 #: through today (Overview, Revenue, Deals, Channels keep today).
 CONSUMER_SETTLED_CAMPAIGN_REFERENCE = "revenue_decision_mart/campaign_settled"
+#: PR-ADS-177C (M8) — the INDEPENDENT reading of the settled campaign
+#: identities. Dashboard → Campaigns republishes the settled mart's
+#: ``campaign_totals`` / ``summary``, so comparing those two compared one build
+#: with itself and could not fail on a wrong figure. This consumer reads the
+#: same settled days without the mart: spend from the settled spend truth
+#: (``revenue_spend_truth_service.build_google_ads_spend_truth_for_days``, the
+#: Channels page's reader, settle rule applied), deals / customers / revenue
+#: from the canonical reader contract at ``campaign_attributable`` scope
+#: (``load_won_deals(bounds=settled_revenue_bounds)`` → ``reader_row``), and
+#: SQLs from the campaign-ID cohort reading
+#: (``campaign_label_resolver.google_ads_cohort_sqls_by_campaign_id``).
+CONSUMER_SETTLED_CAMPAIGN_CANONICAL = "canonical/campaign_settled"
 
 #: Identities that partition a whole. Registering the split is not enough — if
 #: the parts do not add back to the total, one of the three is wrong and the
@@ -572,6 +585,15 @@ METRIC_IDENTITIES = {
     },
 }
 
+#: PR-ADS-177C (M8): where the independent settled reading takes each figure.
+_INDEPENDENT_SOURCE = {
+    "google_ads_spend_usd": "google_ads_api.canonical_campaign_spend",
+    "campaign_attributed_won_revenue_usd": "hubspot.canonical_deal_ledger",
+    "campaign_attributed_closed_won_deals": "hubspot.canonical_deal_ledger",
+    "campaign_attributed_customers": "hubspot.canonical_deal_ledger",
+    "google_ads_cohort_sqls": "hubspot.canonical_contact_funnel",
+}
+
 #: PR-ADS-177B — the SETTLED campaign view's identities. Dashboard →
 #: Campaigns reads the campaign view over settled days, so it is one identity
 #: with the settled campaign reference, never with the consumers above whose
@@ -600,8 +622,13 @@ for _key, _base, _path, _ref_path in (
         "coverage_proof": _spec["coverage_proof"],
         "contract_metric": _base,
         "proof_consumer": CONSUMER_SETTLED_CAMPAIGN_REFERENCE,
+        # PR-ADS-177C (M8): the independent reading names the source it read.
+        "consumer_sources": {
+            **(_spec.get("consumer_sources") or {}),
+            CONSUMER_SETTLED_CAMPAIGN_CANONICAL: _INDEPENDENT_SOURCE[_base]},
         "consumers": [("dashboard/campaigns", _path),
-                      (CONSUMER_SETTLED_CAMPAIGN_REFERENCE, _ref_path)],
+                      (CONSUMER_SETTLED_CAMPAIGN_REFERENCE, _ref_path),
+                      (CONSUMER_SETTLED_CAMPAIGN_CANONICAL, f"kpis.{_base}")],
     }
 
 #: Lifecycle stages from the canonical HubSpot contact funnel — a DIFFERENT
@@ -650,7 +677,8 @@ PENDING_REDESIGN_CONSUMERS = {
     "platform_evidence": {
         "classification": "pending_redesign_non_authoritative",
         "overlapping_metrics": ["spend_usd", "sqls"],
-        "services": ["campaign_evidence_service", "keyword_evidence_service"],
+        # PR-ADS-177C: campaign_evidence_service retired with /api/campaigns.
+        "services": ["keyword_evidence_service"],
         "note": ("Publishes spend and SQL figures at an evidence grain. Not a "
                  "canonical executive total and must not be read as one. Consumer "
                  "migration belongs to the Platform Evidence redesign."),
@@ -1072,6 +1100,8 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
             window=window, view="country", now=now),
         CONSUMER_SETTLED_CAMPAIGN_REFERENCE: lambda: build_revenue_decision_mart(
             window=window, view="campaign", now=now, settled=True),
+        CONSUMER_SETTLED_CAMPAIGN_CANONICAL: lambda: independent_settled_campaign_reading(
+            window, now),
     }
 
     built: dict = {}
@@ -1081,6 +1111,128 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
         except Exception as exc:  # noqa: BLE001
             built[name] = {"payload": None, "error": f"{type(exc).__name__}: {exc}"[:300]}
     return built
+
+
+def _approved_not_google_ads_labels(start, end) -> tuple:
+    """``(normalised labels | None, reason)`` — the configured account's
+    approved "not Google Ads" campaign labels (PR-ADS-120b), read from its own
+    identity mappings. None when they cannot be read."""
+    from db import revenue_repository as repo  # noqa: PLC0415
+    from services.campaign_identity_service import normalize_campaign_name  # noqa: PLC0415
+    from services.google_ads_spend_service import configured_customer_id  # noqa: PLC0415
+    try:
+        spend = repo.fetch_canonical_campaign_spend(start, end,
+                                                    customer_id=configured_customer_id())
+        if not spend.get("available"):
+            return None, "canonical_campaign_spend_unavailable"
+        identity = repo.fetch_campaign_identity(spend.get("customer_id"))
+        if not identity.get("available", True):
+            return None, "campaign_identity_unavailable"
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - unknown exclusions, never a wider count
+        return None, "campaign_identity_unavailable"
+    return ({normalize_campaign_name(m.get("external_campaign_label"))
+             for m in identity.get("mappings") or []
+             if m.get("match_method") == "not_google_ads" and m.get("approved_at")
+             and m.get("external_campaign_label")}, None)
+
+
+def independent_settled_campaign_reading(window: str, now: datetime | None) -> dict:
+    """PR-ADS-177C (M8) — the settled campaign identities, read WITHOUT the mart.
+
+    Over the settled days of ``window`` (``resolve_settled_window``):
+
+    * ``google_ads_spend_usd`` — the settled spend truth's ``usd_spend``
+      (``build_google_ads_spend_truth_for_days(settled=True)``), published only
+      when its state is verified;
+    * ``campaign_attributed_closed_won_deals`` / ``_customers`` /
+      ``_won_revenue_usd`` — the canonical reader contract over the
+      ``campaign_attributable`` deals of ``load_won_deals(bounds=
+      settled_revenue_bounds)`` (``reader_row``), each published only when its
+      metric is;
+    * ``google_ads_cohort_sqls`` — the campaign-ID cohort reading.
+
+    Each figure carries its own ``metric_truth`` contract, naming the source
+    it read. A window with no settled day publishes nothing, with
+    ``no_settled_day_in_window``."""
+    from analysis import revenue_scope as _scope  # noqa: PLC0415
+    from services import canonical_contract as cc  # noqa: PLC0415
+    from services import canonical_revenue_service as crs  # noqa: PLC0415
+    from services.campaign_label_resolver import (  # noqa: PLC0415
+        google_ads_cohort_sqls_by_campaign_id,
+    )
+    from services.google_ads_spend_service import configured_customer_id  # noqa: PLC0415
+    from services.revenue_spend_truth_service import (  # noqa: PLC0415
+        STATE_VERIFIED, STATE_VERIFIED_ZERO, build_google_ads_spend_truth_for_days,
+    )
+    from datetime import date as _date  # noqa: PLC0415
+
+    settled = cc.resolve_settled_window(window, now=now)
+    bounds = cc.settled_revenue_bounds(settled) if settled.get("through_reason") else None
+    window_block = {**settled}
+    if bounds is not None:
+        window_block["start_utc"] = bounds[0].isoformat() if bounds[0] else None
+        window_block["end_utc_exclusive"] = bounds[1].isoformat()
+    empty = bool((settled.get("window_range") or {}).get("empty"))
+    start = _date.fromisoformat(settled["start_date"]) if settled.get("start_date") else None
+    end = _date.fromisoformat(settled["end_date"])
+    values: dict = {}
+    reasons: dict = {}
+    if empty:
+        for k in _INDEPENDENT_SOURCE:
+            values[k], reasons[k] = None, cc.NO_SETTLED_DAY_IN_WINDOW
+    else:
+        truth = build_google_ads_spend_truth_for_days(start, end, settled=True, now=now)
+        ok = truth.get("state") in (STATE_VERIFIED, STATE_VERIFIED_ZERO)
+        values["google_ads_spend_usd"] = truth.get("usd_spend") if ok else None
+        reasons["google_ads_spend_usd"] = (None if ok else truth.get("unsettled_reason")
+                                           or truth.get("state"))
+        base = crs.load_won_deals(window, now=now, bounds=bounds)
+        rows = (crs.canonical_deal_rows(base, _scope.SCOPE_CAMPAIGN_ATTRIBUTABLE)
+                if base.get("available") else [])
+        # PR-ADS-177C-F1 (truth audit minor 1): a label the configured
+        # account's admin APPROVED as "not Google Ads" is not campaign revenue
+        # on any advertising view (PR-ADS-120b) — the mart drops its deals
+        # before any campaign figure. The same approved exclusions apply here,
+        # read independently, or correct data reads as a mismatch. When the
+        # account's mappings cannot be read the exclusions are unknown, so the
+        # deal figures are unknown too — never counted wider.
+        excluded, excl_reason = _approved_not_google_ads_labels(start, end)
+        if excluded is None:
+            rows = None
+        elif excluded:
+            from services.campaign_identity_service import normalize_campaign_name  # noqa: PLC0415
+            rows = [r for r in rows
+                    if normalize_campaign_name(r.get("campaign_name")) not in excluded]
+        metrics = (crs.reader_row(base, rows).get("metrics") or {}) if rows is not None else {}
+        for key, m in (("campaign_attributed_closed_won_deals", "closed_won_deals"),
+                       ("campaign_attributed_customers", "customers"),
+                       ("campaign_attributed_won_revenue_usd", "revenue_usd")):
+            mm = metrics.get(m) or {}
+            published = mm.get("status") == "published"
+            values[key] = mm.get("value") if published else None
+            reasons[key] = None if published else (
+                excl_reason if rows is None else (mm.get("reason") or base.get("reason")))
+        cohort = google_ads_cohort_sqls_by_campaign_id(start, end, now=now)
+        values["google_ads_cohort_sqls"] = cohort.get("google_ads_sqls")
+        reasons["google_ads_cohort_sqls"] = (None if cohort.get("google_ads_sqls") is not None
+                                             else cohort.get("sql_reason")
+                                             or cohort.get("sql_status"))
+    scopes = {"google_ads_spend_usd": "google_ads_campaign_spend",
+              "campaign_attributed_won_revenue_usd": "campaign_attributable_revenue",
+              "campaign_attributed_closed_won_deals": "campaign_attributable_revenue",
+              "campaign_attributed_customers": "campaign_attributable_revenue",
+              "google_ads_cohort_sqls": "google_ads_cohort_sqls"}
+    contracts = cc.metric_truth_block(window_block, [
+        {"metric": k, "data_source": _INDEPENDENT_SOURCE[k],
+         "scope": METRIC_IDENTITIES[k]["scope"] if k in METRIC_IDENTITIES else scopes[k],
+         "truth_status": (cc.TRUTH_READY if values[k] is not None else cc.TRUTH_NOT_READY),
+         "customer_id": (configured_customer_id() if k == "google_ads_spend_usd" else None),
+         **({"unavailable_reason": reasons[k]} if values[k] is None and reasons[k] else {})}
+        for k in _INDEPENDENT_SOURCE])
+    return {"window": window_block, "kpis": values, METRIC_TRUTH_KEY: contracts,
+            "independent_of": "revenue_decision_mart"}
 
 
 def audit_window(window: str, now: datetime | None = None) -> dict:
@@ -1402,8 +1554,8 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                     "detail": row["detail"] + " — " + rule["reason"]})
         conservation.append(row)
 
-    # ── PR-ADS-177A: one SQL count across the Countries page, Dashboard
-    # Countries and Campaign Evidence, over the SAME days ─────────────────
+    # ── PR-ADS-177A: one SQL count across every settled-day surface and
+    # (PR-ADS-177C) the independent campaign-ID reading, over the SAME days ─
     cohort_sql_parity = _cohort_sql_parity(consumers, window, now)
     if cohort_sql_parity["status"] == "broken":
         violations.append({"code": V_COHORT_SQL_PARITY_BROKEN,
@@ -1517,6 +1669,16 @@ def _cohort_sql_total(rows_total, residual):
     return rows_total + residual
 
 
+def _campaign_id_cohort_sqls(start, end, now):
+    """The independent leg of both ``cohort_sql_parity`` groups (PR-ADS-177C):
+    the Google Ads cohort SQLs placed by campaign ID over ``start..end``.
+    None unless published."""
+    from services.campaign_label_resolver import (  # noqa: PLC0415
+        google_ads_cohort_sqls_by_campaign_id,
+    )
+    return google_ads_cohort_sqls_by_campaign_id(start, end, now=now).get("google_ads_sqls")
+
+
 def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
     """PR-ADS-177A — the window's Google Ads acquisition-cohort SQLs, read from
     every settled-day surface over the SAME settled days, must be one number:
@@ -1524,11 +1686,23 @@ def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
     * the Countries page (the mart's country view): listed markets'
       ``country_totals.sqls`` + the residual row's ``sqls``;
     * Dashboard Countries: ``kpis.sqls`` + ``residual.sqls``;
-    * Campaign Evidence, built over exactly those days
-      (``build_campaign_evidence(bounds=…)``): ``summary.cohort_sqls_google_ads``;
     * PR-ADS-177B: the Campaigns page (the settled campaign view): Σ campaign
       rows' ``sqls`` + ``campaign_residual_row.sqls``; and Dashboard →
-      Campaigns' ``kpis.sqls``.
+      Campaigns' ``kpis.sqls``;
+    * PR-ADS-177C: the INDEPENDENT campaign-ID reading over exactly those days
+      (``campaign_label_resolver.google_ads_cohort_sqls_by_campaign_id``).
+
+    Why the last one. Until PR-ADS-177C the independent leg was Campaign
+    Evidence (``build_campaign_evidence(bounds=…)``), the only consumer that
+    placed contacts by campaign ID. That page is retired. Every surface left
+    above republishes the mart, which places contacts with ONE name-keyed
+    resolver (``_mart_label_resolver``): the country and campaign partitions
+    still check each other's conservation, but nothing would check the
+    mart's Google Ads / excluded split. The campaign-ID reading reads the
+    canonical funnel with the campaign-ID resolver instead (approved identity
+    mappings, then exactly one spend campaign id per name) — Campaign
+    Evidence's rule, ported — so a resolver that drops, or wrongly excludes,
+    a Google Ads SQL breaks this group (``docs/60`` §9).
 
     A surface that withholds is ``not_evaluable`` (a withheld count cannot
     disprove parity), never a pass; any two published values that differ is
@@ -1558,23 +1732,20 @@ def _cohort_sql_parity(consumers: dict, window: str, now) -> dict:
         "campaigns_page": _cohort_sql_total(
             camp_rows_total, (camp.get("campaign_residual_row") or {}).get("sqls")),
         "dashboard_campaigns": (dcamp.get("kpis") or {}).get("sqls"),
-        "campaign_evidence": None,
+        "campaign_id_cohort": None,
     }
     w = page.get("window") or {}
-    ce_error = None
+    reading_error = None
     try:
         start = _date.fromisoformat(w["start_date"]) if w.get("start_date") else None
         end = _date.fromisoformat(w["end_date"]) if w.get("end_date") else None
         if end is not None and not (w.get("window_range") or {}).get("empty"):
-            from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
-            ce = build_campaign_evidence(window, now=now, bounds=(start, end))
-            readings["campaign_evidence"] = (ce.get("summary") or {}).get(
-                "cohort_sqls_google_ads")
+            readings["campaign_id_cohort"] = _campaign_id_cohort_sqls(start, end, now)
     except Exception as exc:  # noqa: BLE001 - a finding, never a crash
-        ce_error = f"{type(exc).__name__}: {exc}"[:300]
+        reading_error = f"{type(exc).__name__}: {exc}"[:300]
     present = {k: v for k, v in readings.items() if v is not None}
     out = {"window": {"start_date": w.get("start_date"), "end_date": w.get("end_date")},
-           "readings": readings, "campaign_evidence_error": ce_error}
+           "readings": readings, "independent_reading_error": reading_error}
     if len(set(present.values())) > 1:
         out["status"] = "broken"
         out["detail"] = ("the window's Google Ads acquisition-cohort SQLs differ across "
@@ -1599,8 +1770,12 @@ def _cohort_sql_parity_campaign_view(consumers: dict, window: str, now) -> dict:
     never one comparison across both. Over the campaign view's days:
 
     * the mart (campaign view): ``summary.sqls``;
-    * the Dashboard Overview's SQL headline: ``kpis.google_ads_cohort_sqls``;
-    * Campaign Evidence, built over exactly those days.
+    * the Dashboard Overview's SQL headline: ``kpis.google_ads_cohort_sqls``
+      (a republication of the mart's ``summary.sqls``);
+    * PR-ADS-177C: the independent campaign-ID reading over exactly those days
+      (it replaces Campaign Evidence, retired). Without it this group would
+      compare the mart with its own republication and could never fail on a
+      wrong placement — see ``_cohort_sql_parity``.
 
     The other campaign-view Dashboard pages (Revenue, Deals) are already one
     identity with the mart (``google_ads_cohort_sqls``). PR-ADS-177B: Dashboard
@@ -1613,23 +1788,20 @@ def _cohort_sql_parity_campaign_view(consumers: dict, window: str, now) -> dict:
     readings = {
         "mart_campaign_view": (mart.get("summary") or {}).get("sqls") if published else None,
         "dashboard_overview": (overview.get("kpis") or {}).get("google_ads_cohort_sqls"),
-        "campaign_evidence": None,
+        "campaign_id_cohort": None,
     }
     w = mart.get("window") or {}
-    ce_error = None
+    reading_error = None
     try:
         start = _date.fromisoformat(w["start_date"]) if w.get("start_date") else None
         end = _date.fromisoformat(w["end_date"]) if w.get("end_date") else None
         if end is not None:
-            from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
-            ce = build_campaign_evidence(window, now=now, bounds=(start, end))
-            readings["campaign_evidence"] = (ce.get("summary") or {}).get(
-                "cohort_sqls_google_ads")
+            readings["campaign_id_cohort"] = _campaign_id_cohort_sqls(start, end, now)
     except Exception as exc:  # noqa: BLE001 - a finding, never a crash
-        ce_error = f"{type(exc).__name__}: {exc}"[:300]
+        reading_error = f"{type(exc).__name__}: {exc}"[:300]
     present = {k: v for k, v in readings.items() if v is not None}
     out = {"window": {"start_date": w.get("start_date"), "end_date": w.get("end_date")},
-           "readings": readings, "campaign_evidence_error": ce_error}
+           "readings": readings, "independent_reading_error": reading_error}
     if len(set(present.values())) > 1:
         out["status"] = "broken"
         out["detail"] = ("the campaign view's Google Ads acquisition-cohort SQLs differ "

@@ -356,7 +356,7 @@ def _validate(data: dict, findings: _Findings) -> None:
 
 
 def collect(window: str) -> dict:
-    from services.campaign_evidence_service import _window_bounds
+    from analysis.evidence_windows import evidence_window_bounds as _window_bounds
 
     # Raises EvidenceWindowError for an unknown window.
     start, end, _ = _window_bounds(window, None)

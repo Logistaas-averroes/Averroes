@@ -92,14 +92,15 @@ def test_revenue_pages_hide_monitoring_warning():
 # ── Test 4 — Shared, clean Canonical Spend Truth card ───────────────────────
 
 def test_shared_clean_spend_truth_card():
-    assert "function renderMartSpendTruth" in JS
-    card = _slice("function renderMartSpendTruth", span=1100)
-    # PR-ADS-161E: the basis row describes the period revenue / ad spend ratio,
-    # never "ROAS".
-    for label in ("Canonical Spend Truth", "Native Spend", "USD Reporting",
-                  "FX Coverage", "Period Ratio Basis"):
-        assert label in card, f"spend card missing '{label}'"
-    assert "ROAS Basis" not in card
+    # PR-ADS-177C: renderMartSpendTruth is deleted — no page called it after
+    # PR-ADS-177B (docs/60 §8). Each revenue page states the spend truth in its
+    # own footer, from the mart's spend_truth, and never as "ROAS".
+    assert "function renderMartSpendTruth" not in JS
+    for footer in ("function renderCampaignsTruthFooter",
+                   "function renderCountriesTruthFooter"):
+        card = _slice(footer, span=1100)
+        assert "spend_truth" in card and "fx_status" in card, footer
+        assert "ROAS" not in card, footer
     # The three business pages that carry Google Ads spend use the SAME
     # component. PR-ADS-164A removed it from the Deals page: that page lists
     # ALL-SOURCE won deals, and a Google Ads spend card above them read as the
@@ -122,16 +123,16 @@ def test_shared_clean_spend_truth_card():
 # ── Test 5 — No native-as-USD; Unavailable, never $0 ────────────────────────
 
 def test_no_native_labelled_as_usd():
-    card = _slice("function renderMartSpendTruth", span=1100)
-    # Native spend uses the native-currency formatter (never "$" on GBP).
-    assert "fmtNativeMoney(st.native_spend, st.native_currency)" in card
-    # USD reporting is Unavailable when null (never $0, never native).
-    assert 'st.usd_spend == null ? "Unavailable"' in card
-    # Period ratio basis is Unavailable when the period ratio is null
-    # (PR-ADS-161E: the ratio is period revenue / ad spend, not ROAS).
-    assert 's.period_revenue_per_ad_spend == null ? "Unavailable"' in card
-    # The card never formats native spend with the USD formatter.
-    assert "fmtMoney(st.native_spend" not in card
+    # PR-ADS-177C: the deleted card's rule, on the live surfaces. Native spend
+    # is never formatted with the USD formatter anywhere; the Dashboard
+    # Campaigns tab prints native spend with its own currency; the Campaigns
+    # page prints only the USD figure the mart published.
+    assert "fmtMoney(st.native_spend" not in JS
+    assert "fmtMoney(r.spend_native" not in JS
+    assert "fmtCompactCurrency(r.spend_native, r.native_currency" in JS
+    summary = _slice("function renderCampaignsPageSummary", span=2200)
+    assert 'rowMetricHtml(t, "spend", fmtMoney, opts)' in summary
+    assert "native_spend" not in summary
     # fmtNativeMoney itself routes through the currency formatter, not fmtMoney.
     helper = _slice("function fmtNativeMoney", span=200)
     assert "fmtCurrency(" in helper

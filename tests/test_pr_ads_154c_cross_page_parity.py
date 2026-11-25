@@ -348,6 +348,25 @@ def _payloads(**overrides):
                 ("campaign_attributed_customers", _MART,
                  "campaign_attributable_revenue"),
                 ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
+        # PR-ADS-177C (M8): the settled campaign identities' INDEPENDENT
+        # reading (``independent_settled_campaign_reading``) — the canonical
+        # sources read without the mart, in the shape it publishes.
+        "canonical/campaign_settled": {
+            "window": dict(_WIN), "independent_of": "revenue_decision_mart",
+            "kpis": {"google_ads_spend_usd": 13000.0,
+                     "campaign_attributed_won_revenue_usd": 29000.0,
+                     "campaign_attributed_closed_won_deals": 2,
+                     "campaign_attributed_customers": 2,
+                     "google_ads_cohort_sqls": 25},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
+                ("campaign_attributed_won_revenue_usd", _LEDGER,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_closed_won_deals", _LEDGER,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_customers", _LEDGER,
+                 "campaign_attributable_revenue"),
+                ("google_ads_cohort_sqls", _FUNNEL, "google_ads_cohort_sqls"))},
         "revenue_decision_mart": {
             "window": dict(_WIN),
             # Coverage proof is per metric: campaign spend needs campaign AND FX
@@ -587,8 +606,9 @@ def test_5d_an_unavailable_contract_carries_no_figures_and_is_not_canonical():
 #: may not come from a legacy table, so an entry that needed one would be a
 #: violation to fix, not a category to add.
 LEGACY_READ_REGISTRY = {
-    ("services/campaign_evidence_service.py", "fetch_campaign_lead_detail"): "detail_rows",
-    ("services/campaign_evidence_service.py", "fetch_lead_quality"): "detail_rows",
+    # PR-ADS-177C: ("services/campaign_evidence_service.py",
+    # "fetch_campaign_lead_detail") and (…, "fetch_lead_quality") stood here.
+    # Campaign Evidence is retired; fetch_campaign_lead_detail is deleted with it.
     ("services/campaign_identity_service.py", "fetch_lead_quality"): "diagnostic",
     # PR-ADS-178B: ("services/dashboard_deals_service.py",
     # "fetch_sql_lead_details") removed — the read and the reader are deleted

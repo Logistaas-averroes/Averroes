@@ -54,6 +54,7 @@ from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from services import google_ads_geo_sync_service as geo_gate
 from services.revenue_attribution_service import (
+    VERDICT_SPEND_UNKNOWN,
     build_revenue_attribution,
     build_revenue_deals,
 )
@@ -523,6 +524,7 @@ def _withhold_cohort(cohort: dict, reason: str) -> dict:
                 "stale": False})
     out["reconciliation"] = {**(cohort.get("reconciliation") or {}),
                              "status": "unavailable", "problem_count": None}
+    out["breakdown"] = None   # PR-ADS-177C: withheld means absent
     out["metadata"] = {**(cohort.get("metadata") or {}),
                        "sql_status": cwt.UNAVAILABLE, "sql_reason": reason,
                        "mapped_count": None, "unattributed_count": None,
@@ -718,6 +720,83 @@ def _withhold_empty_settled_window(spend_truth: dict, summary: dict,
                  for k, v in readiness.items()}
     readiness["withheld_reason"] = reason
     return spend_truth, summary, readiness
+
+
+#: PR-ADS-177C (M4): the verdicts classify_verdict derives from spend (with
+#: revenue / deals / SQLs). Over unsettled spend none of them is computed.
+_SPEND_DERIVED_VERDICTS = frozenset({"winner", "watch", "waste", "learning"})
+_CAMPAIGN_SPEND_FIGURES = ("spend", "spend_native", "spend_usd",
+                           cwt.PERIOD_REVENUE_PER_AD_SPEND,
+                           cwt.PERIOD_SPEND_PER_CUSTOMER_WON)
+
+
+def _withhold_campaign_spend_until_settled(rows: list, summary: dict,
+                                           spend_truth: dict) -> tuple:
+    """PR-ADS-177C (M4) — the SETTLED campaign view publishes no spend figure
+    while its spend is not decision-ready (the settle rule: yesterday is
+    published only once the morning sync has re-read it; a coverage or FX gap).
+
+    The Campaigns page drew the gate card and printed nothing, but the API
+    payload still carried every row's spend, ``summary.spend_usd`` and
+    ``spend_truth.usd_spend`` over the moving days, and each row's verdict
+    was computed on that spend. Countries withholds its rows the same way
+    (``_withhold_country_rows_when_geo_not_ready``). Now: every row's spend,
+    USD spend and period ratios are None (their metrics unavailable with the
+    reason), ``summary.spend_usd`` / ``spend_truth.usd_spend`` are None, and a
+    verdict derived from spend (winner / watch / waste / learning) becomes
+    ``spend_unknown`` with the reason. Identity verdicts
+    (``mapping_required``) and a withheld outcome are not about spend and stay.
+
+    Native spend follows the Countries rule
+    (``geo_gate.native_country_spend_publishable``): it survives only when
+    the ONE gap is FX — the window's spend is covered and settled, only its
+    USD conversion is missing ("native spend is shown instead"). Any other
+    gap (not settled, not covered) nulls native spend too.
+    """
+    reason = (spend_truth.get("campaign_spend_unsettled_reason")
+              or spend_truth.get("campaign_spend_coverage_reason")
+              or ("fx_coverage_incomplete" if spend_truth.get("fx_status") != "verified"
+                  else None)
+              or "google_ads_spend_coverage_or_fx_unverified")
+    fx_only = (spend_truth.get("spend_coverage_status") == "complete"
+               and not spend_truth.get("campaign_spend_unsettled_reason")
+               and spend_truth.get("fx_status") != "verified")
+    out_rows = []
+    for r in rows or []:
+        row = {**r}
+        for k in _CAMPAIGN_SPEND_FIGURES:
+            if k in row and not (fx_only and k == "spend_native"):
+                row[k] = None
+        metrics = row.get("metrics")
+        if isinstance(metrics, dict):
+            metrics = dict(metrics)
+            for k in ("spend", "spend_usd", cwt.PERIOD_REVENUE_PER_AD_SPEND,
+                      cwt.PERIOD_SPEND_PER_CUSTOMER_WON):
+                if k in metrics:
+                    metrics[k] = cwt.metric(None, cwt.UNAVAILABLE, reason)
+            row["metrics"] = metrics
+        if row.get("verdict") in _SPEND_DERIVED_VERDICTS:
+            row["verdict"] = VERDICT_SPEND_UNKNOWN
+            row["verdict_reason"] = reason
+        if "decision" in row and row.get("decision") in _SPEND_DERIVED_VERDICTS:
+            row["decision"] = VERDICT_SPEND_UNKNOWN
+        row["spend_withheld_reason"] = reason
+        out_rows.append(row)
+    summary = {**summary, "spend_usd": None}
+    smetrics = summary.get("metrics")
+    if isinstance(smetrics, dict):
+        smetrics = dict(smetrics)
+        for k in (cwt.PERIOD_REVENUE_PER_AD_SPEND, cwt.PERIOD_SPEND_PER_CUSTOMER_WON):
+            if k in smetrics:
+                smetrics[k] = cwt.metric(None, cwt.UNAVAILABLE, reason)
+        summary["metrics"] = smetrics
+    for k in (cwt.PERIOD_REVENUE_PER_AD_SPEND, cwt.PERIOD_SPEND_PER_CUSTOMER_WON):
+        if k in summary:
+            summary[k] = None
+    spend_truth = {**spend_truth, "usd_spend": None,
+                   "native_spend": spend_truth.get("native_spend") if fx_only else None,
+                   "spend_withheld_reason": reason}
+    return out_rows, summary, spend_truth
 
 
 def _withhold_country_spend_without_account(spend_truth: dict) -> dict:
@@ -1178,6 +1257,11 @@ def build_revenue_decision_mart(
     elif view == "country":
         payload = {**payload, "rows": _withhold_country_rows_when_geo_not_ready(
             payload["rows"], spend_truth)}
+    elif settled_campaign and not readiness.get("spend_decision_ready"):
+        # PR-ADS-177C (M4): no spend figure over spend that is not settled.
+        rows_, summary, spend_truth = _withhold_campaign_spend_until_settled(
+            payload["rows"], summary, spend_truth)
+        payload = {**payload, "rows": rows_}
     # PR-ADS-177A: the cohort behind every leads / SQLs figure in this payload.
     cohort = _cohort_of(core)
     if _empty:

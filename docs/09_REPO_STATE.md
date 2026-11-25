@@ -7137,3 +7137,103 @@ still shown as an exact number. Now an undated TO stage gives
 (`pipelineFunnelHtml`). Test: `tests/test_pr_ads_178b_f1_truth_audit_round1.py`
 `test_09_a`/`test_09_b`; `test_09_a` fails on 2904d7f. The full note is in
 docs/61 §12.
+
+## PR-ADS-177C — the old campaign feed retired; one Keywords & Search Terms page
+
+`docs/60` §9. Depends on PR-ADS-177B (`d543dcc`); rebased onto PR-ADS-178B (§9.13). Read-only: no Google Ads or
+HubSpot write added.
+
+* **Retired (404):** `/api/campaigns`, `/api/campaign-detail`, `/api/keywords`,
+  `/api/search-terms`, `/api/search-terms/summary`, `/api/search-terms/ngrams`,
+  `/api/revenue-attribution` (`/audit` stays). `campaign_evidence_service`, the
+  drawer previews, the Campaign Evidence JS, its certification / screenshot /
+  benchmark scripts and four test modules go with them. Every truth property
+  their tests held is ported first (§9.3 port table). Guard:
+  `tests/test_pr_ads_177c_campaign_feed_retired.py` + certification S1.
+* **Moved:** `evidence_window_bounds` (`analysis.evidence_windows`),
+  `account_today` / `ACCOUNT_TZ` (`analysis.account_time`), the campaign-ID
+  resolver (`services/campaign_label_resolver.py`).
+* **Parity:** `campaign_id_cohort` (the canonical funnel through the campaign-ID
+  resolver, configured account) replaces Campaign Evidence as the independent
+  leg of both `cohort_sql_parity` groups; `canonical/campaign_settled` gives
+  the five `*__settled_days` identities an independent reading (M8).
+* **Certification:** `scripts/audit_campaigns_page_certification.py` (key
+  `campaigns`) replaces the Campaign Evidence gate in `AUDITS`; it exits 2 on an
+  unreachable database instead of certifying empty payloads.
+* **Findings fixed:** two Google Ads campaign ids under one name were merged on
+  the settled view and overwritten on Dashboard → Campaigns (now flagged
+  `campaign_name_shared_by_google_ads_campaigns`, ids listed, mapping review);
+  Dashboard → Campaigns read every account's spend (M3); the live search-term
+  routes dropped the "no account configured" reason.
+* **Keywords & Search Terms:** one `search-terms` page, Dashboard design, tabs
+  Terms / Flagged / Patterns / Keywords; `#/keywords` redirects to its tab; the
+  Campaigns item is `[campaigns, search-terms]`.
+* **Legacy `keywords` snapshot:** no reader left, so the monthly job no longer
+  writes it (our own table); it is a retired dataset. `keyword_daily_facts`
+  still syncs monthly.
+* **177B minors:** M1–M8 and O1 fixed (§9.7); CLAUDE.md's zero-revenue rule
+  rewritten.
+* **Tests:** `test_pr_ads_177c_campaign_feed_retired.py` (16),
+  `test_pr_ads_177c_campaign_feed_port_pg_integration.py` (10, PG; in the CI
+  PostgreSQL step and did-run list). All 26 fail on `d543dcc`. Existing-test
+  changes with reasons: `docs/60` §9.9.
+
+## PR-ADS-177C-F1 — truth audit round 1
+
+`docs/60` §9.11. On top of `2cfd095`. Read-only.
+
+* **M-1 (major): a name several Google Ads campaign ids share is labelled
+  everywhere it is printed** (production: `low cpc - europe`, two ids). Label,
+  don't withhold: the Campaigns table, its drawer and Dashboard → Campaigns say
+  "N Google Ads campaigns share this name — figures combined" beside the name
+  and the period ratio; drawers list the ids; the badge says "Not judged —
+  shared name". Overview's best-campaign and waste signals rank distinct
+  campaigns only. Certification S4 / L5 enforce it.
+* **Minors:** the settled identities' independent reading applies the
+  account's approved "not Google Ads" exclusions (no false mismatch); L6 reads
+  the drawers once per window, records drawers probed in the run row and exits
+  2 when canonical revenue cannot be read; the Windsor backfill's swallowed
+  `write_keywords` step is removed; CLAUDE.md, the API-contract index, a
+  docstring and a thresholds comment corrected; docs/60's 157 §4–8 overclaim
+  corrected.
+* **Runtime:** the Campaigns certification, all five windows, 21.8k contacts /
+  401 deals / 42 campaign rows: 26–28 s, 60 MB resident (177C: 39–47 s).
+* **Tests:** `tests/test_pr_ads_177c_f1_truth_audit.py` (8) and PG cases 11–13
+  in the 177C port module; all fail on `2cfd095`. Carried: L7 coverage, M4
+  FX-only rows (`docs/60` §9.11).
+
+## PR-ADS-177C-F2 — truth audit round 2
+
+`docs/60` §9.12. On top of `8876c0f`. Read-only.
+
+* **Major (introduced in F1), fixed.** Overview counts shared-name rows again
+  in every total and count: the waste signal's value and count, and the
+  Scale card's producers. A shared row is passed over only when ONE row is
+  named. When it is the only candidate, it is named with its label, "N Google
+  Ads campaigns share this name — figures combined". The Scale, Watch and
+  Investigate cards and the signal lines carry the label.
+* **Certification L5** now checks Overview's totals and decision cards
+  against the through-today campaign view.
+* **Dashboard → Deals** labels shared rows. This is minimal because 178B
+  rewrites that file: two pass-through fields and one helper call.
+* **CLAUDE.md**: the stale `/api/campaign-detail` drawer reference is
+  corrected.
+* **Production fact:** `low cpc - europe` is two back-to-back ids in account
+  3059734490 (a relaunch). Its per-campaign revenue is withheld until its
+  label is approved onto one id.
+* **Tests:** `test_pr_ads_177c_f1_truth_audit.py` gains 05b–05f, and 05 is
+  rewritten. All 6 fail on `8876c0f`.
+
+## PR-ADS-177C on PR-ADS-178B — rebase, and the round-3 carried minors
+
+`docs/60` §9.13. The three 177C commits are cherry-picked onto `bffe604`
+(main `07be622` + 178B), with the conflicts resolved so both PRs hold:
+`NAV_ITEMS` campaigns `[campaigns, search-terms]` and pipeline `[pipeline]`;
+`RETIRED_PAGE_REDIRECTS` keeps roas-campaigns, keywords, leads, deals and
+opportunities; CI runs both PRs' new PG modules; the reader-cutover audit
+keeps 178B's `pipeline` row, builder and `pipeline_checks` beside 177C's
+settled-view and Meta builders. 177C-F2's Dashboard → Deals label is dropped,
+because 178B deleted that table. The Campaigns drawer's "Open Deals" becomes
+"Open Pipeline". Round-3 minors: the Scale card names a bigger shared row it
+passed over; headlines count names when one is shared; L5 matches the exact
+label.

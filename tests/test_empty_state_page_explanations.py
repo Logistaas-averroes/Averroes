@@ -18,7 +18,8 @@ REQUIRED_ROUTES = [
     "search-terms",
     "ngrams",
     # PR-ADS-176B: "geo" was deleted; #/geo redirects to roas-countries.
-    "keywords",
+    # PR-ADS-177C: "keywords" is the Keywords tab of "search-terms" (#/keywords
+    # redirects there); its explanation is that page's.
     # PR-ADS-178B: "leads" and "deals" are one page, "pipeline"; both keys
     # are redirects to it.
     "pipeline",
@@ -194,12 +195,13 @@ class TestBuildEmptyStateIntegration:
         )
 
     def test_build_empty_state_called_in_campaigns(self):
-        # PR-ADS-142: the campaigns empty state is rendered by
-        # renderCampaignEvidencePage (loadCampaigns delegates to loadCampaignEvidence).
-        body = self._get_function_slice("function renderCampaignEvidencePage(")
-        assert "buildEmptyState(" in body, (
-            "renderCampaignEvidencePage must call buildEmptyState() for its empty state"
-        )
+        # PR-ADS-177C: Campaign Evidence (renderCampaignEvidencePage) is
+        # retired. The one Campaigns page renders an explicit safe empty state
+        # — not a table of zeros — when the window is ready and holds nothing.
+        body = self._get_function_slice("function renderCampaignsPage(", window=2600)
+        assert "renderCampaignsSafeEmptyState()" in body
+        empty = self._get_function_slice("function renderCampaignsSafeEmptyState(", 600)
+        assert "No campaign activity in this window" in empty
 
     def test_build_empty_state_called_in_leads(self):
         """PR-ADS-153C: the canonical Leads page replaced the legacy empty state
@@ -371,7 +373,8 @@ class TestPageExplanationContainers:
         # container (the ROAS / Countries precedent).
         key_pages = [
             "dashboard",
-            "keywords",   # PR-ADS-176B: "geo" deleted (roas-countries is clean)
+            # PR-ADS-176B: "geo" deleted (roas-countries is clean).
+            # PR-ADS-177C: "keywords" is a tab of "search-terms" (no container).
             "gclid-attribution",
             "scheduler", "health", "backfill",
         ]

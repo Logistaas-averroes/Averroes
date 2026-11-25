@@ -192,7 +192,8 @@ def _patch_durable(monkeypatch, *, canonical=None, deals=None, keyword_snapshot=
     # unavailable — the legacy gclid_attribution gate is gone.
     if not revenue_connected:
         make_canonical_unavailable(monkeypatch)
-    monkeypatch.setattr(repo, "fetch_keyword_theme_snapshot", lambda: dict(ks))
+    # PR-ADS-177C: fetch_keyword_theme_snapshot is deleted (no reader since
+    # PR-ADS-177B); there is nothing left to stub.
     monkeypatch.setattr(repo, "fetch_search_term_signals", lambda s, e: dict(ss))
     import db.writers as db_writers
     monkeypatch.setattr(db_writers, "source_attribution_health_counts",
@@ -578,10 +579,9 @@ def test_keyword_snapshot_unavailable_degrades(monkeypatch):
     # reach the tab.
     import db.revenue_repository as repo
 
-    def boom():
-        raise AssertionError("the keyword snapshot must not be read")
+    # PR-ADS-177C: the reader itself is deleted, so the tab cannot read it.
     _patch_durable(monkeypatch)
-    monkeypatch.setattr(repo, "fetch_keyword_theme_snapshot", boom)
+    assert not hasattr(repo, "fetch_keyword_theme_snapshot")
     from services.dashboard_campaigns_service import build_dashboard_campaigns
     out = build_dashboard_campaigns(WINDOW, now=NOW)
     assert out["campaigns"]
@@ -627,7 +627,8 @@ def test_truth_status_keys(monkeypatch):
 
 
 def test_new_repo_fetchers_are_read_only():
-    for name in ("fetch_keyword_theme_snapshot", "fetch_search_term_signals"):
+    # PR-ADS-177C: fetch_keyword_theme_snapshot is deleted.
+    for name in ("fetch_search_term_signals",):
         body = _repo_fn_body(name).lower()
         for forbidden in ("insert", "update ", "delete", "upsert", "drop", "alter",
                           "requests.post", "requests.patch", "requests.put"):

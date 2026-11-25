@@ -289,56 +289,8 @@ def fetch_lead_quality(start: date | None, end: date) -> dict:
         return _unavailable("leads", {"event_date_safe": False})
 
 
-def fetch_campaign_lead_detail(start: date | None, end: date) -> dict:
-    """Per-contact deduped paid-search lead DETAIL for the Campaign Evidence drawer.
-
-    IDENTICAL population, filters, event-date window (contact_created_at) and
-    per-contact dedup as ``fetch_lead_quality`` — just more per-contact columns —
-    so the drawer's Lead Quality / Country / Recent Leads reconcile EXACTLY with the
-    Campaign table row. Read-only.
-
-    Returns rows [{campaign_name, country, keyword, company, mql_status,
-    status_category, contact_id, contact_created_at, has_gclid}].
-    """
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return _unavailable("leads")
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    WITH deduped AS (
-                        SELECT DISTINCT ON ({_CONTACT_KEY})
-                            campaign_name, country, keyword, company, mql_status,
-                            status_category, contact_id, contact_created_at,
-                            (gclid IS NOT NULL AND gclid <> '') AS has_gclid
-                        FROM leads
-                        WHERE source_type = 'paid_search'
-                          AND contact_created_at IS NOT NULL
-                          AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
-                          AND contact_created_at < (%s::date + INTERVAL '1 day')
-                          AND campaign_name IS NOT NULL
-                          AND lower(campaign_name) NOT IN %s
-                          AND campaign_name !~* 'email_campaign'
-                          AND {_CONTACT_KEY} NOT IN (SELECT lead_id FROM lead_truth_exclusions)
-                        ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
-                    )
-                    SELECT campaign_name, country, keyword, company, mql_status,
-                           status_category, contact_id, contact_created_at, has_gclid
-                    FROM deduped
-                    ORDER BY contact_created_at DESC
-                    """,
-                    (start, end, _PSEUDO_CAMPAIGNS),
-                )
-                rows = _rows_as_dicts(cur)
-                for r in rows:
-                    r["contact_created_at"] = _as_date(r.get("contact_created_at"))
-            return {"available": True, "rows": rows, "table": "leads",
-                    "date_field": "contact_created_at"}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("fetch_campaign_lead_detail failed: %s", exc)
-        return _unavailable("leads")
-
+# PR-ADS-177C: ``fetch_campaign_lead_detail`` (the Campaign Evidence drawer's
+# per-contact lead detail) is deleted with Campaign Evidence; nothing reads it.
 
 # PR-ADS-178B: ``fetch_sql_lead_details`` (the legacy lead-status "qualified,
 # not yet closed-won" rows behind Dashboard → Deals' backlog) is deleted with
@@ -918,45 +870,6 @@ def fetch_source_revenue_daily(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_source_revenue_daily failed: %s", exc)
         return {"available": False, "rows": []}
-
-
-def fetch_keyword_theme_snapshot() -> dict:
-    """Latest keyword-performance snapshot for the Dashboard Campaigns tab (PR-ADS-137).
-
-    Read-only. The `keywords` table stores per-scheduler-run lookback aggregates
-    keyed by `run_date`, so summing across runs double-counts and the snapshot has
-    NO business-window or outcome (SQL/customer/revenue) attribution. To avoid
-    double-counting we return ONLY the single most-recent `run_date` snapshot —
-    honest "recent activity", never window-scoped. Spend is Google Ads USD
-    (`spend_usd`); there is no native-GBP or outcome column on this table.
-
-    Returns {available, run_date, rows:[{campaign_name, ad_group, keyword,
-             match_type, spend_usd, clicks, impressions, conversions}]}.
-    """
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return {"available": False, "run_date": None, "rows": []}
-            with conn.cursor() as cur:
-                # Select run_date alongside the rows (all share the single MAX
-                # run_date) so the snapshot date needs no second round trip.
-                cur.execute(
-                    """
-                    SELECT run_date, campaign_name, ad_group, keyword, match_type,
-                           spend_usd::float AS spend_usd,
-                           clicks, impressions, conversions::float AS conversions
-                    FROM keywords
-                    WHERE run_date = (SELECT MAX(run_date) FROM keywords)
-                    """
-                )
-                rows = _rows_as_dicts(cur)
-                run_date = _as_date(rows[0].get("run_date")) if rows else None
-                for r in rows:
-                    r.pop("run_date", None)
-                return {"available": True, "run_date": run_date, "rows": rows}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("fetch_keyword_theme_snapshot failed: %s", exc)
-        return {"available": False, "run_date": None, "rows": []}
 
 
 def fetch_search_term_signals(start: date | None, end: date) -> dict:

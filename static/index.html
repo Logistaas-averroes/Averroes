@@ -182,8 +182,7 @@
       <div id="section-tabs-bar" class="section-tabs-bar" hidden>
         <nav class="dashboard-tabs section-tabs" data-section="campaigns" aria-label="Campaigns pages" hidden>
           <a class="section-tab dashboard-tab" data-page="campaigns" href="#/campaigns">Campaigns</a>
-          <a class="section-tab dashboard-tab" data-page="keywords" href="#/keywords">Keyword Evidence</a>
-          <a class="section-tab dashboard-tab" data-page="search-terms" href="#/search-terms" title="Search terms and pattern analysis">Search Terms</a>
+          <a class="section-tab dashboard-tab" data-page="search-terms" href="#/search-terms" title="Search terms, flagged terms, patterns and keywords">Keywords &amp; Search Terms</a>
         </nav>
         <nav class="dashboard-tabs section-tabs" data-section="system" aria-label="System pages" hidden>
           <a id="nav-system-item" class="section-tab dashboard-tab" data-page="system" href="#/system" title="Is the data correct and up to date">System</a>
@@ -289,22 +288,32 @@
         </div>
       </section>
 
-      <!-- Search Terms + Patterns evidence page (PR-ADS-144) -->
+      <!-- Keywords & Search Terms — one page (PR-ADS-177C, owner decision 3,
+           2026-11-24): the Search Terms page (PR-ADS-144) with its Terms,
+           Flagged and Patterns tabs, and Keyword Evidence (PR-ADS-146) as its
+           Keywords tab, on evidence windows, in the Dashboard design. -->
       <section id="page-search-terms" class="page page--wide" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Keywords &amp; Search Terms</h1>
+          <p class="page-subtitle">Google Ads search queries and keywords over an evidence window: review state, waste evidence, recurring patterns, match-type exposure and quality diagnostics. Evidence for the weekly review — a flagged term is a human-review candidate, never an approved negative.</p>
+        </header>
+        <div class="dash-command-bar">
+          <div class="dash-command-bar__truth">
+            <span class="dash-chip dash-chip--readonly">Read-only</span>
+            <span class="dash-chip">Source: Google Ads search terms &amp; keyword facts</span>
+            <span class="dash-chip">The only write: a local review decision — never Google Ads or HubSpot</span>
+          </div>
+        </div>
         <p id="run-meta-search_terms" class="run-meta" data-section="search_terms"></p>
-        <div id="search-terms-shell"></div>
+        <div id="search-terms-shell" class="dashboard-overview kst-page"></div>
       </section>
 
 
       <!-- N-Gram Intelligence (kept as hidden route alias for backward compatibility) -->
       <section id="page-ngrams" class="page" hidden></section>
 
-      <!-- Keyword Evidence (PR-ADS-146) -->
-      <section id="page-keywords" class="page page--wide" hidden>
-        <div id="page-explanation-keywords" hidden></div>
-        <p id="run-meta-keywords" class="run-meta" data-section="keywords"></p>
-        <div id="keyword-evidence-shell"></div>
-      </section>
+      <!-- PR-ADS-177C: the Keyword Evidence page (#page-keywords) is the Keywords
+           tab of Keywords & Search Terms; #/keywords redirects there. -->
 
       <!-- Pipeline — leads and deals on one page (PR-ADS-178B, docs/61). It
            replaces the Leads page (PR-ADS-153C) and the Closed-Won Deals page
@@ -762,20 +771,6 @@
 
     </div><!-- /.main-content -->
   </div><!-- /#app -->
-
-  <!-- ── Campaign Detail Drawer ── rendered by JS, reusable slide-over panel -->
-  <div id="campaign-drawer-overlay" class="drawer-overlay" hidden aria-hidden="true"></div>
-  <aside id="campaign-drawer" class="campaign-drawer" hidden aria-label="Campaign detail" role="dialog" aria-modal="true">
-    <div class="campaign-drawer__header">
-      <div id="drawer-campaign-title" class="campaign-drawer__title"></div>
-      <button id="drawer-close-btn" class="drawer-close" type="button" aria-label="Close campaign detail">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </div>
-    <div class="campaign-drawer__body" id="campaign-drawer-body">
-      <p class="empty-state">Loading…</p>
-    </div>
-  </aside>
 
   <!-- ── Search Term / Pattern Evidence Drawer (PR-ADS-144) ── -->
   <div id="st-drawer-overlay" class="drawer-overlay" hidden aria-hidden="true"></div>

@@ -35,9 +35,10 @@ CSS = (ROOT / "static/styles.css").read_text(encoding="utf-8")
 EXPECTED_ITEMS = [
     ("overview", "Overview", ["dashboard"]),
     ("channels", "Channels", ["channels"]),
-    # PR-ADS-177B: one Campaigns page (#/roas-campaigns is retired into it);
-    # Keywords and Search Terms stay until PR-ADS-177D merges them.
-    ("campaigns", "Campaigns", ["campaigns", "keywords", "search-terms"]),
+    # PR-ADS-177B: one Campaigns page (#/roas-campaigns is retired into it).
+    # PR-ADS-177C: one Keywords & Search Terms page (#/keywords is retired into
+    # its Keywords tab).
+    ("campaigns", "Campaigns", ["campaigns", "search-terms"]),
     # PR-ADS-176B: Countries is one page (#/geo is retired into it), so it is
     # a single-page item with no strip.
     ("countries", "Countries", ["roas-countries"]),
@@ -284,7 +285,8 @@ def test_06_the_strip_labels_are_the_old_sidebar_labels():
               for _, p, _, l in tabs}
     assert labels == {
         "campaigns": "Campaigns",
-        "keywords": "Keyword Evidence", "search-terms": "Search Terms",
+        # PR-ADS-177C: one page, renamed for what it holds.
+        "search-terms": "Keywords & Search Terms",
         "system": "System", "scheduler": "Data Runs", "health": "System Status",
         "revenue-health": "Revenue Health", "backfill": "Admin Backfill",
         "gclid-attribution": "GCLID Attribution",
@@ -347,7 +349,7 @@ def test_11_the_highlight_and_strip_for_each_page_in_the_real_code():
     script = _fake_dom_js() + _gating_js() + _render_state() + """
 _showAppGating({ role: "admin" });
 const out = {};
-for (const p of ["dashboard", "channels", "keywords", "roas-countries", "deals", "backfill"]) {
+for (const p of ["dashboard", "channels", "search-terms", "roas-countries", "deals", "backfill"]) {
   renderNavActive(p);
   out[p] = _state();
 }
@@ -355,7 +357,7 @@ process.stdout.write(JSON.stringify(out));
 """
     out = json.loads(_node(script))
     for page, item in (("dashboard", "overview"), ("channels", "channels"),
-                       ("keywords", "campaigns"), ("roas-countries", "countries"),
+                       ("search-terms", "campaigns"), ("roas-countries", "countries"),
                        ("deals", "pipeline"), ("backfill", "system")):
         state = out[page]
         active = [x["item"] for x in state["items"] if x["active"]]

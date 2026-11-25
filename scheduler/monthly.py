@@ -7,8 +7,9 @@ detection → flag history → GCLID match.
 No business logic lives here. This module only sequences the steps.
 
 PR-ADS-165A: the weekly job is retired, and this is now the ONLY scheduled
-writer of the legacy geo / keywords snapshots, the waste annotations, the
-search-term flag history and the GCLID coverage snapshot. Those datasets are
+writer of the legacy geo snapshot, the waste annotations, the
+search-term flag history and the GCLID coverage snapshot. (PR-ADS-177C: it no
+longer writes the legacy `keywords` snapshot, which nothing reads.) Those datasets are
 therefore at most one month old by design (see
 `services.freshness_service.MONTHLY_REFRESH_STALE_DAYS`). The flag-history
 step moved here from the weekly job, which was its only caller.
@@ -17,7 +18,7 @@ PR-ADS-162H: this job no longer produces a report. It used to end by building
 the advisor report (lead quality → campaign truth → n-grams → markdown) and
 emailing it; the Reports page that displayed it was deleted in PR-ADS-162G and
 the email had failed to send every month. What is left is every step a live
-page still reads: the legacy leads / deals / geo / keywords snapshots, durable
+page still reads: the legacy leads / deals / geo snapshots, durable
 keyword facts, the canonical search-term sync, the waste annotations, and the
 GCLID match with its coverage snapshot.
 
@@ -213,11 +214,11 @@ def run_monthly_report():
             else:
                 log.error("DB write after Step 2: write_run returned no run_id; skipping child writes")
                 # No run row means no child row can be written: leads, deals,
-                # geo and keywords are all skipped below. Said once, here.
+                # geo and keyword facts are all skipped below. Said once, here.
                 note_step_failure(
                     step_failures, "write_run",
-                    "no run row was created — the leads, deals, geo and keyword "
-                    "snapshots were not written and keyword facts were not synced")
+                    "no run row was created — the leads, deals and geo snapshots "
+                    "were not written and keyword facts were not synced")
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write after Step 2 failed: %s", db_exc)
             run_id = None
@@ -255,35 +256,15 @@ def run_monthly_report():
             log.error("DB write geo failed: %s", db_exc)
             note_step_failure(step_failures, "write_geo", db_exc)
 
-        # Write keyword rows to database
+        # PR-ADS-177C: the legacy `keywords` snapshot is no longer written. Its
+        # last in-product reader (Dashboard → Campaigns' keyword themes) went in
+        # PR-ADS-177B and the orphaned /api/keywords endpoint in PR-ADS-177C, so
+        # the write fed nothing. Only our own table is affected: this was a
+        # write to the local database, never to Google Ads or HubSpot. The
+        # keyword pull above is unchanged (it is a read). Durable keyword facts
+        # (the Keywords evidence) keep their one shared sync path below.
         try:
             if run_id is not None:
-                kw_batch_id = db_writers.start_sync_batch(
-                    source="google_ads_api",
-                    dataset="keywords",
-                    sync_type="monthly",
-                    date_from=run_date - timedelta(days=30),
-                    date_to=run_date,
-                    run_id=run_id,
-                )
-                kw_count = db_writers.write_keywords(run_id, keywords)
-                log.info("Wrote %d keyword rows to database (run_id=%s)", kw_count, run_id)
-                if kw_batch_id:
-                    kw_persisted = persistence_succeeded(keywords, kw_count)
-                    db_writers.finish_sync_batch(
-                        batch_id=kw_batch_id,
-                        status="success" if kw_persisted else "failed",
-                        row_count=kw_count,
-                        last_source_date=max_source_date(keywords, fallback_date=run_date),
-                        error_message=None if kw_persisted else (
-                            f"write_keywords returned 0 for {len(keywords or [])} fetched rows"
-                        ),
-                    )
-                if not persistence_succeeded(keywords, kw_count):
-                    note_step_failure(
-                        step_failures, "write_keywords",
-                        f"wrote {kw_count} of {len(keywords or [])} fetched rows")
-
                 # PR-ADS-146A: durable keyword facts via the ONE shared sync path.
                 from services.keyword_sync_service import sync_keyword_daily_facts  # noqa: PLC0415
                 kdf = sync_keyword_daily_facts(
@@ -294,9 +275,8 @@ def run_monthly_report():
                         step_failures, "sync_keyword_daily_facts",
                         (kdf or {}).get("error") or "the sync did not report ok")
         except Exception as db_exc:  # noqa: BLE001
-            log.error("DB write keywords failed: %s", db_exc)
-            note_step_failure(
-                step_failures, "write_keywords / sync_keyword_daily_facts", db_exc)
+            log.error("Durable keyword facts sync failed: %s", db_exc)
+            note_step_failure(step_failures, "sync_keyword_daily_facts", db_exc)
 
         # Write search term rows to database (non-fatal)
         #

@@ -468,8 +468,11 @@ def test_schema_has_durable_table_and_migration():
 # ════════════════ UI (string assertions) ════════════════
 def test_frontend_page_is_full_width_no_runs_column():
     idx = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
-    assert 'id="page-keywords" class="page page--wide"' in idx
-    assert 'id="keyword-evidence-shell"' in idx
+    # PR-ADS-177C: Keyword Evidence is the Keywords tab of the one full-width
+    # Keywords & Search Terms page; its module renders into the tab body.
+    assert 'id="page-keywords"' not in idx
+    assert 'id="page-search-terms" class="page page--wide"' in idx
+    assert '<div id="kw-tab-body"></div>' in APP_JS
     kw_mod = APP_JS[APP_JS.find("// ── Keyword Evidence page (PR-ADS-146)"):
                     APP_JS.find("// ── In Progress Leads page")]
     # Concise table headers; no Runs column.

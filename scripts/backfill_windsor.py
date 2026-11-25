@@ -6,11 +6,16 @@ Roadmap ID: PR-ADS-071 | Phase: 1 — Read-Only Intelligence / Roadmap V4.0
 
 Supported datasets:
     campaigns    — Google Ads campaign performance (all campaigns, active and paused)
-    keywords     — Keyword-level performance
     geo          — Geographic performance
     search_terms — Supported only for confirmed rolling preset extraction (`last_60d`).
                    Arbitrary date_from/date_to historical backfill remains unsupported
                    unless Windsor confirms explicit range support for search terms.
+
+PR-ADS-177C-F1: the `keywords` dataset is removed. It wrote the legacy
+`keywords` snapshot through `db.writers.write_keywords`, which PR-ADS-177C
+deleted with the snapshot's last reader; the step imported it inside a
+`try` that swallowed the ImportError and reported 0 rows written. Keyword
+evidence is `keyword_daily_facts`, synced from the Google Ads API.
 
 NEVER writes to Google Ads.
 NEVER called by any scheduler or Render startup command.
@@ -22,7 +27,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-SUPPORTED_DATASETS = frozenset({"campaigns", "keywords", "geo", "search_terms"})
+SUPPORTED_DATASETS = frozenset({"campaigns", "geo", "search_terms"})
 
 # search_terms cannot be reliably backfilled with arbitrary date ranges.
 # The confirmed working extraction uses date_preset=last_60d (~45,292 rows).
@@ -44,11 +49,6 @@ def _pull_campaigns(date_from: date, date_to: date) -> list:
     return pull_campaign_performance_range(str(date_from), str(date_to))
 
 
-def _pull_keywords(date_from: date, date_to: date) -> list:
-    from connectors.windsor_pull import pull_keyword_performance_range
-    return pull_keyword_performance_range(str(date_from), str(date_to))
-
-
 def _pull_geo(date_from: date, date_to: date) -> list:
     from connectors.windsor_pull import pull_geo_performance_range
     return pull_geo_performance_range(str(date_from), str(date_to))
@@ -56,7 +56,6 @@ def _pull_geo(date_from: date, date_to: date) -> list:
 
 _PULL_FN = {
     "campaigns": _pull_campaigns,
-    "keywords":  _pull_keywords,
     "geo":       _pull_geo,
 }
 
@@ -74,15 +73,6 @@ def _write_campaigns(run_id: int, rows: list) -> int:
         return 0
 
 
-def _write_keywords(run_id: int, rows: list) -> int:
-    try:
-        from db.writers import write_keywords
-        return write_keywords(run_id, rows)
-    except Exception as exc:  # noqa: BLE001
-        log.error("write_keywords failed: %s", exc)
-        return 0
-
-
 def _write_geo(run_id: int, rows: list) -> int:
     try:
         from db.writers import write_geo
@@ -94,14 +84,12 @@ def _write_geo(run_id: int, rows: list) -> int:
 
 _WRITE_FN = {
     "campaigns": _write_campaigns,
-    "keywords":  _write_keywords,
     "geo":       _write_geo,
 }
 
 # Maps dataset name to sync_state dataset key used in sync_batches
 _SYNC_DATASET_KEY = {
     "campaigns": "campaigns",
-    "keywords":  "keywords",
     "geo":       "geo",
 }
 
@@ -156,7 +144,7 @@ def run_google_ads_backfill(
     """Execute Google Ads (Windsor) backfill for the given dataset and date chunks.
 
     For search_terms: returns immediately with unsupported_by_current_connector status.
-    For campaigns/keywords/geo: calls Windsor connector with explicit date_from/date_to,
+    For campaigns/geo: calls Windsor connector with explicit date_from/date_to,
     writes results via db/writers.py, and records sync_batches for each chunk.
 
     Returns a result dict with rows_pulled, rows_written, status, chunks_completed, errors.

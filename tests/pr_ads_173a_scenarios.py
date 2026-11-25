@@ -290,8 +290,9 @@ def scenarios(st, srv, variant: str | None = None) -> list:
     def drawer(window, text, campaign_key=None):
         return st.build_search_term_drawer(window, text, campaign_key, now=NOW)
 
-    def preview(window, campaign_key):
-        return st.build_campaign_flagged_preview(window, campaign_key, now=NOW)
+    # PR-ADS-177C: ``preview`` (build_campaign_flagged_preview, the Campaign
+    # Evidence drawer's flagged section) is retired with that page; its
+    # requests are no longer asked (test_21 names them).
 
     def export(window, **kw):
         params = {"q": None, "campaign": None, "state": None, "junk_category": None,
@@ -310,7 +311,6 @@ def scenarios(st, srv, variant: str | None = None) -> list:
             add(f"flagged/{window}", flagged, window, page_size=5)
             add(f"flagged/{window}/filtered", flagged, window, page=2, q="jobs")
             add(f"waste/{window}", waste, window)
-            add(f"preview/{window}/A", preview, window, CAMP_A)
             add(f"terms/{window}", terms, window, page_size=7)
         return out
 
@@ -320,7 +320,6 @@ def scenarios(st, srv, variant: str | None = None) -> list:
             add(f"terms/{window}/state=flagged", terms, window, state="flagged")
             add(f"flagged/{window}", flagged, window, page_size=5)
             add(f"waste/{window}", waste, window)
-            add(f"preview/{window}/A", preview, window, CAMP_A)
             add(f"patterns/{window}/n=2", patterns, window, n=2, limit=8)
             add(f"pattern_detail/{window}/jobs", pattern_detail, window, "jobs", 1)
             add(f"term/{window}/freight jobs", drawer, window, "freight jobs")
@@ -389,8 +388,6 @@ def scenarios(st, srv, variant: str | None = None) -> list:
     add("flagged/error/sort", flagged, "30d", sort="nope")
     for window in WINDOWS:
         add(f"waste/{window}", waste, window)
-        for key in (CAMP_A, CAMP_B, CAMP_C, "does-not-exist"):
-            add(f"preview/{window}/{key}", preview, window, key)
 
     # ── Patterns ────────────────────────────────────────────────────────────
     for window in WINDOWS:

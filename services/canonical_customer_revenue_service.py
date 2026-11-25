@@ -17,7 +17,8 @@ ones every page already uses. What it adds is the layer those pages lack:
 * a distinction between a deal and a customer (a HubSpot company) — and an
   honest refusal to count customers the repository cannot identify;
 * a deal-level attribution PARTITION that always sums to the all-source total,
-  with campaign placement through Campaign Evidence's own resolver (approved
+  with campaign placement through the campaign-ID label resolver
+  (``services.campaign_label_resolver``: approved
   mapping, else an exact match to exactly one spend campaign; never fuzzy);
 * the acquisition-cohort question, kept apart from the close-date question;
 * a won-definition cross-check against the confirmed won stage;
@@ -91,7 +92,7 @@ def window_bounds(window_type: str, window_key: str,
     Evidence windows follow the repository's evidence convention: N account-local
     calendar dates ending today (``analysis.account_time``), so ``start`` is
     ACCOUNT-LOCAL midnight of ``today - (N-1)`` and ``end`` is account-local
-    midnight after today, both converted to UTC by Campaign Evidence's own
+    midnight after today, both converted to UTC by the cohort service's
     ``window_instants`` (so under BST a window starts at 23:00Z, not 00:00Z). Business
     windows use ``analysis.business_windows.get_window_bounds`` unchanged. Both
     are UTC instants; neither ever uses an ingestion, sync or boundary time.
@@ -138,7 +139,9 @@ def all_windows() -> list:
 
 
 def campaign_resolver(now: datetime | None = None) -> tuple:
-    """``(resolve_label | None, detail)`` — Campaign Evidence's own resolver.
+    """``(resolve_label | None, detail)`` — the campaign-ID label resolver
+    (``services.campaign_label_resolver``; Campaign Evidence's rule until that
+    page was retired in PR-ADS-177C, unchanged).
 
     Bound to the approved durable identity mappings and the ALL-TIME canonical
     spend campaign names, so a deal's campaign placement does not depend on
@@ -149,9 +152,7 @@ def campaign_resolver(now: datetime | None = None) -> tuple:
     try:
         from analysis.account_time import account_today  # noqa: PLC0415
         from db import revenue_repository as repo  # noqa: PLC0415
-        from services.campaign_evidence_service import (  # noqa: PLC0415
-            _assign_lead, _identity_index, _spend_by_campaign_id,
-        )
+        from services.campaign_label_resolver import build_resolver  # noqa: PLC0415
         # PR-ADS-176C-F2 (m2): the all-time campaign NAMES are read over the
         # certified range, exactly as the leads side's campaign resolver reads
         # them, so a deal can never land on a campaign the leads side cannot
@@ -162,9 +163,7 @@ def campaign_resolver(now: datetime | None = None) -> tuple:
         identity = repo.fetch_campaign_identity(spend.get("customer_id"))
         if not identity.get("available"):
             return None, "campaign identity mappings could not be read"
-        _, norm_to_ids = _spend_by_campaign_id(spend)
-        by_label, _ = _identity_index(identity)
-        return (lambda label: _assign_lead(label, by_label, norm_to_ids),
+        return (build_resolver(spend, identity),
                 "approved identity mappings, else exact normalized match to "
                 "exactly one all-time canonical spend campaign; never fuzzy")
     except Exception as exc:  # noqa: BLE001
@@ -645,7 +644,7 @@ def window_view(window_type: str | None = None, window_key: str | None = None,
          "universe": the snapshot}
 
     Campaign placement is the canonical one: the window is evaluated with
-    Campaign Evidence's own resolver (:func:`campaign_resolver`, built once per
+    the campaign-ID label resolver (:func:`campaign_resolver`, built once per
     snapshot by ``canonical_revenue_service.snapshot_campaign_resolver``), so
     ``publication.campaign_revenue`` and the ``google_ads_unplaced`` partition
     are the verdicts readers republish — never re-derived (PR-ADS-161E).

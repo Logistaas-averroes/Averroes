@@ -94,10 +94,10 @@ LEGACY_ACCESS_ALLOWLIST: dict[str, str] = {
     "connectors/windsor_pull.py": "retired connector, retained for history",
     "connectors/gclid_match.py": "historical diagnostic over the legacy JSON",
     "db/keyword_repository.py": "audit — counts legacy snapshot rows",
-    "db/revenue_repository.py": "legacy keyword-theme snapshot for the "
-                                "campaign page (non-evidence)",
-    "db/writers.py": "writer for the legacy snapshot, still consumed",
-    "api/server.py": "legacy snapshot consumers + legacy state reported as legacy",
+    # PR-ADS-177C: "db/revenue_repository.py" (the keyword-theme snapshot
+    # reader), "db/writers.py" (write_keywords) and "api/server.py"
+    # (/api/keywords and the campaign drill-down) stood here. All three are
+    # gone, so none of them may touch the legacy snapshot again.
     "scripts/audit_production_reality.py": "audit — production reality report",
     # PR-ADS-156 §5 required an INSPECTION before stopping the scheduled legacy
     # writes, and the inspection found four live consumers: the aggregated
@@ -109,8 +109,12 @@ LEGACY_ACCESS_ALLOWLIST: dict[str, str] = {
     # stop NEW ones appearing rather than to pretend these do not exist.
     # PR-ADS-165A: "scheduler/weekly.py" stood here. The job is deleted; the
     # monthly job is the one scheduled writer of the legacy snapshot left.
-    "scheduler/monthly.py": "legacy snapshot writer — four live non-evidence "
-                            "consumers, documented in docs/38",
+    # PR-ADS-177C: the last of those four consumers is gone and the monthly
+    # job no longer writes the snapshot (docs/60 §9). It stays listed for the
+    # retired local JSON snapshot paths its legacy pull step still names.
+    "scheduler/monthly.py": "historical diagnostic — the legacy local JSON "
+                            "snapshot paths of the monthly pull; no legacy "
+                            "keyword snapshot write since PR-ADS-177C",
     "scripts/verify_search_terms_pipeline.py": "diagnostic — reports legacy state",
     # PR-ADS-156-F2 §4 widened the scan to analysis/, api/ and db/, and to
     # indirect reads by NAME. These two are the consequences, and both are the
@@ -118,10 +122,8 @@ LEGACY_ACCESS_ALLOWLIST: dict[str, str] = {
     "analysis/legacy_source_guard.py": "the guard itself — it must name the "
                                        "retired providers, legacy helpers and "
                                        "snapshots it detects",
-    "services/dashboard_campaigns_service.py":
-        "legacy keyword-theme snapshot behind the Campaigns page — one of the "
-        "four inspected non-evidence consumers (PR-ADS-156 §5), historical and "
-        "never a Keyword Evidence input",
+    # PR-ADS-177C: "services/dashboard_campaigns_service.py" stood here (the
+    # keyword-theme panel, dropped in PR-ADS-177B).
 }
 
 #: Machine-readable reasons, so a caller can group findings without parsing prose.

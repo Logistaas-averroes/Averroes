@@ -63,14 +63,9 @@ def summarize(report: dict) -> dict:
     """
     audits = []
     for a in report.get("audits") or []:
-        kept = _drawer_sections(a.get("report"))
+        kept = _drawer_populations(a.get("report"))
         if kept is not None:
-            a = {**a, "drawer_sections": kept,
-                 # A section that passed on a DECLARED withholding (a
-                 # quarantined flagged population) is named here, so it cannot
-                 # sit silently under CERTIFIED. [] when there is none.
-                 "drawer_warnings": [str(w)[:300] for w in
-                                     ((a.get("report") or {}).get("warnings") or [])]}
+            a = {**a, "drawer_populations": kept}
         audits.append({k: a.get(k) for k in (
             "key", "module", "outcome", "exit_code", "seconds", "violations",
             "unavailable", "detail",
@@ -78,10 +73,9 @@ def summarize(report: dict) -> dict:
             "memory_budget_mb", "peak_rss_mb", "vm_peak_mb",
             # The budget's inputs (limit, usage, margin, floor, backstop).
             "memory")
-            # PR-ADS-172A: present only for an audit that builds drawer
-            # sections (campaign_evidence) — see `_drawer_sections`.
-            + (("drawer_sections", "drawer_warnings")
-               if "drawer_sections" in a else ())})
+            # PR-ADS-177C-F1: present only for an audit that probes campaign
+            # drawers (campaigns) — see `_drawer_populations`.
+            + (("drawer_populations",) if "drawer_populations" in a else ())})
     return {"verdict": report.get("verdict"),
             "exit_code": report.get("exit_code"),
             "generated_at": report.get("generated_at"),
@@ -89,31 +83,30 @@ def summarize(report: dict) -> dict:
             "crm_data_to_fix": report.get("crm_data_to_fix")}
 
 
-def _drawer_sections(audit_report) -> dict | None:
-    """PR-ADS-172A — ``{window: {section: {available, reason}}}`` from an
-    audit report that built drawer sections, else None.
+def _drawer_populations(audit_report) -> dict | None:
+    """PR-ADS-177C-F1 — ``{window: {drawers_probed, rows_with_deals,
+    canonical_revenue}}`` from an audit report that probed campaign drawers
+    (the Campaigns certification's L6), else None.
 
-    The raw report is dropped from the stored summary, and with it went the
-    only record of whether each Campaign Evidence drawer section was BUILT. An
-    audit that held because its sections came back unavailable and one that
-    held having built them stored the same row. This small part of the report
-    is kept so the run row alone answers that, for every window audited; a
-    window that built no section is stored as ``{}``, not left out.
+    The raw report is dropped from the stored summary. Without this, a run
+    whose L6 held because it probed NO drawer (no row carried deals, or the
+    window was not built) stored the same row as one that probed every drawer.
+    This replaces PR-ADS-172A's ``_drawer_sections``, the record of the retired
+    Campaign Evidence drawer sections. A window not audited is stored with
+    ``drawers_probed`` None, not left out.
     """
     if not isinstance(audit_report, dict):
         return None
     per_window = audit_report.get("per_window")
     if not isinstance(per_window, dict):
         return None
-    if not any(isinstance(w, dict) and "sections" in w for w in per_window.values()):
+    if not any(isinstance(w, dict) and "drawers_probed" in w for w in per_window.values()):
         return None
     out = {}
     for window, result in per_window.items():
-        sections = (result or {}).get("sections") if isinstance(result, dict) else None
-        out[str(window)] = {
-            str(name): {"available": (sec or {}).get("available"),
-                        "reason": (sec or {}).get("reason")}
-            for name, sec in (sections or {}).items() if isinstance(sec, dict)}
+        result = result if isinstance(result, dict) else {}
+        out[str(window)] = {k: result.get(k) for k in
+                            ("drawers_probed", "rows_with_deals", "canonical_revenue")}
     return out
 
 

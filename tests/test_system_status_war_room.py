@@ -172,7 +172,10 @@ def test_source_health_groups_google_ads_api_datasets():
     assert "canonical_spend" in google_ads["datasets"]
     assert "campaigns" not in google_ads["datasets"]
     assert "search_terms" in google_ads["datasets"]
-    assert "keywords" in google_ads["datasets"]
+    # PR-ADS-177C: the legacy keyword snapshot is retired; the Keywords tab's
+    # dataset is keyword_facts.
+    assert "keywords" not in google_ads["datasets"]
+    assert "keyword_facts" in google_ads["datasets"]
     assert "geo" in google_ads["datasets"]
 
 

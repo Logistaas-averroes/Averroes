@@ -311,25 +311,27 @@ def test_05b_country_verdicts_and_statuses_under_a_withheld_cohort(live_db, monk
 
 
 # ── 6. parity: the same days, one number on three surfaces ──────────────────
-def test_06_the_countries_page_dashboard_countries_and_campaign_evidence_agree(
+def test_06_the_countries_page_dashboard_countries_and_the_campaign_id_reading_agree(
         live_db, monkeypatch):
+    # PR-ADS-177C: Campaign Evidence is retired; the independent campaign-ID
+    # reading it supplied is ``google_ads_cohort_sqls_by_campaign_id``.
     from services import cross_page_parity_service as parity
-    from services.campaign_evidence_service import build_campaign_evidence
+    from services.campaign_label_resolver import google_ads_cohort_sqls_by_campaign_id
     from datetime import date
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _ready(live_db)
     page = _mart("country")
     w = page["window"]
-    ce = build_campaign_evidence(WINDOW, bounds=(
-        date.fromisoformat(w["start_date"]), date.fromisoformat(w["end_date"])))
-    assert ce["summary"]["cohort_sqls_google_ads"] == page["summary"]["sqls"] == 4
+    ind = google_ads_cohort_sqls_by_campaign_id(
+        date.fromisoformat(w["start_date"]), date.fromisoformat(w["end_date"]))
+    assert ind["google_ads_sqls"] == page["summary"]["sqls"] == 4
     report = parity.audit_window(WINDOW)
     p = report["cohort_sql_parity"]
     assert p["status"] == "identical", p
     # PR-ADS-177B: the Campaigns page (Σ rows + "No campaign label" row) and
     # Dashboard → Campaigns are two more readings of the same count.
     assert p["readings"] == {"countries_page": 4, "dashboard_countries": 4,
-                             "campaign_evidence": 4, "campaigns_page": 4,
+                             "campaign_id_cohort": 4, "campaigns_page": 4,
                              "dashboard_campaigns": 4}
     conservation = next(r for r in report["conservation"]
                         if r["total"] == "google_ads_cohort_sqls")
@@ -364,7 +366,7 @@ def test_06c_withheld_parity_is_not_evaluable_never_a_pass(live_db, monkeypatch)
     p = parity.audit_window(WINDOW)["cohort_sql_parity"]
     assert p["status"] == "not_evaluable"
     assert p["readings"] == {"countries_page": None, "dashboard_countries": None,
-                             "campaign_evidence": None, "campaigns_page": None,
+                             "campaign_id_cohort": None, "campaigns_page": None,
                              "dashboard_campaigns": None}
 
 
@@ -520,7 +522,7 @@ def test_09_an_approved_manual_mapping_places_cohort_contacts_on_the_mapped_row(
     assert (m["summary"]["leads"], m["summary"]["sqls"]) == (5, 4)
 
 
-def test_10_the_campaign_view_days_agree_across_the_mart_the_overview_and_campaign_evidence(
+def test_10_the_campaign_view_days_agree_across_the_mart_the_overview_and_the_campaign_id_reading(
         live_db, monkeypatch):
     """MINOR 1: the campaign view runs through TODAY, the country view through
     yesterday — two groups, each like for like."""
@@ -531,7 +533,7 @@ def test_10_the_campaign_view_days_agree_across_the_mart_the_overview_and_campai
     cv = report["cohort_sql_parity"]["campaign_view"]
     assert cv["status"] == "identical", cv
     assert cv["readings"] == {"mart_campaign_view": 4, "dashboard_overview": 4,
-                              "campaign_evidence": 4}
+                              "campaign_id_cohort": 4}
     _, today = _window_dates(WINDOW)
     assert cv["window"]["end_date"] == today.isoformat()
     assert report["cohort_sql_parity"]["window"]["end_date"] == (

@@ -333,7 +333,16 @@ def test_source_date_is_the_business_boundary_never_run_date():
 
 
 def test_same_account_timezone_as_campaign_evidence():
-    assert "from services.campaign_evidence_service import ACCOUNT_TZ, _window_bounds" in SERVICE
+    # PR-ADS-177C: Campaign Evidence is retired; the ONE evidence-window
+    # boundary moved, unchanged, to analysis.evidence_windows — the Keywords
+    # tab reads the same one, so the page cannot disagree with itself.
+    assert "from analysis.account_time import ACCOUNT_TZ" in SERVICE
+    assert ("from analysis.evidence_windows import evidence_window_bounds as "
+            "_window_bounds") in SERVICE
+    kw = open(os.path.join(ROOT, "services", "keyword_evidence_service.py"),
+              encoding="utf-8").read()
+    assert ("from analysis.evidence_windows import evidence_window_bounds as "
+            "_window_bounds") in kw
 
 
 # ════════════════ 2. Deduplication / natural key ════════════════
@@ -919,7 +928,9 @@ def test_drawer_has_no_negative_keyword_action():
     assert "negative keyword" not in drawer_region.lower() or \
         "no negative keyword is applied" in drawer_region
     assert "Copy term" in drawer_region                  # copying IS permitted
-    assert "Open Campaign Evidence" in drawer_region
+    # PR-ADS-177C: Campaign Evidence is retired; the link opens Campaigns.
+    assert "Open Campaigns" in drawer_region
+    assert "Open Campaign Evidence" not in drawer_region
     assert "Open Flagged Waste Terms" in drawer_region
     assert "Patterns with these words" in drawer_region
 
@@ -945,8 +956,11 @@ def test_single_sidebar_search_terms_item():
 
 
 def test_header_is_concise_without_source_pill_clutter():
-    assert "Queries reported by Google Ads, with review state and waste evidence." in ST_MODULE
-    # No permanent Google Ads / Read-only pills or Depends-on strip in the page.
+    # PR-ADS-177C: the page header is the one Keywords & Search Terms page's
+    # (index.html, the Dashboard design); the shell carries only the window.
+    assert "<h1 class=\"page-title\">Keywords &amp; Search Terms</h1>" in INDEX_HTML
+    assert "Google Ads search queries and keywords over an evidence window" in INDEX_HTML
+    # No Depends-on strip in the page.
     assert "Depends on" not in ST_MODULE
     assert ST_MODULE.count("read-only-notice") == 0
     assert "renderEvidenceTruthStrip" not in ST_MODULE
@@ -1030,7 +1044,9 @@ def test_freshness_single_compact_state():
 
 
 def test_help_content_updated():
-    help_entry = _region(APP_JS, '"search-terms": {\n    what: "Search Terms + Patterns',
+    # PR-ADS-177C: one Keywords & Search Terms help entry (the Keyword
+    # Evidence help folded in); the search-term needles are unchanged.
+    help_entry = _region(APP_JS, '"search-terms": {\n    what: "Keywords & Search Terms',
                          "},")
     for needle in ["source_date", "Verified Search-Term Spend",
                    "Reporting Coverage", "FX-converted to USD",
@@ -1044,18 +1060,23 @@ def test_help_content_updated():
 
 
 def test_campaign_evidence_page_untouched_by_this_pr():
-    # Regression guardrail: Campaign Evidence renderers still present + intact.
-    for fn in ["function renderCampaignEvidencePage", "function renderCampaignEvidenceKPIs",
-               "function renderCampaignDecisionTable", "function openCampaignDrawer"]:
-        assert fn in APP_JS, fn
-    # The campaign drawer's N-Gram drilldown still works (legacy endpoint + mix pills).
-    assert "loadCampaignDrawerNgrams" in APP_JS
-    assert "function ngramWasteStateMix" in APP_JS
-    assert "/api/search-terms/ngrams" in APP_JS
+    # PR-ADS-177C: Campaign Evidence, its drawer and that drawer's N-Gram
+    # drilldown (the one reader of /api/search-terms/ngrams) are retired. The
+    # guardrail is now that they STAY gone (tests/test_pr_ads_177c_*) and that
+    # the Patterns tab — the live word-level analysis — reads the canonical
+    # search-term evidence.
+    for fn in ["function renderCampaignEvidencePage", "function openCampaignDrawer",
+               "loadCampaignDrawerNgrams", "function ngramWasteStateMix"]:
+        assert fn not in APP_JS, fn
+    assert "/api/search-terms/ngrams" not in APP_JS
+    assert "/api/search-term-evidence/patterns" in APP_JS
 
 
 def test_campaign_prefill_from_campaign_drawer_still_works():
-    assert "ngramsPrefill = { campaign: _campName }" in APP_JS
+    # PR-ADS-177C: the campaign drawer that set the prefill is retired; the
+    # Patterns tab still honours a campaign prefill (navigate("ngrams") with
+    # ngramsPrefill), by display name.
+    assert "if (ngramsPrefill && ngramsPrefill.campaign)" in APP_JS
     assert "_patPendingCampaignName" in ST_MODULE
 
 

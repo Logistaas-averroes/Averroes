@@ -463,10 +463,16 @@ def test_33_without_the_resolver_no_deal_is_placed_on_a_campaign():
 
 
 def test_34_production_binds_campaign_evidences_own_resolver():
+    # PR-ADS-177C: Campaign Evidence's resolver (``_assign_lead``) moved,
+    # unchanged, to services/campaign_label_resolver.assign_label when that
+    # page was retired; production binds it through build_resolver.
     src = (_ROOT / "services/canonical_customer_revenue_service.py") \
         .read_text(encoding="utf-8")
-    assert "_assign_lead" in src and "fuzzy" in src
+    assert "from services.campaign_label_resolver import build_resolver" in src
+    assert "fuzzy" in src
     assert "fuzzy_match_score" not in src
+    resolver = (_ROOT / "services/campaign_label_resolver.py").read_text(encoding="utf-8")
+    assert "def assign_label(" in resolver and "fuzzy_match_score" not in resolver
 
 
 def test_35_roas_and_cac_are_never_published():

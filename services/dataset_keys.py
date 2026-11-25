@@ -166,11 +166,10 @@ KEYWORD_FACTS_DATASET = "keyword_facts"
 SEARCH_TERMS_SOURCE = PLATFORM_EVIDENCE_SOURCE
 SEARCH_TERMS_DATASET = "search_terms"
 
-# The LEGACY per-run keyword snapshot (`keywords`). Registered because live
-# non-evidence surface still reads it (the Dashboard keyword themes; the
-# campaign drill-down preview migrated in PR-ADS-157), so its rows must keep
-# resolving. It is
-# never the source of a Keyword Evidence figure.
+# The LEGACY per-run keyword snapshot (`keywords`). RETIRED in PR-ADS-177C:
+# no writer, no reader (`freshness_service.RETIRED_DATASETS`). The key stays
+# named so its historical sync_state row is reported as retired, never as a
+# live dataset. It was never the source of a Keyword Evidence figure.
 LEGACY_KEYWORD_SNAPSHOT_SOURCE = PLATFORM_EVIDENCE_SOURCE
 LEGACY_KEYWORD_SNAPSHOT_DATASET = "keywords"
 

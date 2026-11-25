@@ -589,6 +589,15 @@ def _seed_mixed_population():
     assert _scalar("SELECT COUNT(*) FROM search_terms") == 4
 
 
+# PR-ADS-177C retired the three handlers these tests first executed —
+# `/api/search-terms`, `/api/search-terms/summary` and `/api/search-terms/ngrams`
+# (they answer 404; nothing in the UI read them). Each property is PORTED onto
+# the live route that answers the same question for the one Keywords & Search
+# Terms page: the Terms tab (`/api/search-term-evidence`) and the Patterns tab
+# (`/api/search-term-evidence/patterns`). Same seeded population, same claims.
+# The live routes publish native spend until FX is proven, so the dedup claim
+# is made on `spend_native` (5.0 GBP, never 10.0) and on clicks/impressions.
+
 @_needs_pg
 def test_13_raw_search_terms_returns_only_the_canonical_row(pg, monkeypatch):  # noqa: F811
     """One row out, not four — and specifically the one carrying the account."""
@@ -596,7 +605,7 @@ def test_13_raw_search_terms_returns_only_the_canonical_row(pg, monkeypatch):  #
     _seed_mixed_population()
 
     client = _api_client()
-    r = client.get("/api/search-terms?days=30&limit=500",
+    r = client.get("/api/search-term-evidence?window=30d&page_size=200",
                    cookies=_viewer_cookies())
     assert r.status_code == 200, r.text
     body = r.json()
@@ -604,7 +613,8 @@ def test_13_raw_search_terms_returns_only_the_canonical_row(pg, monkeypatch):  #
 
     assert len(rows) == 1, [row["search_term"] for row in rows]
     assert rows[0]["search_term"] == "freight forwarding software"
-    assert rows[0]["spend_usd"] == pytest.approx(5.0)
+    assert rows[0]["spend_native"] == pytest.approx(5.0)
+    assert rows[0]["source_rows"] == 1
     # The other three are not in the payload under any label.
     terms = {row["search_term"] for row in rows}
     assert "another account term" not in terms
@@ -613,70 +623,51 @@ def test_13_raw_search_terms_returns_only_the_canonical_row(pg, monkeypatch):  #
 
 @_needs_pg
 def test_13b_a_filter_argument_still_binds_to_the_right_column(pg, monkeypatch):  # noqa: F811
-    """Parameter order, tested by making it matter.
-
-    The scope contributes its own placeholders at the FRONT of the WHERE clause.
-    If the handler appended the caller's filter values in the wrong order, the
-    query would silently compare the search text against a date or an account
-    id — and return zero rows, which looks exactly like "no matches".
-    """
+    """Parameter order, tested by making it matter: the scope's own
+    placeholders come first, so a misbound filter would silently compare the
+    search text against a date or an account id and return nothing."""
     _init_db(pg, monkeypatch)
     _seed_mixed_population()
     _insert(customer_id=ACCOUNT, source_date=date.today(), spend_usd=2.0,
-            search_term="second canonical term", campaign_name="brand - de",
-            match_type="EXACT")
+            cost_micros=2_000_000, search_term="second canonical term",
+            campaign_name="brand - de", campaign_id="20", match_type="EXACT")
 
     client, cookies = _api_client(), _viewer_cookies()
+    base = "/api/search-term-evidence?window=30d&page_size=200"
 
-    hit = client.get("/api/search-terms?days=30&limit=500&q=forwarding",
-                     cookies=cookies).json()
+    hit = client.get(base + "&q=forwarding", cookies=cookies).json()
     assert [r["search_term"] for r in hit["rows"]] == \
         ["freight forwarding software"]
 
-    by_campaign = client.get(
-        "/api/search-terms?days=30&limit=500&campaign=brand - de",
-        cookies=cookies).json()
+    by_campaign = client.get(base + "&campaign=20", cookies=cookies).json()
     assert [r["search_term"] for r in by_campaign["rows"]] == \
         ["second canonical term"]
 
-    by_match = client.get(
-        "/api/search-terms?days=30&limit=500&match_type=EXACT",
-        cookies=cookies).json()
-    assert [r["search_term"] for r in by_match["rows"]] == \
-        ["second canonical term"]
-
-    # A filter matching nothing returns nothing — proving the empty results
-    # above are real filtering, not a misbound parameter matching nothing.
-    assert client.get("/api/search-terms?days=30&q=zzz-no-such-term",
-                      cookies=cookies).json()["rows"] == []
+    # A filter matching nothing returns nothing — proving the results above
+    # are real filtering, not a misbound parameter matching nothing.
+    assert client.get(base + "&q=zzz-no-such-term", cookies=cookies).json()["rows"] == []
 
 
 @_needs_pg
 def test_14_the_summary_totals_are_not_doubled(pg, monkeypatch):  # noqa: F811
-    """The number a person reads and acts on.
-
-    Unscoped this reported 34.0 spend over 4 terms. The twin alone accounted
-    for 5.0 of that — the same clicks and the same impressions counted twice,
-    from SQL that looked entirely reasonable.
-    """
+    """The number a person reads and acts on. Unscoped, the twin alone counted
+    the same clicks and the same impressions twice."""
     _init_db(pg, monkeypatch)
     _seed_mixed_population()
 
-    r = _api_client().get("/api/search-terms/summary?days=30",
+    r = _api_client().get("/api/search-term-evidence?window=30d&page_size=200",
                           cookies=_viewer_cookies())
     assert r.status_code == 200, r.text
-    summary = r.json()["summary"]
+    body = r.json()
+    kpis = body["kpis"]
 
-    assert summary["total_terms"] == 1
-    assert summary["unique_search_terms"] == 1
-    assert summary["total_spend_usd"] == pytest.approx(5.0)
-    assert summary["total_clicks"] == 3
-    assert summary["total_impressions"] == 40
-
-    # The denominator behind the derived rates is the same single row, so the
-    # averages describe one observation rather than an average of a fact and
-    # its own duplicate.
-    assert r.json()["data_quality"]["rows_in_window"] == 1
+    assert kpis["reported_terms"] == 1
+    assert kpis["unique_search_terms"] == 1
+    assert kpis["clicks"] == 3
+    assert body["pagination"]["total_count"] == 1
+    (row,) = body["rows"]
+    assert row["impressions"] == 40
+    assert row["spend_native"] == pytest.approx(5.0)
 
 
 @_needs_pg
@@ -687,52 +678,54 @@ def test_15_ngrams_are_built_from_canonical_rows_only(pg, monkeypatch):  # noqa:
     _init_db(pg, monkeypatch)
     _seed_mixed_population()
 
-    r = _api_client().get("/api/search-terms/ngrams?days=30",
-                          cookies=_viewer_cookies())
-    assert r.status_code == 200, r.text
-    body = r.json()
+    for n in (1, 2):
+        r = _api_client().get(f"/api/search-term-evidence/patterns?window=30d&n={n}",
+                              cookies=_viewer_cookies())
+        assert r.status_code == 200, r.text
+        body = r.json()
 
-    grams = {g["ngram"] for g in body["rows"]}
-    assert grams, body
-    assert any("freight" in g for g in grams)
-    # Words that exist ONLY in the excluded rows must not appear at all.
-    assert not any("windsor" in g for g in grams)
-    assert not any("another" in g for g in grams)
-    assert not any("account" in g for g in grams)
+        grams = {g["pattern"] for g in body["rows"]}
+        assert grams, body
+        assert any("freight" in g for g in grams)
+        # Words that exist ONLY in the excluded rows must not appear at all.
+        assert not any("windsor" in g for g in grams)
+        assert not any("another" in g for g in grams)
+        assert not any("account" in g for g in grams)
+        assert body["kpis"]["terms_analysed"] == 1
 
-    for gram in body["rows"]:
-        # Spend and row counts are summed per n-gram; the twin would have
-        # doubled every one of them.
-        assert gram["total_spend_usd"] == pytest.approx(5.0), gram["ngram"]
-        assert gram["row_count"] == 1, gram["ngram"]
+        for gram in body["rows"]:
+            # Terms and clicks are counted per pattern; the twin would have
+            # doubled every one of them.
+            assert gram["terms"] == 1, gram["pattern"]
+            assert gram["clicks"] == 3, gram["pattern"]
 
 
 @_needs_pg
-@pytest.mark.parametrize("path", ["/api/search-terms",
-                                  "/api/search-terms/summary",
-                                  "/api/search-terms/ngrams"])
+@pytest.mark.parametrize("path", ["/api/search-term-evidence",
+                                  "/api/search-term-evidence/patterns",
+                                  "/api/search-term-evidence/flagged"])
 def test_15b_every_endpoint_fails_closed_on_an_unresolved_account(
         pg, monkeypatch, path):  # noqa: F811
-    """Executed, not inspected. With no account configured each endpoint
-    returns an empty, explicitly-unavailable payload — not the whole table, and
-    not a 500."""
+    """Executed, not inspected. With no account configured each live route of
+    the Keywords & Search Terms page returns an empty, explicitly-unavailable
+    payload — not the whole table, and not a 500."""
     _init_db(pg, monkeypatch)
     _seed_mixed_population()
     monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
 
-    r = _api_client().get(f"{path}?days=30", cookies=_viewer_cookies())
+    r = _api_client().get(f"{path}?window=30d", cookies=_viewer_cookies())
     assert r.status_code == 200, r.text
     body = r.json()
 
-    # `rows` carries the fact rows for two of the three endpoints and the
-    # n-gram aggregates for the third, so one assertion covers all of them.
     assert not body.get("rows")
-    summary = body.get("summary") or {}
-    assert not summary.get("total_terms")
-    assert not summary.get("total_spend_usd")
+    kpis = body.get("kpis") or {}
+    for k in ("reported_terms", "unique_search_terms", "terms_analysed",
+              "flagged_terms", "clicks"):
+        assert not kpis.get(k), (k, kpis.get(k))
     # And it SAYS so, rather than presenting an empty table as an answer.
-    blob = json.dumps(body)
-    assert scope_mod.REASON_CUSTOMER_NOT_CONFIGURED in blob, blob[:600]
+    assert body.get("db_unavailable") is True, json.dumps(body)[:600]
+    assert body.get("unavailable_reason") == scope_mod.REASON_CUSTOMER_NOT_CONFIGURED, \
+        json.dumps(body)[:600]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -762,7 +755,10 @@ SCOPED_CONSUMERS = {
     "db/search_term_repository.py::fetch_search_term_aggregates",
     "db/search_term_repository.py::fetch_search_term_daily_costs",
     "db/search_term_repository.py::fetch_search_term_daily_for_campaign",
-    "api/server.py::_canonical_search_term_scope",
+    # PR-ADS-177C: "api/server.py::_canonical_search_term_scope" stood here;
+    # it was the scope of the three retired /api/search-terms* handlers and
+    # was deleted with them (their fail-closed claims are ported to the live
+    # routes in test_15b above).
     "api/server.py::_build_search_terms_verdict",
     "scripts/audit_search_term_waste_truth.py::_canonical_facts",
     "scripts/verify_search_terms_pipeline.py::_check_db",

@@ -179,60 +179,11 @@ CONSUMERS: list[dict] = [
        operational=True),
 
     # ── Platform Evidence ───────────────────────────────────────────────────
-    _c("Campaign Evidence table + KPI strip",
-       "PR-ADS-161B: publishes ACQUISITION-COHORT SQLs, cohort CPQL and closed-won "
-       "deals per campaign, with an unattributed bucket. Still COMPUTES and returns "
-       "the legacy confirmed_sqls / confirmed_sqls_total / overall_cpql_usd / "
-       "mapping_coverage / sql_reconciliation fields (declared in `legacy_sql`, "
-       "not rendered). Junk and junk rate remain the lead-quality classification.",
-       endpoint="GET /api/campaigns",
-       service_function="services.campaign_evidence_service.build_campaign_evidence / "
-                        "_row / _cohort_row_fields / _cohort_summary_fields / _build_summary",
-       repository_source="db.crm_funnel_repository.fetch_acquisition_cohort_contacts "
-                         "(published SQLs); db.revenue_repository.fetch_lead_quality "
-                         "(legacy fields, junk)",
-       source_table=f"{LIFECYCLE_TABLE} (published) + {LEGACY_TABLE} (legacy fields)",
-       sql_definition=COHORT_DEF,
-       date_field=COHORT_DATE, dedup_key=COHORT_DEDUP, windows=EVIDENCE + ["days=1..365"],
-       scope="google_ads cohort = campaign (mapped) + unattributed_google_ads; "
-             "excluded_non_google disclosed",
-       classification=CLS_MIXED,
-       code_location="services/campaign_evidence_service.py:build_campaign_evidence",
-       migration_notes="PR-ADS-161B migrated the PUBLISHED SQL, CPQL and outcome "
-                       "status to the canonical cohort; the frontend gate reads "
-                       "`cohort.sql_status`. MIXED only because the legacy fields "
-                       "are still computed and returned for other readers and "
-                       "audits (scripts/audit_campaign_evidence_certification.py). "
-                       "Removing them completes the migration.",
-       truth_status="cohort counts None when the funnel is unreadable; SQL withheld "
-                    "when the watermark is unknown or buckets fail to reconcile; CPQL "
-                    "withheld on a stale/unknown source, unavailable without spend/FX",
-       headline=True, row=True, cpql=True, filters=True, sorting=True, drawer=True,
-       decision=True, executive=True, operational=True),
-    _c("Campaign drawer (headline, lead quality, countries, recent leads)",
-       "PR-ADS-161B: the headline KPIs are the cohort row (Leads acquired, Cohort "
-       "SQLs, CPQL), gated on the detail response's OWN cohort verdict. The Lead "
-       "Quality and Country splits and Recent Leads still read the legacy "
-       "population, labelled 'Qualified (lead status)'. Closed-won is not shown.",
-       endpoint="GET /api/campaign-detail, GET /api/campaigns/{campaign_name}/detail",
-       service_function="services.campaign_evidence_service.build_campaign_drawer_evidence; api.server._build_campaign_detail",
-       repository_source="db.revenue_repository.fetch_campaign_lead_detail (splits); "
-                         "build_campaign_evidence_row (headline)",
-       source_table=f"{LIFECYCLE_TABLE} (headline) + {LEGACY_TABLE} (splits)",
-       sql_definition=f"headline: {COHORT_DEF}; splits: status_category == _QUALIFIED",
-       date_field=f"headline: {COHORT_DATE}; splits: {LEGACY_DATE}",
-       dedup_key=f"headline: {COHORT_DEDUP}; splits: {LEGACY_DEDUP}", windows=EVIDENCE,
-       scope="campaign_attributable (one campaign)", classification=CLS_MIXED,
-       code_location="services/campaign_evidence_service.py:build_campaign_drawer_evidence",
-       migration_notes="Embeds keyword preview (attributed_sqls via platform attribution) "
-                       "and flagged-term preview. The temporal-dead-zone defect "
-                       "(renderCampaignDrawer read drawerSqlPub before its const "
-                       "declaration) is FIXED in PR-ADS-161B. Remaining legacy: "
-                       "fetch_campaign_lead_detail splits.",
-       truth_status="db_unavailable on envelope; drawer KPIs withheld via "
-                    "campaignRowSqlPublication(data.cohort, camp) — the detail "
-                    "response's verdict, never page state",
-       row=True, cpql=True, drawer=True, decision=True, operational=True),
+    # PR-ADS-177C: the consumers "Campaign Evidence table + KPI strip"
+    # (/api/campaigns) and "Campaign drawer (…)" (/api/campaign-detail) stood
+    # here. The page, its drawer, the endpoints and
+    # services/campaign_evidence_service.py are retired; the live campaign
+    # surfaces are the mart / Dashboard Campaigns consumers.
     _c(_CHANNEL_FUNNEL,
        "Channels page: contacts created in the window, by HubSpot original "
        "source, and how many have reached MQL / SQL / Opportunity / Customer "
@@ -249,7 +200,7 @@ CONSUMERS: list[dict] = [
        classification=CLS_CANONICAL,
        code_location="services/channel_funnel_service.py:build_channel_funnel",
        migration_notes="Same cohort, window days, SQL proof and publication "
-                       "verdict as Campaign Evidence, over all sources.",
+                       "verdict as the mart's campaign cohort, over all sources.",
        truth_status="totals and channels are None unless the one publication "
                     "verdict is published; withheld means absent",
        headline=True, row=True, operational=True),
@@ -359,8 +310,9 @@ CONSUMERS: list[dict] = [
                        "(fetch_lead_quality, CLS_LEGACY). Now the acquisition cohort, "
                        "one verdict (cohort.sql_status) on every row and total; the "
                        "cohort's own reconciliation replaces the PR-ADS-152 legacy one. "
-                       "Cross-page parity asserts it equal across five pages and "
-                       "against Campaign Evidence over the same days.",
+                       "Cross-page parity asserts it equal across the settled-day "
+                       "pages and (PR-ADS-177C) against an independent campaign-ID "
+                       "reading over the same days.",
        truth_status="None with the cohort reason when the verdict is not published (never 0)",
        headline=True, row=True, sorting=True, decision=True, executive=True, operational=True),
     _c("Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)",
@@ -423,8 +375,8 @@ CONSUMERS: list[dict] = [
        classification=CLS_CANONICAL,
        code_location="services/dashboard_campaigns_service.py:_campaign_status",
        migration_notes="PR-ADS-177A: republishes the mart's cohort; 'SQLs withheld' "
-                       "status when the count is withheld. Status vocabulary still "
-                       "differs from Campaign Evidence.",
+                       "status when the count is withheld. PR-ADS-177B: reads the "
+                       "settled campaign view the Campaigns page reads.",
        truth_status="kpis.sqls is the cohort total; None with its reason when withheld",
        headline=True, row=True, drawer=True, decision=True, executive=True, operational=True),
     _c("Dashboard Countries", "Country rows sqls, residual sqls, SQL producer status, regional mix.",
@@ -629,12 +581,16 @@ CONSUMERS: list[dict] = [
        code_location="services/cross_page_parity_service.py:METRIC_IDENTITIES",
        migration_notes="",
        truth_status="n/a"),
-    _c("Campaign Evidence certification gate", "PR-ADS-157 read-only certification of the campaign page.",
-       endpoint="python -m scripts.audit_campaign_evidence_certification",
-       service_function="scripts.audit_campaign_evidence_certification.run", repository_source="service payloads",
-       source_table="n/a", sql_definition="asserts population reconciliation", date_field="n/a", dedup_key="n/a",
-       windows=EVIDENCE, scope="campaign_attributable", classification=CLS_DIAGNOSTIC,
-       code_location="scripts/audit_campaign_evidence_certification.py:run",
+    _c("Campaigns page certification gate",
+       "PR-ADS-177C read-only certification of the live Campaigns surfaces (it "
+       "replaces the PR-ADS-157 Campaign Evidence certification).",
+       endpoint="python -m scripts.audit_campaigns_page_certification",
+       service_function="scripts.audit_campaigns_page_certification.run",
+       repository_source="service payloads",
+       source_table="n/a", sql_definition="asserts withheld-means-absent and conservation",
+       date_field="n/a", dedup_key="n/a",
+       windows=BUSINESS, scope="google_ads_cohort_sqls", classification=CLS_DIAGNOSTIC,
+       code_location="scripts/audit_campaigns_page_certification.py:run",
        migration_notes="n/a", truth_status="n/a"),
     _c("Search-term waste truth audit (CLI)", "Prints flagged-tab SQL evidence with a 'lifecycle SQLs' label.",
        endpoint="python -m scripts.audit_search_term_waste_truth",
@@ -701,8 +657,7 @@ def _m(rid, path, classification, consumer, patterns) -> dict:
     return _r(rid, path, classification, consumer, symbol="<module>", pattern=patterns)
 
 
-_CE = "Campaign Evidence table + KPI strip"
-_CD = "Campaign drawer (headline, lead quality, countries, recent leads)"
+# PR-ADS-177C: _CE / _CD (Campaign Evidence and its drawer) are retired.
 _KW = "Keyword Evidence table / drawer / CSV export"
 _ST = "Search Terms table / flagged tab / drawer / CSV export"
 _OVW = "Dashboard Overview KPI strip (google_ads_cohort_sqls + kpis.sqls)"
@@ -745,7 +700,7 @@ _PLATFORM = "Platform SQL attribution (keyword / search-term units)"
 _SQLTRUTH = "SQL-truth audit (/api/audit/sql-truth)"
 _FUNNELREC = "CRM funnel reconciliation (/api/crm-funnel/audit)"
 _PARITY = "Cross-page canonical parity"
-_CERT = "Campaign Evidence certification gate"
+_CERT = "Campaigns page certification gate"
 _STWASTE = "Search-term waste truth audit (CLI)"
 _GACONV = "Google Ads platform conversions (keyword / search-term / campaign snapshot / daily delta)"
 _JSONFALLBACK = "Legacy JSON revenue fallback (revenue_attribution_service._build_from_json)"
@@ -843,35 +798,17 @@ RULES: list[dict] = [
        symbol="fetch_sql_contacts"),
 
     # ── platform evidence services ──────────────────────────────────────────
-    _m("ce.module", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
-       ["contact_created_at_ref", "legacy_qualified_symbol", "sql_verdict_ref"]),
-    _r("ce.drawer", "services/campaign_evidence_service.py", CLS_LEGACY, _CD,
-       symbol=["build_campaign_drawer_evidence", "_lead_split", "_country_split",
-               "build_campaign_evidence_row"]),
-    _r("ce.service", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
-       symbol=["_add_lead", "_audit_block", "_build_summary", "_canonical_sql_reconciliation",
-               # PR-ADS-161B round 3: the legacy block's shape for the fallback.
-               "_unavailable_sql_reconciliation",
-               "_new_outcomes", "_outcome_status",
-               "unavailable_response", "_junk_rate", "_empty_summary",
-               # PR-ADS-161B: declares the legacy fields as legacy.
-               "_legacy_sql_block"]),
-    # PR-ADS-161B — the builder and the row now assemble BOTH families: the
-    # published cohort fields and the retained legacy ones.
-    _r("ce.service.mixed", "services/campaign_evidence_service.py", CLS_MIXED, _CE,
-       symbol=["build_campaign_evidence", "_row"]),
-    _r("ce.cohort", "services/campaign_evidence_service.py", CLS_CANONICAL, _CE,
-       symbol=["_cohort_row_fields", "_cohort_summary_fields", "_cohort_block",
-               "_safe_lifecycle_disclosure", "_lifecycle_disclosure_for",
-               "_unavailable_cohort_block", "cohort_verdict", "_publication"]),
-    # The module docstring and LEGACY_SQL_FIELDS describe both families.
-    _m("ce.module.161b", "services/campaign_evidence_service.py", CLS_MIXED, _CE,
-       ["confirmed_sqls_ref", "cpql_ref", "sql_reconciliation_ref"]),
+    # PR-ADS-177C: the ce.* rules (services/campaign_evidence_service.py)
+    # are removed with the module.
+    # The campaign-ID label resolver it held (moved, unchanged) and the parity
+    # audit's independent cohort reading over it.
+    _r("labelresolver.cohort", "services/campaign_label_resolver.py", CLS_CANONICAL,
+       _PARITY, symbol=["google_ads_cohort_sqls_by_campaign_id"]),
     _m("kw.module", "services/keyword_evidence_service.py", CLS_LEGACY, _KW, ["sql_verdict_ref"]),
     _r("kw.service", "services/keyword_evidence_service.py", CLS_LEGACY, _KW,
        symbol=["_canonical_keyword_reconciliation", "_filter_sql_state", "_keyword_drawer_sql_block",
                "_keyword_sql_attribution", "_sql_attribution_block", "build_keyword_evidence",
-               "_apply_keyword_sql", "build_keyword_drawer", "build_campaign_keyword_preview",
+               "_apply_keyword_sql", "build_keyword_drawer",
                "_sort_rows"]),
     _m("st.module", "services/search_term_evidence_service.py", CLS_LEGACY, _ST, ["sql_verdict_ref"]),
     _r("st.service", "services/search_term_evidence_service.py", CLS_LEGACY, _ST,
@@ -879,7 +816,7 @@ RULES: list[dict] = [
                "_search_term_drawer_sql_block", "_search_term_sql_attribution",
                "_search_term_sql_block", "build_flagged_search_terms", "build_search_term_evidence",
                "_apply_search_term_sql", "_flagged_kpis", "_flagged_priority",
-               "_flagged_truth_state", "build_search_term_drawer", "build_campaign_flagged_preview",
+               "_flagged_truth_state", "build_search_term_drawer",
                "_empty_flagged_kpis"]),
     _r("workbench", "services/campaign_identity_service.py", CLS_LEGACY, _WORKBENCH,
        symbol="build_mapping_review"),
@@ -1056,8 +993,11 @@ RULES: list[dict] = [
     _r("cohort.audit", "scripts/audit_marketing_outcome_cohorts.py", CLS_DIAGNOSTIC,
        _COHORT,
        symbol=["check_no_date_contamination", "check_no_write_paths",
-               "_code_without_docstrings", "_function_sources", "audit_window",
-               "withheld_exposures", "check_closed_won_not_published",
+               "_code_without_docstrings", "_function_sources",
+               # PR-ADS-177C: the per-window certification moved from Campaign
+               # Evidence onto the Campaigns surface (audit_window,
+               # withheld_exposures, check_closed_won_not_published removed).
+               "audit_campaign_cohort", "_cpql_keys", "_settled_instants",
                # PR-ADS-177A: the mart and Dashboard payloads.
                "mart_withheld_exposures", "mart_conservation_problems",
                "audit_mart_window", "_build_mart_payloads",
@@ -1228,9 +1168,15 @@ RULES: list[dict] = [
        ["confirmed_sqls_ref", "contact_created_at_ref"]),
 
     # ── revenue repository (query source of the legacy pages) ───────────────
-    _r("revrepo.lead_quality", "db/revenue_repository.py", CLS_LEGACY, _CE,
-       symbol=["fetch_lead_quality", "fetch_campaign_lead_detail", "fetch_campaign_pollution_report",
-               "fetch_lead_date_grain_health", "fetch_missing_event_date_leads"]),
+    # PR-ADS-177C: bound to Campaign Evidence (and listed
+    # fetch_campaign_lead_detail, its drawer's read, deleted with it) until the
+    # page was retired. Each read is bound to the consumer that still calls it.
+    _r("revrepo.lead_quality", "db/revenue_repository.py", CLS_LEGACY, _WORKBENCH,
+       symbol=["fetch_lead_quality"]),
+    _r("revrepo.lead_grain", "db/revenue_repository.py", CLS_LEGACY, _RAS,
+       symbol=["fetch_campaign_pollution_report", "fetch_lead_date_grain_health"]),
+    _r("revrepo.lead_missing_dates", "db/revenue_repository.py", CLS_LEGACY, _LEADREC,
+       symbol=["fetch_missing_event_date_leads"]),
     _r("revrepo.source", "db/revenue_repository.py", CLS_LEGACY, _SRC,
        symbol=["fetch_source_leads", "fetch_source_leads_daily"]),
     _r("revrepo.series", "db/revenue_repository.py", CLS_LEGACY, _REV, symbol="fetch_lead_daily_series"),
@@ -1242,14 +1188,14 @@ RULES: list[dict] = [
     # and "country_evidence.module" removed with the routes and the service.
     _r("api.leads", "api/server.py", CLS_LEGACY, _LEADS_API,
        symbol=["api_leads", "_lead_quality_sql_reconciliation"]),
-    _r("api.campaign_detail", "api/server.py", CLS_LEGACY, _CD, symbol="_build_campaign_detail"),
+    # PR-ADS-177C: "api.campaign_detail" (_build_campaign_detail) and
+    # "api.revenue" (get_revenue_attribution) removed with their routes.
     _r("api.gclid", "api/server.py", CLS_LEGACY, _GCLID, symbol="api_gclid_attribution"),
     _r("api.keyword", "api/server.py", CLS_LEGACY, _KW,
        symbol=["api_keyword_evidence", "api_keyword_evidence_export", "api_keyword_evidence_detail"]),
     _r("api.search_terms", "api/server.py", CLS_LEGACY, _ST,
        symbol=["api_search_term_evidence", "api_search_term_evidence_export",
                "api_search_term_evidence_flagged", "api_search_term_evidence_term"]),
-    _r("api.revenue", "api/server.py", CLS_MIXED, _RAS, symbol="get_revenue_attribution"),
     # PR-ADS-162H: "api.module" bound a module-level `sqls` field reference in
     # api/server.py to the report pipeline. The consumer is deleted and the rule
     # matched no occurrence; a module-level one written there now is unknown.
@@ -1289,20 +1235,23 @@ RULES: list[dict] = [
     # consumer of the customers / closed-won-deals identities. No SQL figure.
     _r("diag.parity.consumers", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="_build_consumers"),
-    # PR-ADS-177A: one SQL count across the Countries page, Dashboard
-    # Countries and Campaign Evidence over the same days. Reads, publishes nothing.
+    # PR-ADS-177A: one SQL count across the settled-day pages and (PR-ADS-177C)
+    # the independent campaign-ID reading over the same days. Reads, publishes
+    # nothing.
     _r("diag.parity.cohort", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
        # PR-ADS-177A-F1: and over the campaign view's days.
-       symbol=["_cohort_sql_parity", "_cohort_sql_parity_campaign_view"]),
+       symbol=["_cohort_sql_parity", "_cohort_sql_parity_campaign_view",
+               "_campaign_id_cohort_sqls"]),
     _r("diag.parity.cli", "scripts/audit_cross_page_canonical_parity.py", CLS_DIAGNOSTIC, _PARITY,
        symbol="main"),
-    # PR-ADS-161B round 3: the module-level regexes NAME the legacy fields in
-    # order to forbid Campaign Evidence surfaces from reading them.
-    _m("diag.cert.module", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT,
-       ["cpql_ref", "confirmed_sqls_ref", "sql_reconciliation_ref"]),
-    _r("diag.cert", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT,
-       symbol=["_audit_window", "check_frontend_gates", "check_summary_population_reconciliation",
-               "check_publication_rule", "check_reconciliation_scope"]),
+    # PR-ADS-177C: the Campaigns page certification (it replaces the retired
+    # Campaign Evidence certification). It names CPQL and the cohort's `sqls`
+    # fields in order to forbid / reconcile them; it publishes nothing.
+    _m("diag.cert.module", "scripts/audit_campaigns_page_certification.py", CLS_DIAGNOSTIC,
+       _CERT, ["cpql_ref", "sqls_field_ref"]),
+    _r("diag.cert", "scripts/audit_campaigns_page_certification.py", CLS_DIAGNOSTIC, _CERT,
+       symbol=["check_frontend_gates", "audit_window", "overview_shared_name_problems",
+               "run", "main"]),
     _r("diag.stwaste", "scripts/audit_search_term_waste_truth.py", CLS_MIXED, _STWASTE, symbol="main"),
     _r("diag.funnel_truth", "scripts/audit_crm_funnel_truth.py", CLS_DIAGNOSTIC, _FUNNELREC,
        symbol=["collect", "main"]),
@@ -1310,25 +1259,19 @@ RULES: list[dict] = [
        symbol=["collect", "main"]),
 
     # ── frontend: static/app.js by top-level function ───────────────────────
-    # PR-ADS-161B — the page publishes acquisition-cohort SQLs through one gate
-    # that reads `cohort.sql_status`; these render only cohort SQL fields.
-    _r("ui.campaign", "static/app.js", CLS_CANONICAL, _CE,
-       symbol=["campaignSqlPublication", "campaignSqlWithheld", "campaignCpqlNotPublished",
-               "campaignCohortAsOf", "campaignCohortReason",
-               "campaignCohortPopulationPartial", "campaignPartialCount",
-               "loadCampaignEvidence",
-               "renderCampaignEvidenceKPIs", "renderCampaignSqlReconciliation",
-               "renderCampaignEvidenceFilters", "filterCampaignEvidence", "sortCampaignEvidence",
-               "renderCampaignEvidenceRow", "renderCampaignDecisionTable"]),
-    # No SQL semantics of their own; unchanged by PR-ADS-161B.
-    _r("ui.campaign.chrome", "static/app.js", CLS_LEGACY, _CE,
-       symbol=["wireCampaignEvidenceControls", "applyEvidenceChrome",
-               "renderCampaignMappingCard"]),
-    # Headline = cohort row; the splits below it still read the legacy population.
-    _r("ui.campaign.drawer", "static/app.js", CLS_MIXED, _CD,
-       symbol=["renderCampaignDrawer"]),
-    _r("ui.campaign.drawer.legacy", "static/app.js", CLS_LEGACY, _CD,
-       symbol=["_appendDrawerEvidenceSections", "openCampaignDrawer"]),
+    # No SQL semantics of their own: the evidence pages' chrome (the Keywords &
+    # Search Terms page) and the mapping workbench card. Bound to Campaign
+    # Evidence until PR-ADS-177C retired it.
+    _r("ui.evidence.chrome", "static/app.js", CLS_LEGACY, _ST,
+       symbol=["applyEvidenceChrome"]),
+    _r("ui.workbench.card", "static/app.js", CLS_LEGACY, _WORKBENCH,
+       symbol=["renderCampaignMappingCard"]),
+    # PR-ADS-161B — the one acquisition-cohort gate, reading `cohort.sql_status`.
+    # PR-ADS-177C retired the Campaign Evidence renderers and drawer; the gate
+    # stays, used by every leads / SQLs figure (`cohortCountPublication`).
+    _r("ui.cohort_gate", "static/app.js", CLS_CANONICAL, _MART,
+       symbol=["campaignSqlPublication", "campaignRowSqlPublication",
+               "campaignCohortAsOf", "campaignCohortReason"]),
     _r("ui.overview", "static/app.js", CLS_MIXED, _OVW, symbol=["renderDashKpiRow", "dashSignalBody"]),
     # DASH_DELTA_VALENCE — the Dashboard delta-chip valence map, keyed `sqls` —
     # is a top-level literal, so the scanner attributes it to the function
@@ -1351,7 +1294,7 @@ RULES: list[dict] = [
     _r("ui.campaigns_tab", "static/app.js", CLS_CANONICAL, _CAMP,
        symbol=["renderDashboardCampaigns", "renderCampKpiRow", "campBubbleSVG",
                "renderCampPerformanceMap", "wireCampBubbleHover", "renderCampLeaderboard",
-               "wireCampDrawers", "renderCampTruthFooter", "loadCampaigns",
+               "wireCampDrawers", "renderCampTruthFooter",
                # PR-ADS-177B: the residual row (the cohort's contacts on no
                # campaign row); the keyword-theme panel is deleted.
                "renderCampLeaderboardResidual"]),
@@ -1421,58 +1364,11 @@ RULES: list[dict] = [
 # CPQL CONSUMERS (§8)
 # ═════════════════════════════════════════════════════════════════════════════
 CPQL_CONSUMERS: list[dict] = [
-    {
-        "consumer": "Campaign Evidence row cpql_usd",
-        "code_location": "services/campaign_evidence_service.py:_row",
-        "spend_numerator_source": "google_ads_campaign_daily_spend (canonical) per campaign_id, selected window",
-        "currency_fx_contract": "native GBP → USD via fx_rates per spend_date; usd None when any date lacks FX",
-        "sql_denominator_definition": LEGACY_DEF,
-        "sql_denominator_scope": "campaign_attributable (mapped rows)",
-        "sql_denominator_date_field": LEGACY_DATE,
-        "numerator_denominator_same_window": True,
-        "unmatched_sqls_excluded": True,
-        "denominator_incomplete_when_stage_dates_missing": "n/a (legacy denominator does not use stage dates); lifecycle 30d shows 40 SQL-stage contacts without entry date",
-        "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by cohort_cpql_usd",
-    },
-    {
-        "consumer": "Campaign Evidence row cohort_cpql_usd",
-        "code_location": "services/campaign_evidence_service.py:_cohort_row_fields",
-        "spend_numerator_source": "google_ads_campaign_daily_spend (canonical) per campaign_id, selected window, as published (rounded)",
-        "currency_fx_contract": "native GBP → USD via fx_rates per spend_date; unavailable when any date lacks FX",
-        "sql_denominator_definition": COHORT_DEF,
-        "sql_denominator_scope": "this campaign's acquisition-cohort SQLs",
-        "sql_denominator_date_field": COHORT_DATE,
-        "numerator_denominator_same_window": True,
-        "unmatched_sqls_excluded": True,
-        "denominator_incomplete_when_stage_dates_missing": "no — stage-proven SQLs without an entry date are counted; the gap is disclosed",
-        "publication": "published only when the cohort SQL count is published, the source is fresh, identity mappings are readable and SQLs > 0; N/A at zero; withheld/unavailable otherwise",
-    },
-    {
-        "consumer": "Campaign Evidence summary cohort_cpql_usd",
-        "code_location": "services/campaign_evidence_service.py:_cohort_summary_fields",
-        "spend_numerator_source": "account-wide canonical USD spend total (all Google Ads campaigns), selected window",
-        "currency_fx_contract": "total_spend_usd None unless fx_complete → unavailable",
-        "sql_denominator_definition": COHORT_DEF,
-        "sql_denominator_scope": "ALL Google Ads cohort SQLs = campaign + unattributed (same scope as the numerator)",
-        "sql_denominator_date_field": COHORT_DATE,
-        "numerator_denominator_same_window": True,
-        "unmatched_sqls_excluded": False,
-        "denominator_incomplete_when_stage_dates_missing": "no — see row entry",
-        "publication": "published when the cohort is published and the source fresh; withheld on a stale (False) or unknown (None) source; not_applicable at zero SQLs",
-    },
-    {
-        "consumer": "Campaign Evidence overall_cpql_usd",
-        "code_location": "services/campaign_evidence_service.py:_build_summary",
-        "spend_numerator_source": "account-wide canonical USD spend total (all Google Ads campaigns)",
-        "currency_fx_contract": "total_spend_usd None unless fx_complete",
-        "sql_denominator_definition": LEGACY_DEF,
-        "sql_denominator_scope": "campaign_attributable (mapped_sqls only)",
-        "sql_denominator_date_field": LEGACY_DATE,
-        "numerator_denominator_same_window": True,
-        "unmatched_sqls_excluded": True,
-        "denominator_incomplete_when_stage_dates_missing": "n/a (legacy); overall_cpql_scope = complete|mapped_only discloses unmatched/excluded SQLs",
-        "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by summary.cohort_cpql_usd",
-    },
+    # PR-ADS-177C: four Campaign Evidence entries stood here (row cpql_usd,
+    # row cohort_cpql_usd, summary cohort_cpql_usd, overall_cpql_usd). The page
+    # and its service are retired; no live campaign surface publishes a CPQL
+    # (PR-ADS-177B dropped the column; audit_campaigns_page_certification and
+    # audit_marketing_outcome_cohorts fail on a CPQL key).
     {
         # PR-ADS-162H: this was "(weekly/monthly report table)", computed by
         # analysis.core.run_campaign_truth and published in the emailed report.
@@ -1513,27 +1409,10 @@ CPQL_CONSUMERS: list[dict] = [
 # DECISION SURFACES (§8)
 # ═════════════════════════════════════════════════════════════════════════════
 DECISION_SURFACES: list[dict] = [
-    # PR-ADS-161B — all three now decide on the acquisition-cohort SQLs the
-    # page publishes, and refuse when the cohort is not published. An unknown
-    # SQL count yields 'Data unavailable', never 'Spend without SQL proof'.
-    {"surface": "Campaign Evidence outcome_status 'SQL producer' / 'Spend without SQL proof'",
-     "code_location": "services/campaign_evidence_service.py:_outcome_status",
-     "sql_definition": COHORT_DEF, "scope": "campaign (acquisition cohort)",
-     "date_field": COHORT_DATE,
-     "kind": "verdict", "gated": "frontend campaignSqlPublication() (cohort.sql_status)",
-     "evidence_kind": "row evidence"},
-    {"surface": "Campaign Evidence has_sql / no_sql outcome filter",
-     "code_location": "static/app.js:filterCampaignEvidence",
-     "sql_definition": COHORT_DEF, "scope": "campaign (acquisition cohort)",
-     "date_field": COHORT_DATE,
-     "kind": "filter", "gated": "disabled unless the cohort is published",
-     "evidence_kind": "row evidence"},
-    {"surface": "Campaign Evidence sqls / cpql sort",
-     "code_location": "static/app.js:sortCampaignEvidence",
-     "sql_definition": COHORT_DEF, "scope": "campaign (acquisition cohort)",
-     "date_field": COHORT_DATE,
-     "kind": "sort", "gated": "disabled unless the cohort is published",
-     "evidence_kind": "row evidence"},
+    # PR-ADS-177C: three Campaign Evidence surfaces stood here (its
+    # outcome_status, has_sql / no_sql filter and sqls / cpql sort), retired
+    # with the page. The live campaign decision is Dashboard Campaigns'
+    # _campaign_status and the mart's classify_verdict (below).
     {"surface": "Keyword Evidence sql_state filter and attributed_sqls sort",
      "code_location": "services/keyword_evidence_service.py:_filter_sql_state",
      "sql_definition": LEGACY_DEF, "scope": "keyword_attributable", "date_field": LEGACY_DATE,
@@ -1590,17 +1469,20 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
     {"id": "reconciliation.non_sql_gap_downgrades_sql_status",
      "summary": "_reconciliation_status turns partial on stale/missing classification of ANY "
                 "in-window contact; a non-SQL contact (latest status unknown) downgrades the "
-                "Campaign Evidence SQL reconciliation to partial and withholds the aggregate.",
+                "legacy SQL reconciliation to partial and withholds the aggregate. (Its "
+                "Campaign Evidence consumer was retired in PR-ADS-177C.)",
      "code_location": "services/canonical_contact_outcome_service.py:_reconciliation_status"},
     {"id": "date.creation_vs_stage_entry",
      "summary": "Legacy consumers window SQLs by contact_created_at; the lifecycle contract "
                 "windows by date_entered_sql. The same contact lands in different windows.",
      "code_location": "services/crm_funnel_reconciliation_service.py:compare_sql_counts"},
     {"id": "date.run_date_windows",
-     "summary": "/api/leads windows the leads table by run_date; Campaign "
-                "Evidence windows the same table by contact_created_at under the "
-                "same Evidence Window label. (PR-ADS-176C retired the Geo country "
-                "summary, the other run_date reader.)",
+     "summary": "/api/leads windows the leads table by run_date; the campaign "
+                "identity workbench reads the same table by contact_created_at "
+                "(fetch_lead_quality). (PR-ADS-176C retired the Geo country "
+                "summary, the other run_date reader; PR-ADS-177C retired Campaign "
+                "Evidence, which windowed it by contact_created_at under the same "
+                "Evidence Window label.)",
      "code_location": "api/server.py:api_leads"},
     # PR-ADS-162H: "doctrine.third_snapshot_population" stood here —
     # campaigns.confirmed_sqls counted mql_status literals from a JSON pull with
@@ -1626,10 +1508,8 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
     {"id": "ui.channels_sums_none_as_zero",
      "summary": "Dashboard Channels total_sqls sums withheld channels as 0.",
      "code_location": "services/dashboard_channels_service.py:_build_kpis"},
-    {"id": "ui.campaign_drawer_tdz",
-     "summary": "renderCampaignDrawer reads drawerSqlPub before its const declaration "
-                "(temporal dead zone) — the drawer's SQL gate cannot execute as written.",
-     "code_location": "static/app.js:renderCampaignDrawer"},
+    # PR-ADS-177C: "ui.campaign_drawer_tdz" stood here (fixed in PR-ADS-161B);
+    # renderCampaignDrawer is deleted with the Campaign Evidence drawer.
     # PR-ADS-177A: "verdict.withheld_sql_becomes_zero" stood here —
     # classify_verdict used sqls_for_verdict = 0 when lead metrics were
     # withheld. _finalize_row now gives a row whose verdict depends on a
@@ -1639,12 +1519,14 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
                 "status_category = qualified population.",
      "code_location": "scripts/audit_search_term_waste_truth.py:main"},
     {"id": "gate.backend_never_enforces_reconciliation",
-     "summary": "Narrowed by PR-ADS-161B. Campaign Evidence's backend now DECIDES "
-                "publication (cohort.sql_status / cpql_status) and returns CPQL as None "
-                "unless published — but it still returns the cohort SQL COUNTS beside a "
-                "withheld status, and static/app.js:campaignSqlPublication withholds their "
-                "display. Every other page: no backend withholding, unchanged.",
-     "code_location": "services/campaign_evidence_service.py:_cohort_block; "
+     "summary": "Narrowed by PR-ADS-161B and PR-ADS-177A. The mart's cohort contract "
+                "DECIDES publication (cohort.sql_status) and returns every count as None "
+                "unless published (withheld means absent); static/app.js:"
+                "campaignSqlPublication renders the withholding word. Campaign Evidence, "
+                "which returned counts beside a withheld status, was retired in "
+                "PR-ADS-177C. The legacy-doctrine pages (Keywords / Search Terms SQL "
+                "attribution): no backend withholding, unchanged.",
+     "code_location": "services/revenue_attribution_service.py:_cohort_contract_block; "
                       "static/app.js:campaignSqlPublication"},
 ]
 

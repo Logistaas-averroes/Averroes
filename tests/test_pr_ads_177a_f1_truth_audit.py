@@ -264,13 +264,15 @@ def test_n1_a_every_cohort_label_carries_its_window_end():
 
 def test_n1_b_parity_compares_the_campaign_view_days_like_for_like(monkeypatch):
     from services import cross_page_parity_service as parity
-    import services.campaign_evidence_service as ce
+    # PR-ADS-177C: the independent leg is the campaign-ID cohort reading
+    # (Campaign Evidence, its former source, is retired); the property is
+    # unchanged — it is read over exactly the campaign view's days.
     seen = {}
 
-    def _ce(window, now=None, bounds=None):
-        seen["bounds"] = bounds
-        return {"summary": {"cohort_sqls_google_ads": 4}}
-    monkeypatch.setattr(ce, "build_campaign_evidence", _ce)
+    def _independent(start, end, now):
+        seen["bounds"] = (start, end)
+        return 4
+    monkeypatch.setattr(parity, "_campaign_id_cohort_sqls", _independent)
     consumers = {
         "revenue_decision_mart": {"payload": {
             "cohort": {"sql_status": "published"}, "summary": {"sqls": 4},

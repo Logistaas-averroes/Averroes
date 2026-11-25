@@ -50,7 +50,9 @@ REQUIRED_HELP_PAGES = [
     # endpoints); see tests/test_pr_ads_162g_action_queue_reports_retired.py.
     "campaigns",
     "search-terms",
-    "keywords",
+    # PR-ADS-177C: "keywords" is the Keywords tab of the one Keywords & Search
+    # Terms page; #/keywords redirects there and its help lives under
+    # "search-terms" (above).
     # PR-ADS-176B: "geo" was deleted with its help entry; Countries is
     # "roas-countries" (below).
     # PR-ADS-178B: "leads", "opportunities" and "deals" are one page,

@@ -423,10 +423,13 @@ disclosure. A re-read never takes a day with verified spend to zero
   (`audit_marketing_outcome_cohorts.withheld_exposures` must be empty), and
   `static/app.js` renders the withholding word — never the number with a "not
   published" suffix. The one stated exception is the legacy family declared in
-  `legacy_sql`, which no Campaign Evidence surface may read (enforced by
-  `audit_campaign_evidence_certification`). The gate is `campaignSqlPublication(cohort)`:
+  `legacy_sql`, which no Campaign Evidence surface may read (its only
+  publisher, Campaign Evidence, was retired in PR-ADS-177C; no audit checks
+  this rule now). The gate is `campaignSqlPublication(cohort)`:
   the cohort is an **argument**; page surfaces pass the page response's, the
-  drawer passes its own `/api/campaign-detail` response's. A gate that reads
+  Campaigns drawer passes the cohort of the settled campaign-view response
+  its row came from (its deal list, `/api/revenue-performance/campaign-detail`,
+  carries no cohort; `/api/campaign-detail` is retired). A gate that reads
   page-global state authorises a drawer opened from another page with another
   request's verdict. Closed-won deals are not published on Campaign Evidence
   (`docs/44` §5); never call deals customers.
@@ -502,10 +505,12 @@ disclosure. A re-read never takes a day with verified spend to zero
 
   Reader-contract rows get them from `derive_period_revenue_per_ad_spend` /
   `derive_period_spend_per_customer_won`, with `ratio_kind` and the
-  disclosure. The Campaigns, Countries and Channels dashboard rows divide the
-  same published inputs themselves and carry no metadata. Those rows return
-  None, not 0, for zero revenue. The UI shows the disclosure beside every
-  period value. **Never put a figure under a key named `roas` / `cac`
+  disclosure. The Campaigns and Countries dashboard rows republish the mart
+  row's reader-contract ratio, with its metadata; the Channels dashboard rows
+  divide the same published inputs themselves and carry no metadata. A
+  published zero revenue over verified positive spend is a published 0.00 with
+  its disclosure; unknown or withheld revenue, or zero or unknown spend, is
+  never 0. The UI shows the disclosure beside every period value. **Never put a figure under a key named `roas` / `cac`
   (`geo_roas`, `google_ads_roas` …) or a "ROAS"/"CAC" label on a period
   ratio — nor ROAS/CAC prose in any API string.** Audit check 18
   (`no_period_ratio_named_roas_or_cac`) fails on any of these (`docs/48_*` §4).

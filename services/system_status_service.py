@@ -78,7 +78,8 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
     "search_terms": {
         "label": "Search Terms",
         "source": "google_ads_api",
-        "page": "Search Terms",
+        # PR-ADS-177C: one Keywords & Search Terms page.
+        "page": "Keywords & Search Terms",
         "depends_on": [],
         # PR-ADS-153F: "ngrams" dropped — n-grams are computed on demand FROM
         # search terms and have no dataset of their own, so search terms cannot
@@ -126,17 +127,13 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": ["meta_ads_spend"],
         "blocks": [],
     },
-    "keywords": {
-        "label": "Keywords (legacy snapshot)",
-        "source": "google_ads_api",
-        "page": None,
-        "depends_on": [],
-        "blocks": [],
-    },
+    # PR-ADS-177C: "keywords" (the legacy keyword snapshot) is retired; nothing
+    # writes or reads it.
     "keyword_facts": {
         "label": "Keyword Evidence",
         "source": "google_ads_api",
-        "page": "Keywords",
+        # PR-ADS-177C: the Keywords tab of Keywords & Search Terms.
+        "page": "Keywords & Search Terms",
         "depends_on": [],
         "blocks": [],
     },
@@ -231,7 +228,7 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     # from one platform and one set of credentials.
     "google_ads_api": {
         "label": "Google Ads API",
-        "datasets": ["search_terms", "keywords", "keyword_facts",
+        "datasets": ["search_terms", "keyword_facts",
                      "geo", "canonical_spend", "canonical_geo"],
     },
     # PR-ADS-171A: the Meta Marketing API — its own platform and credential.
@@ -272,7 +269,9 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "dashboard": ["canonical_spend", "leads", "waste_terms"],
     "campaigns": ["canonical_spend"],
     "waste": ["waste_terms", "search_terms"],
-    "search-terms": ["search_terms"],
+    # PR-ADS-177C: one Keywords & Search Terms page; its Keywords tab reads
+    # durable keyword facts ("keywords" is a retired page key).
+    "search-terms": ["search_terms", "keyword_facts"],
     # PR-ADS-153F: the N-Gram page's only real dependency is search_terms.
     "ngrams": ["search_terms"],
     # PR-ADS-176C: "geo" removed. It mapped the retired `#/geo` page (and
@@ -282,7 +281,6 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     # PR-ADS-153F: Countries depends on canonical geo spend and the campaign
     # total it must reconcile against.
     "countries": ["canonical_geo", "canonical_spend"],
-    "keywords": ["keyword_facts"],
     "leads": ["leads"],
     # PR-ADS-163B: "deals" removed. It mapped the Deals page to the legacy
     # `deals` snapshot, which that page does not read: once the snapshot's row

@@ -18,7 +18,8 @@ REQUIRED_ROUTE_KEYS = [
     # PR-ADS-176B: "geo" (the Countries evidence page) was deleted; #/geo
     # redirects to "roas-countries", the one Countries page. See
     # tests/test_pr_ads_176b_countries_one_page.py.
-    "keywords",
+    # PR-ADS-177C: "keywords" is the Keywords tab of "search-terms"; #/keywords
+    # redirects there. See tests/test_pr_ads_177c_campaign_feed_retired.py.
     # PR-ADS-178B: "leads" and "deals" were merged into "pipeline"; #/leads and
     # #/deals redirect to its sections. See
     # tests/test_pr_ads_178b_pipeline_one_page.py.
@@ -148,7 +149,8 @@ def test_revenue_attribution_section_exists():
     # PR-ADS-177B: the campaign one is the Campaigns page itself, the
     # strip's first tab.
     strip = HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
-    assert re.findall(r'data-page="([a-z0-9-]+)"', strip) == ["campaigns", "keywords", "search-terms"]
+    # PR-ADS-177C: Keywords is a tab of the one Keywords & Search Terms page.
+    assert re.findall(r'data-page="([a-z0-9-]+)"', strip) == ["campaigns", "search-terms"]
     assert 'data-page="roas-campaigns"' not in HTML
     assert 'data-section="countries"' not in HTML
     assert 'data-page="roas-countries" data-nav-item="countries"' in HTML

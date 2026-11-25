@@ -32,14 +32,16 @@ EVIDENCE_MODULE = open(os.path.join(ROOT, "analysis", "evidence_windows.py"),
                       encoding="utf-8").read()
 
 EVIDENCE_ENDPOINTS = [
-    "/api/campaigns",
-    "/api/keywords",
+    # PR-ADS-177C: "/api/campaigns", "/api/keywords", "/api/search-terms",
+    # "/api/search-terms/summary" and "/api/search-terms/ngrams" retired (404;
+    # tests/test_pr_ads_177c_campaign_feed_retired.py). The live evidence
+    # routes of the Keywords & Search Terms page keep the same window contract
+    # (tests/test_pr_ads_144_*, tests/test_pr_ads_146_*).
     # PR-ADS-176C: "/api/geo" and "/api/leads/country-summary" retired (404).
     "/api/leads",
     "/api/waste",
-    "/api/search-terms",
-    "/api/search-terms/summary",
-    "/api/search-terms/ngrams",
+    "/api/search-term-evidence",
+    "/api/keyword-evidence",
 ]
 
 
@@ -152,14 +154,6 @@ def test_all_time_does_not_fabricate_rows(client_cookie, endpoint):
             assert body[key] == [], f"{endpoint} all_time must not fabricate {key}"
 
 
-def test_legacy_days_param_still_works(client_cookie):
-    # Backward compatibility: the old ?days= param is still accepted (no window).
-    client, cookie = client_cookie
-    res = client.get("/api/campaigns?days=30", cookies={"ads_session": cookie})
-    assert res.status_code == 200, res.text
-    assert res.json().get("window") == "30d"
-
-
 # ════════════════ 3. Read-only doctrine (touched backend) ════════════════
 
 
@@ -182,10 +176,11 @@ def test_evidence_endpoint_handlers_are_select_only():
     # Extract each evidence handler body and assert it never issues a write.
     handlers = [
         # PR-ADS-176C: api_geo / api_leads_country_summary deleted.
-        "def api_campaigns(", "def api_keywords(",
+        # PR-ADS-177C: api_campaigns, api_keywords, api_search_terms,
+        # api_search_terms_summary and api_search_terms_ngrams deleted; the
+        # live evidence handlers of the Keywords & Search Terms page join.
         "def api_leads(", "def api_waste(",
-        "def api_search_terms(", "def api_search_terms_summary(",
-        "def api_search_terms_ngrams(",
+        "def api_search_term_evidence(", "def api_keyword_evidence(",
     ]
     for marker in handlers:
         start = SERVER.find(marker)
@@ -234,9 +229,12 @@ def test_evidence_pages_list_and_helper():
     # Countries page (roas-countries) is on business windows (owner decision).
     # PR-ADS-177B: "campaigns" is the one Campaigns page, on business windows
     # (owner decision 2026-11-24, 2).
-    for route in ("search-terms", "ngrams", "keywords"):
+    # PR-ADS-177C: "keywords" is the Keywords tab of "search-terms" (one
+    # page, one evidence window), so it is no longer a page of its own here.
+    for route in ("search-terms", "ngrams"):
         assert f'"{route}"' in block, f"EVIDENCE_PAGES missing {route}"
-    for retired in ("leads", "opportunities", "waste", "geo", "roas-countries", "campaigns"):
+    for retired in ("leads", "opportunities", "waste", "geo", "roas-countries", "campaigns",
+                    "keywords"):
         assert f'"{retired}"' not in block, (
             f"EVIDENCE_PAGES must not contain the retired route {retired}")
     assert "function isEvidencePage(" in APP_JS
@@ -284,7 +282,9 @@ def test_old_day_buttons_hidden_on_evidence_pages():
 def test_evidence_loaders_use_window_param():
     # Each of the 7 evidence page loaders fetches with the evidence window,
     # never the legacy day integer.
-    assert "/api/campaigns?${evidenceWindowQuery()}" in APP_JS
+    # PR-ADS-177C: Campaign Evidence (/api/campaigns) is retired; Campaigns
+    # is on business windows. No evidence loader requests it.
+    assert "/api/campaigns?" not in APP_JS
     # Keyword Evidence (PR-ADS-146) uses its own evidence endpoint + param builder
     # (kwBuildParams sets window=getEvidenceWindow()), not the legacy /api/keywords.
     assert "/api/keyword-evidence?${kwBuildParams().toString()}" in APP_JS
@@ -321,8 +321,11 @@ def test_evidence_loaders_use_window_param():
     assert "/api/geo" not in APP_JS
     assert "/api/leads/country-summary" not in APP_JS
     assert 'fetchRevenuePerformance("country", window_)' in APP_JS
-    # Search-terms family sends window= in its param builders.
-    assert 'params.set("window", getEvidenceWindow())' in APP_JS
+    # Search-terms family sends window= in its param builders. (PR-ADS-177C:
+    # the `params.set(...)` spelling lived in the retired campaign drawer's
+    # sub-fetches; the Terms tab's builder is the live one.)
+    terms = APP_JS.split("function stBuildTermsParams(")[1].split("\n}")[0]
+    assert 'p.set("window", getEvidenceWindow())' in terms
     # evidenceWindowQuery serializes to a window= param.
     q = APP_JS[APP_JS.find("function evidenceWindowQuery("):
                APP_JS.find("function evidenceWindowQuery(") + 160]
@@ -558,81 +561,15 @@ def test_frontend_waste_discloses_showing_x_of_y_and_partial_export():
 # ════════════════ BLOCKER 3 — campaign drawer honours the window ═════════════
 
 
-def test_campaign_detail_all_time_returns_window(monkeypatch):
-    # PR-ADS-143: the drawer no longer runs run_date-bounded SQL — lead evidence is
-    # event-date (contact_created_at) via the campaign-evidence service, keyword/
-    # waste are latest-snapshot. all_time must not hidden-downgrade (window stays
-    # all_time). With no DB, the safe shape still carries the window.
-    captured = {"sql": []}
-
-    def responder(sql, params):
-        captured["sql"].append(sql)
-        return ([], ["x"])
-
-    _patch_conn(monkeypatch, responder)
-    import importlib
-    server = importlib.import_module("api.server")
-    out = server.api_campaign_detail_query(
-        user={"e": "x"}, campaign_name="alpha", days=30, window="all_time")
-    assert out["window"] == "all_time"
-    # No drawer query bounds on run_date any more (event-date / latest-snapshot only).
-    for sql in captured["sql"]:
-        assert "run_date >=" not in sql
-
-
-def test_campaign_drawer_no_longer_bounds_on_run_date():
-    # PR-ADS-143 contract: the drawer builds lead evidence via the event-date
-    # service and never bounds any query on run_date; keyword/waste are latest
-    # snapshots scoped by the approved label set.
-    import os as _os
-    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-    src = open(_os.path.join(root, "api", "server.py"), encoding="utf-8").read()
-    fn = src[src.find("def _build_campaign_detail("):src.find("def api_campaign_detail_query(")]
-    assert "run_date >= NOW() - INTERVAL" not in fn
-    assert "build_campaign_drawer_evidence" in fn
-    repo = open(_os.path.join(root, "db", "revenue_repository.py"), encoding="utf-8").read()
-    detail = repo[repo.find("def fetch_campaign_lead_detail("):
-                  # PR-ADS-178B: fetch_sql_lead_details (the next function)
-                  # is deleted; the one after it bounds the same body.
-                  repo.find("def fetch_won_revenue(")]
-    assert "contact_created_at >=" in detail and "run_date >=" not in detail
-
-
-def test_campaign_detail_rejects_invalid_window(monkeypatch):
-    import importlib
-    server = importlib.import_module("api.server")
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException) as exc:
-        server.api_campaign_detail_query(
-            user={"e": "x"}, campaign_name="alpha", days=30, window="99d")
-    assert exc.value.status_code == 400
-
-
-def test_frontend_drawer_uses_evidence_window_not_365():
-    # Drawer sub-fetches pass window=getEvidenceWindow(), never a days downgrade.
-    # (PR-ADS-143 inserts an optional &campaign_key=… between name and window.)
-    assert "/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}" in APP_JS
-    assert "&window=${encodeURIComponent(getEvidenceWindow())}" in APP_JS
-    # The hidden all_time->365 helper is gone entirely.
-    assert "evidenceWindowDays" not in APP_JS
-    # Attribution preview + quality drawer calls also send window=.
-    preview = APP_JS[APP_JS.find("async function loadCampaignAttributionPreview"):
-                     APP_JS.find("async function loadCampaignAttributionPreview") + 900]
-    assert 'params.set("window", getEvidenceWindow())' in preview
-    quality = APP_JS[APP_JS.find("async function loadCampaignAttributionQuality"):
-                     APP_JS.find("async function loadCampaignAttributionQuality") + 900]
-    assert 'params.set("window", getEvidenceWindow())' in quality
-
-
 def test_campaign_detail_and_attribution_accept_window_endpoint(client_cookie):
     # End-to-end: the drawer endpoints accept the evidence window (200, not 422/400)
     # and reject an unknown one.
     client, cookie = client_cookie
-    for url in ("/api/campaign-detail?campaign_name=x&window=all_time",
-                "/api/attribution/quality?window=all_time&campaign=x",
+    # PR-ADS-177C: /api/campaign-detail (the Campaign Evidence drawer) is
+    # retired; the attribution endpoints keep the evidence-window contract.
+    for url in ("/api/attribution/quality?window=all_time&campaign=x",
                 "/api/gclid-attribution?window=all_time&campaign=x"):
         assert client.get(url, cookies={"ads_session": cookie}).status_code == 200, url
-    for url in ("/api/campaign-detail?campaign_name=x&window=99d",
-                "/api/attribution/quality?window=99d",
+    for url in ("/api/attribution/quality?window=99d",
                 "/api/gclid-attribution?window=99d"):
         assert client.get(url, cookies={"ads_session": cookie}).status_code == 400, url

@@ -150,7 +150,9 @@ def test_f3_2_countries_is_out_of_the_full_campaign_attributable_comparison():
                          "dashboard/deals", "pipeline", "revenue_decision_mart"}
     settled = {c for c, _ in parity.METRIC_IDENTITIES[
         "google_ads_cohort_sqls__settled_days"]["consumers"]}
-    assert settled == {"dashboard/campaigns", "revenue_decision_mart/campaign_settled"}
+    # PR-ADS-177C (M8): plus the independent canonical reading of the same days.
+    assert settled == {"dashboard/campaigns", "revenue_decision_mart/campaign_settled",
+                       "canonical/campaign_settled"}
     assert "dashboard/countries" not in settled
 
 
