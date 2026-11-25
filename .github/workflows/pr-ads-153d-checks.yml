@@ -152,6 +152,7 @@ jobs:
             tests/test_pr_ads_173a_search_terms_pages_memory.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
             tests/test_pr_ads_180b_acquisition_cohort_funnel_pg_integration.py \
+            tests/test_pr_ads_180c_pipeline_undated_bound_pg_integration.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -413,6 +414,12 @@ jobs:
                            # undated contacts OUTSIDE the window's rows
                            # (fetch_undated_stage_reach) on a real table.
                            "tests.test_pr_ads_180b_acquisition_cohort_funnel_pg_integration",
+                           # PR-ADS-180C. The Pipeline funnel reads the same
+                           # undated-reach bound as Overview Activity: one
+                           # population, one reading on both pages; the read's
+                           # outside-the-rows count; a lead filter exact only
+                           # where nothing undated lies outside the rows.
+                           "tests.test_pr_ads_180c_pipeline_undated_bound_pg_integration",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

@@ -289,14 +289,16 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
 
     ``start=None`` / ``end=None`` are open bounds (All Time rules out nothing).
     Read-only.
+
+    PR-ADS-180C: ``outside_window_rows`` counts, per event, the part of each
+    figure that is NOT in the window's own rows — the contacts with no stage
+    date in the window (the predicate below is ``fetch_funnel_contacts``'
+    window clause, character for character). Where it is 0, every undated
+    contact that could belong to the window is among the rows the funnel
+    build read, so the build's own per-scope coverage holds all of them: that
+    is what lets a lead-filtered Pipeline funnel state a narrow scope exact
+    (docs/65). It never dates a contact.
     """
-    stage_counts = []
-    params: list = []
-    for event in FUNNEL_EVENTS:
-        stage_counts.append(
-            f"COUNT(*) FILTER (WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s) "
-            f"AND {effective_date_sql(event)} IS NULL) AS {event}")
-        params.append(list(stages_implying_event(event)))
     in_window = " OR ".join(
         f"""(
             {expr} IS NOT NULL
@@ -304,8 +306,24 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
             AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
         )"""
         for expr in (effective_date_sql(e) for e in FUNNEL_EVENTS))
+    window_params: list = []
     for _ in FUNNEL_EVENTS:
-        params.extend([start, end, end])
+        window_params.extend([start, end, end])
+    stage_counts = []
+    params: list = []
+    for event in FUNNEL_EVENTS:
+        stage_counts.append(
+            f"COUNT(*) FILTER (WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s) "
+            f"AND {effective_date_sql(event)} IS NULL) AS {event}")
+        params.append(list(stages_implying_event(event)))
+    for event in FUNNEL_EVENTS:
+        stage_counts.append(
+            f"COUNT(*) FILTER (WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s) "
+            f"AND {effective_date_sql(event)} IS NULL "
+            f"AND COALESCE(({in_window}), FALSE) IS FALSE) AS {event}__outside")
+        params.append(list(stages_implying_event(event)))
+        params.extend(window_params)
+    params.extend(window_params)
     params.extend([end, end])
     try:
         with get_conn() as conn:
@@ -328,6 +346,7 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
                 )
                 row = _rows_as_dicts(cur)[0]
         return {"available": True, "counts": {e: int(row[e]) for e in FUNNEL_EVENTS},
+                "outside_window_rows": {e: int(row[f"{e}__outside"]) for e in FUNNEL_EVENTS},
                 "table": FUNNEL_TABLE, "rule": UNDATED_REACH_RULE}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_undated_stage_reach failed: %s", exc)

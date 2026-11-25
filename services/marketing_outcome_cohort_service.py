@@ -637,6 +637,39 @@ def coverage_status(cohort: dict | None, *, publication: tuple[str, str | None])
     return COVERAGE_COMPLETE
 
 
+def unpublished_coverage_notes(*, missing_created_at,
+                               publication: tuple[str, str | None]) -> list[str]:
+    """The coverage notes of a cohort whose SQL count is NOT published.
+
+    Say WHY, and nothing derived from the cohort: a note quoting a withheld
+    count (e.g. "4 cohort SQL contact(s) … have no exact SQL-entry
+    timestamp", a floor on the SQL count) would publish it by another route.
+    The only figure kept is the table-wide no-created-date count — every
+    canonical contact, no window, no source — a data-quality disclosure
+    published whatever the verdict (PR-ADS-180B-F1, docs/64 §12.3).
+
+    PR-ADS-180C: one function for both unpublished paths — the cohort's own
+    verdict (``coverage_notes``) and a window the mart withholds after the
+    fact (``revenue_decision_mart._withhold_cohort``).
+    """
+    status, reason = publication
+    if status == STATUS_WITHHELD:
+        notes = [
+            f"the cohort SQL count is withheld ({reason}): it is not "
+            f"proven complete and consistent as of the canonical contact-funnel "
+            f"watermark, so no SQL count, SQL breakdown or CPQL is published."]
+    else:
+        notes = [
+            f"the cohort SQL count is {status} ({reason}), so no SQL count, "
+            f"SQL breakdown or CPQL is published."]
+    if missing_created_at:
+        notes.append(
+            f"{missing_created_at} canonical contact(s) have no created date and "
+            f"belong to no acquisition window, All Time included. No other date "
+            f"is substituted.")
+    return notes
+
+
 def coverage_notes(cohort: dict | None, *, missing_created_at,
                    publication: tuple[str, str | None]) -> list[str]:
     if cohort is None:
@@ -644,18 +677,8 @@ def coverage_notes(cohort: dict | None, *, missing_created_at,
                 "outcome is published"]
     notes = []
     if publication[0] != STATUS_PUBLISHED:
-        # Withheld: say WHY, and nothing derived from the SQL count. A note
-        # quoting the withheld count would publish it by another route.
-        notes.append(
-            f"the cohort SQL count is withheld ({publication[1]}): it is not "
-            f"proven complete and consistent as of the canonical contact-funnel "
-            f"watermark, so no SQL count, SQL breakdown or CPQL is published.")
-        if missing_created_at:
-            notes.append(
-                f"{missing_created_at} canonical contact(s) have no created date and "
-                f"belong to no acquisition window, All Time included. No other date "
-                f"is substituted.")
-        return notes
+        return unpublished_coverage_notes(missing_created_at=missing_created_at,
+                                          publication=publication)
     gap = cohort["all_sources"]["sqls_missing_event_timestamp"]
     if gap:
         notes.append(

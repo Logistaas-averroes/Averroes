@@ -1019,6 +1019,101 @@ def _cohort_block(populations: dict, scope: str, window: dict, *,
     }
 
 
+# ── Undated stage reach: one rule for every stage-entry count ────────────────
+# PR-ADS-180B built this for Overview → Lifecycle Activity; PR-ADS-180C moved it
+# here so the Pipeline funnel reads the SAME bound over the same population
+# (docs/65). Overview and Pipeline both call these two functions; neither keeps
+# a copy.
+def undated_stage_reach(window: dict | None) -> dict:
+    """``fetch_undated_stage_reach`` for one funnel window payload: per stage,
+    the canonical contacts (ALL sources, the whole table) that reached the
+    stage with no entry date and could belong to the window. A read that
+    fails is ``available: False`` with no counts — never zeros."""
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+
+    w = window or {}
+
+    def _day(value):
+        if value in (None, ""):
+            return None
+        return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
+    try:
+        read = repo.fetch_undated_stage_reach(_day(w.get("start_date")),
+                                              _day(w.get("end_date")))
+    except Exception as exc:  # noqa: BLE001 — unknown, never zero
+        logger.warning("[canonical_crm_funnel] undated stage reach unreadable: %s", exc)
+        read = {"available": False, "counts": None}
+    counts = (read or {}).get("counts") if (read or {}).get("available") else None
+    outside = (read or {}).get("outside_window_rows") if counts is not None else None
+    return {"available": counts is not None,
+            "counts": dict(counts) if counts is not None else None,
+            # PR-ADS-180C: the part of each count with no stage date in the
+            # window (not among the window's own rows). None when not read.
+            "outside_window_rows": dict(outside) if isinstance(outside, dict) else None,
+            "rule": (read or {}).get("rule") or getattr(repo, "UNDATED_REACH_RULE", None),
+            "population": SCOPE_ALL_SOURCE}
+
+
+def undated_reach_for_population(undated: dict | None, coverage: dict | None, *,
+                                 whole: bool) -> dict:
+    """The undated reach as it bears on ONE selected population.
+
+    The read counts every canonical contact (all sources, no lead filter).
+    For the whole all-source population (``whole``) it IS the population's
+    figure. For a narrower one (a Scope or Source filter) the all-source
+    figure is only an upper limit, never presented as the subset's:
+
+    * all sources 0: 0 (a subset of none is none);
+    * nothing of the stage's figure lies outside the window's own rows
+      (``outside_window_rows`` 0): every undated contact that could belong is
+      in the rows the funnel build read, so the build's own coverage for the
+      selected population (``coverage``) is its complete figure;
+    * otherwise ``None``: how many of the contacts outside the rows the
+      filter selects is not measured (the stage is then a bound);
+    * unread (either part) → ``None``. Unknown is never 0.
+    """
+    u = undated or {}
+    counts = u.get("counts") if u.get("available") else None
+    outside = u.get("outside_window_rows") if counts is not None else None
+    if counts is None:
+        scoped = None
+    elif whole:
+        scoped = dict(counts)
+    else:
+        own = (coverage or {}).get("stage_reached_without_entry_date")
+        own = own if isinstance(own, dict) else {}
+        scoped = {}
+        for event, n in counts.items():
+            out = (outside or {}).get(event) if isinstance(outside, dict) else None
+            if n == 0:
+                scoped[event] = 0           # a subset of none is none
+            else:
+                scoped[event] = own.get(event) if out == 0 else None
+    return {"available": scoped is not None, "counts": scoped,
+            "all_source_counts": dict(counts) if counts is not None else None,
+            "outside_window_rows": dict(outside) if isinstance(outside, dict) else None,
+            "covers_selected_population": bool(whole),
+            "rule": u.get("rule"), "population": u.get("population")}
+
+
+def stage_count_is_bound(event: str, coverage: dict | None, undated: dict | None) -> bool:
+    """True unless the evidence proves the stage-entry count complete.
+
+    A bound when the build's own coverage does not report the stage, or
+    reports undated contacts in the window's rows; or when the undated reach
+    over every contact that could belong to the window is unknown or above
+    zero. Missing is never read as zero."""
+    missing = ((coverage or {}).get("stage_reached_without_entry_date") or {})
+    own = missing.get(event) if isinstance(missing, dict) else None
+    if own is None or own > 0:
+        return True
+    counts = (undated or {}).get("counts") if (undated or {}).get("available") else None
+    if counts is None or counts.get(event) is None:
+        return True
+    return counts[event] > 0
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 # PR-ADS-179A: built once per certification window, inside its one snapshot
 # (``services.snapshot_memo``). Outside a certification window: a plain call.

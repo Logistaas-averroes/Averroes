@@ -763,7 +763,11 @@ RULES: list[dict] = [
        symbol=["_build_campaign_resolver", "build", "contacts", "default_campaign_resolver",
                "operational_status_breakdown", "build_populations", "reconciliation_status",
                "_contact_scopes", "_event_counts", "scope_keys", "scopes_are_nested",
-               "lead_cohort_progression", "event_definition"]),
+               "lead_cohort_progression", "event_definition",
+               # PR-ADS-180C: the undated stage reach and the stage-count
+               # bound, one rule for Overview Activity and Pipeline (docs/65).
+               "undated_stage_reach", "undated_reach_for_population",
+               "stage_count_is_bound"]),
     _m("engine.funnel.repo.module", "db/crm_funnel_repository.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        ["lifecycle_funnel_service_ref", "lifecycle_sql_column_ref"]),
     _r("engine.funnel.repo.legacy_rows", "db/crm_funnel_repository.py", CLS_DIAGNOSTIC, _FUNNELREC,
@@ -990,6 +994,9 @@ RULES: list[dict] = [
                "contact_identity", "contact_bucket", "_new_slot", "_bump",
                "_merge_duplicates", "build_cohort", "reconcile_cohort",
                "sql_publication", "cpql_decision", "coverage_status", "coverage_notes",
+               # PR-ADS-180C: the notes of an unpublished cohort (its own
+               # verdict, or a window the mart withholds after the fact).
+               "unpublished_coverage_notes",
                "sql_metric_metadata", "_jsonable_cohort",
                "read_freshness", "build_window_outcomes",
                "lifecycle_event_disclosure"]),

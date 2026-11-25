@@ -947,3 +947,32 @@ truncated list. Verified by execution on exported copies of both commits.
   23 related contract/PG modules 676 passed, 0 skipped; full suite with -x
   reached ~92% with no failure before my own 50-min `timeout` cut it (NOT a
   complete run). Lesson: give the full suite >60 min or run it unbounded.
+
+## PR-ADS-180B-F1 re-review (7cd5e22 on 46f5396, PR 240, 2026-11-25)
+- Verdict: merge with minors. No Major. 10 of 13 new unit tests fail on
+  46f5396; 01_b / 01_c / 05_b pass there by design (they guard existing
+  branches / the unchanged rule). Mutations G, H, K, L and removing the page's
+  `count_is_bound === true` clause each now fail a test for the intended reason.
+- m4 verified: `contacts_without_created_at` = `SELECT COUNT(*) FROM
+  hubspot_contact_funnel WHERE created_at IS NULL` (whole table, no window, no
+  source). It is read in the same try as the cohort rows; failure yields None
+  for both. cohort, readiness (via source_health) and the Overview block all
+  come from ONE `cohort_outcomes` read, so `created_at_disclosure_problems` is
+  an invariant guard, not an independent re-derivation. The UI reads the field
+  only under a published verdict (`martCohortFunnelData`,
+  `acquisitionFunnelModel`). Channels still withholds its copy (declared, §12.3).
+- Page `count_is_bound`: a missing key keeps the page's own rules. Probe: a
+  synthetic stage with undated measured 0, coverage silent and reconciliation
+  ok, and no key, renders "MQL 12" exact. No production path. The only producer
+  is `_lifecycle_activity_block`, which always sets the key when available. There
+  is no cache. A pre-180B payload lacks `undated_reach`, and the page bounds that
+  anyway. Accepted.
+- Still open (pre-existing since 167A/177A, not F1): `_withhold_cohort` keeps
+  `metadata.coverage_notes` from a PUBLISHED cohort. Probe: a no-settled-day
+  window's withheld block still says "4 cohort SQL contact(s) are proven by
+  lifecycle stage..." while sql_status is unavailable. It is in the API body
+  only (app.js never renders coverage_notes), and `mart_withheld_exposures`
+  does not scan the notes.
+- Same key, different figure: `build_revenue_attribution_audit`'s
+  `missing_contact_created_at_count` is the legacy lead-date-grain count and
+  still defaults to 0 (`grain.get(..., 0)`). It is not the readiness/cohort figure.

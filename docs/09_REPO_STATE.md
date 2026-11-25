@@ -7624,3 +7624,42 @@ the "full funnel on every page" request.
   `fetch_undated_stage_reach`) is the next PR.
 * **Tests.** `test_pr_ads_180b_f1_truth_audit_minors.py` (13); 180B's 02_b,
   02_d, 03_b and PG 03 assert the published disclosure.
+
+#### PR-ADS-180C — Pipeline reads the undated-reach bound; withheld cohort notes
+
+`docs/65`. One commit on `7cd5e22` (PR-ADS-180B-F1, open PR 240).
+
+* **m3 (180B audit).** Same window, same contacts: Overview Activity read
+  "Leads at least 10 … 7 contacts …", Pipeline "Entered Lead 10" exact. The
+  undated reach and the stage-count bound moved to
+  `canonical_crm_funnel_service` (`undated_stage_reach`,
+  `stage_count_is_bound`); Overview and `pipeline_service._funnel` both call
+  them. The Pipeline payload publishes `funnel.undated_reach` and, per stage,
+  `undated_contacts_could_belong` / `count_is_bound`. The page has one rule,
+  `stageEntryCountBounds` (was `dashActivityLowerBounds`), called by both
+  stage-entry adapters.
+* **Lead filters.** `fetch_undated_stage_reach` also returns
+  `outside_window_rows` (no stage date in the window, `fetch_funnel_contacts`'
+  own clause). Under a Scope/Source filter the all-source figure is never the
+  subset's: where nothing lies outside the rows the scope's own coverage
+  decides (178C's narrowing); otherwise the stage is a bound naming the
+  all-source figure. 178C's PG case had printed Google Ads-source SQL exact
+  beside an undated Google Ads SQL contact outside the rows (`c-nolb`); it is
+  now a bound.
+* **Hardening.** A stage without an explicit `count_is_bound: false` is a
+  bound on the page.
+* **Carried minor (a).** `_withhold_cohort` rebuilds `coverage_notes` /
+  `coverage_status` for the unpublished verdict
+  (`unpublished_coverage_notes`, shared with `coverage_notes`); no
+  "N cohort SQL contact(s)" note survives a withheld block.
+  `mart_withheld_exposures` scans the notes.
+* **Carried minor (b).** The legacy audit's `missing_contact_created_at_count`
+  is None when unread (repository and service); Revenue Health says
+  "Unknown".
+* **Tests.** `test_pr_ads_180c_pipeline_undated_bound.py` (12) and its PG
+  module (4, in the CI PG step and did-run list): all fail on `7cd5e22`.
+  Ported: 178B `_payload`, 178C test_09 and PG test_05, 166A `_pipeline`,
+  180A activity fixtures, 180B-F1 04_c (`docs/65` §5). Mutation table in
+  `docs/65` §4.
+* **Open.** A scope-aware undated reach; the sibling legacy counts that still
+  default to 0; production cost of the extra read not measured (`docs/65` §6).

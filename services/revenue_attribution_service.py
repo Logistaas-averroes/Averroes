@@ -3608,7 +3608,8 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         "counts_by_source_type": grain.get("counts_by_source_type", {}),
         "excluded_non_paid_count": grain.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": grain.get("excluded_pseudo_campaign_count", 0),
-        "missing_contact_created_at_count": grain.get("missing_contact_created_at_count", 0),
+        # PR-ADS-180C: an unread count is None, never 0 (unknown is not zero).
+        "missing_contact_created_at_count": (grain or {}).get("missing_contact_created_at_count"),
         "legacy_excluded_count": legacy_excluded_count,
         "pseudo_campaign_rows": pollution.get("pseudo_campaign_rows", []),
         "email_campaign_rows": pollution.get("email_campaign_rows", []),

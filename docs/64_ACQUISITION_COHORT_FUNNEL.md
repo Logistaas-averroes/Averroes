@@ -254,7 +254,8 @@ Channels' "X% of contacts" becomes "share unknown" (both sides are bounds).
 * **Bound the cohort KPI cards and table cells** where
   `contacts_without_created_at > 0` (§7.6).
 * **Pipeline's stage-entry bound** reads only the window's rows; it should
-  read `fetch_undated_stage_reach` as Activity now does.
+  read `fetch_undated_stage_reach` as Activity now does. *(Built by
+  PR-ADS-180C, `docs/65`.)*
 * **Port the parity audit's Lead-cohort coverage disclosure** to the
   acquisition block, then delete the Overview `lifecycle_cohort` key.
 * **A Google Ads-scoped no-created-date count** for the mart cohort (§7.4).
@@ -486,6 +487,7 @@ name passes.
   window's rows, not `fetch_undated_stage_reach`: same window, same
   population, Activity "Leads at least 10" against Pipeline "Entered Lead
   10". Masked in production by the ~9,000 undated Lead contacts.
+  *(Closed by PR-ADS-180C, `docs/65`.)*
 * Audit gap carried: stage counts are re-derived by the audit's own SQL for
   `all_sources` only; the Google Ads stage split is checked against the
   payload's breakdown.

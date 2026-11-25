@@ -298,6 +298,14 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
                                         published=False)
     meta = cohort.get("metadata") or {}
     out += [f"cohort.metadata.{k}" for k in _META_SQL_FIELDS if meta.get(k) is not None]
+    # PR-ADS-180C (carried minor a): the coverage notes are a route too. A
+    # withheld block must not say "4 cohort SQL contact(s) are proven by
+    # lifecycle stage…" — a floor on the SQL count it withholds — nor lead
+    # with any other cohort count. Only the table-wide no-created-date
+    # disclosure may state a number (held by created_at_disclosure_problems).
+    out += [f"cohort.metadata.coverage_notes[{i}]"
+            for i, note in enumerate(meta.get("coverage_notes") or [])
+            if withheld_note_states_a_count(note)]
     # PR-ADS-177C: the published breakdown, and the lifecycle-event counts.
     if cohort.get("breakdown") is not None:
         out.append("cohort.breakdown")
@@ -464,6 +472,22 @@ def acquisition_funnel_problems(payload: dict) -> list[str]:
 #: The coverage note that states the no-created-date count (the cohort
 #: service's ``coverage_notes``), as a pattern: its number is read back.
 _NO_CREATED_DATE_NOTE = re.compile(r"^(\d+) canonical contact\(s\) have no created date")
+
+
+#: PR-ADS-180C: a coverage note stating a cohort SQL figure (the published
+#: cohort's event-timestamp gap note), and any note that leads with a count.
+_COHORT_SQL_NOTE = re.compile(r"^\d+ cohort SQL contact")
+_COUNT_LED_NOTE = re.compile(r"^\s*\d")
+
+
+def withheld_note_states_a_count(note) -> bool:
+    """True when a coverage note of an UNPUBLISHED cohort states a figure it
+    may not: the cohort-SQL gap note, or any note that leads with a count
+    other than the table-wide no-created-date disclosure."""
+    text = str(note)
+    if _COHORT_SQL_NOTE.match(text):
+        return True
+    return bool(_COUNT_LED_NOTE.match(text)) and not _NO_CREATED_DATE_NOTE.match(text.strip())
 
 
 def created_at_disclosure_problems(payload: dict) -> list[str]:

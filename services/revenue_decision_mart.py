@@ -528,10 +528,22 @@ def _withhold_cohort(cohort: dict, reason: str) -> dict:
     # PR-ADS-180B-F1 (m4): `contacts_without_created_at` is KEPT — a table-wide
     # data-quality disclosure, not a figure of this window (the readiness
     # block publishes the same count for the same window).
+    # PR-ADS-180C (carried minor a): withheld means absent — the coverage
+    # notes too. The published cohort's notes state cohort figures ("4 cohort
+    # SQL contact(s) … have no exact SQL-entry timestamp" is a floor on the
+    # SQL count this block withholds); they are rebuilt for the unpublished
+    # verdict, so only the reason and the table-wide no-created-date
+    # disclosure survive. The coverage status follows the verdict likewise.
+    from services import marketing_outcome_cohort_service as cohort_svc  # noqa: PLC0415
+    publication = (cwt.UNAVAILABLE, reason)
     out["metadata"] = {**(cohort.get("metadata") or {}),
                        "sql_status": cwt.UNAVAILABLE, "sql_reason": reason,
                        "mapped_count": None, "unattributed_count": None,
-                       "excluded_non_google_count": None}
+                       "excluded_non_google_count": None,
+                       "coverage_status": cohort_svc.COVERAGE_NOT_PROVEN,
+                       "coverage_notes": cohort_svc.unpublished_coverage_notes(
+                           missing_created_at=cohort.get("contacts_without_created_at"),
+                           publication=publication)}
     return out
 
 

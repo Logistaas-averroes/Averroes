@@ -600,7 +600,9 @@ def fetch_lead_date_grain_health(start: date | None, end: date) -> dict:
         "available": base.get("available", False),
         "lead_event_date_field_available": base.get("lead_event_date_field_available", False),
         "lead_window_safe": base.get("event_date_safe", False),
-        "missing_contact_created_at_count": base.get("missing_contact_created_at_count", 0),
+        # PR-ADS-180C: an unread count is None — unknown is not zero.
+        "missing_contact_created_at_count": (base.get("missing_contact_created_at_count")
+                                             if base.get("available") else None),
         "excluded_non_paid_count": base.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": base.get("excluded_pseudo_campaign_count", 0),
         "counts_by_source_type": counts,
