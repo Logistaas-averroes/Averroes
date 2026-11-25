@@ -2041,7 +2041,7 @@ function renderDashboardOverview() {
       </aside>
     </div>
     ${renderDashLifecycleActivity(d)}
-    ${renderDashLifecycleCohort(d)}
+    ${renderDashAcquisitionFunnel(d)}
     ${renderDashCommercialOutcomes(d)}
     <div class="dash-lower-grid">
       <section class="dash-panel dash-anim" aria-label="Channel mix">
@@ -2880,12 +2880,10 @@ const FUNNEL_FAMILY_LABELS = {
   lifecycle_stage_events: "Lifecycle stage events: contacts that entered each stage in the window",
   stage_entry_events: "Lifecycle stage events: contacts that entered each stage in the window",
   acquisition_cohort_outcomes: "Acquisition cohort: contacts created in the window; each stage counts every contact that has reached it so far",
-  lead_entry_cohort: "Lead cohort: contacts that entered Lead in the window, followed through every later stage",
 };
 const FUNNEL_WINDOW_BASIS_LABELS = {
   stage_entry_date: "each stage counted on its own HubSpot stage-entry date",
   contact_created_at: "windowed on the contact's creation date",
-  date_entered_lead: "windowed on the Lead-entry date",
 };
 
 
@@ -3086,7 +3084,7 @@ function dashActivityFunnelModel(activity) {
     return { family, verdict: { status: "unavailable", reason: dashActivityReasonLabel(a.reason) },
       stages: lifecycleColumnLabels(stages) };
   }
-  const bounds = stageEntryLowerBounds(a, stages.map((s) => s.event));
+  const bounds = dashActivityLowerBounds(a, stages);
   const conversions = Array.isArray(a.conversions) ? a.conversions : [];
   const byPair = {};
   conversions.forEach((c) => { byPair[`${c.from_event}>${c.to_event}`] = c; });
@@ -3110,6 +3108,28 @@ function dashActivityFunnelModel(activity) {
     conversions: stages.slice(1).map((s, i) => dashActivityConversion(
       byPair[`${stages[i].event}>${s.event}`], bounds[stages[i].event], bounds[s.event])),
   };
+}
+
+/**
+ * PR-ADS-180B (docs/63 §8 b) — the activity's lower bounds. The Pipeline rule
+ * (stageEntryLowerBounds) reads the gap in the window's OWN rows; a contact
+ * that reached a stage undated but has no date in the window is not among
+ * them, so "0 there" never proved a count exact. Each stage also reads
+ * `undated_contacts_could_belong`: the same gap over EVERY contact that could
+ * belong to the window. Above zero, or not measured, the count is a bound.
+ */
+function dashActivityLowerBounds(a, stages) {
+  const out = stageEntryLowerBounds(a, stages.map((s) => s.event));
+  const measured = ((a || {}).undated_reach || {}).available === true;
+  stages.forEach((s) => {
+    const n = s.undated_contacts_could_belong;
+    if (!measured || n === null || n === undefined) {
+      out[s.event] = "the contacts that reached this stage with no entry date could not all be counted, so this count may be missing some";
+    } else if (Number(n) > 0) {
+      out[s.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot and could belong to this window`;
+    }
+  });
+  return out;
 }
 
 const DASH_ACTIVITY_SUBTITLE =
@@ -3165,7 +3185,8 @@ function dashActivityTrend(metric, previousPeriod) {
   const label = (previousPeriod && previousPeriod.label) || "vs previous period";
   if (!metric || metric.status !== "ok"
       || metric.delta_pct === null || metric.delta_pct === undefined) {
-    return { text: "No comparison", tone: "none" };
+    // PR-ADS-180B: the reason travels with it ("previous count is a lower bound").
+    return { text: "No comparison", tone: "none", title: (metric && metric.reason) || "" };
   }
   const pct = metric.delta_pct * 100;
   const magnitude = Math.abs(pct) >= 100 ? 0 : 1;
@@ -3238,231 +3259,36 @@ function dashActivityCoverageDisclosure(activity) {
 }
 
 /**
- * PR-ADS-155 §1/§2/§3 — the Dashboard funnel.
+ * PR-ADS-180B — the Overview funnel: the ACQUISITION COHORT, all sources.
  *
- * What this replaced, and why
- * --------------------------
- * The panel used to place five INDEPENDENT window totals in a narrowing
- * pipeline: contacts that entered Lead in the window, contacts that entered MQL
- * in the window, and so on, then closed-won Customers and Closed-Won Revenue.
- * Those are five different populations answering five different questions. A
- * contact counted at MQL this quarter may have entered Lead two years ago, so
- * the strip could widen rather than narrow while still being read as attrition,
- * and the last two cells crossed into an entirely different truth — deals, not
- * contacts — under the same connecting arrows.
- *
- * It is now ONE Lead-anchored cohort followed forward (`lifecycle_cohort`), with
- * commercial outcomes in their own section below. Every count, percentage and
- * status here is READ from the canonical backend contract. This function
- * performs no conversion arithmetic: there is no division anywhere in it, by
- * design, because a rate computed in the browser is a rate nobody governs.
+ * Every HubSpot contact created in this window and how many have reached each
+ * stage so far (`lifecycle_acquisition_funnel`, the all-sources slot of the
+ * cohort the Overview's Google Ads cohort counts come from, under its one
+ * verdict). It replaced the Lead-anchored "Lifecycle Cohort" (PR-ADS-155),
+ * which needed a Lead-entry date that about 60% of production MQLs lack, so
+ * every stage read "at least N" and every rate "—". This one needs no
+ * stage-entry date. Drawn by the shared block through the acquisition adapter
+ * Channels uses; nothing here divides.
  */
-function renderDashLifecycleCohort(d) {
-  const cohort = d.lifecycle_cohort || null;
-  const available = !!cohort && cohort.available === true;
+function renderDashAcquisitionFunnel(d) {
+  const f = d.lifecycle_acquisition_funnel || null;
+  const published = !!f && ((f.publication || {}).status === "published") && !!f.totals;
+  const asOf = published && f.stale && f.as_of
+    ? ` <small class="metric-reason cohort-as-of">measured as of ${escapeHtml(fmtDate(f.as_of))}</small>` : "";
   return `
-    <section class="dash-panel dash-cohort-panel dash-anim" aria-label="Lifecycle cohort funnel">
+    <section class="dash-panel dash-cohort-panel dash-anim" aria-label="Acquisition cohort funnel">
       <div class="dash-panel__header">
         <div>
-          <h3 class="dash-panel__title">Lifecycle Cohort</h3>
-          <p class="dash-panel__sub">${escapeHtml(dashCohortSubtitle(cohort))}</p>
+          <h3 class="dash-panel__title">Acquisition Cohort</h3>
+          <p class="dash-panel__sub">Every HubSpot contact created in this window, all
+            sources, and how many have reached each stage so far.${asOf}</p>
         </div>
-        ${available ? dashCohortCoverageBadge(cohort) : ""}
       </div>
-      ${funnelBlockHtml(dashCohortFunnelModel(cohort), { ariaLabel: "Lifecycle cohort" })}
-      ${available ? dashCohortCoverageDisclosure(cohort) : ""}
+      ${funnelBlockHtml(acquisitionFunnelModel(f, {
+        head: "Contacts acquired", headSub: "created in this window · all sources",
+        reasonText: cohortFunnelReasonText, shares: false }), { ariaLabel: "Acquisition cohort" })}
+      <p class="lifecycle-legend">${escapeHtml(ACQUISITION_FUNNEL_LEGEND)}</p>
     </section>`;
-}
-
-/**
- * PR-ADS-180A — the cohort block's model, read from `d.lifecycle_cohort`
- * alone. The family is the Lead-anchored cohort the payload declares
- * (`anchor_event`), windowed on the anchor stage's own entry date. Every
- * percentage is the service's: `previous_stage_conversion_pct` on the
- * connector, `rate_from_anchor_pct` inside the stage. There is no division
- * here, by design — a rate computed in the browser is a rate nobody governs.
- *
- * PR-ADS-180A-F1 (truth audit Major 1): the cohort's counts are lower bounds
- * wherever evidence was excluded — a missing date can only hide a contact
- * from a stage, never add one (dashCohortStageBounds). A bound stage is
- * "at least N"; the connectors follow 178B-F2 with CUMULATIVE bounds.
- */
-function dashCohortFunnelModel(cohort) {
-  const c = cohort || {};
-  const stages = Array.isArray(c.stages) ? c.stages : [];
-  const family = { key: c.anchor_event === "lead" ? "lead_entry_cohort" : null,
-    basis: (stages[0] || {}).event_date_column || null };
-  if (c.available !== true) {
-    // The columns keep their own names: the first one is Lead entries.
-    return { family, verdict: { status: "unavailable", reason: dashCohortReasonLabel(c.reason) },
-      stages: lifecycleColumnLabels(stages) };
-  }
-  const bounds = dashCohortStageBounds(c);
-  const anchorBound = !!bounds[0];
-  return {
-    family,
-    verdict: { status: "published" },
-    stages: stages.map((s, i) => {
-      const fromAnchor = s.rate_from_anchor_pct;
-      // The share of the Lead cohort: exact only when neither side is a
-      // bound; "at least" when only this stage is; unknown when Lead is.
-      let share = null;
-      if (i > 0 && anchorBound) {
-        share = { text: "Share of the Lead cohort unknown", tone: "none",
-          title: `The Lead cohort itself is a lower bound: ${bounds[0]}` };
-      } else if (!(i === 0 && anchorBound) && fromAnchor !== null && fromAnchor !== undefined) {
-        share = bounds[i]
-          ? { text: `at least ${fromAnchor}% of Lead cohort`, tone: "share", title: `Lower bound: ${bounds[i]}` }
-          : { text: `${fromAnchor}% of Lead cohort`, tone: "share" };
-      }
-      return {
-        slot: FUNNEL_EVENT_SLOTS[s.event], key: s.event, label: s.label || s.event || "",
-        metric: funnelCountMetric(s.reached, null),
-        bound_reason: bounds[i] || null,
-        sub: i === 0 ? "Entered Lead in this window" : "Of that same cohort",
-        sub_title: s.event_date_property ? `HubSpot property: ${s.event_date_property}` : "",
-        notes: [
-          share,
-          s.excluded_contacts
-            ? { text: `${s.excluded_contacts} excluded`, tone: "gap",
-                title: dashCohortExclusionTitle(s.exclusion_reasons) }
-            : null,
-        ],
-      };
-    }),
-    // The connector carries the previous-stage conversion the SERVICE
-    // computed. A null rate is unavailable — never 0%. Beside a bound
-    // (178B-F2, cumulative): any bound at or before the FROM stage leaves the
-    // rate unknown; a bound on the TO stage alone makes it "at least".
-    conversions: stages.slice(1).map((s, i) => {
-      const step = s.previous_stage_conversion_pct;
-      const earlier = bounds.slice(0, i + 1).find((b) => !!b);
-      if (step === null || step === undefined) {
-        return { kind: "unavailable", title: "The canonical service published no rate for this step." };
-      }
-      if (earlier) return { kind: "unknown", title: `Conversion unknown: an earlier stage is a lower bound (${earlier})` };
-      const title = `Of this cohort's contacts that reached the stage before, the share that reached ${s.label || s.event}`;
-      return bounds[i + 1]
-        ? { kind: "at_least", pct: step, title: `Lower bound: ${bounds[i + 1]}. ${title}` }
-        : { kind: "exact", pct: step, title };
-    }),
-  };
-}
-
-/**
- * Which Lead-cohort stages are lower bounds, each with its reason in words
- * (PR-ADS-180A-F1). `lead_cohort_progression` undercounts three ways:
- *   1. anchorless contacts (`missing_lead_entry_date`): reached Lead with no
- *      Lead-entry date, so no window's cohort holds them — EVERY stage,
- *      Lead included, is a bound;
- *   2. an exclusion at stage j (`missing_stage_entry_date`,
- *      `prior_stage_entry_unproven`) — stage j is a bound;
- *   3. a contact dropped at stage j is never followed further, and an undated
- *      later stage is neither counted nor excluded — so ANY exclusion at an
- *      earlier stage (whatever its reason) makes every later stage a bound.
- * Presentation only: the counts are the service's, never adjusted.
- */
-function dashCohortStageBounds(c) {
-  const stages = Array.isArray(c.stages) ? c.stages : [];
-  const records = Array.isArray(c.exclusion_reasons) ? c.exclusion_reasons : [];
-  let anchorless = 0;
-  records.forEach((r) => {
-    if (r && r.reason === "missing_lead_entry_date") anchorless += Number(r.contacts) || 0;
-  });
-  const out = [];
-  let earlierExcluded = null;
-  stages.forEach((s) => {
-    const own = s.exclusion_reasons || {};
-    const undated = (Number(own.missing_stage_entry_date) || 0)
-      + (Number(own.prior_stage_entry_unproven) || 0);
-    const why = [];
-    if (anchorless > 0) {
-      why.push(`${fmtCount(anchorless)} contact${anchorless === 1 ? "" : "s"} reached Lead with no Lead-entry date recorded in HubSpot, so no window's cohort holds them`);
-    }
-    if (earlierExcluded) why.push(earlierExcluded);
-    if (undated > 0) {
-      why.push(`${fmtCount(undated)} contact${undated === 1 ? "" : "s"} reached this stage with no proven entry date`);
-    }
-    out.push(why.length ? why.join("; ") : null);
-    if (!earlierExcluded && Number(s.excluded_contacts) > 0) {
-      earlierExcluded = `contacts excluded at ${s.label || s.event} are not followed into later stages`;
-    }
-  });
-  return out;
-}
-
-// The cohort's own description of itself. Never assembled from stage counts.
-function dashCohortSubtitle(cohort) {
-  if (cohort && cohort.anchor_definition) return cohort.anchor_definition;
-  return "Contacts whose HubSpot Lead-entry date falls inside this window, "
-    + "followed through every later lifecycle stage.";
-}
-
-function dashCohortReasonLabel(reason) {
-  const labels = {
-    canonical_contact_store_unavailable: "the canonical contact store could not be read",
-    funnel_invariant_mismatch: "a funnel invariant broke, so no count is rendered",
-    campaign_identity_unavailable: "the Google Ads campaign-identity contract could not be consulted",
-  };
-  return labels[reason] || "the canonical lifecycle cohort is not available";
-}
-
-/**
- * §3 — partial lifecycle coverage is stated on the face of the panel, not
- * buried. A funnel that silently omits contacts whose stage-entry timestamps
- * HubSpot never recorded looks exactly like a complete one, which is how a gap
- * becomes an accepted number.
- */
-function dashCohortCoverageBadge(cohort) {
-  const status = (cohort || {}).coverage_status;
-  if (status === "partial") {
-    return '<span class="dash-badge dash-badge--warn" title="Some contacts reached a stage '
-      + 'that HubSpot holds no entry timestamp for. They are excluded and listed below — '
-      + 'no substitute date is ever used.">Partial lifecycle history</span>';
-  }
-  if (status === "complete") {
-    return '<span class="dash-badge dash-badge--ok">Complete lifecycle history</span>';
-  }
-  return '<span class="dash-badge dash-badge--muted">Coverage unknown</span>';
-}
-
-function dashCohortExclusionTitle(reasons) {
-  if (!reasons) return "";
-  return Object.keys(reasons)
-    .map((r) => `${dashCohortExclusionLabel(r)}: ${reasons[r]}`)
-    .join(" · ");
-}
-
-function dashCohortExclusionLabel(reason) {
-  const labels = {
-    missing_lead_entry_date: "Reached Lead, no Lead-entry timestamp in HubSpot",
-    missing_stage_entry_date: "Reached this stage, no entry timestamp in HubSpot",
-    stage_entry_before_lead_entry: "Stage entry predates this cohort's Lead entry",
-    prior_stage_entry_unproven: "No proven entry for the preceding stage",
-  };
-  return labels[reason] || reason;
-}
-
-// The detail behind the badge: every excluded contact, by reason, with the
-// population each count is over. Disclosed, never imputed.
-function dashCohortCoverageDisclosure(cohort) {
-  const reasons = Array.isArray(cohort.exclusion_reasons) ? cohort.exclusion_reasons : [];
-  if (!reasons.length) return "";
-  const items = reasons.map((r) => `
-    <li class="dash-coverage__item">
-      <span class="dash-coverage__count">${escapeHtml(String(r.contacts))}</span>
-      <span class="dash-coverage__reason">${escapeHtml(dashCohortExclusionLabel(r.reason))}</span>
-      <span class="dash-coverage__detail">${escapeHtml(r.detail || "")}</span>
-    </li>`).join("");
-  return `
-    <details class="dash-coverage">
-      <summary class="dash-coverage__summary">Lifecycle coverage — ${escapeHtml(
-        String(cohort.excluded_contacts))} contact(s) excluded from this cohort</summary>
-      <ul class="dash-coverage__list">${items}</ul>
-      <p class="dash-coverage__note">A missing stage-entry timestamp is never replaced
-        with contact creation date, current-stage date, or an ingestion timestamp.
-        The transition is real; the date is unknown, and it is reported as unknown.</p>
-    </details>`;
 }
 
 /**
@@ -9195,39 +9021,152 @@ const CHANNEL_STAGE_SLOTS = {
 
 function channelFunnelModel(data) {
   const d = data || {};
+  // The Channels page publishes its totals with its channel rows: a response
+  // that carries no rows is not a published funnel (fail closed, as on 180A).
+  return acquisitionFunnelModel(d.channels ? d : { ...d, totals: null }, {
+    head: "Contacts acquired", headSub: "in this period",
+    reasonText: (code) => CHANNEL_FUNNEL_REASON_LABELS[code]
+      || String(code || "the cohort could not be published").replace(/_/g, " "),
+  });
+}
+
+/**
+ * PR-ADS-180B — the ACQUISITION COHORT as the shared funnel block, for every
+ * page that publishes it: Channels and Overview (all sources), Campaigns and
+ * Countries (Google Ads). `data` is Channels-shaped — `publication`,
+ * `metric_family` / `window_basis`, `stages` (reached_* keys), `totals` and
+ * `contacts_without_created_at` — read from ONE response, as an argument.
+ *
+ * Unpublished: the word and the reason in every column; the totals are never
+ * read (withheld means absent). Published: each stage counts every contact of
+ * the cohort that has reached it so far, and the block draws no step
+ * conversion. On Channels its share of the contacts acquired is a sub-line
+ * (divided in the browser, as on 180A); `shares: false` draws none (Overview,
+ * Campaigns, Countries publish no rate, and those pages divide nothing). A contact with no
+ * created date is in no window, so while any exist (or the response does not
+ * say) every column is a lower bound — "at least N" — and no share is stated:
+ * both sides of it would be bounds.
+ */
+function acquisitionFunnelModel(data, opts) {
+  const d = data || {};
+  const o = opts || {};
   const pub = d.publication || {};
-  const stages = (d.stages || []).filter((st) => CHANNEL_STAGE_SLOTS[st.key]);
+  const stages = (Array.isArray(d.stages) ? d.stages : []).filter((st) => st && CHANNEL_STAGE_SLOTS[st.key]);
   const family = { key: d.metric_family, basis: d.window_basis };
-  const funnelOk = pub.status === "published" && !!d.channels && !!d.totals;
-  const head = { slot: "contacts", key: "contacts", label: "Contacts acquired" };
-  if (!funnelOk) {
+  const head = { slot: "contacts", key: "contacts", label: o.head || "Contacts acquired" };
+  const reasonText = o.reasonText || ((code) => String(code || "the cohort could not be published").replace(/_/g, " "));
+  if (pub.status !== "published" || !d.totals) {
     return {
       family,
-      verdict: { status: pub.status === "unavailable" ? "unavailable" : "withheld",
-        reason: CHANNEL_FUNNEL_REASON_LABELS[pub.reason]
-          || String(pub.reason || "the cohort could not be published").replace(/_/g, " "),
-        note: "No figures are shown until the contact data is complete and current." },
+      verdict: { status: (!d.publication || pub.status === "unavailable") ? "unavailable" : "withheld",
+        reason: reasonText(pub.reason),
+        note: o.note || "No figures are shown until the contact data is complete and current." },
       stages: [head].concat(stages.map((st) => ({
         slot: CHANNEL_STAGE_SLOTS[st.key], key: st.key, label: `Reached ${st.label}` }))),
     };
   }
   const totals = d.totals;
   const missing = "the server sent no count for this stage";
+  const bound = acquisitionCohortBound(d.contacts_without_created_at);
+  const shareUnknown = bound ? `The cohort itself is a lower bound: ${bound}` : "";
   return {
     family,
     verdict: { status: "published" },
     stages: [{ ...head, metric: funnelCountMetric(channelFunnelCount(totals.contacts), missing),
-      sub: "in this period" }].concat(stages.map((st) => {
-      const rate = channelFunnelRate(totals[st.key], totals.contacts);
+      bound_reason: bound, sub: o.headSub || "in this period" }].concat(stages.map((st) => {
+      // `shares: false` (Overview, Campaigns, Countries): no rate is drawn at
+      // all — those pages publish none, and the browser computes none there.
+      if (o.shares === false) {
+        return {
+          slot: CHANNEL_STAGE_SLOTS[st.key], key: st.key, label: `Reached ${st.label}`,
+          metric: funnelCountMetric(channelFunnelCount(totals[st.key]), missing),
+          bound_reason: bound, sub: "of the contacts acquired, so far",
+        };
+      }
+      const rate = bound ? null : channelFunnelRate(totals[st.key], totals.contacts);
       return {
         slot: CHANNEL_STAGE_SLOTS[st.key], key: st.key, label: `Reached ${st.label}`,
         metric: funnelCountMetric(channelFunnelCount(totals[st.key]), missing),
+        bound_reason: bound,
         sub: rate === null ? "share unknown" : `${rate.toFixed(1)}% of contacts`,
+        sub_title: shareUnknown,
       };
     })),
     conversions: [],
   };
 }
+
+/**
+ * PR-ADS-180B — why an acquisition cohort is a lower bound, or null. A contact
+ * with no created date belongs to no window (no other date is substituted),
+ * so any such contact may be missing from this one. Not stated is not zero.
+ */
+function acquisitionCohortBound(withoutCreatedAt) {
+  const n = channelFunnelCount(withoutCreatedAt);
+  if (n === null) {
+    return "this response does not say how many contacts have no created date, so contacts created in this window may be missing";
+  }
+  if (n <= 0) return null;
+  return `${fmtCount(n)} contact${n === 1 ? " has" : "s have"} no created date in HubSpot and ${n === 1 ? "is" : "are"} in no window — some may have been created in this one`;
+}
+
+/** A cohort reason as the verdict line's words (no trailing full stop). */
+function cohortFunnelReasonText(code) {
+  return String(cohortReasonText(code) || "the acquisition cohort is not published")
+    .replace(/\.\s*$/, "");
+}
+
+/**
+ * PR-ADS-180B — a Revenue Decision Mart response's cohort (Campaigns,
+ * Countries) in the acquisition adapter's shape. The gate is the cohort's own
+ * `campaignSqlPublication(cohort)` — the cohort is the ARGUMENT, the block of
+ * the SAME response the page's cohort counts come from. Unpublished, no total
+ * is read. Each column names the `totals` field it reads (`funnel_stages`); a
+ * response without them shows those columns as not on this page.
+ */
+function martCohortFunnelData(cohort) {
+  const c = cohort || {};
+  const gate = campaignSqlPublication(cohort);
+  const defs = (Array.isArray(c.funnel_stages) ? c.funnel_stages : []).filter((st) => st && st.key);
+  const stages = defs.filter((st) => CHANNEL_STAGE_SLOTS[st.key]);
+  const head = defs.find((st) => st.key === "contacts_acquired");
+  const t = c.totals || {};
+  const totals = gate.publish ? { contacts: head ? t[head.total] : null } : null;
+  if (totals) stages.forEach((st) => { totals[st.key] = t[st.total]; });
+  return {
+    publication: c.sql_status ? { status: gate.publish ? "published" : gate.state,
+      reason: gate.publish ? null : c.sql_reason } : null,
+    metric_family: c.metric_family, window_basis: c.window_basis,
+    stages: stages.map((st) => ({ key: st.key, label: st.label })),
+    totals,
+    contacts_without_created_at: gate.publish ? c.contacts_without_created_at : null,
+  };
+}
+
+/** The Campaigns / Countries funnel panel: ONE block for the page's cohort. */
+function martCohortFunnelHtml(cohort, opts) {
+  const o = opts || {};
+  const model = acquisitionFunnelModel(martCohortFunnelData(cohort), {
+    head: "Leads · contacts acquired", headSub: o.headSub || "Google Ads-sourced",
+    reasonText: cohortFunnelReasonText, shares: false,
+  });
+  const published = campaignSqlPublication(cohort).publish;
+  return `
+    <section class="dash-panel dash-anim mart-cohort-funnel-panel" aria-label="${escapeHtml(o.title || "Lifecycle funnel")}">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">${escapeHtml(o.title || "Lifecycle funnel")}</h3>
+          <p class="dash-panel__sub">${escapeHtml(o.sub || "")}${escapeHtml(cohortThroughSuffix(cohort))}${published ? cohortAsOfNote(cohort) : ""}</p>
+        </div>
+      </div>
+      ${funnelBlockHtml(model, { ariaLabel: o.title || "Lifecycle funnel" })}
+      <p class="lifecycle-legend">${escapeHtml(ACQUISITION_FUNNEL_LEGEND)}</p>
+    </section>`;
+}
+
+const ACQUISITION_FUNNEL_LEGEND = "Each stage counts every contact of this cohort that "
+  + "has reached it so far, so a recent window keeps maturing. 'Customer stage' is the "
+  + "HubSpot lifecycle stage, counted in contacts — never companies, never deals.";
 
 // Two rankings for one stage: who brings the most, and who converts best.
 function channelFunnelRankHtml(data, stage, mode) {
@@ -15867,6 +15806,8 @@ function renderCampaignsPage() {
   body.innerHTML = `
     ${renderMartCampaignCoverage(data)}
     ${renderCampaignsPageSummary(data)}
+    ${martCohortFunnelHtml(data.cohort, { title: "Lifecycle funnel",
+      sub: "Google Ads-sourced HubSpot contacts created in this window — the Leads above — and how many have reached each stage so far" })}
     <section class="dash-panel dash-anim camp-leaderboard-panel camp-page-panel" aria-label="Google Ads campaigns">
       <div class="dash-panel__header">
         <div>
@@ -16765,6 +16706,8 @@ function renderRoasCountriesPage() {
     ${ownerLabelMismatchNotice(st.owner_labelled_geo)}
     ${residualMode ? renderCountryResidualWarning(st) : ""}
     ${renderRoasCountrySummary(data)}
+    ${martCohortFunnelHtml(data.cohort, { title: "Lifecycle funnel",
+      sub: "Google Ads-sourced HubSpot contacts created in this window, every country — the residual included, so not only the listed markets above — and how many have reached each stage so far" })}
     <section class="dash-panel dash-anim ctry-leaderboard-panel" aria-label="Countries">
       <div class="dash-panel__header">
         <div>

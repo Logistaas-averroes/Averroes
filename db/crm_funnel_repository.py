@@ -21,7 +21,10 @@ import logging
 from datetime import date, datetime
 
 from analysis.crm_lifecycle import (
+    EVENT_CUSTOMER,
     EVENT_DATE_COLUMN,
+    EVENT_MQL,
+    EVENT_OPPORTUNITY,
     EVENT_SQL,
     FUNNEL_EVENTS,
     stages_implying_event,
@@ -261,6 +264,82 @@ def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_funnel_contacts failed: %s", exc)
         return _unavailable(rows=[])
+
+
+def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
+    """PR-ADS-180B — per funnel event, the canonical contacts that reached the
+    stage with NO effective entry date and could belong to ``[start, end]``.
+
+    ``fetch_funnel_contacts`` returns only contacts with some stage date in the
+    window, so the undated contacts it sees are a subset: one that reached
+    Lead undated and whose MQL date falls after the window, or one at stage
+    ``lead`` with no date at all, is never fetched — and "no undated contact in
+    the window's rows" did not prove a stage-entry count exact (docs/63 §8).
+    This counts over the WHOLE table, one statement, counts only (no rows).
+
+    "Reached the stage" is the coverage rule ``build_populations`` uses: the
+    current lifecycle stage implies the event (``stages_implying_event``).
+    A contact is left out only where its own record proves it cannot belong:
+    it was created after the window ended (a stage is entered no earlier than
+    the contact exists — the rule ``fetch_unresolved_sql_created_at_bounds``
+    already applies) AND none of its stage-entry dates falls in the window (so
+    every contact the window's own read returns stays counted). A contact with
+    no ``created_at`` is never ruled out. Nothing here is a date: the counts
+    say how many undated transitions MAY sit in the window, never which.
+
+    ``start=None`` / ``end=None`` are open bounds (All Time rules out nothing).
+    Read-only.
+    """
+    stage_counts = []
+    params: list = []
+    for event in FUNNEL_EVENTS:
+        stage_counts.append(
+            f"COUNT(*) FILTER (WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s) "
+            f"AND {effective_date_sql(event)} IS NULL) AS {event}")
+        params.append(list(stages_implying_event(event)))
+    in_window = " OR ".join(
+        f"""(
+            {expr} IS NOT NULL
+            AND ({expr} >= COALESCE(%s::timestamptz, {expr}))
+            AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
+        )"""
+        for expr in (effective_date_sql(e) for e in FUNNEL_EVENTS))
+    for _ in FUNNEL_EVENTS:
+        params.extend([start, end, end])
+    params.extend([end, end])
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(counts=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {", ".join(stage_counts)}
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
+                    WHERE NOT (
+                        COALESCE(({in_window}), FALSE) IS FALSE
+                        AND {FUNNEL_ALIAS}.created_at IS NOT NULL
+                        AND %s::date IS NOT NULL
+                        AND {FUNNEL_ALIAS}.created_at >= (%s::date + INTERVAL '1 day')
+                    )
+                    """,
+                    params,
+                )
+                row = _rows_as_dicts(cur)[0]
+        return {"available": True, "counts": {e: int(row[e]) for e in FUNNEL_EVENTS},
+                "table": FUNNEL_TABLE, "rule": UNDATED_REACH_RULE}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_undated_stage_reach failed: %s", exc)
+        return _unavailable(counts=None)
+
+
+#: What :func:`fetch_undated_stage_reach` counts, in words, for the payload.
+UNDATED_REACH_RULE = (
+    "every canonical contact whose current lifecycle stage proves it reached the "
+    "stage and which has no entry date for it, anywhere in the table; ruled out "
+    "only when it was created after the window ended and no stage date of its "
+    "falls in the window")
 
 
 def fetch_all_funnel_contacts() -> dict:
@@ -520,6 +599,13 @@ def fetch_acquisition_cohort_contacts(start_at, end_before) -> dict:
     direct = direct_date_sql(EVENT_SQL)
     recovered = recovered_date_sql(EVENT_SQL)
     a = FUNNEL_ALIAS
+    # PR-ADS-180B: the evidence for the cohort's other funnel stages, read the
+    # same way as SQL's — direct and recovered, apart. Evidence that a stage was
+    # reached; never a window date (membership stays `created_at` alone).
+    other_stages = "".join(
+        f"\n                           {direct_date_sql(e)} AS {e}_entered_direct,"
+        f"\n                           {recovered_date_sql(e)} AS {e}_entered_recovered,"
+        for e in (EVENT_MQL, EVENT_OPPORTUNITY, EVENT_CUSTOMER))
     try:
         with get_conn() as conn:
             if conn is None:
@@ -532,7 +618,7 @@ def fetch_acquisition_cohort_contacts(start_at, end_before) -> dict:
                            {a}.created_at,
                            {a}.lifecycle_stage,
                            {direct}    AS sql_entered_direct,
-                           {recovered} AS sql_entered_recovered,
+                           {recovered} AS sql_entered_recovered,{other_stages}
                            {a}.hs_analytics_source,
                            {a}.hs_analytics_source_data_1,
                            {a}.gclid,

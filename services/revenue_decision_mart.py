@@ -525,6 +525,7 @@ def _withhold_cohort(cohort: dict, reason: str) -> dict:
     out["reconciliation"] = {**(cohort.get("reconciliation") or {}),
                              "status": "unavailable", "problem_count": None}
     out["breakdown"] = None   # PR-ADS-177C: withheld means absent
+    out["contacts_without_created_at"] = None   # PR-ADS-180B: likewise
     out["metadata"] = {**(cohort.get("metadata") or {}),
                        "sql_status": cwt.UNAVAILABLE, "sql_reason": reason,
                        "mapped_count": None, "unattributed_count": None,

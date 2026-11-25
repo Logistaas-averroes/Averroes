@@ -31,6 +31,10 @@ Static (no database):
       drawer and Dashboard → Campaigns passes through ``cohortCountHtml`` with
       the response's OWN cohort as an argument; no campaign renderer prints a
       CPQL; the strict spend gate returns before any figure. (157 check 15)
+      PR-ADS-180B: the page's one funnel block (``martCohortFunnelHtml``)
+      reads the page response's OWN ``cohort`` through the cohort gate
+      (``campaignSqlPublication(cohort)`` in ``martCohortFunnelData``), and
+      the spend gate returns before it too.
 
 Live, per business window (the Campaigns page's windows):
 
@@ -42,6 +46,11 @@ Live, per business window (the Campaigns page's windows):
   L3  conservation — under a published cohort, Σ campaign rows + the
       residual = the cohort's Google Ads total = ``campaign_totals``, for
       leads and SQLs, and Dashboard → Campaigns' KPIs equal it. (157 check 11)
+      PR-ADS-180B: the funnel's MQL, Opportunity and Customer-stage totals
+      equal the breakdown's Google Ads slot, Google Ads + excluded = all
+      sources for each, none exceeds the leads, and none is missing beside a
+      published SQL count (``cohort_stage_problems``). L2 covers their
+      absence when the cohort is withheld.
   L4  identity_unique — no two campaign rows share a key. (157 check 12)
   L5  shared_name_not_merged — a row whose name more than one Google Ads
       campaign id spent under says so (``identity_status``), lists the ids,
@@ -340,15 +349,25 @@ def check_frontend_gates(f: Findings, *, js: str | None = None) -> None:
                 problems.append(f"{fn} prints a campaign row without {helper}")
     if "CAMPAIGN_SHARED_NAME" not in _js_function(js, "getBusinessVerdictBadge"):
         problems.append("getBusinessVerdictBadge has no words of its own for a shared name")
+    # PR-ADS-180B: the funnel block is gated on the SAME response's cohort.
+    funnel_data = _js_function(js, "martCohortFunnelData")
+    if "campaignSqlPublication(cohort)" not in _js_code_only(funnel_data):
+        problems.append("martCohortFunnelData does not gate the funnel on its cohort "
+                        "argument (campaignSqlPublication(cohort))")
+    if "martCohortFunnelHtml(data.cohort" not in _js_code_only(
+            _js_function(js, "renderCampaignsPage")):
+        problems.append("the Campaigns page's funnel block is not given its own "
+                        "response's cohort (martCohortFunnelHtml(data.cohort, …))")
     gate = _js_function(js, "campaignSqlPublication")
     if "function campaignSqlPublication(cohort)" not in gate:
         problems.append("campaignSqlPublication does not take the cohort as its argument")
     page = _js_function(js, "renderCampaignsPage")
     g = page.find("spend_decision_ready !== true")
     s = page.find("renderCampaignsPageSummary(")
-    if g == -1 or s == -1 or g > s:
+    fb = page.find("martCohortFunnelHtml(")
+    if g == -1 or s == -1 or g > s or fb == -1 or g > fb:
         problems.append("the Campaigns page's strict spend gate does not return "
-                        "before the KPI cards")
+                        "before the KPI cards and the funnel block")
     if problems:
         f.violation("frontend_gates", "; ".join(problems[:8]))
     else:

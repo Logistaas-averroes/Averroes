@@ -158,6 +158,12 @@ def _funnel_block(populations, *, available=True):
         } for e in _EVENTS},
         "sync": {"status": "ok"},
         "cohort": None,
+        # PR-ADS-180B: `_lifecycle_funnel_block` also publishes the undated
+        # stage reach over the WHOLE table. These fixtures' rows ARE the whole
+        # table, so it is their own coverage gap, read from the same service.
+        "undated_reach": ({"available": True, "counts": dict(
+            populations["coverage"]["stage_reached_without_entry_date"])}
+            if available else None),
     }
 
 
@@ -188,7 +194,9 @@ def _entered(activity):
 def _activity_renderer():
     """Everything from the activity renderer to the start of the cohort one."""
     start = _APP.index("function renderDashLifecycleActivity(d)")
-    end = _APP.index("function renderDashLifecycleCohort(d)")
+    # PR-ADS-180B: the Lead-cohort renderer that followed it is gone; the
+    # acquisition-cohort panel follows the activity section now.
+    end = _APP.index("function renderDashAcquisitionFunnel(d)")
     return _APP[start:end]
 
 
@@ -514,6 +522,9 @@ def test_10_previous_period_trend_is_distinct_from_cohort_conversion(monkeypatch
     previous = {"available": True, "label": "vs Last Quarter", "window": None,
                 "counts": {"lead": 300, "mql": 553, "sql": 42,
                            "opportunity": 46, "customer": 17},
+                # PR-ADS-180B: a complete baseline says so; an absent verdict
+                # is a lower bound (no comparison).
+                "count_is_bound": dict.fromkeys(_EVENTS, False),
                 "reason": None}
     activity = _activity(_production_shaped_rows(), monkeypatch=monkeypatch,
                          previous=previous)
@@ -900,7 +911,7 @@ def test_22_the_lifecycle_sections_still_render_in_order_and_do_no_arithmetic():
     funnel service.
     """
     order = [_APP.index(f"{name}(d)}}") for name in (
-        "${renderDashLifecycleActivity", "${renderDashLifecycleCohort",
+        "${renderDashLifecycleActivity", "${renderDashAcquisitionFunnel",
         "${renderDashCommercialOutcomes")]
     assert order == sorted(order), "the panels are rendered out of order"
 

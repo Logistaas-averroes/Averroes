@@ -90,8 +90,11 @@ def test_01c_duplicate_rows_that_disagree_on_country_are_placed_in_the_residual(
                                                   "funnel_row_id": 9}]
     cohort = cs.build_cohort(rows, resolve_label=_resolver(), start_at=START,
                              end_before=END, group_key=_country_key)
+    # PR-ADS-180B: a slot also carries the cohort's other funnel stages.
     assert cohort["by_group"] == {"unknown": {"display_name": None, "contacts_acquired": 1,
-                                              "sqls": 0, "sqls_missing_event_timestamp": 0}}
+                                              "sqls": 0, "sqls_missing_event_timestamp": 0,
+                                              "reached_mql": 0, "reached_opportunity": 0,
+                                              "reached_customer_stage": 0}}
 
 
 def test_01d_mutation_a_partition_that_drops_a_contact_fails_reconciliation():
@@ -282,7 +285,11 @@ def test_05b_the_in_residual_marker_is_not_a_count():
 
 def test_05c_conservation_is_checked_under_a_published_cohort():
     from scripts import audit_marketing_outcome_cohorts as audit
-    ok = {"cohort": {"sql_status": "published", "totals": {"sqls": 3, "leads": 5},
+    # PR-ADS-180B: a published cohort carries its other funnel stages beside
+    # the SQL count (a missing one is its own violation, cohort_stage_problems).
+    ok = {"cohort": {"sql_status": "published",
+                     "totals": {"sqls": 3, "leads": 5, "reached_mql": 4,
+                                "reached_opportunity": 1, "reached_customer_stage": 0},
                      "campaign_residual": {"sqls": 1, "leads": 1}},
           "summary": {"sqls": 3},
           "rows": [{"sqls": 2, "leads": 4}]}

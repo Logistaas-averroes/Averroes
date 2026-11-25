@@ -7552,3 +7552,42 @@ A second commit on the same branch (`docs/63` §4.3, §7a).
 * **Proposal, not built.** A backend per-stage bound, or narrowing the
   anchorless set to contacts that could belong to the window. Today any
   anchorless contact makes every cohort rate "—".
+
+### PR-ADS-180B — the acquisition-cohort funnel on every page
+
+`docs/64`. Owner decision 24 Nov (one SQL count: the acquisition cohort) and
+the "full funnel on every page" request.
+
+* **Overview.** The Lead-anchored "Lifecycle Cohort" panel (every stage "at
+  least N" in production: 6,105 of 10,285 MQLs lack a Lead date) is replaced
+  by "Acquisition Cohort", all sources: `lifecycle_acquisition_funnel`, the
+  `all_sources` slot of the mart cohort the Overview already reads, under its
+  one verdict; withheld means absent. The Lead-cohort backend and the
+  payload's `lifecycle_cohort` are kept — Activity and the parity audit read
+  them.
+* **One stage rule.** `marketing_outcome_cohort_service.stage_reached`; the
+  cohort's slots carry `reached_mql` / `reached_opportunity` /
+  `reached_customer_stage` (cumulative); Channels' `reached` delegates to it.
+  `fetch_acquisition_cohort_contacts` reads each stage's direct and recovered
+  dates; `reconcile_cohort` holds every identity for every stage.
+* **Campaigns and Countries.** The mart cohort contract adds the three stage
+  totals, `funnel_stages` and `contacts_without_created_at` (all `None` unless
+  published). One funnel block per page, gated by
+  `campaignSqlPublication(cohort)` on the response's own cohort. Countries'
+  block is the whole Google Ads cohort (residual included). The Customer
+  column is the lifecycle stage, in contacts.
+* **Bounds.** `contacts_without_created_at` above 0 or not stated makes every
+  acquisition column "at least N" (Overview, Channels — 180A never read it —
+  Campaigns, Countries). KPI cards and table cells are unchanged (open).
+* **180A findings.** (a) A previous-period count that is a lower bound is
+  `no_comparison` "previous count is a lower bound". (b) New
+  `fetch_undated_stage_reach`: undated stage reach over the whole table,
+  ruled out only by creation after the window; the Activity bound reads it.
+  Pipeline does not yet (open).
+* **Audits.** `audit_marketing_outcome_cohorts`: stage exposures, stage
+  conservation, independent stage SQL, the Overview block's equality with its
+  cohort. `audit_campaigns_page_certification` S4: the block's gate. SQL
+  doctrine inventory: 0 unknown.
+* **Tests.** `test_pr_ads_180b_acquisition_cohort_funnel.py` (27) and its PG
+  module (7, in the CI PG step and did-run list): all fail on `bf9deed`;
+  mutations M1–M10 in `docs/64` §9. Existing tests ported in `docs/64` §10.

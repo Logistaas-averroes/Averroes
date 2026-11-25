@@ -824,7 +824,11 @@ RULES: list[dict] = [
     # ── executive / revenue services ────────────────────────────────────────
     _m("ovw.module", "services/dashboard_overview_service.py", CLS_MIXED, _OVW, ["sqls_field_ref"]),
     _r("ovw.lifecycle", "services/dashboard_overview_service.py", CLS_CANONICAL, _OVW_LC,
-       symbol=["_lifecycle_funnel_block", "_lifecycle_previous_period", "_lifecycle_activity_block"]),
+       symbol=["_lifecycle_funnel_block", "_lifecycle_previous_period", "_lifecycle_activity_block",
+               # PR-ADS-180B: the Activity bounds (undated stage reach over
+               # every contact that could belong to the window) and the trend
+               # rule that withholds a change against a lower bound.
+               "_undated_reach", "_stage_count_is_bound", "_activity_trend"]),
     _r("ovw", "services/dashboard_overview_service.py", CLS_MIXED, _OVW,
        symbol=["_build_decision_cards", "_build_period_change", "_build_signals",
                "_build_source_mix", "_build_unavailable", "build_dashboard_overview",
@@ -976,7 +980,10 @@ RULES: list[dict] = [
     # It names CPQL because it decides cohort-CPQL publication.
     _m("cohort.module", "services/marketing_outcome_cohort_service.py", CLS_CANONICAL,
        _COHORT, ["contact_created_at_ref", "cpql_ref", "legacy_outcome_service_ref",
-                 "lifecycle_funnel_service_ref"] + _LIFECYCLE_MARKERS),
+                 "lifecycle_funnel_service_ref",
+                 # PR-ADS-180B: SLOT_COUNT_FIELDS names the cohort's `sqls`
+                 # slot field beside its other funnel stages.
+                 "sqls_field_ref"] + _LIFECYCLE_MARKERS),
     _r("cohort.service", "services/marketing_outcome_cohort_service.py", CLS_CANONICAL,
        _COHORT,
        symbol=["window_instants", "_as_instant", "in_window", "sql_proof",
@@ -1000,6 +1007,10 @@ RULES: list[dict] = [
                "audit_campaign_cohort", "_cpql_keys", "_settled_instants",
                # PR-ADS-177A: the mart and Dashboard payloads.
                "mart_withheld_exposures", "mart_conservation_problems",
+               # PR-ADS-180B: the cohort's other funnel stages, and the
+               # Overview's all-source acquisition funnel.
+               "cohort_stage_problems", "acquisition_funnel_exposures",
+               "acquisition_funnel_problems",
                "audit_mart_window", "_build_mart_payloads",
                "independent_counts", "global_population_split", "run",
                "_render", "main"]),

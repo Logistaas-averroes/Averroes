@@ -69,6 +69,10 @@ def _payload(**over):
             _channel("REFERRALS", "Referrals", (5, 5, 2, 2, 0)),
         ],
         "notes": {"stages": "S.", "channels": "C.", "maturity": "M."},
+        # build_channel_funnel publishes this beside every published funnel
+        # (it was missing from this fixture). PR-ADS-180B reads it: above
+        # zero — or absent — every strip column is a lower bound.
+        "contacts_without_created_at": 0,
     }
     data.update(over)
     return data

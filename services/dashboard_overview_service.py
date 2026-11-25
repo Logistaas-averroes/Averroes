@@ -1143,6 +1143,7 @@ def build_dashboard_overview(window: str = "current_quarter",
     # SAME reference instant the revenue mart's comparison uses, so the two
     # cannot describe different previous periods on the same page.
     lifecycle_activity = _lifecycle_activity_block(lifecycle_funnel, window, ref_now)
+    _acq_funnel = _acquisition_funnel_block(_cohort)
 
     kpis = {
         # USD spend is strictly canonical: None whenever FX/coverage is unsafe.
@@ -1320,6 +1321,16 @@ def build_dashboard_overview(window: str = "current_quarter",
          "truth_status": (_cohort_block.get("truth_status")
                           or canonical_contract.TRUTH_UNAVAILABLE),
          "unavailable_reason": _cohort_block.get("reason")},
+        # PR-ADS-180B: the Overview funnel, the all-source acquisition cohort,
+        # under the cohort's one verdict.
+        {"metric": "lifecycle_acquisition_funnel",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_acquisition_cohort",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if _acq_funnel["publication"]["status"] == "published"
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if _acq_funnel["publication"]["status"] == "published"
+                                else _acq_funnel["publication"]["reason"])},
         # PR-ADS-155-F2 §1/§2. Activity is a DIFFERENT reading from the cohort
         # and carries its own status: five stage-entry populations plus the
         # canonical conversions measured over them. It is `ready` whenever the
@@ -1385,11 +1396,16 @@ def build_dashboard_overview(window: str = "current_quarter",
         # A conversion is published only when the canonical service proves it is
         # cohort-safe; unrelated period totals are never divided.
         "lifecycle_funnel": lifecycle_funnel,
-        # PR-ADS-155 §1: the ONE narrowing structure the page may draw. Every
-        # count in it is a subset of the same Lead cohort, and every percentage
-        # in it was computed by the canonical funnel service — the frontend does
-        # no conversion arithmetic of its own.
+        # PR-ADS-155 §1: the Lead-anchored cohort. PR-ADS-180B: no longer drawn
+        # on the Overview (the acquisition cohort below replaced it); kept in
+        # the payload because the cross-page parity audit reads its coverage.
         "lifecycle_cohort": lifecycle_funnel.get("cohort"),
+        # PR-ADS-180B: the Overview funnel — the ACQUISITION COHORT, all
+        # sources: contacts created in the window, each stage counting every
+        # contact that has reached it so far. Read from the SAME cohort build
+        # as the Google Ads cohort above (its all-sources slot), under the SAME
+        # verdict; when that verdict is not published no count is present.
+        "lifecycle_acquisition_funnel": _acq_funnel,
         # PR-ADS-155-F2 §1/§2: stage-entry ACTIVITY — five independent
         # populations, published as such, with the canonical cohort conversions
         # beside them. The cohort block above answers "of one Lead cohort, how
@@ -1402,6 +1418,80 @@ def build_dashboard_overview(window: str = "current_quarter",
         # exists that would let one be drawn as a conversion of the other, so they
         # are presented as separate sections and never joined by an arrow.
         "commercial_outcomes": _commercial_outcomes(mart, revenue_connected),
+    }
+
+
+#: PR-ADS-180B — the Overview funnel's columns after the first: the
+#: acquisition cohort's stages, each naming the all-sources slot field it
+#: reads. "Customer stage" is the HubSpot lifecycle stage, in contacts.
+ACQUISITION_FUNNEL_STAGES = (
+    {"key": "reached_mql", "field": "reached_mql", "label": "MQL"},
+    {"key": "reached_sql", "field": "sqls", "label": "SQL"},
+    {"key": "reached_opportunity", "field": "reached_opportunity", "label": "Opportunity"},
+    {"key": "reached_customer_stage", "field": "reached_customer_stage",
+     "label": "Customer stage"},
+)
+REASON_ACQUISITION_COUNTS_MISSING = "acquisition_funnel_counts_missing"
+ACQUISITION_FUNNEL_POPULATION = "all_source_contacts_acquired_in_window"
+
+
+def _acquisition_funnel_block(cohort: dict | None) -> dict:
+    """PR-ADS-180B — the Overview's funnel: the all-source acquisition cohort.
+
+    Every HubSpot contact CREATED in the window (all sources), and how many
+    have reached each stage so far — cumulative, the rule Channels counts by
+    (``marketing_outcome_cohort_service.stage_reached``). It is the
+    ``all_sources`` slot of the SAME cohort build the mart publishes the
+    Google Ads leads / SQLs from, over the same days, so it is published under
+    THAT block's one verdict (``sql_status``: the real freshness ``assess``,
+    bucket reconciliation) and nothing here re-decides it. No stage-entry date
+    is needed, so the Lead-entry gap that made the old Lead cohort a permanent
+    lower bound does not apply.
+
+    Withheld means absent: unless published, ``totals`` and
+    ``contacts_without_created_at`` are None. A published verdict whose slot
+    lacks a count is unavailable (``acquisition_funnel_counts_missing``) —
+    never a partial set of columns. Channels-shaped (``publication``,
+    ``stages``, ``totals``), so one adapter draws both blocks."""
+    from services import marketing_outcome_cohort_service as cohort_svc  # noqa: PLC0415
+
+    c = cohort if isinstance(cohort, dict) else {}
+    status = c.get("sql_status")
+    reason = c.get("sql_reason")
+    if not status:
+        status, reason = cohort_svc.STATUS_UNAVAILABLE, cohort_svc.SQL_REASON_FUNNEL_UNREADABLE
+    slot = ((c.get("breakdown") or {}).get("all_sources")
+            if status == cohort_svc.STATUS_PUBLISHED else None)
+    fields = ["contacts_acquired"] + [st["field"] for st in ACQUISITION_FUNNEL_STAGES]
+    if status == cohort_svc.STATUS_PUBLISHED and (
+            not isinstance(slot, dict)
+            or any(not isinstance(slot.get(f), int) or isinstance(slot.get(f), bool)
+                   for f in fields)):
+        status, reason = cohort_svc.STATUS_UNAVAILABLE, REASON_ACQUISITION_COUNTS_MISSING
+    published = status == cohort_svc.STATUS_PUBLISHED
+    totals = None
+    if published:
+        totals = {"contacts": slot["contacts_acquired"],
+                  **{st["key"]: slot[st["field"]] for st in ACQUISITION_FUNNEL_STAGES}}
+    return {
+        "metric_family": c.get("metric_family"),
+        "window_basis": c.get("window_basis"),
+        "scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "population": ACQUISITION_FUNNEL_POPULATION,
+        "publication": {"status": status, "reason": None if published else reason},
+        "window": c.get("window"),
+        "as_of": c.get("as_of"),
+        "stale": bool(published and c.get("stale")),
+        "stages": [{"key": st["key"], "label": st["label"]} for st in ACQUISITION_FUNNEL_STAGES],
+        "totals": totals,
+        "contacts_without_created_at": (c.get("contacts_without_created_at")
+                                        if published else None),
+        "producer": ("services.marketing_outcome_cohort_service.build_cohort "
+                     "all_sources slot (the Revenue Decision Mart's cohort)"),
+        "notes": {"customer_stage": ("'Customer stage' counts contacts whose HubSpot "
+                                     "lifecycle stage reached Customer, counted in "
+                                     "contacts; never companies, never deals."),
+                  "maturity": c.get("maturity_note")},
     }
 
 
@@ -1537,10 +1627,13 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         } for e in empty},
         "sync": payload.get("sync"),
         "campaign_identity_available": payload.get("campaign_identity_available"),
-        # PR-ADS-155 §1: THE funnel the Dashboard renders — one Lead-anchored
-        # cohort followed forward. The five counts above remain available as
-        # independent stage-entry totals, but they are no longer drawn as a
-        # pipeline, because they never were one.
+        # PR-ADS-180B (docs/63 §8 b): undated stage reach over EVERY contact
+        # that could belong to this window, not only the window's own rows.
+        "undated_reach": _undated_reach(payload.get("window")) if available else None,
+        # PR-ADS-155 §1: one Lead-anchored cohort followed forward. PR-ADS-180B
+        # took it off the Overview page (the acquisition cohort replaced it);
+        # it is still published here because the cross-page parity audit reads
+        # its coverage (`_lifecycle_coverage_disclosures`) — see docs/64 §3.
         "cohort": payload.get("lifecycle_cohort"),
     }
 
@@ -1599,14 +1692,85 @@ def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
                 "reason": "Previous period unavailable."}
 
     events = payload.get("events") or {}
+    # PR-ADS-180B (docs/63 §8, carried from the 180A re-audit): a previous
+    # count that is a lower bound is no baseline. "+X% vs prior" against it is
+    # a change nobody measured, and its sign can flip.
+    undated = _undated_reach(payload.get("window"))
     return {
         "available": True,
         "label": label,
         "window": payload.get("window"),
         "counts": {e: (events.get(e) or {}).get("count")
                    for e in LIFECYCLE_STAGE_EVENTS},
+        "count_is_bound": {e: _stage_count_is_bound(e, payload.get("coverage"), undated)
+                        for e in LIFECYCLE_STAGE_EVENTS},
+        "undated_reach": undated,
         "reason": None,
     }
+
+
+#: PR-ADS-180B — why a stage's period change is not stated.
+REASON_PREVIOUS_LOWER_BOUND = "previous count is a lower bound"
+REASON_CURRENT_LOWER_BOUND = "current count is a lower bound"
+
+
+def _undated_reach(window: dict | None) -> dict:
+    """``fetch_undated_stage_reach`` for one funnel window payload: per stage,
+    the undated contacts that could belong to it, over the whole table. A read
+    that fails is ``available: False`` with no counts — never zeros."""
+    from db import crm_funnel_repository as funnel_repo  # noqa: PLC0415
+
+    w = window or {}
+
+    def _day(value):
+        if value in (None, ""):
+            return None
+        return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
+    try:
+        read = funnel_repo.fetch_undated_stage_reach(_day(w.get("start_date")),
+                                                     _day(w.get("end_date")))
+    except Exception as exc:  # noqa: BLE001 — unknown, never zero
+        logger.warning("[dashboard_overview] undated stage reach unreadable: %s", exc)
+        read = {"available": False, "counts": None}
+    counts = read.get("counts") if read.get("available") else None
+    return {"available": counts is not None,
+            "counts": dict(counts) if counts is not None else None,
+            "rule": read.get("rule") or getattr(funnel_repo, "UNDATED_REACH_RULE", None)}
+
+
+def _stage_count_is_bound(event: str, coverage: dict | None,
+                                undated: dict | None) -> bool:
+    """True unless the evidence proves the stage-entry count complete.
+
+    A bound when the build's own coverage does not report the stage, or
+    reports undated contacts in the window's rows; or when the undated reach
+    over every contact that could belong to the window is unknown or above
+    zero. Missing is never read as zero."""
+    missing = ((coverage or {}).get("stage_reached_without_entry_date") or {})
+    own = missing.get(event) if isinstance(missing, dict) else None
+    if own is None or own > 0:
+        return True
+    counts = (undated or {}).get("counts") if (undated or {}).get("available") else None
+    if counts is None or counts.get(event) is None:
+        return True
+    return counts[event] > 0
+
+
+def _activity_trend(current, previous, *, current_bound: bool, previous_bound: bool) -> dict:
+    """One stage's period change, or why there is none (PR-ADS-180B).
+
+    A lower bound on EITHER side is no measurement of change: the current
+    count may undercount, and so may the baseline — the sign of "+X%" can flip.
+    Both are stated as ``no_comparison`` with the reason, never a percentage."""
+    metric = _delta_metric(current, previous)
+    if metric["status"] != "ok":
+        return metric
+    if current_bound or previous_bound:
+        return {**metric, "delta_pct": None, "direction": None, "status": "no_comparison",
+                "reason": (REASON_CURRENT_LOWER_BOUND if current_bound
+                           else REASON_PREVIOUS_LOWER_BOUND)}
+    return metric
 
 
 def _activity_unavailable_reason(lifecycle_funnel: dict) -> str:
@@ -1671,6 +1835,9 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
                 else {"available": False, "label": None, "window": None,
                       "counts": {}, "reason": "Previous period unavailable."})
     prev_counts = previous.get("counts") or {}
+    prev_bounds = previous.get("count_is_bound") or {}
+    undated = lifecycle_funnel.get("undated_reach") or {}
+    undated_counts = undated.get("counts") if undated.get("available") else None
 
     stages = []
     for event in LIFECYCLE_STAGE_EVENTS:
@@ -1697,7 +1864,19 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
             # them — and that absence is disclosed here rather than imputed.
             "missing_entry_date_contacts": (missing_by_stage.get(event)
                                             if available else None),
-            "previous_period": _delta_metric(entered, prev_counts.get(event)),
+            # PR-ADS-180B (docs/63 §8 b): the same gap over EVERY contact that
+            # could belong to this window — outside the window's rows too. None
+            # when it could not be read (the stage is then a lower bound).
+            "undated_contacts_could_belong": (
+                (undated_counts or {}).get(event) if available else None),
+            "count_is_bound": (_stage_count_is_bound(
+                event, lifecycle_funnel.get("coverage"), undated) if available else None),
+            "previous_period": _activity_trend(
+                entered, prev_counts.get(event),
+                current_bound=available and _stage_count_is_bound(
+                    event, lifecycle_funnel.get("coverage"), undated),
+                previous_bound=bool(previous.get("available"))
+                and prev_bounds.get(event) is not False),
         })
 
     # Fail closed as ONE block. A `mismatch` leaves the funnel payload's own
@@ -1744,9 +1923,12 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
         "conversions": conversions,
         "conversions_available": bool(conversions),
         "coverage": lifecycle_funnel.get("coverage"),
+        # PR-ADS-180B: the undated reach the stage bounds above were read from.
+        "undated_reach": undated if available else None,
         "reconciliation": lifecycle_funnel.get("reconciliation"),
         "sync": lifecycle_funnel.get("sync"),
-        "previous_period": {k: v for k, v in previous.items() if k != "counts"},
+        "previous_period": {k: v for k, v in previous.items()
+                            if k not in ("counts", "count_is_bound", "undated_reach")},
         "canonical_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
         # Read by the frontend contract test: activity counts are contact-stage
         # facts and are never joined to closed-won deal facts by an arrow.

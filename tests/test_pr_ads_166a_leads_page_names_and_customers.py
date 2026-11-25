@@ -2037,12 +2037,17 @@ def test_32_the_overview_lifecycle_panels_never_call_the_customer_stage_customer
     assert offenders == [], offenders
 
     # ... and everything the page renders from them, tooltips included.
+    # PR-ADS-180B: the Overview's second panel is the acquisition cohort now
+    # (the Lead cohort above is still published, and still checked, but no
+    # longer drawn). Its Customer column is "Reached Customer stage".
     out = _node({"activity": ["renderDashLifecycleActivity", [payload]],
-                 "cohort": ["renderDashLifecycleCohort", [payload]]})
+                 "cohort": ["renderDashAcquisitionFunnel", [payload]]})
+    assert "Reached Customer stage" in _text(out["cohort"])
+    assert "Moved to Customer stage" in _text(out["activity"])
     for panel in ("activity", "cohort"):
         markup = out[panel]
         visible = _text(markup)
-        assert "Moved to Customer stage" in visible, panel
+        assert "Customer stage" in visible, panel
         assert not _names_a_customer(visible), (panel, visible)
         for title in re.findall(r'title="([^"]*)"', markup):
             assert not _names_a_customer(html_lib.unescape(title)), (panel, title)

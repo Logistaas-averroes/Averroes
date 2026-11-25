@@ -435,6 +435,12 @@ Fail-before:
 
 ## 8. Proposals (not built)
 
+> **PR-ADS-180B (`docs/64`) built these.** Overview's Lead cohort panel is
+> replaced by the acquisition cohort; Campaigns and Countries carry the
+> cohort's MQL, Opportunity and Customer-stage counts and one block each;
+> the previous-period trend and the anchorless count are closed for the
+> Activity panel (`docs/64` §4, §5). The text below is the 180A record.
+
 * **A block on Campaigns and Countries.** Neither page draws a funnel today.
   Their lifecycle figures are acquisition-cohort Leads and SQLs. They carry
   no MQL, Opportunity or Customer-stage count, and their only customer figure

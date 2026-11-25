@@ -90,7 +90,10 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 from analysis.account_time import ACCOUNT_TZ
-from analysis.crm_lifecycle import EVENT_SQL, normalize_lifecycle_stage, stages_implying_event
+from analysis.crm_lifecycle import (
+    EVENT_CUSTOMER, EVENT_MQL, EVENT_OPPORTUNITY, EVENT_SQL, normalize_lifecycle_stage,
+    stages_implying_event,
+)
 from analysis.source_classification import GROUP_GOOGLE_ADS, GROUP_UNCLASSIFIED, classify_source
 from services.canonical_contact_outcome_service import campaign_disqualifier
 
@@ -124,6 +127,23 @@ PROOF_ORDER = (PROOF_DIRECT, PROOF_RECOVERED, PROOF_STAGE)
 TIMESTAMPED_PROOFS = frozenset({PROOF_DIRECT, PROOF_RECOVERED})
 
 _STAGES_IMPLYING_SQL = frozenset(stages_implying_event(EVENT_SQL))
+
+# ── PR-ADS-180B: the cohort's other funnel stages ────────────────────────────
+#: The acquisition cohort's stages beside SQL, as ``(slot field, event)``. Each
+#: counts every contact of the cohort that has reached the stage SO FAR —
+#: cumulative, not a partition by furthest stage — on the same evidence rule as
+#: SQL (:func:`stage_reached`). "Customer stage" is the HubSpot lifecycle stage,
+#: counted in CONTACTS: never companies, never deals, never "customers".
+STAGE_REACH_FIELDS = (
+    ("reached_mql", EVENT_MQL),
+    ("reached_opportunity", EVENT_OPPORTUNITY),
+    ("reached_customer_stage", EVENT_CUSTOMER),
+)
+#: Every count a cohort slot carries. Each bucket identity holds for each.
+SLOT_COUNT_FIELDS = ("contacts_acquired", "sqls", "sqls_missing_event_timestamp",
+                     *(f for f, _e in STAGE_REACH_FIELDS))
+_STAGES_IMPLYING = {e: frozenset(stages_implying_event(e))
+                    for e in (EVENT_MQL, EVENT_SQL, EVENT_OPPORTUNITY, EVENT_CUSTOMER)}
 
 # ── Attribution buckets ──────────────────────────────────────────────────────
 BUCKET_CAMPAIGN = "campaign"
@@ -260,6 +280,32 @@ def sql_proof(row: dict) -> str | None:
     return None
 
 
+def stage_reached(row: dict, event: str) -> bool:
+    """Has this contact canonical evidence of reaching ``event``? (PR-ADS-180B)
+
+    The ONE stage-reach rule of the acquisition cohort, shared by the cohort's
+    slots and the Channels funnel (``channel_funnel_service.reached``). SQL is
+    :func:`sql_proof`. Any other stage: its direct stage-entry timestamp, its
+    recovered one, or a current lifecycle stage at or beyond it. Evidence says
+    the stage WAS reached; it never supplies a date, and nothing here reads one
+    as a window.
+    """
+    if event == EVENT_SQL:
+        return sql_proof(row) is not None
+    if row.get(f"{event}_entered_direct") is not None:
+        return True
+    if row.get(f"{event}_entered_recovered") is not None:
+        return True
+    return normalize_lifecycle_stage(row.get("lifecycle_stage")) in _STAGES_IMPLYING[event]
+
+
+def stage_flags(rows: list[dict]) -> dict:
+    """``{slot field: reached}`` for one contact's rows. A stage any canonical
+    row proves is reached (the duplicate rule ``sql_proof`` follows)."""
+    return {field: any(stage_reached(r, event) for r in rows)
+            for field, event in STAGE_REACH_FIELDS}
+
+
 def contact_identity(row: dict) -> tuple[str, bool]:
     """``(dedup_key, used_fallback)``. ``contact_id`` unless genuinely blank."""
     cid = str(row.get("contact_id") or "").strip()
@@ -317,16 +363,18 @@ def contact_bucket(row: dict, resolve_label: LabelResolver) -> tuple[str, str | 
 # The cohort (pure)
 # ═════════════════════════════════════════════════════════════════════════════
 def _new_slot(display=None) -> dict:
-    return {"display_name": display, "contacts_acquired": 0, "sqls": 0,
-            "sqls_missing_event_timestamp": 0}
+    return {"display_name": display, **dict.fromkeys(SLOT_COUNT_FIELDS, 0)}
 
 
-def _bump(slot: dict, proof: str | None) -> None:
+def _bump(slot: dict, proof: str | None, flags: dict | None = None) -> None:
     slot["contacts_acquired"] += 1
     if proof is not None:
         slot["sqls"] += 1
         if proof not in TIMESTAMPED_PROOFS:
             slot["sqls_missing_event_timestamp"] += 1
+    for field, hit in (flags or {}).items():
+        if hit:
+            slot[field] += 1
 
 
 def _merge_duplicates(rows: list[dict], resolve_label: LabelResolver) -> tuple[dict, str, str | None, str | None]:
@@ -406,39 +454,40 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
             bucket, key, reason = contact_bucket(row, resolve_label)
         else:
             row, proof, bucket, (key, reason) = _merge_duplicates(group, resolve_label)
+        flags = stage_flags(group)
 
-        _bump(all_sources, proof)
+        _bump(all_sources, proof, flags)
         if proof is not None:
             proof_counts[proof] += 1
             sql_identities[ident] = {"proof": proof, "bucket": bucket,
                                      "campaign_key": key, "reason": reason}
 
         if bucket == BUCKET_EXCLUDED:
-            _bump(excluded, proof)
+            _bump(excluded, proof, flags)
             if proof is not None:
                 excluded_reasons[reason] = excluded_reasons.get(reason, 0) + 1
                 if str(row.get("gclid") or "").strip():
                     excluded_sqls_with_gclid += 1
             continue
 
-        _bump(google_ads, proof)
+        _bump(google_ads, proof, flags)
         if by_group is not None:
             keys = {group_key(r) for r in group}
             gkey = next(iter(keys)) if len(keys) == 1 else group_key({})
-            _bump(by_group.setdefault(gkey, _new_slot()), proof)
+            _bump(by_group.setdefault(gkey, _new_slot()), proof, flags)
         if bucket == BUCKET_CAMPAIGN:
-            _bump(by_campaign.setdefault(key, _new_slot()), proof)
+            _bump(by_campaign.setdefault(key, _new_slot()), proof, flags)
         else:
-            _bump(unattributed, proof)
+            _bump(unattributed, proof, flags)
             if proof is not None:
                 unattributed_reasons[reason] = unattributed_reasons.get(reason, 0) + 1
             if key is not None:
                 _bump(unattributed_by_label.setdefault(
-                    key, _new_slot(row.get("hs_analytics_source_data_1"))), proof)
+                    key, _new_slot(row.get("hs_analytics_source_data_1"))), proof, flags)
 
     unattributed_without_label_row = {
         field: unattributed[field] - sum(s[field] for s in unattributed_by_label.values())
-        for field in ("contacts_acquired", "sqls", "sqls_missing_event_timestamp")
+        for field in SLOT_COUNT_FIELDS
     }
     return {
         "all_sources": all_sources,
@@ -466,24 +515,32 @@ def reconcile_cohort(cohort: dict) -> list[str]:
     starts leaking contacts fails loudly in both places.
     """
     problems: list[str] = []
-    ga, un, ex, al = (cohort["google_ads"], cohort["unattributed"],
-                      cohort["excluded_non_google"], cohort["all_sources"])
-    mapped = {f: sum(s[f] for s in cohort["by_campaign"].values())
-              for f in ("contacts_acquired", "sqls", "sqls_missing_event_timestamp")}
-    for f in ("contacts_acquired", "sqls", "sqls_missing_event_timestamp"):
+    # PR-ADS-180B: every slot count, the cohort's other funnel stages included.
+    # A slot that lacks a field reads 0 here, so a field missing from ONE slot
+    # (a leak) breaks an identity; one missing from every slot is no count.
+    fields = SLOT_COUNT_FIELDS
+    ga, un, ex, al = ({**s, **{f: s.get(f, 0) for f in fields}}
+                      for s in (cohort["google_ads"], cohort["unattributed"],
+                                cohort["excluded_non_google"], cohort["all_sources"]))
+    mapped = {f: sum(s.get(f, 0) for s in cohort["by_campaign"].values()) for f in fields}
+    for f in fields:
         if mapped[f] + un[f] != ga[f]:
             problems.append(f"google_ads.{f} {ga[f]} != campaigns {mapped[f]} "
                             f"+ unattributed {un[f]}")
         if ga[f] + ex[f] != al[f]:
             problems.append(f"all_sources.{f} {al[f]} != google_ads {ga[f]} "
                             f"+ excluded {ex[f]}")
-        if un["without_label_row"][f] < 0:
+        if un["without_label_row"].get(f, 0) < 0:
             problems.append(f"unattributed label rows exceed the unattributed {f} total")
+    for f, _event in STAGE_REACH_FIELDS:
+        # Cumulative counts OF the cohort: never more than it acquired.
+        if al[f] > al["contacts_acquired"]:
+            problems.append(f"all_sources.{f} exceeds the contacts acquired")
     groups = cohort.get("by_group")
     if groups is not None:
         # PR-ADS-177A: the second partition conserves the Google Ads cohort too.
-        for f in ("contacts_acquired", "sqls", "sqls_missing_event_timestamp"):
-            grouped = sum(s[f] for s in groups.values())
+        for f in fields:
+            grouped = sum(s.get(f, 0) for s in groups.values())
             if grouped != ga[f]:
                 problems.append(f"google_ads.{f} {ga[f]} != groups {grouped}")
     if sum(cohort["proof_counts"].values()) != al["sqls"]:
