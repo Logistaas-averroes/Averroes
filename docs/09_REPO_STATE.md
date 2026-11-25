@@ -7128,3 +7128,12 @@ Same branch, a second commit. One Major, no blockers (`docs/61` §11).
   deal-count agreement).
 * **Tests.** `tests/test_pr_ads_178b_f1_truth_audit_round1.py` (18, non-PG).
   Carried: m6, m7, m8 (`docs/61` §11).
+
+### PR-ADS-178B-F2 — funnel conversion % beside a lower bound
+
+In truth audit round 2, a conversion % next to an "at least N" stage was
+still shown as an exact number. Now an undated TO stage gives
+"at least X%", and an undated FROM stage gives "—" with the reason
+(`pipelineFunnelHtml`). Test: `tests/test_pr_ads_178b_f1_truth_audit_round1.py`
+`test_09_a`/`test_09_b`; `test_09_a` fails on 2904d7f. The full note is in
+docs/61 §12.

@@ -338,3 +338,41 @@ def test_08_a_partial_stage_count_is_at_least_n_with_the_reason():
     assert _text(html2).count("at least") == 5
     # Reconciled evidence: exact counts.
     assert "at least" not in _text(_funnel_html(_payload()))
+
+
+# ── round 2. a conversion % beside a lower-bound stage is never exact ────────
+def _conv(frm, to, pct):
+    return {"from_event": frm, "to_event": to, "available": True,
+            "basis": "cohort", "rate_pct": pct}
+
+
+def _chips(html):
+    return re.findall(r'<span class="dash-funnel__conv[^"]*"[^>]*>(.*?)</span>', html)
+
+
+def test_09_a_conversion_beside_a_lower_bound_stage_is_never_shown_as_exact():
+    """Truth audit round 2 (figure-affecting). ``cohort_conversion`` counts a
+    contact as converted only when it carries a TO-stage date, so an undated
+    TO stage undercounts the numerator: the rate is "at least X%". An undated
+    FROM stage leaves the cohort itself incomplete: the rate is unknown ("—").
+    On 2904d7f the chips read a bare "0%" / "40%" beside "at least N"."""
+    zero = {e: 0 for e in ("lead", "mql", "sql", "opportunity", "customer")}
+    convs = [_conv("lead", "mql", 50), _conv("mql", "sql", 40),
+             _conv("sql", "opportunity", 0), _conv("opportunity", "customer", 25)]
+    part = _funnel(conversions=convs,
+                   reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
+                   coverage={"stage_reached_without_entry_date": {**zero, "opportunity": 5}})
+    chips = _chips(_funnel_html(_payload(funnel=part)))
+    # lead→mql, mql→sql: neither side is a bound — exact.
+    assert chips[0] == "50%" and chips[1] == "40%", chips
+    # sql→opportunity: the TO stage is a bound — "at least".
+    assert chips[2] == "at least 0%", chips
+    # opportunity→customer: the FROM stage is a bound — unknown.
+    assert chips[3] == "—", chips
+
+
+def test_09_b_reconciled_evidence_keeps_exact_rates():
+    convs = [_conv("lead", "mql", 50), _conv("mql", "sql", 40),
+             _conv("sql", "opportunity", 10), _conv("opportunity", "customer", 25)]
+    chips = _chips(_funnel_html(_payload(funnel=_funnel(conversions=convs))))
+    assert chips == ["50%", "40%", "10%", "25%"], chips

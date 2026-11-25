@@ -7366,9 +7366,21 @@ function pipelineFunnelHtml(d) {
     if (prev) {
       // Only a cohort-safe rate is ever shown. Otherwise "—".
       const ok = conv && conv.available && conv.basis === "cohort" && conv.rate_pct !== null;
-      convChip = ok
-        ? `<span class="dash-funnel__conv" title="Cohort-safe: of contacts entering ${escapeHtml(prev.stage)} in this window, the share that later entered ${escapeHtml(stage.stage)}">${conv.rate_pct}%</span>`
-        : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
+      // PR-ADS-178B-F2: a rate beside a lower-bound stage is never shown as
+      // exact. An undated FROM stage leaves the cohort itself incomplete, so
+      // the rate is unknown ("—" with the reason). An undated TO stage only
+      // undercounts the converted contacts, so the rate is "at least X%".
+      const fromBound = lowerBound[prev.event];
+      const toBound = lowerBound[stage.event];
+      if (ok && fromBound) {
+        convChip = `<span class="dash-funnel__conv dash-funnel__conv--muted" data-conv-bound="unknown" title="${escapeHtml(`Conversion unknown: ${fromBound}`)}">—</span>`;
+      } else if (ok && toBound) {
+        convChip = `<span class="dash-funnel__conv" data-conv-bound="at_least" title="${escapeHtml(`Lower bound: ${toBound}`)}">at least ${conv.rate_pct}%</span>`;
+      } else {
+        convChip = ok
+          ? `<span class="dash-funnel__conv" title="Cohort-safe: of contacts entering ${escapeHtml(prev.stage)} in this window, the share that later entered ${escapeHtml(stage.stage)}">${conv.rate_pct}%</span>`
+          : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
+      }
     }
     const dateProp = block.event_date_property || "";
     const bound = lowerBound[stage.event];

@@ -368,3 +368,30 @@ Carried, not fixed here (follow-ups):
   adapter (`_pipeline_from`) rather than a real `build_pipeline` payload.
 * **m8** §9.1's fail-before wording ("fail on d543dcc") does not say which
   cases fail for a missing module versus a wrong behaviour.
+
+## 12. Truth audit round 2 (PR-ADS-178B-F2)
+
+Round 2 found no Blocking or Major issue. It found one figure-affecting
+Minor, fixed here:
+
+* **The problem.** The conversion % next to a lower-bound stage was still
+  shown as an exact number. `cohort_conversion` counts a contact as converted
+  only when the contact has a date for the TO stage. So when the TO stage
+  has undated contacts, the converted count is too low, and the rate shown
+  is lower than the real one.
+* **The fix.** `pipelineFunnelHtml` now handles two cases:
+  * **TO stage is a lower bound:** the rate reads "at least X%", with the
+    reason in a tooltip.
+  * **FROM stage is a lower bound:** the cohort itself is incomplete, so the
+    rate is unknown. It reads "—", with the reason in a tooltip.
+* **Tests.** `test_09_a` (partial evidence, one undated stage) and
+  `test_09_b` (reconciled evidence keeps exact rates). `test_09_a` fails on
+  2904d7f (`'0%' == 'at least 0%'`).
+
+Two observations are carried, not fixed:
+
+* **Coverage is not split by attribution scope.** Under a narrow Scope this
+  over-marks: a stage can be marked as a lower bound when it is complete for
+  that scope. It never under-marks.
+* **Contacts with an unrecognised lifecycle stage are not counted as
+  undated.** That gap is shown in words in the partial-evidence banner.
