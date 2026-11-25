@@ -151,6 +151,7 @@ jobs:
             tests/test_pr_ads_172a_campaign_evidence_memory.py \
             tests/test_pr_ads_173a_search_terms_pages_memory.py \
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
+            tests/test_pr_ads_180b_acquisition_cohort_funnel_pg_integration.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -404,6 +405,14 @@ jobs:
                            # stored, survive a sparse payload, and an existing
                            # database gains the columns on both tables.
                            "tests.test_pr_ads_166a_leads_page_names_and_customers",
+                           # PR-ADS-180B. The acquisition cohort's MQL /
+                           # Opportunity / Customer-stage counts through the
+                           # real read, mart, Overview and pages, certified
+                           # by the cohort audit's own SQL; withheld absent on
+                           # every surface; and the Activity Lead bound over
+                           # undated contacts OUTSIDE the window's rows
+                           # (fetch_undated_stage_reach) on a real table.
+                           "tests.test_pr_ads_180b_acquisition_cohort_funnel_pg_integration",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

@@ -1612,6 +1612,18 @@ _COHORT_IDENTITIES = [
     "google_ads_sqls = sum(campaign row sqls) + campaign_residual.sqls",
     "google_ads_sqls = sum(country row sqls, residual row included)",
 ]
+#: PR-ADS-180B: the acquisition cohort's funnel, in order: the key the block
+#: column carries, the ``totals`` field it reads and its label. "Customer
+#: stage" is the HubSpot lifecycle stage, counted in contacts — never the
+#: distinct companies a "Customers" figure is.
+COHORT_FUNNEL_STAGES = (
+    {"key": "contacts_acquired", "total": "leads", "label": "Leads · contacts acquired"},
+    {"key": "reached_mql", "total": "reached_mql", "label": "MQL"},
+    {"key": "reached_sql", "total": "sqls", "label": "SQL"},
+    {"key": "reached_opportunity", "total": "reached_opportunity", "label": "Opportunity"},
+    {"key": "reached_customer_stage", "total": "reached_customer_stage",
+     "label": "Customer stage"},
+)
 
 
 def _mart_label_resolver(resolution_map: dict, excluded_label_keys: set):
@@ -1690,6 +1702,14 @@ def _cohort_slots(outcomes: dict) -> tuple[dict, dict]:
     return campaign, dict(cohort.get("by_group") or {})
 
 
+def _disclosed_count(value) -> int | None:
+    """A count published whatever the cohort verdict (PR-ADS-180B-F1): the
+    integer read, or None when it was not read. Never 0 for unknown."""
+    if value is None or isinstance(value, bool):
+        return None
+    return int(value)
+
+
 def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
                            start_date=None, end_date=None) -> dict:
     """The cohort contract every mart response carries (PR-ADS-177A).
@@ -1744,7 +1764,26 @@ def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
         "totals": {"leads": _count(ga.get("contacts_acquired")),
                    "sqls": _count(ga.get("sqls")),
                    "sqls_missing_event_timestamp": _count(
-                       ga.get("sqls_missing_event_timestamp"))},
+                       ga.get("sqls_missing_event_timestamp")),
+                   # PR-ADS-180B: the same contacts' other funnel stages, each
+                   # cumulative (every contact that has reached it so far), on
+                   # the cohort's one stage-reach rule and under the SAME
+                   # verdict as the SQL count beside them. The Customer stage
+                   # is the HubSpot lifecycle stage, in contacts.
+                   **{f: _count(ga.get(f)) for f, _e in cohort_svc.STAGE_REACH_FIELDS}},
+        # PR-ADS-180B: the funnel the totals above draw, in order, each stage
+        # naming its total. A contact with no created date is in no window;
+        # how many there are is what makes every stage a lower bound when it
+        # is above zero.
+        "funnel_stages": [dict(s) for s in COHORT_FUNNEL_STAGES],
+        # PR-ADS-180B-F1 (m4): a TABLE-WIDE data-quality disclosure (every
+        # canonical contact, all sources, no window), not a cohort figure — so
+        # it is published whatever the verdict, as it already was in
+        # `readiness.missing_contact_created_at_count` and in
+        # `metadata.coverage_notes`. One figure, one value, in every copy
+        # (`audit_marketing_outcome_cohorts.created_at_disclosure_problems`).
+        # None only when the read failed: unknown, never 0.
+        "contacts_without_created_at": _disclosed_count(outcomes.get("missing_created_at")),
         "campaign_residual": {
             "label": CAMPAIGN_RESIDUAL_LABEL,
             "definition": ("Google Ads-sourced contacts created in the window "

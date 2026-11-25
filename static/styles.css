@@ -5806,7 +5806,7 @@ body.is-revenue-page #monitoring-banner {
    line and its stage at the start of the next (PR-ADS-155-F2). Equal widths and
    one accent weight per column: nothing in the layout implies a narrowing
    shape the counts may not have — five stage-entry populations may rise. */
-.dash-activity-panel, .dash-cohort-panel { margin-top: var(--space-5); }
+.dash-activity-panel, .dash-cohort-panel, .mart-cohort-funnel-panel { margin-top: var(--space-5); }
 .funnel-block { min-width: 0; }
 .funnel-block__family { font-size: 11px; color: var(--text-muted); margin: 0 0 var(--space-3); line-height: 1.4; }
 .funnel-block__family-label { font-weight: 600; color: var(--text-secondary); }

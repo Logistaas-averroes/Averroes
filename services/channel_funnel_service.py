@@ -36,7 +36,6 @@ from datetime import datetime, timedelta, timezone
 
 from analysis.crm_lifecycle import (
     EVENT_CUSTOMER, EVENT_MQL, EVENT_OPPORTUNITY, EVENT_SQL,
-    normalize_lifecycle_stage, stages_implying_event,
 )
 from services import marketing_outcome_cohort_service as cohort_service
 
@@ -56,9 +55,6 @@ STAGES = (
      "label": "Customer stage"},
 )
 STAGE_KEYS = tuple(s["key"] for s in STAGES)
-
-_IMPLYING = {s["event"]: frozenset(stages_implying_event(s["event"]))
-             for s in STAGES}
 
 NO_SOURCE = "(no source recorded)"
 NO_DRILLDOWN = "(none)"
@@ -83,6 +79,10 @@ SOURCE_LABELS = {
 STAGE_NOTE = (
     "A contact counts for a stage when HubSpot shows it got there: a date it "
     "entered the stage, or a current lifecycle stage at or beyond it. "
+    # PR-ADS-180B-F1 (m5): the consequence of that rule, stated.
+    "The stage columns are not nested subsets: a contact whose stage moved "
+    "back can count at a later stage without counting at an earlier one, so "
+    "a later column can exceed an earlier one. "
     "'Customer stage' counts contacts whose lifecycle stage is Customer; it "
     "is not the number of customer companies shown on the revenue pages.")
 CHANNEL_NOTE = (
@@ -143,15 +143,13 @@ def drilldown_key(row: dict) -> str:
 
 
 def reached(row: dict, event: str) -> bool:
-    """Has this contact canonical evidence of reaching ``event``?"""
-    if event == EVENT_SQL:
-        # One SQL rule in the product: the acquisition cohort's own.
-        return cohort_service.sql_proof(row) is not None
-    if row.get(f"{event}_entered_direct") is not None:
-        return True
-    if row.get(f"{event}_entered_recovered") is not None:
-        return True
-    return normalize_lifecycle_stage(row.get("lifecycle_stage")) in _IMPLYING[event]
+    """Has this contact canonical evidence of reaching ``event``?
+
+    PR-ADS-180B: the acquisition cohort's ONE stage-reach rule
+    (``marketing_outcome_cohort_service.stage_reached``), which the cohort's
+    slots — and so the Overview, Campaigns and Countries funnels — count with
+    too. SQL is the cohort's ``sql_proof``."""
+    return cohort_service.stage_reached(row, event)
 
 
 def _slot() -> dict:

@@ -7552,3 +7552,75 @@ A second commit on the same branch (`docs/63` §4.3, §7a).
 * **Proposal, not built.** A backend per-stage bound, or narrowing the
   anchorless set to contacts that could belong to the window. Today any
   anchorless contact makes every cohort rate "—".
+
+### PR-ADS-180B — the acquisition-cohort funnel on every page
+
+`docs/64`. Owner decision 24 Nov (one SQL count: the acquisition cohort) and
+the "full funnel on every page" request.
+
+* **Overview.** The Lead-anchored "Lifecycle Cohort" panel (every stage "at
+  least N" in production: 6,105 of 10,285 MQLs lack a Lead date) is replaced
+  by "Acquisition Cohort", all sources: `lifecycle_acquisition_funnel`, the
+  `all_sources` slot of the mart cohort the Overview already reads, under its
+  one verdict; withheld means absent. The Lead-cohort backend and the
+  payload's `lifecycle_cohort` are kept — Activity and the parity audit read
+  them.
+* **One stage rule.** `marketing_outcome_cohort_service.stage_reached`; the
+  cohort's slots carry `reached_mql` / `reached_opportunity` /
+  `reached_customer_stage` (cumulative); Channels' `reached` delegates to it.
+  `fetch_acquisition_cohort_contacts` reads each stage's direct and recovered
+  dates; `reconcile_cohort` holds every identity for every stage.
+* **Campaigns and Countries.** The mart cohort contract adds the three stage
+  totals, `funnel_stages` and `contacts_without_created_at` (all `None` unless
+  published). One funnel block per page, gated by
+  `campaignSqlPublication(cohort)` on the response's own cohort. Countries'
+  block is the whole Google Ads cohort (residual included). The Customer
+  column is the lifecycle stage, in contacts.
+* **Bounds.** `contacts_without_created_at` above 0 or not stated makes every
+  acquisition column "at least N" (Overview, Channels — 180A never read it —
+  Campaigns, Countries). KPI cards and table cells are unchanged (open).
+* **180A findings.** (a) A previous-period count that is a lower bound is
+  `no_comparison` "previous count is a lower bound". (b) New
+  `fetch_undated_stage_reach`: undated stage reach over the whole table,
+  ruled out only by creation after the window; the Activity bound reads it.
+  Pipeline does not yet (open).
+* **Audits.** `audit_marketing_outcome_cohorts`: stage exposures, stage
+  conservation, independent stage SQL, the Overview block's equality with its
+  cohort. `audit_campaigns_page_certification` S4: the block's gate. SQL
+  doctrine inventory: 0 unknown.
+* **Tests.** `test_pr_ads_180b_acquisition_cohort_funnel.py` (27) and its PG
+  module (7, in the CI PG step and did-run list): all fail on `bf9deed`;
+  mutations M1–M10 in `docs/64` §9. Existing tests ported in `docs/64` §10.
+
+#### PR-ADS-180B-F1 — truth audit minors
+
+`docs/64` §12. One follow-up commit on `46f5396`; the audit found no Major.
+
+* **m1.** Cases for the two "missing means a bound" branches (coverage silent
+  on a stage; a previous period with no `count_is_bound`): mutations G and H
+  now fail. Writing them found the page ignoring the payload's
+  `count_is_bound` ("MQLs 12" beside a backend bound); `dashActivityLowerBounds`
+  now republishes it.
+* **m2.** PG case 05 covers the undated reach's edges: created on the last
+  day (counted), NULL `created_at` (counted), created at the end instant
+  (ruled out), Lead date recovered from history (not undated). Mutations K
+  and L now fail.
+* **m4.** `contacts_without_created_at` is a table-wide disclosure, not a
+  cohort figure: published whatever the verdict (cohort block, no-settled-day
+  cohort, Overview block), as readiness and the coverage note already did.
+  Readiness no longer defaults an unread count to 0. The audit's
+  `created_at_disclosure_problems` holds every copy to one value.
+* **m5.** The acquisition legend and Channels' stage note say a stage counts
+  a contact that entered it or is at a later stage, and that the columns are
+  not nested. `stage_reached` is unchanged (owner decision).
+* **m6.** Countries: the funnel's Reached SQL column notes the residual it
+  includes, from the residual row's own published count, under the cohort
+  gate; an unpublished residual is said in words, never subtracted.
+* **Docs.** The `count_is_bound` name (161E's `lower_bound` guard); §4's
+  "-25%" is a fixture result — in production (~9,000 undated Lead contacts)
+  every Activity stage is "at least N" and every trend "No comparison";
+  production has 0 contacts with NULL `created_at` (25 Nov, 21,947), so m7
+  does not arise today and stays open as a rule; m3 (Pipeline does not read
+  `fetch_undated_stage_reach`) is the next PR.
+* **Tests.** `test_pr_ads_180b_f1_truth_audit_minors.py` (13); 180B's 02_b,
+  02_d, 03_b and PG 03 assert the published disclosure.

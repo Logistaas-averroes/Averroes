@@ -47,8 +47,11 @@ _RENDERERS = ("funnelBlockHtml", "funnelBlockFamily", "funnelBlockVerdictHtml",
               "funnelBlockStageHtml", "funnelBlockValueHtml", "funnelBlockConvHtml")
 
 #: Every surface that shows a lifecycle funnel, and the one call it must make.
-_SURFACES = ("renderDashLifecycleActivity", "renderDashLifecycleCohort",
-             "pipelineFunnelHtml", "renderChannelFunnel")
+#: PR-ADS-180B: the Overview's Lead cohort panel is replaced by the acquisition
+#: cohort (renderDashAcquisitionFunnel); Campaigns and Countries draw the block
+#: through martCohortFunnelHtml.
+_SURFACES = ("renderDashLifecycleActivity", "renderDashAcquisitionFunnel",
+             "pipelineFunnelHtml", "renderChannelFunnel", "martCohortFunnelHtml")
 
 #: The block's class tokens: `dash-funnel`, `dash-funnel__*`, `funnel-block`,
 #: `funnel-block__*` — exact tokens (``dash-funnel-panel`` is not one).
@@ -169,9 +172,9 @@ def _surface_outputs():
     from tests.test_pr_ads_178b_pipeline_one_page import _payload as pipeline
     return _run_app(
         "[renderDashLifecycleActivity({lifecycle_activity: %s}),"
-        " renderDashLifecycleCohort({lifecycle_cohort: %s}),"
+        " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s}),"
         " pipelineFunnelHtml(%s, null), renderChannelFunnel(%s, {})]"
-        % (json.dumps(_activity()), json.dumps(_cohort()), json.dumps(pipeline()),
+        % (json.dumps(_activity()), json.dumps(_acquisition()), json.dumps(pipeline()),
            json.dumps({**channels(), "metric_family": "acquisition_cohort_outcomes",
                        "window_basis": "contact_created_at"})))
 
@@ -365,12 +368,12 @@ def test_04_b_each_surface_reads_its_family_from_its_own_payload():
         "[pipelineFunnelHtml(%s), pipelineFunnelHtml(%s), renderChannelFunnel(%s, {}),"
         " renderChannelFunnel(%s, {}), renderDashLifecycleActivity({lifecycle_activity: %s}),"
         " renderDashLifecycleActivity({lifecycle_activity: %s}),"
-        " renderDashLifecycleCohort({lifecycle_cohort: %s}),"
-        " renderDashLifecycleCohort({lifecycle_cohort: %s})]"
+        " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s}),"
+        " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s})]"
         % (json.dumps(p), json.dumps(swapped), json.dumps(ch),
            json.dumps({**ch, "metric_family": None}), json.dumps(_activity()),
-           json.dumps({**_activity(), "basis": None}), json.dumps(_cohort()),
-           json.dumps({**_cohort(), "anchor_event": "mql"})))
+           json.dumps({**_activity(), "basis": None}), json.dumps(_acquisition()),
+           json.dumps({**_acquisition(), "metric_family": None})))
     fam = [re.search(r'data-metric-family="([a-z_]+)" data-window-basis="([a-z_]+)"', h).groups()
            for h in out]
     assert fam == [("lifecycle_stage_events", "stage_entry_date"),
@@ -379,14 +382,16 @@ def test_04_b_each_surface_reads_its_family_from_its_own_payload():
                    ("not_stated", "contact_created_at"),
                    ("stage_entry_events", "stage_entry_date"),
                    ("not_stated", "stage_entry_date"),
-                   ("lead_entry_cohort", "date_entered_lead"),
-                   ("not_stated", "date_entered_lead")]
+                   ("acquisition_cohort_outcomes", "contact_created_at"),
+                   ("not_stated", "contact_created_at")]
 
 
 def test_04_c_two_pages_two_families_side_by_side():
     """Overview's activity block and the Channels block are different SQL
     families; each says which, and neither borrows the other's words."""
-    activity, _cohort_html, pipeline, channels = _surface_outputs()
+    activity, acquisition, pipeline, channels = _surface_outputs()
+    assert "Acquisition cohort" in _text(acquisition)
+    assert "Lifecycle stage events" not in _text(acquisition)
     assert "Lifecycle stage events" in _text(activity) and "Acquisition cohort" not in _text(activity)
     assert "Acquisition cohort" in _text(channels) and "Lifecycle stage events" not in _text(channels)
     assert "Lifecycle stage events" in _text(pipeline)
@@ -473,6 +478,9 @@ def _activity(**over):
                        "activity_label": f"{label} entered during this period",
                        "event_date_property": f"hs_v2_date_entered_{e}",
                        "missing_entry_date_contacts": 0,
+                       # PR-ADS-180B: the gap over every contact that could
+                       # belong to the window (none here).
+                       "undated_contacts_could_belong": 0,
                        "previous_period": {"status": "no_comparison"}})
     conv = [{"from_event": a, "to_event": b, "available": True, "basis": "cohort",
              "rate_pct": r, "cohort_size": c, "converted": k, "cohort_label": f"in the {lab} cohort",
@@ -486,31 +494,38 @@ def _activity(**over):
          "monotonic_expected": False, "stages": stages, "conversions": conv,
          "reconciliation": {"status": "reconciled", "reasons": []},
          "coverage": {"stage_reached_without_entry_date": {e: 0 for e in _EVENTS}},
+         "undated_reach": {"available": True, "counts": {e: 0 for e in _EVENTS}},
          "previous_period": {"label": "vs Last Quarter"}}
     a.update(over)
     return a
 
 
-def _cohort(**over):
-    stages = []
-    prev = None
-    for i, (e, label, n) in enumerate((("lead", "Leads", 100), ("mql", "MQLs", 50),
-                                       ("sql", "SQLs", 10), ("opportunity", "Opportunities", 0),
-                                       ("customer", "Moved to Customer stage", 0))):
-        stages.append({"event": e, "label": label, "reached": n, "stage_index": i,
-                       "rate_from_anchor_pct": float(n),
-                       "previous_stage_conversion_pct": (
-                           None if prev is None else (None if not prev else round(n * 100 / prev, 2))),
-                       "event_date_column": f"date_entered_{e}",
-                       "event_date_property": f"hs_v2_date_entered_{e}",
-                       "excluded_contacts": 0, "exclusion_reasons": {}, "basis": "cohort"})
-        prev = n
-    c = {"available": True, "reason": None, "anchor_event": "lead", "anchor_label": "Leads",
-         "anchor_definition": "Contacts whose Lead date falls in the window.",
-         "basis": "cohort", "coverage_status": "complete", "excluded_contacts": 0,
-         "exclusion_reasons": [], "stages": stages}
-    c.update(over)
-    return c
+def _acquisition(**over):
+    """PR-ADS-180B: the Overview's acquisition-cohort block, as
+    dashboard_overview_service._acquisition_funnel_block publishes it."""
+    a = {"metric_family": "acquisition_cohort_outcomes", "window_basis": "contact_created_at",
+         "scope": "all_source", "publication": {"status": "published", "reason": None},
+         "stages": [{"key": "reached_mql", "label": "MQL"}, {"key": "reached_sql", "label": "SQL"},
+                    {"key": "reached_opportunity", "label": "Opportunity"},
+                    {"key": "reached_customer_stage", "label": "Customer stage"}],
+         "totals": {"contacts": 100, "reached_mql": 50, "reached_sql": 10,
+                    "reached_opportunity": 0, "reached_customer_stage": 0},
+         "contacts_without_created_at": 0}
+    a.update(over)
+    return a
+
+
+def _bound_activity(stage, n):
+    """An activity block whose `stage` reached `n` contacts undated, in the
+    window's rows (coverage) and so over every contact (undated reach)."""
+    cov = {e: 0 for e in _EVENTS}
+    cov[stage] = n
+    return _activity(
+        reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
+        coverage={"stage_reached_without_entry_date": cov},
+        undated_reach={"available": True, "counts": cov},
+        stages=[{**s, "undated_contacts_could_belong": cov[s["event"]]}
+                for s in _activity()["stages"]])
 
 
 def test_06_a_overview_activity_keeps_its_canonical_rates_and_trend_inside_the_stage():
@@ -530,11 +545,8 @@ def test_06_b_overview_activity_marks_a_lower_bound_like_pipeline():
     """PR-ADS-180A: the activity block shares the Pipeline's lower-bound rule
     (stageEntryLowerBounds) — the same stage-entry count on the same all-source
     scope no longer reads "42" on one page and "at least 42" on the other."""
-    cov = {e: 0 for e in _EVENTS}
-    cov["sql"] = 12
-    html = _run_app("renderDashLifecycleActivity({lifecycle_activity: %s})" % json.dumps(_activity(
-        reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
-        coverage={"stage_reached_without_entry_date": cov})))
+    html = _run_app("renderDashLifecycleActivity({lifecycle_activity: %s})"
+                    % json.dumps(_bound_activity("sql", 12)))
     cells = _cells(html)
     assert cells["sql"].startswith("SQLs at least 42 "), cells["sql"]
     assert "Lower bound: 12 contacts reached this stage with no entry date" in cells["sql"]
@@ -543,29 +555,41 @@ def test_06_b_overview_activity_marks_a_lower_bound_like_pipeline():
     assert _chips(html) == ["82.95%", "at least 6.69%", "—", "2.17%"]
 
 
-def test_06_c_overview_cohort_keeps_the_service_rates_and_the_anchor_share():
-    html = _run_app("renderDashLifecycleCohort({lifecycle_cohort: %s})" % json.dumps(_cohort()))
-    # previous_stage_conversion_pct whole; a null (empty previous stage) is the
-    # word, never 0%.
-    assert _chips(html) == ["50%", "20%", "0%", "Unavailable"]
-    assert "50% of Lead cohort" in _cells(html)["mql"]
+def test_06_c_overview_acquisition_cohort_draws_no_rate_it_does_not_publish():
+    """PR-ADS-180B: the Lead cohort's service rates went with its panel. The
+    acquisition cohort publishes no step rate and the Overview divides
+    nothing: every connector is plain, and a published 0 is 0."""
+    html = _run_app("renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s})"
+                    % json.dumps(_acquisition()))
+    assert _chips(html) == []
+    assert html.count("dash-funnel__link dash-funnel__link--plain") == 4
+    assert _cells(html)["opportunity"].startswith("Reached Opportunity 0 ")
+    assert "%" not in _text(html).split("Contacts acquired", 1)[1].split("Each stage")[0]
 
 
 def test_06_d_unavailable_overview_blocks_say_why_and_show_no_count():
     out = _run_app(
         "[renderDashLifecycleActivity({lifecycle_activity: {available: false,"
         " reason: 'canonical_funnel_mismatch', basis: 'stage_entry_events', stages: []}}),"
-        " renderDashLifecycleCohort({lifecycle_cohort: {available: false,"
-        " reason: 'funnel_invariant_mismatch', anchor_event: 'lead', stages: []}})]")
-    for html, why in zip(out, ("a funnel invariant broke, so no count is rendered",
-                               "a funnel invariant broke, so no count is rendered")):
-        assert f"<strong>Unavailable</strong> — {why}." in html
-        # PR-ADS-180A-F1 (minor 4): the first column of both Overview blocks
-        # is Lead entries, so an unavailable block keeps the lifecycle names
-        # (it fell back to the generic "Contacts" column caption on d48b6b7).
-        assert list(_cells(html).values()) == [
-            "Leads Unavailable", "MQLs Unavailable", "SQLs Unavailable",
-            "Opportunities Unavailable", "Moved to Customer stage Unavailable"]
+        " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s})]"
+        % json.dumps(_acquisition(publication={"status": "unavailable",
+                                               "reason": "canonical_funnel_unreadable"},
+                                  totals=None)))
+    activity, acquisition = out
+    assert ("<strong>Unavailable</strong> — a funnel invariant broke, so no count is "
+            "rendered.") in activity
+    # PR-ADS-180A-F1 (minor 4): the first column of the activity block is Lead
+    # entries, so an unavailable block keeps the lifecycle names.
+    assert list(_cells(activity).values()) == [
+        "Leads Unavailable", "MQLs Unavailable", "SQLs Unavailable",
+        "Opportunities Unavailable", "Moved to Customer stage Unavailable"]
+    # PR-ADS-180B: the acquisition block keeps ITS column names (contacts
+    # acquired, then each stage reached) and says why, with no count.
+    assert "<strong>Unavailable</strong> — The canonical contact funnel could not be read" \
+        in acquisition
+    assert list(_cells(acquisition).values()) == [
+        "Contacts acquired Unavailable", "Reached MQL Unavailable", "Reached SQL Unavailable",
+        "Reached Opportunity Unavailable", "Reached Customer stage Unavailable"]
 
 
 def test_06_e_the_customer_column_is_the_lifecycle_stage_never_companies():
@@ -574,8 +598,8 @@ def test_06_e_the_customer_column_is_the_lifecycle_stage_never_companies():
     close date — and stay outside the funnel (PR-ADS-155 §2, 166A). No adapter
     reads a customer, deal or company figure, and no column is labelled as
     customers."""
-    adapters = ("dashActivityFunnelModel", "dashCohortFunnelModel", "pipelineFunnelModel",
-                "channelFunnelModel")
+    adapters = ("dashActivityFunnelModel", "acquisitionFunnelModel", "martCohortFunnelData",
+                "pipelineFunnelModel", "channelFunnelModel")
     for name in adapters:
         body = _strip_comments(_fn(name))
         for figure in (".customers", "customers_won", "closed_won", "company"):
@@ -662,6 +686,10 @@ def _overview_panels(monkeypatch, rows):
     from services import dashboard_overview_service as O
     monkeypatch.setattr(repo, "fetch_funnel_contacts",
                         lambda start, end: {"available": True, "rows": rows})
+    # PR-ADS-180B: the undated stage reach over the whole table — these rows
+    # are the whole table — by the read's documented rule.
+    from tests.test_pr_ads_180b_acquisition_cohort_funnel import _undated_reach
+    monkeypatch.setattr(repo, "fetch_undated_stage_reach", _undated_reach(rows))
     monkeypatch.setattr(F, "_build_campaign_resolver",
                         lambda s, e: (F.default_campaign_resolver, True))
     monkeypatch.setattr(F, "_sync_state_block", lambda: {"available": True})
@@ -670,86 +698,63 @@ def _overview_panels(monkeypatch, rows):
                                         "counts": {}, "reason": "Previous period unavailable."})
     funnel = O._lifecycle_funnel_block(_F1_WINDOW, now=_F1_NOW)
     activity = O._lifecycle_activity_block(funnel, _F1_WINDOW, _F1_NOW)
-    d = {"lifecycle_activity": activity, "lifecycle_cohort": funnel.get("cohort")}
-    act, coh = _run_app("(() => { const d = %s; return [renderDashLifecycleActivity(d),"
-                        " renderDashLifecycleCohort(d)]; })()" % json.dumps(d, default=str))
-    return d, act, coh
+    # PR-ADS-180B: the Lead cohort is still PUBLISHED (the parity audit reads
+    # it) but no longer drawn; only the activity panel renders it.
+    d = json.loads(json.dumps({"lifecycle_activity": activity,
+                               "lifecycle_cohort": funnel.get("cohort")}, default=str))
+    act = _run_app("renderDashLifecycleActivity(%s)" % json.dumps(d))
+    return d, act
 
 
-def _conv_titles(html):
-    return re.findall(r'<span class="dash-funnel__conv[^"]*"[^>]*title="([^"]*)"', html)
-
-
-def test_07_a_one_lead_population_reads_one_bound_on_both_overview_panels(monkeypatch):
-    """MAJOR 1. Activity's Lead count and the cohort's Lead size are the same
+def test_07_a_one_lead_population_reads_one_bound_on_the_overview(monkeypatch):
+    """MAJOR 1. Activity's Lead count and the Lead cohort's size are the same
     events["lead"] population. Five contacts reached Lead with no Lead date:
-    both panels say "at least 13" — on d48b6b7 the cohort said "13". Three
-    contacts reached MQL undated: the cohort's MQL is "at least 10", and every
-    cohort rate is unknown ("—" with the reason) once Lead is a bound."""
-    d, act, coh = _overview_panels(monkeypatch, _f1_rows(gap=True, anchorless=True))
+    Activity says "at least 13". PR-ADS-180B: the Lead cohort is no longer
+    drawn (the acquisition cohort replaced it), so its "13" can no longer sit
+    beside this "at least 13" on one page; the producer still publishes it."""
+    d, act = _overview_panels(monkeypatch, _f1_rows(gap=True, anchorless=True))
     assert d["lifecycle_cohort"]["stages"][0]["reached"] == 13      # the producer's own
-    acells, ccells = _cells(act), _cells(coh)
+    acells = _cells(act)
     assert acells["contacts"].startswith("Leads at least 13 "), acells["contacts"]
-    assert ccells["contacts"].startswith("Leads at least 13 "), ccells["contacts"]
-    assert ccells["mql"].startswith("MQLs at least 10 "), ccells["mql"]
-    assert "Lead-entry date" in ccells["contacts"]
-    chips = _chips(coh)
-    assert chips == ["—", "—", "—", "—"], chips
-    assert _conv_titles(coh)[0].startswith("Conversion unknown: an earlier stage is a lower bound")
-    # No exact service rate is printed beside a bound pair, and no share.
-    assert "76.92" not in coh and "% of Lead cohort" not in _text(coh)
+    assert "renderDashLifecycleCohort" not in JS and "dashCohortFunnelModel" not in JS
 
 
-def test_07_b_a_clean_cohort_renders_exact_on_both_panels(monkeypatch):
-    """Positive control: complete evidence, exact counts and rates."""
-    _d, act, coh = _overview_panels(monkeypatch, _f1_rows())
-    assert "at least" not in _text(act) and "at least" not in _text(coh)
+def test_07_b_a_clean_population_renders_exact_on_the_overview(monkeypatch):
+    """Positive control: complete evidence, exact counts."""
+    _d, act = _overview_panels(monkeypatch, _f1_rows())
+    assert "at least" not in _text(act)
     assert _cells(act)["contacts"].startswith("Leads 10 ")
-    assert _cells(coh)["contacts"].startswith("Leads 10 ")
-    assert _chips(coh) == ["100%", "40%", "100%", "0%"]
-    assert "40% of Lead cohort" in _cells(coh)["sql"]
 
 
-def test_07_c_a_stage_gap_bounds_that_stage_and_every_later_one(monkeypatch):
-    """No anchorless contact: Lead is exact. MQL has 3 undated contacts, so it
-    is a bound — Lead→MQL is "at least X%" and its share "at least"; every
-    later stage is a bound and every later rate unknown (cumulative F2)."""
-    _d, _act, coh = _overview_panels(monkeypatch, _f1_rows(gap=True))
-    cells = _cells(coh)
+def test_07_c_a_stage_gap_bounds_that_activity_stage(monkeypatch):
+    """No anchorless contact: Lead is exact. Three contacts reached MQL with
+    no MQL date, so Activity's MQL is a bound. (The Lead cohort's cumulative
+    bounds, 180A-F1, went with its panel in PR-ADS-180B.)"""
+    _d, act = _overview_panels(monkeypatch, _f1_rows(gap=True))
+    cells = _cells(act)
     assert cells["contacts"].startswith("Leads 13 ") and "at least" not in cells["contacts"]
-    assert cells["mql"].startswith("MQLs at least 10 ")
-    assert "at least 76.92% of Lead cohort" in cells["mql"]
-    for slot in ("sql", "opportunity", "customer"):
-        assert " at least " in f" {cells[slot]}", (slot, cells[slot])
-    assert _chips(coh) == ["at least 76.92%", "—", "—", "—"]
+    assert cells["mql"].startswith("MQLs at least 10 "), cells["mql"]
 
 
-def test_07_d_the_silent_path_bounds_a_later_stage(monkeypatch):
+def test_07_d_the_silent_path_is_still_published_by_the_producer(monkeypatch):
     """A contact dropped at MQL (its MQL date precedes its Lead date) whose
-    later SQL is undated is neither counted nor excluded at SQL. Any earlier
-    exclusion makes every later stage a bound; the excluded stage itself is
-    not one for this reason."""
-    d, _act, coh = _overview_panels(monkeypatch, _f1_rows(before_anchor=True))
+    later SQL is undated is neither counted nor excluded at SQL. The producer
+    behaviour is unchanged (the parity audit reads it); no page draws it."""
+    d, _act = _overview_panels(monkeypatch, _f1_rows(before_anchor=True))
     stages = {s["event"]: s for s in d["lifecycle_cohort"]["stages"]}
     assert stages["mql"]["exclusion_reasons"] == {"stage_entry_before_lead_entry": 1}
     assert stages["sql"]["excluded_contacts"] == 0          # the silent path
-    cells = _cells(coh)
-    assert cells["mql"].startswith("MQLs 10 "), cells["mql"]
-    assert cells["sql"].startswith("SQLs at least 4 "), cells["sql"]
-    assert "not followed into later stages" in cells["sql"]
-    assert _chips(coh)[:2] == ["90.91%", "at least 40%"], _chips(coh)
+    assert "renderDashLifecycleCohort" not in JS
 
 
 def test_07_e_a_bound_activity_stage_shows_no_exact_trend():
     """minor 2: "+10.0% vs Last Quarter" beside "at least 42" claims an exact
     change of a count that is not exact."""
-    cov = {e: 0 for e in _EVENTS}
-    cov["sql"] = 12
+    bound = _bound_activity("sql", 12)
     stages = [{**s, "previous_period": {"status": "ok", "delta_pct": 0.1, "direction": "up"}}
-              for s in _activity()["stages"]]
-    html = _run_app("renderDashLifecycleActivity({lifecycle_activity: %s})" % json.dumps(_activity(
-        stages=stages, reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
-        coverage={"stage_reached_without_entry_date": cov})))
+              for s in bound["stages"]]
+    html = _run_app("renderDashLifecycleActivity({lifecycle_activity: %s})"
+                    % json.dumps({**bound, "stages": stages}))
     cells = _cells(html)
     assert "No comparison" in cells["sql"] and "%" not in cells["sql"].split("Lower bound")[0]
     assert "+10.0%" not in cells["sql"]

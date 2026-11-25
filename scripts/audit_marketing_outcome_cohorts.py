@@ -45,6 +45,16 @@ lead or SQL count is present anywhere they publish one
 total (campaign rows + campaign residual, country rows + residual row, and
 Dashboard Countries' markets + residual all equal ``summary.sqls``).
 
+PR-ADS-180B — the cohort's other funnel stages
+-----------------------------------------------
+The cohort also publishes how many of its contacts have reached MQL,
+Opportunity and the Customer stage (``totals.reached_*``, and the Overview's
+all-source ``lifecycle_acquisition_funnel``). Withheld, none is present
+(``mart_withheld_exposures``); published, each obeys the cohort's identities
+(``cohort_stage_problems``), the Overview block equals the cohort's
+all-sources slot (``acquisition_funnel_problems``), and this audit's own SQL
+re-derives every stage (``independent_counts`` → ``stage_reach``).
+
 Nothing here writes. Not to HubSpot, not to Google Ads, not to the local
 database.
 """
@@ -54,6 +64,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -228,7 +239,17 @@ _LIFECYCLE_SQL_FIELDS = ("reached_sql_by_current_stage", "exact_direct_timestamp
 #: those exposures or — worse — be "fixed" by renaming them.
 _MART_SUMMARY_FIELDS = ("leads", "sqls")
 _MART_ROW_FIELDS = ("leads", "sqls")
-_COHORT_TOTAL_FIELDS = ("leads", "sqls", "sqls_missing_event_timestamp")
+_COHORT_TOTAL_FIELDS = ("leads", "sqls", "sqls_missing_event_timestamp",
+                        # PR-ADS-180B: the cohort's other funnel stages.
+                        "reached_mql", "reached_opportunity", "reached_customer_stage")
+#: PR-ADS-180B — the cohort's funnel stages beside SQL: the breakdown slot
+#: field each ``cohort.totals`` field equals (the Google Ads slot).
+_STAGE_FIELDS = ("reached_mql", "reached_opportunity", "reached_customer_stage")
+#: PR-ADS-180B — the Overview funnel (``lifecycle_acquisition_funnel``): its
+#: ``totals`` key → the all-sources breakdown slot field it republishes.
+_ACQ_FUNNEL_FIELDS = {"contacts": "contacts_acquired", "reached_mql": "reached_mql",
+                      "reached_sql": "sqls", "reached_opportunity": "reached_opportunity",
+                      "reached_customer_stage": "reached_customer_stage"}
 _DASH_KPI_FIELDS = ("leads", "sqls", "sqls_residual", "leads_residual",
                     "google_ads_cohort_sqls", "campaign_row_cohort_sqls")
 #: The marker an itemised outside-market sub-row carries instead of a count.
@@ -266,6 +287,15 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
             if (cohort.get("totals") or {}).get(k) is not None]
     out += [f"cohort.campaign_residual.{k}" for k in ("leads", "sqls")
             if (cohort.get("campaign_residual") or {}).get(k) is not None]
+    # PR-ADS-180B-F1 (m4): `cohort.contacts_without_created_at` is NOT scanned
+    # here: it is a table-wide data-quality disclosure (every canonical
+    # contact, no window), published whatever the verdict, exactly as
+    # `readiness.missing_contact_created_at_count` and the coverage notes
+    # publish it. Its copies are held equal by
+    # :func:`created_at_disclosure_problems` instead.
+    # PR-ADS-180B: the Overview's acquisition-cohort funnel (all sources).
+    out += acquisition_funnel_exposures(payload.get("lifecycle_acquisition_funnel"),
+                                        published=False)
     meta = cohort.get("metadata") or {}
     out += [f"cohort.metadata.{k}" for k in _META_SQL_FIELDS if meta.get(k) is not None]
     # PR-ADS-177C: the published breakdown, and the lifecycle-event counts.
@@ -332,6 +362,153 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
     return out
 
 
+def acquisition_funnel_exposures(block, *, published: bool) -> list[str]:
+    """PR-ADS-180B — every count still present in an Overview acquisition
+    funnel (``lifecycle_acquisition_funnel``) that must carry none: under a
+    cohort that is not published (``published=False``), or whenever the block's
+    OWN publication is not ``published``. Empty when ``block`` is None."""
+    if not isinstance(block, dict):
+        return []
+    own = (block.get("publication") or {}).get("status")
+    if published and own == "published":
+        return []
+    out = []
+    totals = block.get("totals")
+    if isinstance(totals, dict):
+        out += [f"lifecycle_acquisition_funnel.totals.{k}" for k, v in totals.items()
+                if v is not None]
+    elif totals is not None:
+        out.append("lifecycle_acquisition_funnel.totals")
+    # PR-ADS-180B-F1 (m4): `contacts_without_created_at` is the cohort's
+    # table-wide disclosure, not a count of this block (see
+    # :func:`created_at_disclosure_problems`).
+    if own == "published":
+        out.append("lifecycle_acquisition_funnel.publication=published")
+    return out
+
+
+def cohort_stage_problems(cohort: dict) -> list[str]:
+    """PR-ADS-180B — under a PUBLISHED cohort, its other funnel stages obey the
+    cohort's own identities: each ``cohort.totals`` stage count is the
+    breakdown's Google Ads slot; Google Ads + excluded = all sources for each
+    stage; no stage exceeds the contacts acquired; every stage is published
+    beside the SQL count (a published SQL count with a missing stage is a
+    partial funnel). Empty when the cohort is not published."""
+    if (cohort or {}).get("sql_status") != "published":
+        return []
+    problems = []
+    totals = cohort.get("totals") or {}
+    bd = cohort.get("breakdown") or {}
+    ga, ex, al = (bd.get(k) or {} for k in ("google_ads", "excluded_non_google",
+                                             "all_sources"))
+    for f in _STAGE_FIELDS:
+        t = totals.get(f)
+        if t is None:
+            problems.append(f"cohort.totals.{f} is not published beside cohort.totals.sqls")
+            continue
+        if totals.get("leads") is not None and t > totals["leads"]:
+            problems.append(f"cohort.totals.{f} {t} exceeds the leads {totals['leads']}")
+        if not bd:
+            continue
+        if ga.get(f) != t:
+            problems.append(f"cohort.totals.{f} {t} != breakdown Google Ads {ga.get(f)}")
+        if None in (ga.get(f), ex.get(f), al.get(f)) or ga[f] + ex[f] != al[f]:
+            problems.append(f"breakdown {f}: all {al.get(f)} != Google Ads {ga.get(f)} "
+                            f"+ excluded {ex.get(f)}")
+        if al.get(f) is not None and al.get("contacts_acquired") is not None \
+                and al[f] > al["contacts_acquired"]:
+            problems.append(f"breakdown all_sources.{f} exceeds the contacts acquired")
+    return problems
+
+
+def acquisition_funnel_problems(payload: dict) -> list[str]:
+    """PR-ADS-180B — the Overview funnel against the cohort it republishes.
+
+    The block must exist, state the cohort's family and window basis, and
+    carry the cohort's verdict (its own ``unavailable`` for a published slot
+    that lacks a count is the one narrowing). Unpublished: no count anywhere
+    (:func:`acquisition_funnel_exposures`). Published: every column EQUALS
+    the cohort breakdown's all-sources slot — the one cohort build both are
+    read from — and no stage exceeds the contacts acquired."""
+    block = payload.get("lifecycle_acquisition_funnel")
+    cohort = payload.get("cohort") or {}
+    if not isinstance(block, dict):
+        return ["the Overview carries no lifecycle_acquisition_funnel block"]
+    problems = []
+    for key in ("metric_family", "window_basis"):
+        if block.get(key) != cohort.get(key):
+            problems.append(f"lifecycle_acquisition_funnel.{key} {block.get(key)!r} != "
+                            f"cohort {cohort.get(key)!r}")
+    own = (block.get("publication") or {}).get("status")
+    status = cohort.get("sql_status")
+    if own != status and not (own == "unavailable" and status == "published"):
+        problems.append(f"lifecycle_acquisition_funnel is {own!r} under a {status!r} cohort")
+    problems += acquisition_funnel_exposures(block, published=status == "published")
+    # PR-ADS-180B-F1 (m4): published whatever the verdict, so equal whatever it is.
+    if block.get("contacts_without_created_at") != cohort.get("contacts_without_created_at"):
+        problems.append("lifecycle_acquisition_funnel.contacts_without_created_at differs "
+                        "from the cohort's")
+    if own != "published" or status != "published":
+        return problems
+    totals = block.get("totals") or {}
+    slot = (cohort.get("breakdown") or {}).get("all_sources") or {}
+    for key, field in _ACQ_FUNNEL_FIELDS.items():
+        if totals.get(key) is None or totals.get(key) != slot.get(field):
+            problems.append(f"lifecycle_acquisition_funnel.totals.{key} {totals.get(key)} "
+                            f"!= cohort breakdown all_sources.{field} {slot.get(field)}")
+        elif key != "contacts" and totals[key] > totals.get("contacts", 0):
+            problems.append(f"lifecycle_acquisition_funnel.totals.{key} exceeds the contacts")
+    return problems
+
+
+#: The coverage note that states the no-created-date count (the cohort
+#: service's ``coverage_notes``), as a pattern: its number is read back.
+_NO_CREATED_DATE_NOTE = re.compile(r"^(\d+) canonical contact\(s\) have no created date")
+
+
+def created_at_disclosure_problems(payload: dict) -> list[str]:
+    """PR-ADS-180B-F1 (m4) — the count of canonical contacts with no created
+    date is ONE table-wide figure (every contact, all sources, no window). It
+    is a data-quality disclosure, not a cohort figure, so it is published
+    whatever the cohort verdict — and every copy of it in one payload must be
+    the same value:
+
+    * ``cohort.contacts_without_created_at`` (None only when unread);
+    * ``readiness.missing_contact_created_at_count`` (mart views);
+    * ``lifecycle_acquisition_funnel.contacts_without_created_at`` (Overview);
+    * ``cohort.metadata.coverage_notes``: exactly one note naming it when it
+      is above 0, none when it is 0 or unknown, never another number.
+
+    Empty for a payload that carries no cohort block."""
+    cohort = payload.get("cohort")
+    if not isinstance(cohort, dict) or "contacts_without_created_at" not in cohort:
+        return []
+    value = cohort.get("contacts_without_created_at")
+    problems = []
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool)
+                              or value < 0):
+        problems.append(f"cohort.contacts_without_created_at {value!r} is not a count")
+    readiness = payload.get("readiness")
+    if isinstance(readiness, dict) and "missing_contact_created_at_count" in readiness \
+            and readiness["missing_contact_created_at_count"] != value:
+        problems.append(f"readiness.missing_contact_created_at_count "
+                        f"{readiness['missing_contact_created_at_count']!r} != "
+                        f"cohort.contacts_without_created_at {value!r}")
+    block = payload.get("lifecycle_acquisition_funnel")
+    if isinstance(block, dict) and block.get("contacts_without_created_at") != value:
+        problems.append(f"lifecycle_acquisition_funnel.contacts_without_created_at "
+                        f"{block.get('contacts_without_created_at')!r} != "
+                        f"cohort.contacts_without_created_at {value!r}")
+    notes = (cohort.get("metadata") or {}).get("coverage_notes") or []
+    stated = [int(m.group(1)) for m in (_NO_CREATED_DATE_NOTE.match(str(n)) for n in notes)
+              if m]
+    expected = [value] if isinstance(value, int) and value > 0 else []
+    if stated != expected:
+        problems.append(f"cohort.metadata.coverage_notes state {stated} contact(s) with no "
+                        f"created date; the cohort states {value!r}")
+    return problems
+
+
 def mart_conservation_problems(payload: dict, *, view: str) -> list[str]:
     """Under a PUBLISHED cohort, the rows must add back to ``summary.sqls``.
 
@@ -376,6 +553,9 @@ def mart_conservation_problems(payload: dict, *, view: str) -> list[str]:
     if view in ("campaign", "country") and (payload.get("summary") or {}).get("sqls") != total:
         problems.append(f"{view}: summary.sqls {(payload.get('summary') or {}).get('sqls')} "
                         f"!= cohort total {total}")
+    # PR-ADS-180B: the cohort's other funnel stages (Campaigns and Countries
+    # draw them in one funnel block from these totals).
+    problems += [f"{view}: {p}" for p in cohort_stage_problems(cohort)]
     return problems
 
 
@@ -444,6 +624,26 @@ def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
             a.holds(f"{w} {name} stale_disclosed",
                     "the published cohort declares its window end and, when "
                     "the funnel is stale, its as-of watermark")
+        # PR-ADS-180B-F1 (m4): the no-created-date disclosure, one value in
+        # every copy, published whatever the verdict.
+        disclosure = created_at_disclosure_problems(payload)
+        if disclosure:
+            a.broken(f"{w} {name} created_at_disclosure", "; ".join(disclosure))
+        elif "contacts_without_created_at" in (payload.get("cohort") or {}):
+            a.holds(f"{w} {name} created_at_disclosure",
+                    "the no-created-date count is one value in every copy "
+                    f"({(payload.get('cohort') or {}).get('contacts_without_created_at')!r})")
+        if name == "dashboard/overview":
+            # PR-ADS-180B: the Overview's acquisition-cohort funnel.
+            acq = acquisition_funnel_problems(payload)
+            if acq:
+                a.broken(f"{w} {name} acquisition_funnel", "; ".join(acq[:6]))
+            else:
+                a.holds(f"{w} {name} acquisition_funnel",
+                        "the all-source acquisition funnel carries the cohort's "
+                        "verdict and family; " + ("its columns equal the cohort's "
+                                                  "all-sources slot" if status == "published"
+                                                  else "no count is present"))
         view = ("campaign" if name in ("mart/campaign", "mart/campaign_settled")
                 else "country" if name == "mart/country" else name)
         if view in ("campaign", "country", "dashboard/countries"):
@@ -559,6 +759,24 @@ def audit_campaign_cohort(a: Audit, *, window: str, payload: dict,
         a.holds(f"{w} sql_proof", f"{independent['sqls']} SQLs, each proven by a "
                 f"direct or recovered SQL-entry date or a stage implying SQL")
 
+    # 2b. PR-ADS-180B: the cohort's other funnel stages, each against this
+    # audit's own SQL over the same days and the same contacts.
+    stage_gaps = [f"{f}: payload {alls.get(f)}, canonical evidence {independent.get(f)}"
+                  for f in _STAGE_FIELDS
+                  if independent.get(f) is None or alls.get(f) != independent.get(f)]
+    if stage_gaps:
+        a.broken(f"{w} stage_reach", "; ".join(stage_gaps))
+    else:
+        a.holds(f"{w} stage_reach", ", ".join(f"{f} {independent[f]}" for f in _STAGE_FIELDS)
+                + " — each proven by a direct or recovered stage-entry date or a "
+                  "stage at or beyond it")
+    stage_problems = cohort_stage_problems(cohort)
+    if stage_problems:
+        a.broken(f"{w} stage_conservation", "; ".join(stage_problems[:6]))
+    else:
+        a.holds(f"{w} stage_conservation", "each stage: totals = Google Ads slot; "
+                "Google Ads + excluded = all sources; never above the contacts acquired")
+
     # 3. contacts deduplicated
     if meta.get("dedup_key") != "contact_id":
         a.broken(f"{w} dedup", f"declared dedup key {meta.get('dedup_key')!r}")
@@ -660,11 +878,23 @@ def independent_counts(start_at, end_before) -> dict | None:
     from db import crm_funnel_repository as repo
     from db.connection import get_conn
 
+    from analysis.crm_lifecycle import EVENT_CUSTOMER, EVENT_MQL, EVENT_OPPORTUNITY
+
     stages = list(stages_implying_event(EVENT_SQL))
     direct = repo.direct_date_sql(EVENT_SQL)
     recovered = repo.recovered_date_sql(EVENT_SQL)
     proven = (f"({direct} IS NOT NULL OR {recovered} IS NOT NULL "
               f"OR lower(btrim(f.lifecycle_stage)) = ANY(%s))")
+    # PR-ADS-180B: the cohort's other funnel stages, decided in SQL by the same
+    # three kinds of evidence (direct date, recovered date, a stage at or
+    # beyond it) — not by the service's Python.
+    reach = {field: (f"({repo.direct_date_sql(e)} IS NOT NULL OR "
+                     f"{repo.recovered_date_sql(e)} IS NOT NULL OR "
+                     f"lower(btrim(f.lifecycle_stage)) = ANY(%s))",
+                     list(stages_implying_event(e)))
+             for field, e in (("reached_mql", EVENT_MQL),
+                              ("reached_opportunity", EVENT_OPPORTUNITY),
+                              ("reached_customer_stage", EVENT_CUSTOMER))}
     stage_only = (f"({direct} IS NULL AND {recovered} IS NULL "
                   f"AND lower(btrim(f.lifecycle_stage)) = ANY(%s))")
     # analysis.source_classification's Paid Search rule, re-stated in SQL rather
@@ -687,7 +917,9 @@ def independent_counts(start_at, end_before) -> dict | None:
                            COUNT(*) FILTER (WHERE {proven}),
                            COUNT(*) FILTER (WHERE {stage_only}),
                            COUNT(DISTINCT f.contact_id) FILTER (WHERE {proven}),
-                           COUNT(*) FILTER (WHERE {proven} AND {paid})
+                           COUNT(*) FILTER (WHERE {proven} AND {paid}),
+                           {", ".join(f"COUNT(*) FILTER (WHERE {pred})"
+                                      for pred, _st in reach.values())}
                     FROM {repo.FUNNEL_TABLE} f
                     {repo._recovery_join()}
                     WHERE f.created_at IS NOT NULL
@@ -695,6 +927,7 @@ def independent_counts(start_at, end_before) -> dict | None:
                       AND f.created_at < %s
                     """,
                     (stages, stages, stages, stages, PY_WHITESPACE_RUN,
+                     *(st for _pred, st in reach.values()),
                      start_at, start_at, end_before),
                 )
                 row = cur.fetchone()
@@ -703,7 +936,8 @@ def independent_counts(start_at, end_before) -> dict | None:
         return None
     return {"contacts_acquired": row[0], "sqls": row[1],
             "stage_only_sqls": row[2], "distinct_sql_contact_ids": row[3],
-            "paid_search_sourced_sqls": row[4]}
+            "paid_search_sourced_sqls": row[4],
+            **{field: row[5 + i] for i, field in enumerate(reach)}}
 
 
 def global_population_split() -> dict | None:

@@ -536,20 +536,22 @@ def test_30_lifecycle_partial_is_disclosed_with_counts_and_is_not_a_violation():
 # §8 — static guards against the misleading Dashboard
 # ═════════════════════════════════════════════════════════════════════════════
 def _dashboard_funnel_source() -> str:
-    start = _APP.index("function renderDashLifecycleCohort(d)")
+    # PR-ADS-180B: the Overview funnel is the acquisition cohort's panel.
+    start = _APP.index("function renderDashAcquisitionFunnel(d)")
     end = _APP.index("function renderDashCommercialOutcomes(d)")
     return _APP[start:end]
 
 
 def test_31_the_old_independent_totals_funnel_is_gone():
     assert "function renderDashFunnel(" not in _APP
-    assert "renderDashLifecycleCohort(d)" in _APP
+    assert "renderDashAcquisitionFunnel(d)" in _APP
     assert "renderDashCommercialOutcomes(d)" in _APP
 
 
 def test_32_the_lifecycle_strip_reads_the_cohort_contract_not_stage_totals():
     src = _dashboard_funnel_source()
-    assert "d.lifecycle_cohort" in src
+    # PR-ADS-180B: one cohort contract still — the acquisition cohort's.
+    assert "d.lifecycle_acquisition_funnel" in src
     for independent_total in ("lifecycle_leads", "lifecycle_mqls", "lifecycle_sqls",
                               "lifecycle_opportunities", "lifecycle_customers"):
         assert independent_total not in src, (
@@ -582,15 +584,20 @@ def test_35_the_dashboard_computes_no_conversion_arithmetic_in_javascript():
     assert "function dashConversion(" not in _APP
     src = _dashboard_funnel_source()
     assert "/" not in re.sub(r"//.*|/\*[\s\S]*?\*/", "", src).replace("</", "<")
-    assert "rate_from_anchor_pct" in src
-    assert "previous_stage_conversion_pct" in src
+    # PR-ADS-180B: the acquisition cohort publishes no rate, and the Overview
+    # draws none (`shares: false`): there is nothing to compute.
+    assert "shares: false" in src
 
 
 def test_36_partial_lifecycle_coverage_is_rendered_not_hidden():
-    assert "Partial lifecycle history" in _APP
-    assert "function dashCohortCoverageBadge" in _APP
-    assert "function dashCohortCoverageDisclosure" in _APP
-    assert "excluded from this cohort" in _APP
+    # PR-ADS-180B: the Lead cohort's coverage badge went with its panel. The
+    # acquisition cohort's one gap — contacts with no created date, in no
+    # window — is rendered on the face of every column as a lower bound.
+    model = _APP[_APP.index("function acquisitionFunnelModel("):]
+    model = model[:model.index("\n}\n")]
+    assert "acquisitionCohortBound(d.contacts_without_created_at)" in model
+    assert "bound_reason: bound" in model
+    assert "no created date in HubSpot" in _APP
 
 
 def test_37_known_revenue_is_never_rendered_under_a_total_revenue_label():

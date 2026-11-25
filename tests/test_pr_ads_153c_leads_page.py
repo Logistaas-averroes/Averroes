@@ -433,12 +433,16 @@ def test_dashboard_conversion_helper_requires_cohort_basis():
     assert "function dashConversion(" not in _APP_JS
     assert "BASIS_COHORT" in (
         _ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
-    # PR-ADS-180A: the cohort's model (the shared block's adapter) reads the
-    # service's percentages; the doc comment above it is not counted.
-    block = _APP_JS.split("function dashCohortFunnelModel(")[1].split(
+    # PR-ADS-180B: the Overview funnel is the acquisition cohort. Its model
+    # (the shared block's acquisition adapter) publishes no step rate and, on
+    # the Overview (`shares: false`), no share either: no rate is derived.
+    block = _APP_JS.split("function acquisitionFunnelModel(")[1].split(
         "\nfunction ")[0]
-    assert "s.previous_stage_conversion_pct" in block
-    assert "s.rate_from_anchor_pct" in block
+    assert "conversions: []" in block
+    assert "if (o.shares === false)" in block
+    overview = _APP_JS.split("function renderDashAcquisitionFunnel(")[1].split(
+        "\nfunction ")[0]
+    assert "shares: false" in overview
 
 
 # =============================================================================
@@ -455,9 +459,11 @@ def test_dashboard_funnel_uses_canonical_lifecycle_counts():
     the same denominator. The independent totals remain published as KPIs; they
     are simply no longer drawn as a funnel.
     """
-    block = _APP_JS.split("function renderDashLifecycleCohort(")[1].split(
+    # PR-ADS-180B: the strip is now the ACQUISITION cohort (every stage a
+    # subset of the contacts created in the window), not the Lead cohort.
+    block = _APP_JS.split("function renderDashAcquisitionFunnel(")[1].split(
         "\nfunction ")[0]
-    assert "d.lifecycle_cohort" in block
+    assert "d.lifecycle_acquisition_funnel" in block
     for independent_total in ("k.lifecycle_leads", "k.lifecycle_mqls",
                               "k.lifecycle_sqls", "k.sqls"):
         assert independent_total not in block
@@ -474,7 +480,7 @@ def test_dashboard_keeps_revenue_customers_on_the_revenue_contract():
     A lifecycle Customer is a contact-stage fact and a closed-won customer is a
     deal fact; nothing in this product proves one converts into the other.
     """
-    lifecycle = _APP_JS.split("function renderDashLifecycleCohort(")[1].split(
+    lifecycle = _APP_JS.split("function renderDashAcquisitionFunnel(")[1].split(
         "\nfunction ")[0]
     assert "k.customers" not in lifecycle
     assert "closed_won_revenue_usd" not in lifecycle

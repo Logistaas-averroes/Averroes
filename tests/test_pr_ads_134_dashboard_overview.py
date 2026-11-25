@@ -859,18 +859,19 @@ def test_funnel_conversion_never_fakes_zero():
     a separate Commercial Outcomes section, not funnel stages.
     """
     assert "function dashConversion" not in JS
-    # PR-ADS-180A: the cohort is drawn by the shared funnel block from its
-    # adapter's model (dashCohortFunnelModel).
-    cohort = _slice(JS, "function dashCohortFunnelModel", 3000)
-    # A null rate is the muted word "Unavailable", never "0%" (it was a muted
-    # arrow; the block renders an unavailable connector as the word).
-    assert "step === null || step === undefined" in cohort
-    assert '{ kind: "unavailable"' in cohort
+    # PR-ADS-180B: the Overview funnel is the acquisition cohort, drawn by the
+    # shared block from the acquisition adapter (the Lead-cohort adapter is
+    # gone). It publishes NO step rate at all — no rate exists to fake.
+    cohort = _slice(JS, "function acquisitionFunnelModel", 3600)
+    assert "conversions: []" in cohort
+    assert "renderDashAcquisitionFunnel(d)" in JS
+    # An exact or at-least connector without its rate is the muted word
+    # "Unavailable", never "0%" (the rule every block keeps).
     conv = _slice(JS, "function funnelBlockConvHtml", 2500)
     assert 'dash-funnel__conv dash-funnel__conv--muted" data-conv-unavailable${title}>Unavailable<' in conv
     # A null count renders Unavailable — funnelCountMetric makes it an
     # "unavailable" verdict, which canonicalMetricHtml renders as the word.
-    assert "funnelCountMetric(s.reached, null)" in cohort
+    assert "funnelCountMetric(channelFunnelCount(totals[st.key]), missing)" in cohort
 
     outcomes = _slice(JS, "function renderDashCommercialOutcomes", 3000)
     # PR-ADS-161E: deals and customers are two cells; "Closed-Won Customers"
