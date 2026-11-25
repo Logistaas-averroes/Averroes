@@ -101,8 +101,12 @@ def test_deals_page_uses_mart():
 # ── 5. Shared spend-truth / summary / diagnostics across every view ─────────
 
 def test_all_revenue_pages_share_mart_renderers():
-    assert "function renderMartSpendTruth" in JS
-    assert "function renderMartSummaryStrip" in JS
+    # PR-ADS-177C: renderMartSpendTruth / renderMartSummaryStrip are deleted —
+    # no page called them after PR-ADS-177B (docs/60 §8). Every revenue page
+    # states the same spend truth through its own footer over the mart's
+    # spend_truth (asserted per page below).
+    assert "function renderMartSpendTruth" not in JS
+    assert "function renderMartSummaryStrip" not in JS
     assert "function renderMartDiagnostics" in JS
     for page in (
         "function renderCampaignsPage()",
@@ -145,39 +149,34 @@ def test_all_revenue_pages_share_mart_renderers():
             # the assertion is about this renderer, not its neighbours.
             own = JS[JS.find(page):JS.find("\n}\n", JS.find(page)) + 3]
             assert "renderMartSpendTruth(" not in own
-        else:
-            assert "renderMartSpendTruth(" in body, f"{page} must render the shared spend truth strip"
         assert "renderMartDiagnostics(" in body, f"{page} must render shared diagnostics"
-    # The shared strip reads spend_truth + summary; the summary strip reads summary.
+    # PR-ADS-178B: the Pipeline page shows no spend. (PR-ADS-177C deleted the
+    # mart spend card / summary strip renderers — no page called them.)
     pipeline = JS[JS.find("function renderPipelinePage()"):
                   JS.find("\n}\n", JS.find("function renderPipelinePage()")) + 3]
     assert "renderMartSpendTruth(" not in pipeline and "spend" not in pipeline.lower()
-    st = _slice("function renderMartSpendTruth", span=900)
-    assert "spend_truth" in st and "usd_spend" in st and "fx_status" in st
-    strip = _slice("function renderMartSummaryStrip", span=900)
-    assert "data.summary" in strip or "(data && data.summary)" in strip
 
 
 # ── 6. FX incomplete is respected — Unavailable, never $0 / native-as-USD ────
 
 def test_fx_incomplete_renders_unavailable_not_zero_in_ui():
-    st = _slice("function renderMartSpendTruth", span=900)
-    # USD reporting + the period ratio basis show "Unavailable" when null — never
-    # $0, never GBP-as-USD. (PR-ADS-161E: the ratio is period revenue / ad spend.)
-    assert 'st.usd_spend == null ? "Unavailable"' in st
-    assert 's.period_revenue_per_ad_spend == null ? "Unavailable"' in st
-    # Native spend uses the native-currency formatter (never "$" on GBP).
-    assert "fmtNativeMoney(st.native_spend, st.native_currency)" in st
-    strip = _fn("function renderMartSummaryStrip")
-    assert 's.spend_usd == null ? "Unavailable"' in strip
-    # PR-ADS-161E: the period ratio through the mart's canonical metric — a null
-    # renders Withheld / Unavailable with the reason, never $0 or 0.00x. The
-    # certified ROAS renders through the same helper (always Unavailable).
-    assert 'martMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio)' in strip
-    assert 'martMetricHtml(s, "roas", fmtPeriodRatio)' in strip
-    helper = _slice("function martMetricHtml", span=600)
-    assert "canonicalMetricHtml(m, formatter" in helper
-    assert "dashValue(" in helper
+    # PR-ADS-177C: the property the deleted spend card / summary strip held,
+    # on the live Campaigns page. FX incomplete makes spend not decision-ready,
+    # so the STRICT gate card renders and returns before any figure; a figure
+    # that is printed goes through the canonical metric (Withheld /
+    # Unavailable with the reason when null — never $0, never 0.00x, never
+    # GBP as USD).
+    page = _fn("function renderCampaignsPage()")
+    assert page.index("spend_decision_ready !== true") < page.index(
+        "renderCampaignsPageSummary(data)")
+    summary = _fn("function renderCampaignsPageSummary")
+    assert 'rowMetricHtml(t, "spend", fmtMoney, opts)' in summary
+    assert 'rowMetricHtml(t, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)' in summary
+    assert "native_spend" not in summary
+    helper = _fn("function rowMetricHtml")
+    assert "canonicalMetricHtml(" in helper
+    # Native spend, where a page prints it, uses the native-currency formatter.
+    assert "fmtCurrency(" in _slice("function fmtNativeMoney", span=200)
 
 
 def test_fx_incomplete_backend_nulls_usd_and_roas(monkeypatch):

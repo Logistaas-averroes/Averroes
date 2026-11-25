@@ -112,7 +112,7 @@ INVENTORY = (
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "canonical_metrics", "status": "migrated"},
     {"consumer": "services/revenue_attribution_service.py",
-     "surface": "/api/revenue-attribution*, /api/revenue-deals; Campaign Revenue & Spend / Country",
+     "surface": "/api/revenue-attribution/audit, /api/revenue-deals, the mart it feeds (PR-ADS-177C retired /api/revenue-attribution)",
      "existing_source": "len(campaign deals), proven-amount sums",
      "existing_meaning": "per-campaign won deals as customers; partial sums",
      "canonical_replacement": "reader_row per campaign / country / summary; "
@@ -914,7 +914,13 @@ def _metric_dicts(payload):
 #: verdict for THOSE days (``load_won_deals(..., through=...)``), not the
 #: window that includes today.
 SETTLED_DAY_PAGES = frozenset({"revenue_decision_mart_country",
-                               "dashboard_countries"})
+                               "dashboard_countries",
+                               # PR-ADS-177C (M2): the Campaigns page's settled
+                               # campaign view, Dashboard → Campaigns (which
+                               # reads it since PR-ADS-177B) and the Meta ad-set
+                               # table end at yesterday too.
+                               "revenue_decision_mart_campaign_settled",
+                               "dashboard_campaigns", "meta_ads_adsets"})
 
 
 def settled_publication(key: str, now) -> dict | None:
@@ -929,6 +935,44 @@ def settled_publication(key: str, now) -> dict | None:
         return None
     base = crs.load_won_deals(key, now=now, bounds=settled_revenue_bounds(settled))
     return base.get("publication") or {}
+
+
+def settled_mart_checks(a: Audit, key: str, now, mart: dict) -> dict:
+    """PR-ADS-177C (M2) — ``windows_reconcile`` for the Campaigns page's
+    SETTLED campaign view: its summary equals the canonical reader over the
+    SAME settled days (``load_won_deals(bounds=settled_revenue_bounds)``),
+    figure for figure, and a figure the canonical reader withholds is absent.
+    A window with no settled day publishes nothing."""
+    from services import canonical_revenue_service as crs  # noqa: PLC0415
+    from services.canonical_contract import (  # noqa: PLC0415
+        resolve_settled_window, settled_revenue_bounds,
+    )
+    s = (mart or {}).get("summary") or {}
+    settled = resolve_settled_window(key, now=now)
+    if (settled.get("window_range") or {}).get("empty"):
+        for field in ("closed_won_deals", "customers", "won_revenue_usd"):
+            a.check("windows_reconcile", s.get(field) is None,
+                    f"{key} campaign_settled: {field}={s.get(field)} over no settled day")
+        return {"settled": "no_settled_day"}
+    base = crs.load_won_deals(key, now=now, bounds=settled_revenue_bounds(settled))
+    row = crs.reader_row(base, base.get("deals") or [])
+    out = {}
+    for field, m in (("closed_won_deals", "closed_won_deals"),
+                     ("customers", "customers"), ("won_revenue_usd", "revenue_usd")):
+        canon = (row.get("metrics") or {}).get(m) or {}
+        out[field] = canon.get("value")
+        if canon.get("status") == "published":
+            mine, theirs = s.get(field), canon.get("value")
+            same = (mine == theirs if not isinstance(theirs, float)
+                    else mine is not None and abs(float(mine) - theirs) < 0.005)
+            a.check("windows_reconcile", same,
+                    f"{key} campaign_settled: mart {field}={mine} != canonical over "
+                    f"the settled days {theirs}")
+        else:
+            a.check("withheld_values_absent", s.get(field) is None,
+                    f"{key} campaign_settled: {field}={s.get(field)} while the "
+                    f"settled days' {m} is {canon.get('status')}")
+    return out
 
 
 def window_checks(a: Audit, key: str, universe: dict, truth_w: dict, base: dict,
@@ -1271,6 +1315,11 @@ def _page_builders():
             from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
             return build_revenue_decision_mart(view=view, window=w, now=now)
         return build
+
+    def settled_campaign(w, now):
+        from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
+        return build_revenue_decision_mart(view="campaign", window=w, now=now,
+                                           settled=True)
     return (
         ("revenue_decision_mart", mart),
         ("revenue_decision_mart_country", mart_view("country")),
@@ -1294,6 +1343,12 @@ def _page_builders():
         # 9 and 18 walk it, and pipeline_checks reconciles its KPIs and deal
         # list with the canonical truth (windows_reconcile).
         ("pipeline", mod("services.pipeline_service", "build_pipeline")),
+        # PR-ADS-177C (M2): the Campaigns page reads the mart's SETTLED
+        # campaign view, and shows the Meta ad-set table beside it. Both were
+        # outside check 18, the leak checks and windows_reconcile.
+        ("revenue_decision_mart_campaign_settled", settled_campaign),
+        ("meta_ads_adsets", mod("services.meta_ads_adset_table_service",
+                                "build_meta_adset_table")),
     )
 
 
@@ -1576,10 +1631,14 @@ def run(now: datetime | None = None, *, pages: bool = True) -> tuple[Audit, dict
                         built[name] = payload
             settled_pub = (settled_publication(key, now)
                            if any(n in SETTLED_DAY_PAGES for n in built) else None)
-            report["windows"].append(window_checks(
+            checked = window_checks(
                 a, key, universe, by_key[key], base, mart, now=now, pages=built,
                 page_pubs=({n: settled_pub for n in built if n in SETTLED_DAY_PAGES}
-                           if settled_pub is not None else None)))
+                           if settled_pub is not None else None))
+            if "revenue_decision_mart_campaign_settled" in built:
+                checked["campaign_settled"] = settled_mart_checks(
+                    a, key, now, built["revenue_decision_mart_campaign_settled"])
+            report["windows"].append(checked)
         # PR-ADS-168A — the evidence windows (Channels page outcomes).
         ev_truth = svc.get_closed_won_truth(
             [("evidence", k) for k in EVIDENCE_PASS_WINDOWS], now=now,

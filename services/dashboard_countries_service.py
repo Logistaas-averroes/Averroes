@@ -150,16 +150,23 @@ def _country_key(country_name, country_code) -> str | None:
 
 
 def _period_ratio(won, usd_spend):
-    """Geo period revenue / ad spend = won revenue / USD spend, only when both are safe.
+    """Geo period revenue / ad spend over this page's PUBLISHED inputs, by the
+    reader contract's rule (``cwt.derive_period_revenue_per_ad_spend``).
 
-    None when USD spend is unavailable/zero, revenue is unknown, OR revenue is a
-    non-positive (zero) return — a spend-with-no-revenue country is conveyed by
-    its status, never a fabricated / misleading 0.00x, and never from native GBP
-    or the Google Ads conversion value.
+    PR-ADS-177C (O1): a published ZERO revenue over verified positive USD spend
+    is a measured ``0.0`` — what the Countries page (the mart) prints for the
+    same market. This returned None for it, so the two country surfaces printed
+    two figures for one row. Still None — never 0 — when revenue is unknown or
+    withheld (``won`` None), when USD spend is unknown, or when spend is zero;
+    never from native GBP or the Google Ads conversion value. Used for the
+    regional mix and the KPI; a market ROW republishes the mart row's own
+    reader-contract ratio (``_build_country_rows``).
     """
-    if won is None or usd_spend is None or usd_spend <= 0 or won <= 0:
+    if won is None:
         return None
-    return round(float(won) / float(usd_spend), 2)
+    m = cwt.derive_period_revenue_per_ad_spend(
+        cwt.metric(float(won), cwt.PUBLISHED), usd_spend)
+    return m.get("value") if m.get("status") == cwt.PUBLISHED else None
 
 
 # ── Per-country geo spend (native GBP + FX-gated USD) ─────────────────────────
@@ -562,11 +569,17 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             won = None if amount_unknown else _round2(m.get("won_revenue"))
 
         attribution_status = _MAPPING_STATUS.get(m.get("spend_mapping"), "mapping_unavailable")
-        # The period ratio only when this country has real attributed spend, FX is complete,
-        # revenue is safe, AND geo reconciliation is unblockable for the account.
+        # PR-ADS-177C (O1): the row's ratio is the MART row's reader-contract
+        # ratio (``derive_period_revenue_per_ad_spend``, with ``ratio_kind`` and
+        # the disclosure in ``metrics``) — the figure the Countries page prints
+        # for the same market, as Dashboard → Campaigns does since PR-ADS-177B.
+        # This page's own gates still withhold it: no unblockable geo
+        # reconciliation, no measured spend here, revenue not connected or
+        # blanked for an unknown amount → None, never 0.
         row_ratio = None
-        if country_roas_unblockable and (native_spend or 0) > 0:
-            row_ratio = _period_ratio(won, usd_spend)
+        if (country_roas_unblockable and (native_spend or 0) > 0
+                and usd_spend is not None and won is not None):
+            row_ratio = m.get("period_revenue_per_ad_spend")
 
         status = _country_status(
             native_spend=native_spend, usd_spend=usd_spend, fx_complete=fx_complete,
@@ -1105,10 +1118,13 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
         body = (f"Geo period revenue / ad spend is withheld because {_revenue_unknown_text(kpis, country_rows)}"
                 " — never a lowered $0.")
     elif kpis.get("geo_period_revenue_per_ad_spend") is None:
-        headline = "Geo period revenue / ad spend not yet meaningful"
-        body = ("There is no country-attributed closed-won revenue yet to measure against "
-                "this window's verified spend, so Geo period revenue / ad spend is not shown — never a "
-                "fabricated 0.00x.")
+        # PR-ADS-177C (O1): a published ZERO revenue over verified positive
+        # spend is a measured 0.00x now; what is left is a ratio with nothing
+        # to divide by, or a country spend state that carries no ratio.
+        headline = "Geo period revenue / ad spend unavailable"
+        body = ("Geo period revenue / ad spend is not published for this window: it needs "
+                "positive verified spend in the listed markets, under a country spend state "
+                "that can carry a ratio — never a fabricated 0.00x.")
     else:
         headline = "Country truth verified"
         body = ("Spend, FX, revenue and geo reconciliation are verified for this window. "
@@ -1194,7 +1210,10 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
             ratio_reason = ("Geo period revenue / ad spend requires published revenue — "
                            f"{_revenue_unknown_text(kpis)}.")
         else:
-            ratio_reason = "Geo period revenue / ad spend not yet meaningful; no country-attributed closed-won revenue."
+            # PR-ADS-177C (O1): zero revenue over positive spend publishes 0.00x;
+            # only zero spend leaves the ratio undefined.
+            ratio_reason = ("Geo period revenue / ad spend requires positive verified spend in the "
+                            "listed markets, under a country spend state that can carry a ratio.")
         out.append({"metric": "geo_period_revenue_per_ad_spend", "reason": ratio_reason})
     if not deal_proof_available:
         out.append({"metric": "deal_proof",

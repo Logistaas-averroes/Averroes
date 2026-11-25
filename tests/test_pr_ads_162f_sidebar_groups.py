@@ -38,7 +38,8 @@ EXPECTED = [
     ("Overview", ["dashboard"]),
     ("Channels", ["channels"]),
     # PR-ADS-177B: Campaign Revenue & Spend merged into Campaigns.
-    ("Campaigns", ["campaigns", "keywords", "search-terms"]),
+    # PR-ADS-177C: Keywords is a tab of the one Keywords & Search Terms page.
+    ("Campaigns", ["campaigns", "search-terms"]),
     # PR-ADS-176B: one Countries page (#/geo retired into it), no strip.
     ("Countries", ["roas-countries"]),
     # PR-ADS-178B: one Pipeline page (#/leads, #/deals retired into it).
@@ -87,7 +88,8 @@ def test_03_no_page_was_added_or_lost_and_every_one_still_routes():
     # PR-ADS-176B: 15 — the Countries evidence page (#/geo) was deleted.
     # PR-ADS-177B: 14 — Campaign Revenue & Spend merged into Campaigns.
     # PR-ADS-178B: 13 — Leads and Deals merged into Pipeline.
-    assert len(nav) == len(set(nav)) == 13
+    # PR-ADS-177C: 12 — Keywords became a tab of Keywords & Search Terms.
+    assert len(nav) == len(set(nav)) == 12
     assert set(nav) <= pages
     for page in nav:
         assert f'id="page-{page}"' in HTML, page

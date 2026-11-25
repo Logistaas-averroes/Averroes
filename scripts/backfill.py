@@ -49,7 +49,9 @@ from typing import Optional
 VALID_SOURCES = {"all", "google_ads", "hubspot"}
 
 # Datasets available per effective source key (google_ads maps to Windsor connector)
-GOOGLE_ADS_DATASETS = ["campaigns", "keywords", "geo", "search_terms"]
+# PR-ADS-177C-F1: "keywords" (the legacy snapshot) is removed — its writer
+# was deleted in PR-ADS-177C with the snapshot's last reader.
+GOOGLE_ADS_DATASETS = ["campaigns", "geo", "search_terms"]
 HUBSPOT_DATASETS    = ["contacts", "deals"]
 
 # search_terms cannot be reliably backfilled via Windsor (date_preset limitation)

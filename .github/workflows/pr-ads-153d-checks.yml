@@ -91,7 +91,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A + 172A + 173A)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 159 + 160 + 161A-1 + 161B + 161C + 161D + 161D2 + 191 + 161E + 161I + 161J + 162A + 162C + 163B + 163C + 169A + 172A + 173A)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -110,8 +110,6 @@ jobs:
             tests/test_pr_ads_156_f3_account_identity_cutover.py \
             tests/test_pr_ads_156_f4_residual_twin_sweep.py \
             tests/test_pr_ads_156_f3_review_corrections.py \
-            tests/test_pr_ads_157_campaign_evidence_certification.py \
-            tests/test_pr_ads_157_f1_population_reconciliation.py \
             tests/test_pr_ads_159_lifecycle_sql_coverage.py \
             tests/test_pr_ads_160_sql_coverage_boundary.py \
             tests/test_pr_ads_161a1_sql_publication_contract.py \
@@ -140,6 +138,7 @@ jobs:
             tests/test_pr_ads_177b_campaigns_pg_integration.py \
             tests/test_pr_ads_177b_meta_adsets_pg_integration.py \
             tests/test_pr_ads_178b_pipeline_pg_integration.py \
+            tests/test_pr_ads_177c_campaign_feed_port_pg_integration.py \
             tests/test_pr_ads_168a_channel_outcomes_pg_integration.py \
             tests/test_pr_ads_171a_meta_ads_pg_integration.py \
             tests/test_pr_ads_171c_meta_adsets_pg_integration.py \
@@ -194,8 +193,6 @@ jobs:
                            "tests.test_pr_ads_156_f3_account_identity_cutover",
                            "tests.test_pr_ads_156_f4_residual_twin_sweep",
                            "tests.test_pr_ads_156_f3_review_corrections",
-                           "tests.test_pr_ads_157_campaign_evidence_certification",
-                           "tests.test_pr_ads_157_f1_population_reconciliation",
                            "tests.test_pr_ads_159_lifecycle_sql_coverage",
                            "tests.test_pr_ads_160_sql_coverage_boundary",
                            # PR-ADS-161A-1. Named here because its two most
@@ -289,7 +286,9 @@ jobs:
                            # acquisition cohort (not legacy lead status);
                            # rows + residual conserve it; a withheld cohort
                            # exposes no count and judges no verdict on it;
-                           # parity with Campaign Evidence over the same days.
+                           # parity with the independent campaign-ID reading
+                           # over the same days (Campaign Evidence until
+                           # PR-ADS-177C).
                            "tests.test_pr_ads_177a_one_sql_count_pg_integration",
                            # PR-ADS-177B. The one Campaigns page: the mart's
                            # SETTLED campaign view (ends yesterday; campaign
@@ -312,6 +311,14 @@ jobs:
                            # same builder, parity, the reader-cutover and
                            # cohort audits, the route.
                            "tests.test_pr_ads_178b_pipeline_pg_integration",
+                           # PR-ADS-177C. The retired Campaign Evidence feed's
+                           # truth properties, ported onto the settled campaign
+                           # view, the Campaigns page and Dashboard →
+                           # Campaigns: parity's independent campaign-ID leg,
+                           # the settled identities' canonical reading, shared
+                           # display names never merged, the certification's
+                           # port, spend withheld before the morning sync.
+                           "tests.test_pr_ads_177c_campaign_feed_port_pg_integration",
                            # PR-ADS-168A. Channels outcomes on real tables: the
                            # contact source read in the won snapshot, the
                            # partition and its unresolved classes, settled

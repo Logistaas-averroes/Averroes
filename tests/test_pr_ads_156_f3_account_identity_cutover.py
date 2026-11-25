@@ -403,11 +403,17 @@ def test_14_another_valid_customer_cannot_enter_this_accounts_totals(pg, monkeyp
     assert agg["source"]["cost_micros_total"] == 5_000_000
 
 
-@pytest.mark.parametrize("path", ["/api/search-terms", "/api/search-terms/summary",
-                                  "/api/search-terms/ngrams"])
+@pytest.mark.parametrize("path", ["/api/search-term-evidence",
+                                  "/api/search-term-evidence/patterns",
+                                  "/api/search-term-evidence/flagged"])
 def test_8_to_10_endpoints_compose_the_canonical_scope(path):
-    """Raw Search Terms, the summary and N-grams all start their WHERE clause
-    from the shared scope.
+    """PR-ADS-177C: the three handlers this first checked — Raw Search Terms
+    (`/api/search-terms`), its summary and N-grams — are retired (404). The
+    routes that answer those questions on the one Keywords & Search Terms page
+    (Terms, Patterns, Flagged) must not query the table themselves: each
+    handler only delegates to the evidence service, which reads through the
+    scoped repository (test_11_and_12 below; executed over PostgreSQL in
+    test_pr_ads_156_f3_review_corrections::test_13–15b).
 
     Checked in the AST because the defect was an absence: a date-only filter
     reads as perfectly sensible SQL, and nothing about it hints that it counts
@@ -415,19 +421,25 @@ def test_8_to_10_endpoints_compose_the_canonical_scope(path):
     """
     src = (_ROOT / "api" / "server.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
+    names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    for gone in ("api_search_terms", "api_search_terms_summary",
+                 "api_search_terms_ngrams", "_canonical_search_term_scope"):
+        assert gone not in names, gone
     handler = {
-        "/api/search-terms": "api_search_terms",
-        "/api/search-terms/summary": "api_search_terms_summary",
-        "/api/search-terms/ngrams": "api_search_terms_ngrams",
+        "/api/search-term-evidence": "api_search_term_evidence",
+        "/api/search-term-evidence/patterns": "api_search_term_evidence_patterns",
+        "/api/search-term-evidence/flagged": "api_search_term_evidence_flagged",
     }[path]
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == handler)
-    dumped = ast.dump(fn)
-    # The scope is resolved, the fail-closed branch exists, and the condition
-    # list is SEEDED with the scope rather than appending it as an afterthought.
-    assert "_canonical_search_term_scope" in dumped
-    assert "_search_term_scope_unavailable" in dumped
-    assert "scope" in dumped and "sql" in dumped
+    code = ast.get_source_segment(src, fn)
+    calls = {getattr(n.func, "attr", getattr(n.func, "id", None))
+             for n in ast.walk(fn) if isinstance(n, ast.Call)}
+    assert not calls & {"execute", "get_conn", "cursor"}, (handler, calls)
+    sql = [c.value for c in ast.walk(fn) if isinstance(c, ast.Constant)
+           and isinstance(c.value, str) and "FROM search_terms" in c.value]
+    assert not sql, handler
+    assert "_search_term_evidence_call" in code and "search_term_evidence_service" in code
 
 
 def test_11_and_12_evidence_and_flagged_read_through_the_scoped_repository():

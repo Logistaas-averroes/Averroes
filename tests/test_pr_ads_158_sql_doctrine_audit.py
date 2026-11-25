@@ -408,7 +408,11 @@ def test_15c_per_category_flags_are_evaluated_independently():
 
 # ── 16: CPQL consumers ───────────────────────────────────────────────────────
 def test_16_cpql_consumers_disclose_denominator_definition_and_scope():
-    assert len(registry.CPQL_CONSUMERS) >= 5
+    # PR-ADS-177C: the four Campaign Evidence CPQL consumers were deleted with
+    # the page (no live campaign surface publishes a CPQL); every consumer that
+    # remains still discloses all of the below.
+    assert len(registry.CPQL_CONSUMERS) >= 2
+    assert not any("campaign_evidence" in c["code_location"] for c in registry.CPQL_CONSUMERS)
     for c in registry.CPQL_CONSUMERS:
         for key in ("spend_numerator_source", "currency_fx_contract",
                     "sql_denominator_definition", "sql_denominator_scope",
@@ -419,8 +423,12 @@ def test_16_cpql_consumers_disclose_denominator_definition_and_scope():
         path = c["code_location"].split(":")[0]
         assert (_ROOT / path).exists(), path
     names = {c["consumer"] for c in registry.CPQL_CONSUMERS}
-    assert any("Campaign Evidence row" in n for n in names)
-    assert any("overall_cpql" in n for n in names)
+    # PR-ADS-177C: the Campaign Evidence row / overall CPQL consumers are
+    # deleted with the page; the two left are the legacy snapshot column and
+    # the inverse-CPQL family on Dashboard Revenue.
+    assert not any("Campaign Evidence" in n for n in names)
+    assert any("cpql_usd snapshot column" in n for n in names)
+    assert any("revenue_per_sql_usd" in n for n in names)
 
 
 # ── 17: database unavailable → exit 2, no fabricated zeros ───────────────────
@@ -680,7 +688,9 @@ _JS_NEW_FUNCTION = (
 
 
 @pytest.mark.parametrize("rel_path, addition, expected_symbol", [
-    ("services/campaign_evidence_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
+    # PR-ADS-177C: campaign_evidence_service.py is deleted; the probe uses the
+    # Keywords evidence service, another reviewed module of the same kind.
+    ("services/keyword_evidence_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
     ("services/canonical_contact_outcome_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
     # PR-ADS-165A: this probed scheduler/weekly.py, which is deleted; the
     # monthly job is the scheduler module of the same kind that remains.
@@ -717,8 +727,9 @@ def test_new_function_in_known_file_is_unknown_until_bound(tmp_path, rel_path, a
 
 def test_new_module_level_statement_of_unbound_pattern_is_unknown(tmp_path):
     """A <module> binding covers only the patterns it names."""
+    # PR-ADS-177C: probed campaign_evidence_service.py (deleted).
     prod = _inject_and_classify(
-        tmp_path, "services/campaign_evidence_service.py",
+        tmp_path, "services/keyword_evidence_service.py",
         "\n\nPR158_PROBE = \"SELECT 1 WHERE status_category = 'qualified'\"\n")
     probe = [o for o in prod if "PR158_PROBE" in o.snippet]
     assert probe and all(o.symbol == "<module>" for o in probe)

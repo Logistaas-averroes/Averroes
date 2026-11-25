@@ -605,7 +605,12 @@ class _Conn:
 #: Stated here, not read from the service, so the fixture describes the
 #: database and not the code under test; test_12 proves the service's own
 #: list equals it.
-MONTHLY_ONLY_KEYS = ("waste_terms", "keywords", "geo", "gclid_coverage_snapshots")
+#: PR-ADS-177C: "keywords" (the legacy keyword snapshot) is retired.
+MONTHLY_ONLY_KEYS = ("waste_terms", "geo", "gclid_coverage_snapshots")
+#: PR-ADS-177C: the weekly job's one step whose dataset is now retired — its
+#: last reader went in PR-ADS-177B, so the monthly job no longer runs it.
+RETIRED_177C_CALLS = {"write_keywords"}
+RETIRED_177C_BATCHES = {("google_ads_api", "keywords")}
 
 
 def _db_state(monkeypatch, *, monthly_age_days: float = 18.0) -> dict:
@@ -694,14 +699,16 @@ def test_11_the_scheduler_summary_ignores_a_weekly_row_it_is_handed():
 # ═════════════════════════════════════════════════════════════════════════════
 #: Every (source, dataset) batch the weekly job stamped (scheduler/weekly.py at
 #: 5574170), and the service-owned syncs it called.
+#: PR-ADS-177C: ("google_ads_api", "keywords") — the legacy keyword snapshot —
+#: is retired (no reader, no writer); RETIRED_177C below.
 WEEKLY_JOB_BATCHES = {("hubspot", "contacts"), ("hubspot", "deals"),
-                      ("google_ads_api", "geo"), ("google_ads_api", "keywords"),
+                      ("google_ads_api", "geo"),
                       ("analysis", "waste_terms"), ("gclid", "matches"),
                       ("gclid", "coverage_snapshots")}
 WEEKLY_JOB_CALLS = {
     "pull_campaign_performance", "pull_keyword_performance",
     "pull_geo_performance", "pull_paid_search_contacts", "pull_deals_with_gclid",
-    "write_leads", "write_deals", "write_geo", "write_keywords",
+    "write_leads", "write_deals", "write_geo",
     "sync_keyword_daily_facts", "sync_recent_search_terms",
     "run_waste_detection", "write_waste_terms", "record_flag_history",
     "run_gclid_match", "write_gclid_attribution",
@@ -745,12 +752,16 @@ def test_12_every_step_of_the_weekly_job_still_has_a_scheduled_writer():
     monthly = _job_function("scheduler/monthly.py", "run_monthly_report")
     assert WEEKLY_JOB_CALLS - _called(monthly) == set()
     assert WEEKLY_JOB_BATCHES - _batches(monthly) == set()
+    # PR-ADS-177C: the one exception, retired on purpose (and registered so).
+    assert not RETIRED_177C_CALLS & _called(monthly)
+    assert not RETIRED_177C_BATCHES & _batches(monthly)
 
     # So no dataset is retired by this slice: the registry of retired datasets
     # is exactly what it was, and every dataset the weekly job fed is still a
     # live, registered one.
     from services import freshness_service as fresh
-    assert set(fresh.RETIRED_DATASETS) == {("google_ads_api", "campaigns")}
+    assert set(fresh.RETIRED_DATASETS) == ({("google_ads_api", "campaigns")}
+                                           | RETIRED_177C_BATCHES)
     registered = {(c["source"], c["dataset"])
                   for c in fresh.DATASET_FRESHNESS_CONFIG.values()}
     assert WEEKLY_JOB_BATCHES <= registered
@@ -771,7 +782,7 @@ def test_12_every_step_of_the_weekly_job_still_has_a_scheduled_writer():
                 for k in fresh.MONTHLY_REFRESH_DATASETS}
     assert set(fresh.MONTHLY_REFRESH_DATASETS) == set(MONTHLY_ONLY_KEYS)
     assert monthly_only == declared == {
-        ("google_ads_api", "geo"), ("google_ads_api", "keywords"),
+        ("google_ads_api", "geo"),
         ("analysis", "waste_terms"), ("gclid", "coverage_snapshots")}
     assert fresh.MONTHLY_REFRESH_STALE_DAYS == 35
     import api.monitoring as mon
@@ -822,7 +833,10 @@ def test_13_monthly_datasets_are_marked_monthly_and_none_of_them_is_core(
     # page (`countries`) keys on canonical geo and canonical spend.
     assert "geo" not in status.PAGE_PIPELINE_IMPACT
     assert status.PAGE_PIPELINE_IMPACT["countries"] == ["canonical_geo", "canonical_spend"]
-    assert status.PAGE_PIPELINE_IMPACT["keywords"] == ["keyword_facts"]
+    # PR-ADS-177C: Keyword Evidence is the Keywords tab of the one Keywords &
+    # Search Terms page; its key is retired and the page keys on both.
+    assert "keywords" not in status.PAGE_PIPELINE_IMPACT
+    assert status.PAGE_PIPELINE_IMPACT["search-terms"] == ["search_terms", "keyword_facts"]
 
     _db_state(monkeypatch, monthly_age_days=18.0)
     body = _war_room(monkeypatch)
@@ -975,7 +989,8 @@ def test_14_the_flagged_tab_is_still_fed_and_states_how_fresh_it_can_be(
     assert "/api/search-term-evidence/flagged" in {
         r.path for r in server.app.routes}
     tabs = re.search(r"const ST_TABS = (\[.*?\]);", JS).group(1)
-    assert json.loads(tabs) == ["terms", "flagged", "patterns"]
+    # PR-ADS-177C: one Keywords & Search Terms page — the Keywords tab joined.
+    assert json.loads(tabs) == ["terms", "flagged", "patterns", "keywords"]
     assert 'waste: { page: "search-terms", tab: "flagged" }' in JS
     assert "fetchJSON(`/api/search-term-evidence/flagged?" in JS
 
@@ -1129,9 +1144,12 @@ def test_17_the_endpoint_is_gone_from_the_running_app(monkeypatch):
     assert client.post(ENDPOINT, headers=auth, json={}).status_code in (404, 405)
     # The sibling report routes other pages read are untouched.
     paths = {r.path for r in server.app.routes}
-    # PR-ADS-168B deleted /api/revenue-by-source with its page.
-    assert {"/api/revenue-attribution",
+    # PR-ADS-168B deleted /api/revenue-by-source with its page; PR-ADS-177C
+    # deleted /api/revenue-attribution (no page read it) and kept its /audit,
+    # which the Revenue Health page reads.
+    assert {"/api/revenue-attribution/audit",
             "/api/revenue-deals", "/api/dashboard/overview"} <= paths
+    assert "/api/revenue-attribution" not in paths
 
 
 def test_18_an_old_bookmark_lands_on_the_dashboard():
@@ -1184,7 +1202,8 @@ def test_19_every_sidebar_page_is_still_routable():
     assert 'data-section="pipeline"' not in HTML
     assert 'data-page="pipeline" data-nav-item="pipeline"' in HTML
     # PR-ADS-177B: Campaign Revenue & Spend merged into the Campaigns page.
-    assert strip("campaigns") == ["campaigns", "keywords", "search-terms"]
+    # PR-ADS-177C: Keywords & Search Terms is one page.
+    assert strip("campaigns") == ["campaigns", "search-terms"]
     # PR-ADS-176B: Countries is one page, the item itself (no strip).
     assert 'data-page="roas-countries" data-nav-item="countries"' in HTML
     assert "unit-economics" not in HTML
@@ -1193,12 +1212,13 @@ def test_19_every_sidebar_page_is_still_routable():
     switch = JS.split("function loadPage(")[1].split("\n}\n")[0]
     loaded = set(re.findall(r'case "([a-z0-9-]+)":', switch))
     assert loaded == {
-        "dashboard", "campaigns", "search-terms", "keywords", "pipeline",
+        "dashboard", "campaigns", "search-terms", "pipeline",
         "gclid-attribution", "scheduler", "health", "backfill",
         "roas-countries", "revenue-health",
         "channels", "system"}  # PR-ADS-168B: revenue-by-source deleted;
     #                              PR-ADS-176B: geo deleted (#/geo redirects);
     #                              PR-ADS-177B: roas-campaigns deleted (redirects)
+    #                              PR-ADS-177C: keywords is a tab (redirects)
     assert loaded <= pages
 
 

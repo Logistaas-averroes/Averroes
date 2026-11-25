@@ -560,6 +560,20 @@ def _family(name: str) -> str:
     return head.split(":")[0] if ":" in head else head
 
 
+def _retired_177c(name: str) -> bool:
+    """PR-ADS-177C retired the Campaign Evidence drawer's flagged preview
+    (``build_campaign_flagged_preview``) with that page. Its golden requests —
+    the ``preview`` family and the ``preview`` request of the quarantine and
+    nothing-flagged variants — have no live route left to answer them. They
+    stay in the golden file (its digest is the parent commit's), and are the
+    ONLY requests the comparison below may leave out."""
+    return name.split(":")[-1].startswith("preview/")
+
+
+#: The families compared request-for-request (``preview`` is retired whole).
+LIVE_FAMILIES = tuple(f for f in FAMILIES if f != "preview")
+
+
 def test_20_the_golden_payloads_are_the_parent_commits_and_are_not_trivial():
     """What the equality below is taken against. The payloads were captured
     from the PARENT commit; the index records which, and summarises each
@@ -692,8 +706,9 @@ def test_22_b_a_verified_spend_ledger_changes_no_payload(published_with_spend_le
     payloads of the no-ledger run (coverage 'ok' → 'unavailable', canonical
     spend → 0.0)."""
     index, golden = _golden()
-    assert set(published_with_spend_ledger) == set(golden["payloads"])
-    differing = [name for name in golden["payloads"]
+    live = {n for n in golden["payloads"] if not _retired_177c(n)}
+    assert set(published_with_spend_ledger) == live
+    differing = [name for name in sorted(live)
                  if not _same_document(index["scenarios"][name]["sha256"],
                                        published_with_spend_ledger[name])]
     assert not differing, (len(differing), differing[:5])
@@ -701,9 +716,14 @@ def test_22_b_a_verified_spend_ledger_changes_no_payload(published_with_spend_le
 
 @_needs_pg
 def test_21_the_same_requests_are_answered(published):
-    """No request of the matrix silently dropped, none added unrecorded."""
+    """No request of the matrix silently dropped, none added unrecorded.
+    PR-ADS-177C: the only requests not asked any more are the retired
+    flagged-preview ones — 20 of 364, named exactly."""
     _, golden = _golden()
-    assert set(published) == set(golden["payloads"])
+    retired = {n for n in golden["payloads"] if _retired_177c(n)}
+    assert len(retired) == 20 and {_family(n) for n in retired} == {
+        "preview", "quarantine", "nothing_flagged"}
+    assert set(published) == set(golden["payloads"]) - retired
 
 
 def _same_document(golden_sha256: str, published_payload) -> bool:
@@ -729,7 +749,7 @@ def test_23_the_comparison_tells_types_apart_that_python_equality_does_not():
 
 
 @_needs_pg
-@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("family", LIVE_FAMILIES)
 def test_22_every_payload_equals_the_one_the_parent_commit_published(published, family):
     """Whole-document equality, request by request: every number, row, total,
     facet, KPI, sort order and key. Nothing is normalized, rounded, sorted or
@@ -738,7 +758,8 @@ def test_22_every_payload_equals_the_one_the_parent_commit_published(published, 
     ``0`` for ``0.0``, ``False`` for ``0`` — differs even where Python's ``==``
     would call it equal."""
     index, golden = _golden()
-    names = [n for n in golden["payloads"] if _family(n) == family]
+    names = [n for n in golden["payloads"]
+             if _family(n) == family and not _retired_177c(n)]
     assert names, family
     differing = {}
     for name in names:
@@ -934,9 +955,9 @@ def _every_route_reports_unavailable():
     assert refused.value.status_code == 503
     waste = srv.api_waste(user={}, days=30, window="30d")
     assert waste["waste"] == [] and "kpis" not in waste
-    section = st_svc.build_campaign_flagged_preview("30d", matrix.CAMP_A, now=NOW)
-    assert (section["available"], section["reason"]) == (
-        False, st_svc.FLAGGED_PREVIEW_UNAVAILABLE_SOURCE)
+    # PR-ADS-177C: the Campaign Evidence drawer's flagged preview
+    # (build_campaign_flagged_preview) is deleted with that page.
+    assert not hasattr(st_svc, "build_campaign_flagged_preview")
 
 
 @_needs_pg

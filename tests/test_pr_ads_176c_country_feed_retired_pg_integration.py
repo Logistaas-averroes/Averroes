@@ -795,14 +795,17 @@ def test_09_b_every_open_start_spend_reader_counts_only_certified_days(live_db, 
                  json.dumps(overview), json.dumps(campaigns), json.dumps(panel, default=str)):
         assert not _has_number(blob, "6375") and not _has_number(blob, "5100")
     # The evidence-window and audit surfaces that read campaign spend.
-    from services.campaign_evidence_service import build_campaign_evidence
+    # PR-ADS-177C: Campaign Evidence (build_campaign_evidence) is retired; the
+    # campaign surfaces that read open-start spend are the mart / Dashboard
+    # ones above and the Campaigns page's settled view below.
     from services.campaign_identity_service import build_mapping_review
     from services.google_ads_spend_service import (
         build_google_ads_spend_audit, is_window_spend_verified)
+    from services.revenue_decision_mart import build_revenue_decision_mart as _mart_177c
     from services.revenue_spend_truth_service import build_google_ads_spend_truth_for_days
-    evidence = json.loads(json.dumps(build_campaign_evidence("all_time"), default=str))
-    assert (evidence["summary"]["spend_native"], evidence["summary"]["spend_usd"]) == (
-        100.0, 125.0)
+    evidence = json.loads(json.dumps(_mart_177c(view="campaign", window="all_time",
+                                                settled=True), default=str))
+    assert evidence["campaign_totals"]["spend"] == 125.0
     audit = build_google_ads_spend_audit("all_time")
     assert (audit["native_total"], audit["campaign_daily_total"]) == (100.0, 100.0)
     assert is_window_spend_verified("all_time")["local_total_spend"] == 100.0
@@ -1315,7 +1318,6 @@ def test_28_with_no_ledger_at_all_no_surface_publishes_spend_zero_or_a_positive_
     the geo panel to 0. Nothing is certified, so nothing reads as a measured
     zero, and no verdict is positive. (Fails on 19e766d.)"""
     import db.writers as writers
-    from services.campaign_evidence_service import build_campaign_evidence
     from services.campaign_identity_service import build_mapping_review
     from services.dashboard_campaigns_service import build_dashboard_campaigns
     from services.dashboard_overview_service import build_dashboard_overview
@@ -1349,8 +1351,12 @@ def test_28_with_no_ledger_at_all_no_surface_publishes_spend_zero_or_a_positive_
     assert nonzero(audit["native_total"]) and nonzero(audit["campaign_daily_total"])
     campaigns = json.loads(json.dumps(build_dashboard_campaigns("all_time"), default=str))
     assert nonzero(campaigns["kpis"]["verified_spend_usd"])
-    evidence = json.loads(json.dumps(build_campaign_evidence("all_time"), default=str))
-    assert nonzero(evidence["summary"]["spend_usd"])
+    # PR-ADS-177C: Campaign Evidence is retired; the Campaigns page's settled
+    # view publishes no spend over an uncertified range either.
+    settled = json.loads(json.dumps(build_revenue_decision_mart(
+        view="campaign", window="all_time", settled=True), default=str))
+    assert nonzero(settled["campaign_totals"]["spend"])
+    assert nonzero(settled["spend_truth"]["usd_spend"])
     for view in ("campaign", "country"):
         mart = build_revenue_decision_mart(view=view, window="all_time")
         st = mart["spend_truth"]

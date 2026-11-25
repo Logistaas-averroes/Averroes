@@ -69,7 +69,9 @@ REPORT_CALLS = {"run_lead_quality", "run_campaign_truth", "determine_verdict",
 KEPT_CALLS = {
     "pull_campaign_performance", "pull_keyword_performance",
     "pull_geo_performance", "pull_paid_search_contacts", "pull_deals_with_gclid",
-    "write_run", "write_leads", "write_deals", "write_geo", "write_keywords",
+    # PR-ADS-177C: "write_keywords" (the legacy keyword snapshot) left with
+    # its last reader; test_04 asserts it is not called.
+    "write_run", "write_leads", "write_deals", "write_geo",
     "sync_keyword_daily_facts", "sync_recent_search_terms",
     "run_waste_detection", "write_waste_terms",
     "run_gclid_match", "write_gclid_attribution",
@@ -79,8 +81,9 @@ KEPT_CALLS = {
 #: Local JSON snapshots that still have a reader (see test_06).
 KEPT_SAVES = {"google_ads_save", "hubspot_save", "gclid_save"}
 #: Every sync batch the jobs still stamp, as (source, dataset).
+#: PR-ADS-177C: ("google_ads_api", "keywords") went with write_keywords.
 KEPT_BATCHES = {("hubspot", "contacts"), ("hubspot", "deals"),
-                ("google_ads_api", "geo"), ("google_ads_api", "keywords"),
+                ("google_ads_api", "geo"),
                 ("analysis", "waste_terms"), ("gclid", "matches"),
                 ("gclid", "coverage_snapshots")}
 
@@ -211,6 +214,9 @@ def test_04_neither_job_builds_a_report_emails_one_or_writes_the_snapshot(job):
     assert not called & REPORT_CALLS, sorted(called & REPORT_CALLS)
     # The `campaigns` snapshot batch went with the step that wrote it.
     assert ("google_ads_api", "campaigns") not in _batches(fn)
+    # PR-ADS-177C: so did the legacy `keywords` snapshot's (no reader left).
+    assert "write_keywords" not in called
+    assert ("google_ads_api", "keywords") not in _batches(fn)
     rel = JOBS[job][0]
     assert not {"scheduler.delivery", "analysis.advisor",
                 "analysis.rule_advisor"} & _imports(ROOT / rel)
@@ -241,7 +247,7 @@ def test_05_both_jobs_still_call_every_kept_data_step(job):
     assert _batches(fn) == KEPT_BATCHES
 
     # Each is called exactly as often as before: one pull, one write, one sync.
-    for name in ("write_leads", "write_deals", "write_geo", "write_keywords",
+    for name in ("write_leads", "write_deals", "write_geo",
                  "sync_keyword_daily_facts", "sync_recent_search_terms",
                  "run_waste_detection", "write_waste_terms", "run_gclid_match",
                  "write_gclid_attribution", "write_gclid_coverage_snapshot",
@@ -389,8 +395,7 @@ class _Harness:
         stub(w + "write_leads", "write_leads", lambda run_id, rows: len(rows))
         stub(w + "write_deals", "write_deals", lambda run_id, rows: len(rows))
         stub(w + "write_geo", "write_geo", lambda run_id, rows: len(rows))
-        stub(w + "write_keywords", "write_keywords",
-             lambda run_id, rows: len(rows))
+        # PR-ADS-177C: write_keywords is deleted; nothing to stub.
         stub(w + "write_waste_terms", "write_waste_terms", None)
         stub(w + "write_gclid_attribution", "write_gclid_attribution",
              lambda **kw: len(kw["matched_rows"]))
@@ -464,7 +469,7 @@ def test_08_a_run_whose_every_step_lands_is_recorded_success(job, harness):
     expected = ["pull_campaign_performance", "pull_keyword_performance",
                 "pull_geo_performance", "pull_paid_search_contacts",
                 "pull_deals_with_gclid", "write_run", "write_leads",
-                "write_deals", "write_geo", "write_keywords",
+                "write_deals", "write_geo",
                 "sync_keyword_daily_facts", "sync_recent_search_terms",
                 "run_waste_detection", "write_waste_terms",
                 "record_flag_history"]
@@ -495,12 +500,12 @@ PARTIAL_CASES = [
      "write_leads / write_deals", "both"),
     ("geo not persisted", "write_geo", _zero, "write_geo", "both"),
     ("geo write raises", "write_geo", RuntimeError("db down"), "write_geo", "both"),
-    ("keywords not persisted", "write_keywords", _zero, "write_keywords", "both"),
+    # PR-ADS-177C: "keywords not persisted" stood here — write_keywords is gone.
     ("keyword facts not ok", "sync_keyword_daily_facts",
      {"ok": False, "error": "pulled 4 keyword row(s) but wrote 0"},
      "sync_keyword_daily_facts", "both"),
     ("keyword facts raise", "sync_keyword_daily_facts", RuntimeError("boom"),
-     "write_keywords / sync_keyword_daily_facts", "both"),
+     "sync_keyword_daily_facts", "both"),
     ("search-term sync not ok", "sync_recent_search_terms",
      {"ok": False, "error": "partial write"}, "sync_recent_search_terms", "both"),
     ("search-term sync raises", "sync_recent_search_terms",
@@ -896,7 +901,8 @@ def test_17_the_campaigns_snapshot_is_not_a_freshness_dataset_and_spend_is():
     assert not [k for k, c in config.items() if c.get("table") == "campaigns"]
     assert RETIRED not in _known_dataset_pairs()
     assert fresh.is_retired_dataset(*RETIRED) is True
-    assert set(fresh.RETIRED_DATASETS) == {RETIRED}
+    # PR-ADS-177C retired the legacy keyword snapshot the same way.
+    assert set(fresh.RETIRED_DATASETS) == {RETIRED, ("google_ads_api", "keywords")}
 
     # The dataset the Campaigns page reads is untouched and still reported.
     spend = config["canonical_spend"]
@@ -913,7 +919,9 @@ def test_17_the_campaigns_snapshot_is_not_a_freshness_dataset_and_spend_is():
     assert fresh.is_retired_dataset("mailchimp", "campaigns") is False
     assert ("mailchimp", "campaigns") in _known_dataset_pairs()
     # The other legacy snapshots these jobs still write stay registered.
-    for key in ("keywords", "geo", "leads", "deals", "waste_terms",
+    # (PR-ADS-177C: "keywords" is no longer written — retired, asserted above.)
+    assert "keywords" not in config
+    for key in ("geo", "leads", "deals", "waste_terms",
                 "gclid_attribution", "gclid_coverage_snapshots", "keyword_facts",
                 "search_terms"):
         assert key in config, key

@@ -29,7 +29,6 @@ The PostgreSQL cases must run in CI (PG step + did-run assertion), never skip.
 """
 from __future__ import annotations
 
-import ast
 import json
 import resource
 import sys
@@ -288,49 +287,11 @@ def test_09e_cgroup_readers_prefer_v2_then_v1_then_config(monkeypatch, tmp_path)
 
 
 # ── verdict equivalence of the memory reductions (pure) ─────────────────────
-def _old_function_code(path: Path, name: str):
-    """The pre-PR-ADS-169A implementation, verbatim, for comparison."""
-    try:
-        src = path.read_text()
-        tree = ast.parse(src)
-    except Exception:  # noqa: BLE001
-        return None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            seg = ast.get_source_segment(src, node)
-            if not seg:
-                return None
-            fn = ast.parse(seg).body[0]
-            body = list(getattr(fn, "body", []))
-            if (body and isinstance(body[0], ast.Expr)
-                    and isinstance(body[0].value, ast.Constant)
-                    and isinstance(body[0].value.value, str)):
-                body = body[1:]
-            fn.body = body or [ast.Pass()]
-            return ast.unparse(fn)
-    return None
-
-
-def test_10_one_parse_of_a_file_returns_exactly_what_the_per_call_walk_did(tmp_path):
-    import scripts.audit_campaign_evidence_certification as cert
-    files = [ROOT / "api" / "server.py",
-             ROOT / "db" / "keyword_repository.py",
-             ROOT / "services" / "keyword_evidence_service.py"]
-    dup = tmp_path / "dup.py"
-    dup.write_text("def f():\n    return 1\n\nclass A:\n    def f(self):\n"
-                   "        '''doc'''\n        return 2\n\nasync def g():\n    pass\n")
-    asked = {"_build_campaign_detail", "_campaign_keyword_preview",
-             "_campaign_flagged_preview", "build_campaign_keyword_preview",
-             "fetch_keyword_aggregates"}
-    for path in files + [dup]:
-        names = sorted({n.name for n in ast.walk(ast.parse(path.read_text()))
-                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
-        if len(names) > 60:          # api/server.py: what the audit asks + a sample
-            names = sorted(asked | set(names[::12]))
-        for name in names + ["no_such_function"]:
-            assert cert._function_code(path, name) == _old_function_code(path, name), \
-                (path, name)
-    assert cert._function_code(tmp_path / "missing.py", "f") is None
+# PR-ADS-177C: test_10 (and its `_old_function_code` reference) stood here. It
+# proved the Campaign Evidence certification's one-parse `_function_code`
+# returned what the per-call walk did; that audit is retired with the page
+# (scripts/audit_campaigns_page_certification.py replaces it), so the helper
+# it pinned no longer exists.
 
 
 def _lead(key, *, status="qualified", created="2026-10-05", source="PAID_SEARCH",

@@ -29,7 +29,10 @@
 // redirect below.
 // PR-ADS-178B: "leads" and "deals" are one page, "pipeline"; they and the
 // older "opportunities" key survive only as redirects below.
-const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "keywords", "pipeline", "gclid-attribution", "scheduler", "health", "backfill", "roas-countries", "revenue-health", "channels", "system"];
+// PR-ADS-177C: "keywords" (Keyword Evidence) is one page with Search Terms
+// under "search-terms" — "Keywords & Search Terms" (owner decision 3,
+// 2026-11-24) — and survives only as a redirect to its Keywords tab.
+const PAGES = ["dashboard", "campaigns", "waste", "search-terms", "ngrams", "pipeline", "gclid-attribution", "scheduler", "health", "backfill", "roas-countries", "revenue-health", "channels", "system"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
 // and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
@@ -61,6 +64,10 @@ const RETIRED_PAGE_REDIRECTS = {
   // Same rule: NOT in PAGES, it survives only here, so an old
   // #/roas-campaigns bookmark lands on Campaigns instead of the Dashboard.
   "roas-campaigns": { page: "campaigns" },
+  // PR-ADS-177C: Keyword Evidence is the Keywords tab of the one Keywords &
+  // Search Terms page (owner decision 3, 2026-11-24). NOT in PAGES; an old
+  // #/keywords bookmark lands on that tab.
+  keywords: { page: "search-terms", tab: "keywords" },
 };
 
 // PR-ADS-174A: the six-item menu. Every page id in PAGES belongs to exactly one
@@ -72,9 +79,9 @@ const RETIRED_PAGE_REDIRECTS = {
 const NAV_ITEMS = [
   { id: "overview", label: "Overview", pages: ["dashboard"] },
   { id: "channels", label: "Channels", pages: ["channels"] },
-  // PR-ADS-177B: one Campaigns page; Keywords and Search Terms stay until
-  // PR-ADS-177D merges them.
-  { id: "campaigns", label: "Campaigns", pages: ["campaigns", "keywords", "search-terms"] },
+  // PR-ADS-177B: one Campaigns page. PR-ADS-177C: one Keywords & Search
+  // Terms page (owner decision 3, 2026-11-24).
+  { id: "campaigns", label: "Campaigns", pages: ["campaigns", "search-terms"] },
   // PR-ADS-176B: one page, so no tab strip.
   { id: "countries", label: "Countries", pages: ["roas-countries"] },
   // PR-ADS-178B: one Pipeline page (leads and deals), so no tab strip.
@@ -204,9 +211,10 @@ const PAGE_DATASET_MAP = {
   // daily spend AND HubSpot contacts; the compact freshness reflects the worst of
   // the two, so it never shows fresh when HubSpot contacts are stale/failed.
   campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"],
-  search_terms:      ["google_ads_api/search_terms"],
+  // PR-ADS-177C: the one Keywords & Search Terms page — the worst of its two
+  // sources (the Keywords tab reads durable keyword facts).
+  search_terms:      ["google_ads_api/search_terms", "google_ads_api/keyword_facts"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
-  keywords:          ["google_ads_api/keyword_facts"],
   // PR-ADS-178B: the Pipeline page reads the CRM funnel spine (leads) and
   // the deal ledger (deals).
   pipeline:          ["hubspot/contact_funnel", "hubspot/lifecycle_events", "hubspot/deals"],
@@ -241,10 +249,10 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check Revenue Health for spend coverage and the deal-ledger sync."
   },
   "search-terms": {
-    title: "Search Terms",
-    purpose: "Selected-window Search Term Universe — queries reported by Google Ads, with factual tri-state review states, waste evidence and pattern analysis.",
-    source: "Durable Google Ads API search-term rows bounded by source_date; spend is reported search-term spend (stored USD), never canonical account spend.",
-    dependsOn: ["search_terms"],
+    title: "Keywords & Search Terms",
+    purpose: "One page on evidence windows: the selected-window Search Term Universe (queries reported by Google Ads, with factual tri-state review states, waste evidence and pattern analysis) and the Keywords tab (keyword activity, match-type exposure and quality diagnostics).",
+    source: "Durable Google Ads API search-term rows and keyword facts, each bounded by source_date; spend is reported search-term / keyword spend, never canonical account spend.",
+    dependsOn: ["search_terms", "keyword_facts"],
     emptyMeans: "This does not mean the account is clean. It means no Google Ads API search-term rows are currently available for this window.",
     nextAction: "Check System Status → Search Terms Pipeline."
   },
@@ -256,14 +264,8 @@ const PAGE_EXPLANATIONS = {
     emptyMeans: "If Search Term Universe is empty or blocked, pattern analysis cannot run.",
     nextAction: "Fix Search Term Universe first."
   },
-  keywords: {
-    title: "Keyword Evidence",
-    purpose: "Google Ads keyword activity, match-type exposure and quality diagnostics.",
-    source: "Durable Google Ads keyword facts (keyword_daily_facts).",
-    dependsOn: ["keyword_facts"],
-    emptyMeans: "No reported keyword activity for this window. A blank Quality Score does not mean poor quality, and no keyword rows does not mean the account has no targeting or spend.",
-    nextAction: "Check System Status → Google Ads API / Keywords."
-  },
+  // PR-ADS-177C: "keywords" (Keyword Evidence) is the Keywords tab of
+  // "search-terms" — its explanation is folded into that entry.
   pipeline: {
     title: "Pipeline",
     purpose: "Leads and closed-won deals together: SQLs (the Google Ads acquisition cohort), the lifecycle funnel (contacts that entered each stage in the window), the closed-won deal list and the customers won.",
@@ -334,20 +336,15 @@ const PAGE_HELP_CONTENT = {
     doNotAssume: "Withheld and Unavailable are never zero. Customers are distinct companies and are never summed across campaigns. Meta ad-set figures are never added to Google Ads; their SQL, deal and revenue cells are not linked yet. Deals closed today are counted on Deals and Overview, not here, until tomorrow.",
     checkNext: "Keywords and Search Terms for query-level evidence, or Revenue Health for blockers."
   },
+  // PR-ADS-177C: one Keywords & Search Terms page (owner decision 3,
+  // 2026-11-24). The Keyword Evidence help ("keywords") is folded in here.
   "search-terms": {
-    what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = durable flag OR safely-confirmed waste evidence · Reviewed clean = every row stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
-    source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Currency is assessed independently per term × campaign: verified Google Ads GBP rows are FX-converted to USD per source-date; unverified legacy rows keep their monetary value withheld (never assumed GBP/USD) and stay visible. Verified Search-Term Spend is therefore a verified subtotal shown as Complete, Partial (excludes N legacy rows) or Unavailable. Reporting Coverage compares FX-safe VERIFIED search-term USD against FX-safe canonical campaign USD; when partial it is verified-row-only.",
-    howToUse: "Pick an Evidence Window, filter by campaign, review state, junk category or minimum spend, and click any row to open its evidence drawer. Switch to Patterns for word-level analysis derived from the same selected-window terms; a term can appear in several patterns, so pattern-row spends overlap and must never be summed.",
-    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Absence of waste evidence is NOT clean — only an explicit stored false is. A flagged term is a human-review candidate, not an approved negative. Attributed SQLs need a directly persisted user query to tie a qualified contact to an exact search term; the CRM stores a HubSpot keyword, not the query, so this normally reads '—' (unavailable) — never a fabricated 0, and a keyword is never treated as a search term. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency, and the 78 unverified legacy rows are preserved, never relabelled.",
-    checkNext: "Flagged Waste Terms for the flagged review queue, or Campaign Evidence for canonical spend and lead outcomes."
-  },
-  keywords: {
-    what: "Keyword Evidence — the selected-window keyword population at the unique Google Ads criterion grain, with match-type exposure, latest-observed quality diagnostics and one factual review signal per keyword.",
-    source: "Durable Google Ads API keyword facts (keyword_daily_facts) totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound) — never SUM'd across overlapping scheduler snapshots. Verified Keyword Spend is Σ(per-source-date native cost × that date's FX rate); it is a verified subtotal shown Complete, Partial (excludes N unverified/FX-incomplete units) or Unavailable. Quality Score, Expected CTR, Ad Relevance and Landing Page Experience are the LATEST observed Google Ads attributes per criterion — not window averages; a blank score means unavailable, distinct from a genuine 0.",
-    howToUse: "Pick an Evidence Window, filter by campaign, match type, criterion status, quality band, review signal or minimum verified spend, and click any row to open its evidence drawer. Export CSV returns the complete server-filtered dataset. Keyword-view reporting coverage compares FX-safe verified keyword-view USD against FX-safe canonical campaign USD — a completeness diagnostic, not a reconciliation failure.",
+    what: "Keywords & Search Terms — one page on evidence windows, four tabs. Terms, Flagged and Patterns: Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = durable flag OR safely-confirmed waste evidence · Reviewed clean = every row stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms. Keywords: Keyword Evidence — the selected-window keyword population at the unique Google Ads criterion grain, with match-type exposure, latest-observed quality diagnostics and one factual review signal per keyword.",
+    source: "Search terms: Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Currency is assessed independently per term × campaign: verified Google Ads GBP rows are FX-converted to USD per source-date; unverified legacy rows keep their monetary value withheld (never assumed GBP/USD) and stay visible. Verified Search-Term Spend is therefore a verified subtotal shown as Complete, Partial (excludes N legacy rows) or Unavailable. Reporting Coverage compares FX-safe VERIFIED search-term USD against FX-safe canonical campaign USD; when partial it is verified-row-only. Keywords: Durable Google Ads API keyword facts (keyword_daily_facts) totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound) — never SUM'd across overlapping scheduler snapshots. Verified Keyword Spend is Σ(per-source-date native cost × that date's FX rate); it is a verified subtotal shown Complete, Partial (excludes N unverified/FX-incomplete units) or Unavailable. Quality Score, Expected CTR, Ad Relevance and Landing Page Experience are the LATEST observed Google Ads attributes per criterion — not window averages; a blank score means unavailable, distinct from a genuine 0.",
+    howToUse: "Pick an Evidence Window and a tab. Search terms: Pick an Evidence Window, filter by campaign, review state, junk category or minimum spend, and click any row to open its evidence drawer. Switch to Patterns for word-level analysis derived from the same selected-window terms; a term can appear in several patterns, so pattern-row spends overlap and must never be summed. Keywords: Pick an Evidence Window, filter by campaign, match type, criterion status, quality band, review signal or minimum verified spend, and click any row to open its evidence drawer. Export CSV returns the complete server-filtered dataset. Keyword-view reporting coverage compares FX-safe verified keyword-view USD against FX-safe canonical campaign USD — a completeness diagnostic, not a reconciliation failure.",
     howItStaysCurrent: "Changing the Evidence Window is a PostgreSQL query over already-stored facts — it filters instantly and never calls or mutates Google Ads. A scheduled daily sync re-pulls the recent rolling range (so late Google Ads metric and conversion adjustments update the stored facts without duplication), and a one-time historical bootstrap backfills the account's full keyword history so 'All time' can become genuinely complete. 'Partial historical coverage' means the stored durable facts start after the account's history start — earlier dates are not yet backfilled, so 'All time' is a truthful partial, never presented as complete. Admins can trigger a recent-range refresh from System Status → Dataset Freshness; it writes locally only.",
-    doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Attributed SQLs are HubSpot-confirmed qualified contacts on their created date, uniquely tied to one keyword criterion; a blank ('—') means the SQL could not be uniquely attributed (ambiguous keyword text or unresolved campaign), never zero, and a genuine 0 means uniquely attributable with no matching contact. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
-    checkNext: "Search Terms to see which queries matched a keyword, or Campaign Evidence for canonical spend and lead outcomes."
+    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Absence of waste evidence is NOT clean — only an explicit stored false is. A flagged term is a human-review candidate, not an approved negative. Attributed SQLs need a directly persisted user query to tie a qualified contact to an exact search term; the CRM stores a HubSpot keyword, not the query, so this normally reads '—' (unavailable) — never a fabricated 0, and a keyword is never treated as a search term. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency, and the 78 unverified legacy rows are preserved, never relabelled. Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Attributed SQLs are HubSpot-confirmed qualified contacts on their created date, uniquely tied to one keyword criterion; a blank ('—') means the SQL could not be uniquely attributed (ambiguous keyword text or unresolved campaign), never zero, and a genuine 0 means uniquely attributable with no matching contact. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
+    checkNext: "Campaigns for canonical spend, leads, SQLs and closed-won outcomes, or the Flagged tab for the review queue."
   },
   pipeline: {
     what: "Pipeline — leads and closed-won deals for one business window through today. SQLs are the Google Ads acquisition cohort (the same count as Overview and Campaigns). The funnel counts contacts that entered each lifecycle stage in the window; click a stage for its contacts. The deal list is every closed-won deal; customers are distinct companies.",
@@ -407,9 +404,9 @@ const PAGE_DEPENDENCIES = {
   // PR-ADS-177B: the one Campaigns page — deals, campaign spend and the
   // acquisition cohort (the contact funnel).
   campaigns:               ["hubspot/deals", "google_ads_api/canonical_spend", "hubspot/contact_funnel"],
-  "search-terms":          ["google_ads_api/search_terms"],
+  // PR-ADS-177C: the Keywords tab reads durable keyword facts.
+  "search-terms":          ["google_ads_api/search_terms", "google_ads_api/keyword_facts"],
   ngrams:                  ["google_ads_api/search_terms"],
-  keywords:                ["google_ads_api/keyword_facts"],
   // PR-ADS-178B: the one Pipeline page — the contact funnel and the deal ledger.
   pipeline:                ["hubspot/contact_funnel", "hubspot/deals"],
   "gclid-attribution":     ["gclid/matches"],
@@ -451,8 +448,9 @@ const DEFAULT_EVIDENCE_WINDOW = "30d";
 // PR-ADS-176B: Countries left this list with the #/geo page — it is on
 // business windows now; the 7/14/30/60/180-day evidence windows are gone from it.
 // PR-ADS-177B: Campaigns left this list — it is on business windows now.
+// PR-ADS-177C: "keywords" is the Keywords tab of "search-terms" now.
 const EVIDENCE_PAGES = [
-  "search-terms", "ngrams", "keywords",
+  "search-terms", "ngrams",
 ];
 
 function isEvidencePage(page) {
@@ -488,25 +486,11 @@ let gclidCoverageStatus = "idle"; // idle | loading | ok | empty | unavailable
 let gclidQualityStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 let gclidQualityData = null;
 
-// Campaign drawer attribution preview state
-let campaignAttributionRows = [];
-let campaignAttributionStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
-let campaignAttributionQuality = null;
-let campaignAttributionQualityStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
-
-// GCLID Attribution page prefill (set when navigating from campaign drawer)
+// GCLID Attribution page prefill (set when another page navigates here with a campaign)
 let gclidAttributionPrefill = null;
 
-// N-Gram page prefill (set when navigating from campaign drawer)
+// N-Gram page prefill (set when another page navigates here with a campaign)
 let ngramsPrefill = null;
-
-// Keyword / Waste page prefill (set when navigating from the campaign drawer,
-// PR-ADS-142). The loaders apply the campaign filter if the input exists.
-let keywordsPrefill = null;
-
-// Campaign drawer N-Gram drilldown state
-let drawerNgramRows = [];
-let drawerNgramStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // Dataset Freshness state
 let datasetFreshnessRows = [];
@@ -616,13 +600,6 @@ function renderPageExplanation(pageKey, options = {}) {
   // drawer, not a permanent strip above the table — so no inline explanation chips.
   if (pageKey === "campaigns" && !options.forceVisible) {
     const el = document.getElementById("page-explanation-campaigns");
-    if (el) { el.hidden = true; el.innerHTML = ""; }
-    return "";
-  }
-  // PR-ADS-146A §7: Keyword Evidence keeps source/methodology in Help, not a
-  // permanent strip of technical chips (keyword_facts / Depends on / Read-only).
-  if (pageKey === "keywords" && !options.forceVisible) {
-    const el = document.getElementById("page-explanation-keywords");
     if (el) { el.hidden = true; el.innerHTML = ""; }
     return "";
   }
@@ -934,8 +911,6 @@ function setSelectedDays(days) {
   try { sessionStorage.setItem("ads_days", String(normalized)); } catch (_) { /* ignore */ }
   // Update active button state
   updateWindowControls(normalized);
-  // Close campaign drawer when selected reporting window changes to avoid stale detail.
-  closeCampaignDrawer();
   // Reload current page with new window
   if (_currentPage) loadPage(_currentPage);
   loadDataFreshness();
@@ -1001,7 +976,6 @@ function setEvidenceWindow(value) {
   // Close open drawers so stale detail from the previous window is dropped
   // (PR-ADS-146A §4). The window change is a DB query — it re-invokes the active
   // page loader (/api/keyword-evidence?window=…) and never calls Google Ads.
-  closeCampaignDrawer();
   if (typeof closeKwDrawer === "function") closeKwDrawer();
   if (_currentPage) loadPage(_currentPage);
   loadDataFreshness();
@@ -1124,8 +1098,8 @@ function showLogin() {
   document.getElementById("login-screen").style.display = "flex";
   document.getElementById("app").style.display = "none";
   _currentUser = null;
-  // Ensure the drawer/overlay are hidden so they don't block the login screen.
-  closeCampaignDrawer();
+  // Ensure the drawers/overlays are hidden so they don't block the login screen.
+  if (typeof closeKwDrawer === "function") closeKwDrawer();
 }
 
 function showApp(user) {
@@ -1447,9 +1421,8 @@ function navigate(page, options) {
 function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboardTab();                       break;
-    case "campaigns":     loadCampaigns();                          break;
+    case "campaigns":     loadCampaignsPage();                      break;
     case "search-terms":  loadSearchTermsEvidence();                break;
-    case "keywords":      loadKeywords();      break;
     case "pipeline":      loadPipeline();      break;
     case "gclid-attribution":
       if (gclidAttributionPrefill) {
@@ -3320,13 +3293,29 @@ const DASH_SIGNAL_DEFS = [
   { key: "biggest_decline", label: "Biggest Decline" },
 ];
 
+// PR-ADS-177C-F1/F2 (truth audit M-1): a campaign signal names a distinct
+// campaign when one qualifies, and says how many shared-name rows it passed
+// over; when it names a shared-name row (the only candidate) it carries that
+// row's label; a total that includes shared-name rows says so.
+function dashSharedExcludedNote(s) {
+  const n = s && s.shared_name_rows_excluded;
+  return n ? ` · ${n} shared-name row${n === 1 ? "" : "s"} (several campaigns combined) not ranked` : "";
+}
+function dashSharedIncludedNote(s) {
+  const n = s && s.shared_name_rows_included;
+  return n ? ` · includes ${n} name${n === 1 ? "" : "s"} several Google Ads campaigns share (figures combined)` : "";
+}
+function dashSharedNamed(name, label) {
+  return label ? `${name || "—"} (${label})` : (name || "—");
+}
+
 function dashSignalBody(key, s) {
   if (key === "best_campaign" || key === "best_country") {
     const ratio = s.period_revenue_per_ad_spend !== null && s.period_revenue_per_ad_spend !== undefined
       ? ` · ${fmtPeriodRatio(s.period_revenue_per_ad_spend)} ${PERIOD_RATIO_LABEL} (${PERIOD_RATIO_DISCLOSURE})` : "";
     return {
       value: s.label,
-      line: `${fmtMoney(s.revenue_usd)} closed-won · ${fmtCount(s.closed_won_deals)} won deal${(s.closed_won_deals || 0) === 1 ? "" : "s"}${ratio}`,
+      line: `${s.shared_name_label ? `${s.shared_name_label} · ` : ""}${fmtMoney(s.revenue_usd)} closed-won · ${fmtCount(s.closed_won_deals)} won deal${(s.closed_won_deals || 0) === 1 ? "" : "s"}${ratio}${dashSharedExcludedNote(s)}`,
     };
   }
   if (key === "best_source") {
@@ -3341,7 +3330,7 @@ function dashSignalBody(key, s) {
       : fmtCompactCurrency(s.value, s.currency || "GBP");
     return {
       value: amount,
-      line: `${fmtCount(s.campaign_count)} campaign${(s.campaign_count || 0) === 1 ? "" : "s"} with spend but no SQLs · top: ${s.top_campaign || "—"}`,
+      line: `${fmtCount(s.campaign_count)} campaign${(s.campaign_count || 0) === 1 ? "" : "s"} with spend but no SQLs · top: ${dashSharedNamed(s.top_campaign, s.top_campaign_shared_name_label)}${dashSharedIncludedNote(s)}${dashSharedExcludedNote(s)}`,
     };
   }
   // fastest_improving / biggest_decline
@@ -4945,6 +4934,41 @@ function campSpendCell(row) {
   return native;
 }
 
+// PR-ADS-177C-F1 (truth audit M-1). A campaign row whose name several Google
+// Ads campaign ids share (identity_status) is the TRUE combined figure for
+// that name — never one campaign's. Every surface that prints such a row says
+// so in plain words beside the name and the period ratio, and its drawer
+// lists the ids. The figures are not withheld; they are labelled.
+const CAMPAIGN_SHARED_NAME = "campaign_name_shared_by_google_ads_campaigns";
+function campaignSharedCount(r) {
+  if (!r || r.identity_status !== CAMPAIGN_SHARED_NAME) return 0;
+  const ids = Array.isArray(r.google_ads_campaign_ids) ? r.google_ads_campaign_ids : [];
+  return ids.length > 1 ? ids.length : -1;          // -1: shared, count unknown
+}
+function campaignSharedText(r) {
+  const n = campaignSharedCount(r);
+  if (!n) return "";
+  return `${n > 0 ? n : "Several"} Google Ads campaigns share this name — figures combined`;
+}
+function campaignSharedNameHtml(r) {
+  const t = campaignSharedText(r);
+  return t ? `<div class="camp-shared-name" data-shared-name>${escapeHtml(t)}</div>` : "";
+}
+function campaignSharedRatioNote(r) {
+  return campaignSharedCount(r)
+    ? `<small class="metric-reason camp-shared-ratio" data-shared-name>combined across the campaigns sharing this name</small>` : "";
+}
+function campaignSharedIdsHtml(r) {
+  const t = campaignSharedText(r);
+  if (!t) return "";
+  const ids = (r.google_ads_campaign_ids || []).map((id) => `<code>${escapeHtml(String(id))}</code>`).join(", ");
+  return `<div class="camp-drawer__section camp-shared-ids" data-shared-name>
+      <p><strong>${escapeHtml(t)}.</strong> ${ids ? `Google Ads campaign ids: ${ids}.` : ""}
+      HubSpot records the campaign by name, so these figures cannot be split by
+      campaign and are not judged as one campaign.</p>
+    </div>`;
+}
+
 function campRoasCell(row) {
   // The period ratio only when it is a real, trusted value; else the status
   // conveys the outcome. Never labelled ROAS: a non-cohort operational ratio.
@@ -5216,6 +5240,9 @@ const CAMP_NEXT_ACTION = {
   "Mapping needs review": "Map campaign spend",
   "Closed-won outcome withheld": "Not judged — closed-won deals withheld",
   "SQLs withheld": "Not judged — SQLs withheld",
+  // PR-ADS-177C (M5): the window's spend is not settled (before the morning
+  // sync re-reads yesterday) — the row is not judged on spend still moving.
+  "Spend not settled": "Not judged — spend not settled",
 };
 
 function renderCampLeaderboard(d) {
@@ -5231,15 +5258,17 @@ function renderCampLeaderboard(d) {
     return `
     <tr class="camp-row" data-camp-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.campaign_name || "campaign")} detail">
       <td class="camp-td camp-td--name">
-        <span class="camp-dot ${(CAMP_STATUS_META[r.status] || {}).dot || "camp-dot--muted"}"></span>${escapeHtml(r.campaign_name || "—")}
+        <span class="camp-dot ${(CAMP_STATUS_META[r.status] || {}).dot || "camp-dot--muted"}"></span>${escapeHtml(r.campaign_name || "—")}${campaignSharedNameHtml(r)}
       </td>
       <td class="camp-num">${campSpendCell(r)}</td>
       <td class="camp-num">${cohortCountHtml(r.sqls, d.cohort, r)}</td>
       <td class="camp-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</td>
       <td class="camp-num">${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</td>
       <td class="camp-num">${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</td>
-      <td>${campRoasCell(r)}</td>
-      <td class="camp-next">${escapeHtml(CAMP_NEXT_ACTION[r.status] || "Open Campaigns")}</td>
+      <td>${campRoasCell(r)}${campaignSharedRatioNote(r)}</td>
+      <td class="camp-next">${escapeHtml(campaignSharedCount(r)
+        ? "Not judged — several campaigns share this name"
+        : (CAMP_NEXT_ACTION[r.status] || "Open Campaigns"))}</td>
     </tr>`;
   }).join("") + renderCampLeaderboardResidual(d);
   return `
@@ -5305,7 +5334,7 @@ function renderCampSearchSignals(d) {
     return `${header}<p class="camp-keyword-note">Search-term signals are unavailable${s.reason ? ` — ${escapeHtml(s.reason)}` : ""}.</p>`;
   }
   const linkTerms = dashCanNavigate("search-terms")
-    ? '<a class="camp-signal-link" href="#/search-terms">Review in Search Terms →</a>' : "";
+    ? '<a class="camp-signal-link" href="#/search-terms">Review in Keywords &amp; Search Terms →</a>' : "";
   const linkWaste = dashCanNavigate("search-terms")
     ? '<a class="camp-signal-link" href="#/search-terms?tab=flagged">Open Flagged terms →</a>' : "";
   return `${header}
@@ -5355,10 +5384,10 @@ function wireCampDrawers(root, d) {
         ? deals.map((deal) => `<tr>${CAMP_DEAL_COLUMNS.map(([key]) => `<td class="camp-deal-td camp-deal-td--${key}">${campDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
         : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
 
+    // PR-ADS-177C: one Keywords & Search Terms page.
     const links = [
       ["campaigns", "Open Campaigns"],
-      ["keywords", "Open Keywords"],
-      ["search-terms", "Open Search Terms"],
+      ["search-terms", "Open Keywords & Search Terms"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
       .map(([page, label]) => `<a class="camp-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
@@ -5382,9 +5411,10 @@ function wireCampDrawers(root, d) {
         <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, campBlockerOpts(d))}</dd></div>
         <div><dt>Revenue</dt><dd>${rowMetricHtml(r, "won_revenue_usd", fmtMoney, campBlockerOpts(d))}</dd></div>
-        <div><dt>${PERIOD_RATIO_LABEL} / status</dt><dd>${campRoasCell(r)}<br><small class="metric-reason">${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</small></dd></div>
+        <div><dt>${PERIOD_RATIO_LABEL} / status</dt><dd>${campRoasCell(r)}${campaignSharedRatioNote(r)}<br><small class="metric-reason">${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</small></dd></div>
         <div><dt>Mapping</dt><dd>${escapeHtml(r.attribution_status || "—")}</dd></div>
       </dl>
+      ${campaignSharedIdsHtml(r)}
       <div class="camp-drawer__section">
         <h4 class="camp-drawer__h">Revenue proof — closed-won deals</h4>
         <div class="camp-deal-scroll">
@@ -6220,49 +6250,11 @@ function renderDashboardDeals() {
 
 // ── Campaigns page ─────────────────────────────────────────────────────────
 
-// ── Campaign Evidence page (PR-ADS-143) ─────────────────────────────────────
-// GENUINE selected-window campaign evidence: canonical Google Ads spend (native
-// GBP + FX-safe USD) reconciled with durable, deduplicated HubSpot lead outcomes
-// for the SAME window. The selected Evidence Window controls the ACTUAL metrics;
-// all_time = genuine cumulative totals (never a scheduler snapshot). Each row
-// carries a factual, window-safe Outcome status — never a SCALE/HOLD/FIX/CUT
-// action verdict. Read-only. Missing values render Unavailable / N/A / — (never a
-// fabricated 0). Source + methodology live in the Help drawer, not above the table.
-
-let _campaignEvidence = [];       // selected-window campaign rows from /api/campaigns
-let _campaignSummary  = null;     // KPI summary (reconciled to canonical totals)
-let _campaignAudit    = null;     // reconciliation/audit metadata (diagnostic, not shown)
-let _campaignMeta     = { window: null, spend_currency: "GBP", reporting_currency: "USD" };
-let _campaignLoadState = "idle";  // idle | loading | ok | empty | db_unavailable | error
-const _campaignFilters = { search: "", status: "all", outcome: "all", sort: "spend" };
-
-// PR-ADS-161B — this page no longer reads the legacy `sql_reconciliation`
-// (leads.status_category) block. The API still returns it for other readers and
-// declares it in `legacy_sql`; reading it here as well would put a second SQL
-// population on a page that publishes one.
-//
-// The acquisition-cohort block of the CURRENT page response: publication
-// status, metadata, reconciliation and the lifecycle-event coverage disclosure.
-// Set in the same assignment as the rows and summary it governs, and reset with
-// them. The gate functions below never read it themselves: every caller passes
-// the cohort of the response it is rendering — the page passes this, the
-// drawer passes its own `/api/campaign-detail` response's `cohort`.
-let _campaignCohort = null;
-
-// The population this page's SQL number represents: contacts CREATED in the
-// window that have reached SQL as of the canonical contact-funnel watermark. Not "contacts that
-// entered SQL in the window" (a lifecycle event, which needs an exact
-// SQL-entry date), not the legacy lead-status count, and emphatically not
-// Google Ads platform conversions — four different numbers.
-const CAMPAIGN_SQL_SCOPE_LABEL = "Cohort SQLs";
-const CAMPAIGN_SQL_SCOPE_SHORT = "Cohort SQLs";
-const CAMPAIGN_COHORT_BASIS = "SQLs from contacts created during this period";
-// The drawer's Lead Quality and Country splits still read the LEGACY lead
-// population (leads.status_category). Their qualified column is that
-// classification, and is labelled as such — never as the cohort SQL count,
-// which is a different population from a different table.
-const CAMPAIGN_LEGACY_QUALIFIED_LABEL = "Qualified (lead status)";
-const CAMPAIGN_LEGACY_QUALIFIED_TITLE = "Lead-status classification from the leads table — not the Cohort SQL count above, which is read from canonical lifecycle evidence";
+// ── The acquisition-cohort gate (PR-ADS-161B, PR-ADS-177A) ─────────────────
+// PR-ADS-177C retired the Campaign Evidence page (`/api/campaigns`,
+// `/api/campaign-detail`) and its renderers and drawer. Its cohort gate is the
+// one gate every leads / SQLs figure still passes through
+// (`cohortCountPublication` → `campaignSqlPublication`), so it stays here.
 
 // Watermark phrase for the basis label. Never a fabricated date: an unknown
 // watermark says so.
@@ -6300,56 +6292,6 @@ function campaignCohortReason(code) {
   return CAMPAIGN_COHORT_REASONS[code] || (code ? `Withheld (${code}).` : "Withheld.");
 }
 
-// PR-ADS-161B review — Leads acquired is counted over the SAME canonical
-// contact population as the cohort SQLs. When the backend says that population
-// is not proven complete, it is a partial count: still shown (an operator needs
-// it to investigate) but never as a total.
-const CAMPAIGN_PARTIAL_TITLE = "Partial — the canonical contact population is not proven complete for this window, so this is a count, not a total.";
-function campaignCohortPopulationPartial(cohort) {
-  const m = (cohort && cohort.metadata) || {};
-  return m.coverage_status === "cohort_population_not_proven";
-}
-function campaignPartialCount(html) {
-  return `<span class="campaign-sql-unreconciled" title="${escapeHtml(CAMPAIGN_PARTIAL_TITLE)}">${html}<span class="td-sub">partial</span></span>`;
-}
-
-// Junk and Junk Rate are the legacy lead-quality classification from the leads
-// table — a DIFFERENT population from "Leads acquired" (canonical funnel
-// contacts) beside them. Junk Rate's denominator is verdicted leads in that
-// table, so junk ÷ leads acquired is a figure this page never produced.
-const CAMPAIGN_LEGACY_JUNK_LABEL = "Junk (lead status)";
-const CAMPAIGN_LEGACY_JUNK_RATE_LABEL = "Junk Rate (lead status)";
-const CAMPAIGN_LEGACY_JUNK_TITLE = "Lead-quality classification from the leads table. Junk Rate = junk ÷ verdicted leads in that table — not ÷ Leads acquired, which counts canonical-funnel contacts. Different populations: do not divide one by the other.";
-
-// Outcome statuses whose meaning DEPENDS on the SQL count. When the SQL scope
-// does not reconcile, these two are conclusions the evidence no longer
-// supports — "Spend without SQL proof" in particular is an accusation, and an
-// unreconciled scope is not proof of absence.
-const CAMPAIGN_SQL_DEPENDENT_STATUSES = new Set([
-  "SQL producer", "Spend without SQL proof",
-]);
-
-/**
- * The single decision: may this page publish aggregate SQL evidence?
- *
- * Every SQL-dependent surface asks this one function, so the KPI strip, the
- * table, the filters, the sorts and the drawer cannot drift apart — which is
- * how a gate ends up applied in three places out of five.
- *
- * PR-ADS-161B: the gate reads the ACQUISITION-COHORT status, not the legacy
- * lead-status reconciliation. A missing SQL-entry timestamp no longer withholds
- * anything here — the cohort never asks for one. What still withholds: an
- * unreadable funnel, a cohort whose buckets do not reconcile, or a watermark
- * that cannot be stated.
- *
- * `cohort` is REQUIRED: the cohort block of the response being rendered. There
- * is no global fallback — a missing argument is unavailable, which is
- * fail-closed, so a surface can never be authorised by another request's state.
- *
- * Returns `{ publish, state, reason, cpql, cpqlState, cpqlReason }`. `publish`
- * is true ONLY for a published cohort. `cpql` can never be true unless
- * `publish` is: CPQL's denominator IS the SQL count.
- */
 function campaignSqlPublication(cohort) {
   const c = cohort;
   if (!c || !c.sql_status) {
@@ -6395,8 +6337,8 @@ function campaignRowSqlPublication(cohort, row) {
 // Every leads / SQLs figure the Revenue Decision Mart publishes — and every
 // Dashboard tab and the Countries page that republish it — is the ACQUISITION
 // COHORT: Google Ads contacts created in the window, and those proven to have
-// reached SQL as of the contact-funnel watermark. The same count Campaign
-// Evidence publishes. Its gate is `campaignSqlPublication(cohort)`, and the
+// reached SQL as of the contact-funnel watermark. Its gate is
+// `campaignSqlPublication(cohort)`, and the
 // cohort is an ARGUMENT: the `cohort` block of the SAME response the figure
 // came from, never page-global state. `row` (optional) narrows it with the
 // row's own copy (`sqls_status` / `sqls_reason`) — a row can be withheld under
@@ -6406,16 +6348,16 @@ const COHORT_LEADS_LABEL = "Leads · contacts acquired in window";
 const COHORT_COUNT_TITLE = "Acquisition cohort: Google Ads-sourced HubSpot contacts created in this window (Leads), and those canonical lifecycle evidence proves reached SQL as of the contact-funnel watermark (SQLs). The same count on every page.";
 function cohortCountPublication(cohort, row) {
   // A row without its own copy of the verdict (a KPI, a total) is gated by
-  // the response's cohort alone; a row with one is narrowed by the Campaign
-  // Evidence row helper — the one sanctioned narrowing — never widened.
+  // the response's cohort alone; a row with one is narrowed by the row
+  // helper — the one sanctioned narrowing — never widened.
   if (!row || !row.sqls_status) return campaignSqlPublication(cohort);
   return campaignRowSqlPublication(cohort, {
     cohort_sql_status: row.sqls_status, cohort_sql_reason: row.sqls_reason });
 }
 // PR-ADS-177A-F1 (truth audit MAJOR 1): a cohort is published over a STALE
-// contact funnel only as of its watermark (`docs/44` §7). Campaign Evidence
-// says so ("measured as of …"); every mart / Dashboard count says it too, with
-// Campaign Evidence's own helper (`campaignCohortAsOf`) — never a bare number.
+// contact funnel only as of its watermark (`docs/44` §7): every mart /
+// Dashboard count says so ("measured as of …", `campaignCohortAsOf`) — never a
+// bare number.
 function cohortIsStale(cohort) {
   const c = cohort || {};
   return c.sql_status === "published"
@@ -6490,548 +6432,10 @@ function cohortCountText(value, cohort, row) {
   return (!pub.publish && pub.state === "withheld") ? "Withheld" : "Unavailable";
 }
 
-// The withheld rendering. Never a 0, never an empty string — the operator must
-// be able to tell "we measured none" from "we could not measure". The visible
-// word is in the DOM, not only in a tooltip, so it reaches every reader.
-function campaignSqlWithheld(pub, { compact = false } = {}) {
-  const label = pub.state === "unavailable" ? "Unavailable" : "Withheld";
-  const text = compact ? label : `${label} — see evidence below`;
-  return `<span class="detail-unavailable" title="${escapeHtml(pub.reason || "")}">${text}</span>`;
-}
-
-// CPQL has its own refusals on top of the SQL gate (stale source, no spend,
-// zero SQLs). `N/A` is reserved for the genuine zero-SQL case.
-function campaignCpqlNotPublished(pub, { compact = false } = {}) {
-  if (!pub.publish) return campaignSqlWithheld(pub, { compact });
-  if (pub.cpqlState === "not_applicable") {
-    return `<span class="detail-unavailable" title="${escapeHtml(pub.cpqlReason || "")}">N/A</span>`;
-  }
-  const label = pub.cpqlState === "withheld" ? "Withheld" : "Unavailable";
-  return `<span class="detail-unavailable" title="${escapeHtml(pub.cpqlReason || "")}">${label}</span>`;
-}
-
-// Factual outcome-status → badge tone (no action verdict).
-const CAMPAIGN_STATUS_TONE = {
-  "SQL producer": "good",
-  "Junk-heavy": "bad",
-  "Spend without SQL proof": "warn",
-  "Mapping review": "info",
-  "No outcome evidence": "muted",
-  "Data unavailable": "muted",
-};
-
-function campaignStatusBadge(status) {
-  const tone = CAMPAIGN_STATUS_TONE[status] || "muted";
-  return `<span class="campaign-status-badge campaign-status-badge--${tone}">${escapeHtml(status || "—")}</span>`;
-}
-
-// GBP formatter (mirrors fmtDollar's compaction, £ instead of $).
-function fmtGbp(n) {
-  if (n === null || n === undefined) return "—";
-  if (n >= 1000) return "£" + (n / 1000).toFixed(1) + "k";
-  return "£" + n.toFixed(0);
-}
-
 const CAMPAIGN_WINDOW_LABELS = {
   "7d": "Last 7 days", "14d": "Last 14 days", "30d": "Last 30 days",
   "60d": "Last 60 days", "180d": "Last 180 days", "all_time": "All time",
 };
-
-async function loadCampaignEvidence() {
-  renderPageDatasetFreshness("campaigns");
-  const shell = document.getElementById("campaign-evidence-shell");
-  if (!shell) return;
-  shell.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading campaign evidence…</p>`;
-  _campaignLoadState = "loading";
-
-  try {
-    const data = await fetchJSON(`/api/campaigns?${evidenceWindowQuery()}`);
-    _campaignEvidence = data.campaigns || [];
-    _campaignSummary  = data.summary || null;
-    _campaignAudit    = data.audit || null;
-    // PR-ADS-157 §2 / PR-ADS-161B: carried into state and ENFORCED, not merely
-    // stored — the cohort block every page surface passes to
-    // `campaignSqlPublication(cohort)`. Null
-    // when absent, which the gate treats as unavailable, never as permission.
-    _campaignCohort = data.cohort || null;
-    _campaignMeta = {
-      window: data.window || getEvidenceWindow(),
-      spend_currency: data.spend_currency || "GBP",
-      reporting_currency: data.reporting_currency || "USD",
-    };
-    _campaignLoadState = data.db_unavailable ? "db_unavailable"
-      : (_campaignEvidence.length ? "ok" : "empty");
-    renderCampaignEvidencePage();
-  } catch (_) {
-    _campaignLoadState = "error";
-    _campaignCohort = null;
-    shell.innerHTML = `
-      <div class="evidence-empty-state">
-        Campaign evidence is unavailable.<br>The underlying dataset could not be read.
-      </div>`;
-  }
-}
-// Router entry. PR-ADS-177B: the Campaigns page is the one campaign page
-// (loadCampaignsPage). Campaign Evidence's renderers above draw nothing on any
-// page now; they stay, with /api/campaigns and build_campaign_evidence (which
-// the parity and certification audits read), until PR-ADS-177C retires them.
-function loadCampaigns() { return loadCampaignsPage(); }
-
-/**
- * PR-ADS-157 §2/§7 — the compact reconciliation disclosure beside the KPI strip.
- *
- * Present in BOTH directions. When the scope reconciles it names the population
- * and shows the nested scopes, so "Campaign-attributable SQLs" is a defined
- * number rather than a label. When it does not, it states which of mismatch /
- * partial / unavailable applies and what has therefore been withheld.
- */
-function renderCampaignSqlReconciliation() {
-  const pub = campaignRowSqlPublication(_campaignCohort, _campaignSummary);
-  const c = _campaignCohort || {};
-  const s = _campaignSummary || {};
-  const lc = c.lifecycle_event_coverage || {};
-  const br = c.breakdown || {};
-  const unByReason = (br.unattributed && br.unattributed.by_reason) || {};
-  const UNATTRIBUTED_REASON_LABELS = {
-    unmapped_campaign_label: "campaign label with no approved mapping",
-    missing_campaign: "no campaign label",
-    pseudo_campaign: "HubSpot traffic-source pseudo-label",
-    email_campaign: "email-send label",
-    conflicting_attribution_across_rows: "conflicting attribution",
-  };
-  const reasonItems = Object.keys(unByReason).sort().map((k) =>
-    `<li>${escapeHtml(UNATTRIBUTED_REASON_LABELS[k] || k)}: <strong>${fmtCount(unByReason[k])}</strong></li>`).join("");
-  // "Not proven Google Ads" is not "proven another channel": a blank original
-  // source is excluded under its own reason.
-  const exByReason = (br.excluded_non_google && br.excluded_non_google.by_reason) || {};
-  const EXCLUDED_REASON_LABELS = {
-    non_google_source: "original source is another channel",
-    original_source_unclassified: "original source blank or unrecognised — not proven Google Ads, not proven another channel",
-    label_mapped_not_google_ads: "campaign label approved as not Google Ads",
-  };
-  const excludedItems = Object.keys(exByReason).sort().map((k) =>
-    `<li>${escapeHtml(EXCLUDED_REASON_LABELS[k] || k)}: <strong>${fmtCount(exByReason[k])}</strong></li>`).join("");
-
-  // The event-time disclosure is shown in EVERY state — it is the reason the
-  // lifecycle-event number is absent, and it must not disappear when the
-  // cohort number is present.
-  // PR-ADS-161B round 3 — the reached-SQL population counts below are read
-  // over the SAME contact funnel the cohort may be withheld for. They render
-  // only under a PUBLISHED verdict (and only if the backend did not withhold
-  // them); otherwise the line says they are withheld with the cohort. The
-  // incident count is an integrity fact, never suppressed.
-  const lcCountsShown = pub.publish && !lc.counts_withheld;
-  const lcCounts = lcCountsShown ? `
-      <li>Contacts whose lifecycle stage proves SQL: <strong>${dashValue(lc.reached_sql_by_current_stage, fmtCount)}</strong></li>
-      <li>With an exact SQL-entry timestamp: <strong>${dashValue(lc.exact_direct_timestamp, fmtCount)}</strong> direct, <strong>${dashValue(lc.recovered_timestamp, fmtCount)}</strong> recovered</li>
-      <li>With no exact SQL-entry timestamp: <strong>${dashValue(lc.missing_exact_timestamp, fmtCount)}</strong></li>`
-    : `
-      <li>Reached-SQL population counts: <strong>Withheld</strong> with the cohort SQL count — they are read over the same contact funnel, which is not proven complete and consistent for this window.</li>`;
-  const lifecycleHtml = `
-    <div class="kw-sql-coverage-title" style="margin-top:var(--space-3)">Lifecycle-event SQLs — not shown on this page · all-time, every contact, not this window</div>
-    <ul class="kw-sql-coverage">${lcCounts}
-      <li>Open post-boundary timestamp incidents: <strong>${dashValue(lc.open_post_boundary_incidents, fmtCount)}</strong></li>
-    </ul>
-    <div class="kw-sql-coverage-foot">These are global figures, not this window's, and are not a superset of the cohort: a contact whose SQL date is recorded but whose stage later moved back is in the cohort and not in the first line; a contact with no created date is in the first line and in no cohort.</div>
-    <div class="kw-sql-coverage-foot">"How many contacts <em>entered</em> SQL in this period" needs an exact SQL-entry date for every contact. Those totals stay withheld by the lifecycle coverage gate and are not replaced by the cohort count above. No SQL-entry date is estimated or invented.</div>`;
-
-  if (!pub.publish) {
-    return `<div class="kw-sql-note kw-sql-note--warn" role="note">
-      <div class="kw-sql-coverage-title">${escapeHtml(CAMPAIGN_SQL_SCOPE_LABEL)} — ${pub.state === "withheld" ? "withheld" : "unavailable"}</div>
-      <p>${escapeHtml(pub.reason)}</p>
-      <div class="kw-sql-coverage-foot">${campaignCohortPopulationPartial(_campaignCohort)
-        ? "Spend and the lead-status junk / wrong-fit evidence (leads table) are independent of the cohort and remain published below. Leads acquired is counted over the same unproven contact population, so it is marked partial."
-        : "Spend, leads acquired, and the lead-status junk / wrong-fit evidence (leads table) are independent of the SQL count and remain published below."}</div>
-      ${lifecycleHtml}
-    </div>`;
-  }
-
-  const gap = s.cohort_sqls_missing_event_timestamp;
-  const gapHtml = gap ? `<li>Of these, proven by lifecycle stage with no exact SQL-entry timestamp: <strong>${fmtCount(gap)}</strong> — counted here in the period they were acquired; still a lifecycle-event coverage gap</li>` : "";
-  return `<div class="kw-sql-note" role="note">
-    <div class="kw-sql-coverage-title">${escapeHtml(CAMPAIGN_COHORT_BASIS)}, measured as of ${escapeHtml(campaignCohortAsOf(_campaignCohort))}</div>
-    <ul class="kw-sql-coverage">
-      <li>Google Ads cohort SQLs: <strong>${dashValue(s.cohort_sqls_google_ads, fmtCount)}</strong> = campaigns <strong>${dashValue(s.cohort_sqls_mapped, fmtCount)}</strong> + unattributed <strong>${dashValue(s.cohort_sqls_unattributed, fmtCount)}</strong></li>
-      ${gapHtml}
-      <li>Excluded — not proven Google Ads sourced: <strong>${dashValue(s.cohort_sqls_excluded_non_google, fmtCount)}</strong>${excludedItems ? `<ul class="kw-sql-coverage">${excludedItems}</ul>` : ""}</li>
-      <li>All-source cohort SQLs: <strong>${dashValue(s.cohort_sqls_all_sources, fmtCount)}</strong></li>
-    </ul>
-    ${reasonItems ? `<div class="kw-sql-coverage-foot">Unattributed / mapping missing, by reason:</div><ul class="kw-sql-coverage">${reasonItems}</ul>` : ""}
-    ${(c.metadata && c.metadata.maturity_note) ? `<div class="kw-sql-coverage-foot">${escapeHtml(c.metadata.maturity_note)}</div>` : ""}
-    <div class="kw-sql-coverage-foot">A contact counts once, by HubSpot contact id, when canonical lifecycle evidence proves it reached SQL: an exact SQL-entry date, a recovered lifecycle transition, or a current stage of SQL or later. These are <strong>not Google Ads platform conversions</strong>, which are a different population reported by a different system.</div>
-    ${lifecycleHtml}
-  </div>`;
-}
-
-function campaignEvidenceHeader() {
-  const label = CAMPAIGN_WINDOW_LABELS[_campaignMeta.window] || _campaignMeta.window || "";
-  return `
-    <header class="campaign-evidence-head">
-      <div class="campaign-evidence-head__text">
-        <h2 class="campaign-evidence-title">Campaign Evidence</h2>
-        <p class="campaign-evidence-sub">Selected-window Google Ads spend against the outcomes of the contacts acquired in that window. ${escapeHtml(CAMPAIGN_COHORT_BASIS)}, measured as of the canonical contact-funnel watermark (${escapeHtml(campaignCohortAsOf(_campaignCohort))}). Closed-won deals are not shown on this page.</p>
-      </div>
-      ${label ? `<span class="campaign-evidence-window" title="Selected evidence window">${escapeHtml(label)}</span>` : ""}
-    </header>`;
-}
-
-function renderCampaignEvidencePage() {
-  const shell = document.getElementById("campaign-evidence-shell");
-  if (!shell) return;
-
-  if (_campaignLoadState === "db_unavailable") {
-    shell.innerHTML = `${campaignEvidenceHeader()}
-      <div class="evidence-empty-state">Campaign evidence is unavailable.<br>The underlying dataset could not be read.</div>`;
-    return;
-  }
-  if (_campaignLoadState === "empty") {
-    const emptyBody = buildEmptyState({
-      pageKey: "campaigns",
-      canonicalStatus: getPageCanonicalStatus("campaigns"),
-      rowsInWindow: 0,
-    });
-    shell.innerHTML = `${campaignEvidenceHeader()}
-      <div class="evidence-empty-state">No campaign evidence is available in this window.
-        <div style="margin-top:8px"><a href="#/health">Open System Status →</a></div></div>
-      ${emptyBody}`;
-    return;
-  }
-
-  shell.innerHTML = `
-    ${campaignEvidenceHeader()}
-    ${renderCampaignEvidenceKPIs()}
-    ${renderCampaignSqlReconciliation()}
-    ${renderCampaignEvidenceFilters()}
-    <div class="evidence-table-shell"><div class="evidence-table-scroll" id="campaign-decision-table"></div></div>
-  `;
-  renderCampaignDecisionTable();
-  wireCampaignEvidenceControls();
-}
-
-function renderCampaignEvidenceKPIs() {
-  const s = _campaignSummary || {};
-  const cur = s.spend_currency || _campaignMeta.spend_currency || "GBP";
-  // Spend KPI: reporting USD primary (Unavailable when FX incomplete), native GBP
-  // subline. Reconciles EXACTLY with canonical spend for the window.
-  const spendPrimary = s.spend_usd != null
-    ? fmtDollar(s.spend_usd)
-    : `<span class="detail-unavailable" title="USD unavailable — FX coverage incomplete for this window">Unavailable</span>`;
-  const spendSub = s.spend_native != null
-    ? `${fmtGbp(s.spend_native)} ${escapeHtml(cur)}`
-    : "native spend unavailable";
-  // PR-ADS-157 §2 / PR-ADS-161B — aggregate SQL and CPQL publish only through
-  // the gate. CPQL is derived from the SQL count, so a withheld SQL total does
-  // not produce a slightly-wrong CPQL; it produces a CPQL with no denominator
-  // anyone can vouch for. CPQL can additionally be withheld on its own (stale
-  // source, no spend) while the SQL count stands.
-  // The summary carries its own copy of the verdict (cohort_sql_status); it is
-  // narrowed exactly like a row, so the KPI strip can never outrun the block.
-  const pub = campaignRowSqlPublication(_campaignCohort, s);
-  const sqlKpi = pub.publish
-    ? fmtCount(s.cohort_sqls_google_ads)
-    : campaignSqlWithheld(pub);
-  const sqlSub = pub.publish
-    ? `Google Ads-sourced contacts created this period that have reached SQL, as of ${campaignCohortAsOf(_campaignCohort)}`
-    : "Withheld — see evidence below";
-  const unattributedKpi = pub.publish
-    ? fmtCount(s.cohort_sqls_unattributed)
-    : campaignSqlWithheld(pub, { compact: true });
-  const cpql = !pub.publish
-    ? campaignSqlWithheld(pub)
-    : (!pub.cpql ? campaignCpqlNotPublished(pub)
-      : (s.cohort_cpql_usd != null ? fmtDollar(s.cohort_cpql_usd)
-        : `<span class="detail-unavailable">N/A</span>`));
-  // CPQL = ALL window Google Ads spend ÷ ALL Google Ads cohort SQLs (campaigns
-  // + unattributed). Numerator and denominator share one scope and one window.
-  const cpqlSub = "Google Ads spend ÷ cohort SQLs, same window";
-  return `
-    <div class="evidence-kpi-grid campaign-kpi-grid">
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns</div>
-        <div class="dash-kpi-card__value">${fmtCount(s.campaigns)}</div>
-        <div class="dash-kpi-card__sub">With spend, lead or outcome evidence</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Spend</div>
-        <div class="dash-kpi-card__value">${spendPrimary}</div>
-        <div class="dash-kpi-card__sub">${spendSub}</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">${escapeHtml(CAMPAIGN_SQL_SCOPE_LABEL)}</div>
-        <div class="dash-kpi-card__value">${sqlKpi}</div>
-        <div class="dash-kpi-card__sub">${escapeHtml(sqlSub)}</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Unattributed Google Ads SQLs</div>
-        <div class="dash-kpi-card__value">${unattributedKpi}</div>
-        <div class="dash-kpi-card__sub">Included in Cohort SQLs — no campaign mapping</div></div>
-      <div class="dash-kpi-card" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}"><div class="dash-kpi-card__label">Confirmed Junk</div>
-        <div class="dash-kpi-card__value">${fmtCount(s.confirmed_junk_total)}</div>
-        <div class="dash-kpi-card__sub">Lead status (leads table) · not the Leads acquired population · excludes wrong-fit</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">CPQL</div>
-        <div class="dash-kpi-card__value">${cpql}</div>
-        <div class="dash-kpi-card__sub">${cpqlSub}</div></div>
-    </div>`;
-}
-
-function renderCampaignEvidenceFilters() {
-  const f = _campaignFilters;
-  const pub = campaignSqlPublication(_campaignCohort);
-  // PR-ADS-157 §2 — a status option whose MEANING depends on the SQL count is
-  // disabled when that count is not publishable. "SQL producer" and "Spend
-  // without SQL proof" are conclusions drawn from the SQL number; offering them
-  // as filters over an unreconciled count invites the operator to slice the
-  // table by a finding the evidence does not support.
-  const statusOpt = (v, label) => {
-    const gated = CAMPAIGN_SQL_DEPENDENT_STATUSES.has(v) && !pub.publish;
-    const attrs = gated ? ` disabled title="${escapeHtml(pub.reason)}"` : "";
-    return `<option value="${v}"${f.status === v ? " selected" : ""}${attrs}>${label}</option>`;
-  };
-
-  // PR-ADS-157 §2 — SQL-dependent controls are DISABLED when the scope does not
-  // reconcile, not silently ignored. "Has confirmed SQL" / "No confirmed SQL"
-  // are classifications; applying them to an unproven count would sort every
-  // campaign into a bucket the evidence cannot support, and "No confirmed SQL"
-  // in particular would read as a finding rather than an absence of data.
-  //
-  // A stale selection is coerced back to the neutral option so the table can
-  // never quietly keep filtering by a control the operator can no longer see.
-  if (!pub.publish) {
-    if (f.outcome === "has_sql" || f.outcome === "no_sql") f.outcome = "all";
-    if (f.sort === "sqls" || f.sort === "cpql") f.sort = "spend";
-    // A stale SQL-dependent STATUS selection is neutralized for the same
-    // reason the outcome and sort selections are: the control disappears, so
-    // the filter it was applying must not silently keep applying.
-    if (CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)) f.status = "all";
-  }
-  const sqlDisabled = pub.publish ? "" : " disabled";
-  const sqlTitle = pub.publish ? "" : ` title="${escapeHtml(pub.reason)}"`;
-  return `
-    <div class="campaign-controls">
-      <input type="search" id="campaign-search" class="waste-search-input" placeholder="Search campaign name…" aria-label="Search campaign name" value="${escapeHtml(f.search)}">
-      <select id="campaign-status" class="waste-filter-select" aria-label="Outcome status">
-        ${statusOpt("all", "All statuses")}
-        ${statusOpt("SQL producer", "SQL producer")}
-        ${statusOpt("Junk-heavy", "Junk-heavy")}
-        ${statusOpt("Spend without SQL proof", "Spend without SQL proof")}
-        ${statusOpt("Mapping review", "Mapping review")}
-        ${statusOpt("No outcome evidence", "No outcome evidence")}
-        ${statusOpt("Data unavailable", "Data unavailable")}
-      </select>
-      <select id="campaign-outcome" class="waste-filter-select" aria-label="Outcome signal">
-        <option value="all"${f.outcome === "all" ? " selected" : ""}>All outcomes</option>
-        <option value="has_sql"${f.outcome === "has_sql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Has cohort SQL</option>
-        <option value="no_sql"${f.outcome === "no_sql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>No cohort SQL</option>
-        <option value="has_junk"${f.outcome === "has_junk" ? " selected" : ""}>Has confirmed junk</option>
-      </select>
-      <select id="campaign-sort" class="waste-filter-select" aria-label="Sort campaigns">
-        <option value="spend"${f.sort === "spend" ? " selected" : ""}>Highest spend</option>
-        <option value="sqls"${f.sort === "sqls" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Most cohort SQLs</option>
-        <option value="junk"${f.sort === "junk" ? " selected" : ""}>Highest confirmed junk</option>
-        <option value="junk_rate"${f.sort === "junk_rate" ? " selected" : ""}>Highest junk rate</option>
-        <option value="cpql"${f.sort === "cpql" ? " selected" : ""}${sqlDisabled}${sqlTitle}>Highest CPQL</option>
-        <option value="name"${f.sort === "name" ? " selected" : ""}>Campaign name</option>
-      </select>
-      <button type="button" id="campaign-clear-filters" class="revenue-filter-chip campaign-clear-btn">Reset</button>
-    </div>`;
-}
-
-function filterCampaignEvidence(rows) {
-  const f = _campaignFilters;
-  const sqlPub = campaignSqlPublication(_campaignCohort);
-  return rows.filter((c) => {
-    if (f.search && !(c.campaign_name || "").toLowerCase().includes(f.search.toLowerCase())) return false;
-    // PR-ADS-157 §2 — refuse SQL-dependent STATUS filtering internally too.
-    // The disabled <option> is an affordance; this is where a campaign actually
-    // gets included or excluded, so a stale state value or a direct call to
-    // this function must not be able to classify by an unreconciled count.
-    // SQL-INDEPENDENT statuses (Junk-heavy, Mapping review, No outcome
-    // evidence, Data unavailable) keep working — they never depended on it.
-    if (f.status !== "all" && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)
-        && !sqlPub.publish) return true;
-    if (f.status !== "all" && (c.outcome_status || "") !== f.status) return false;
-    // Outcome filters match genuine recorded values only — an unavailable (null)
-    // metric is never classified as a zero-outcome campaign. PR-ADS-161B: the
-    // SQL classified here is the cohort SQL the page publishes.
-    const sqls = c.cohort_sqls;
-    const junk = c.confirmed_junk;
-    // PR-ADS-157 §2 — the disabled <option> is a UI affordance, not a guarantee.
-    // A stale state value, a restored session, or a caller invoking this
-    // function directly must not be able to classify an unreconciled SQL count.
-    // So the refusal lives here too, where the classification actually happens.
-    if ((f.outcome === "has_sql" || f.outcome === "no_sql")
-        && !campaignRowSqlPublication(_campaignCohort, c).publish) return true;
-    if (f.outcome === "has_sql"  && !(sqls != null && sqls > 0))  return false;
-    if (f.outcome === "no_sql"   && !(sqls != null && sqls === 0)) return false;
-    if (f.outcome === "has_junk" && !(junk != null && junk > 0))  return false;
-    return true;
-  });
-}
-
-// Descending comparator placing null/unavailable values LAST (never coerced to 0).
-function _campDescNullLast(getter) {
-  return (a, b) => {
-    const va = getter(a), vb = getter(b);
-    if (va == null && vb == null) return 0;
-    if (va == null) return 1;
-    if (vb == null) return -1;
-    return vb - va;
-  };
-}
-
-function sortCampaignEvidence(rows) {
-  let by = _campaignFilters.sort;
-  const arr = [...rows];
-  // PR-ADS-157 §2 — ranking by an unproven SQL count would publish an ordering
-  // as a finding ("these are the top SQL producers") that the reconciliation
-  // does not support. Fall back to spend, which is independent canonical
-  // evidence and needs no SQL scope to be true.
-  if ((by === "sqls" || by === "cpql") && !campaignSqlPublication(_campaignCohort).publish) by = "spend";
-  // Spend sort ranks by the native amount (always present when spend exists);
-  // unavailable spend sinks last.
-  if (by === "spend")      arr.sort(_campDescNullLast((c) => c.spend_native));
-  else if (by === "sqls")  arr.sort(_campDescNullLast((c) => c.cohort_sqls));
-  else if (by === "junk")  arr.sort(_campDescNullLast((c) => c.confirmed_junk));
-  else if (by === "junk_rate") arr.sort(_campDescNullLast((c) => c.junk_rate_pct));
-  else if (by === "cpql")  arr.sort(_campDescNullLast((c) => c.cohort_cpql_usd));
-  else if (by === "name")  arr.sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || ""));
-  return arr;
-}
-
-function renderCampaignDecisionTable() {
-  const host = document.getElementById("campaign-decision-table");
-  if (!host) return;
-  const rows = sortCampaignEvidence(filterCampaignEvidence(_campaignEvidence));
-  if (rows.length === 0) {
-    host.innerHTML = `<div class="evidence-empty-state">No campaigns match the current filters.</div>`;
-    return;
-  }
-  const thead = `
-    <thead>
-      <tr>
-        <th class="td--name">Campaign</th>
-        <th>Status</th>
-        <th class="td--num">Spend</th>
-        <th class="td--num" title="Google Ads-sourced HubSpot contacts created in this window and placed on this campaign">Leads acquired</th>
-        <th class="td--num" title="${escapeHtml(CAMPAIGN_COHORT_BASIS)} that have reached SQL as of the canonical contact-funnel watermark — not Google Ads platform conversions">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</th>
-        <th class="td--num" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th>
-        <th class="td--num" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>
-        <th class="td--num">CPQL</th>
-        <th class="td--action"><span class="sr-only">Open evidence</span></th>
-      </tr>
-    </thead>`;
-  const body = rows.map(renderCampaignEvidenceRow).join("");
-  host.innerHTML = `<table class="data-table campaign-decision-table">${thead}<tbody>${body}</tbody></table>`;
-  host.querySelectorAll("[data-campaign-open]").forEach((el) => {
-    const open = () => openCampaignDrawer(
-      decodeURIComponent(el.getAttribute("data-campaign-open")),
-      el.getAttribute("data-campaign-key") || null);
-    el.addEventListener("click", (e) => {
-      if (e.target.closest("a")) return;
-      open();
-    });
-    el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
-    });
-  });
-}
-
-// Spend cell: reporting USD primary + native GBP subline; falls back to native
-// GBP when USD is FX-withheld; "Unavailable" when there is no canonical spend row.
-function campaignSpendCell(c) {
-  if (c.spend_usd != null) {
-    const sub = c.spend_native != null
-      ? `<span class="td-sub">${fmtGbp(c.spend_native)} ${escapeHtml(c.spend_currency || "GBP")}</span>` : "";
-    return `${fmtDollar(c.spend_usd)}${sub}`;
-  }
-  if (c.spend_native != null) {
-    return `${fmtGbp(c.spend_native)} ${escapeHtml(c.spend_currency || "GBP")}<span class="td-sub">USD unavailable (FX)</span>`;
-  }
-  return `<span class="detail-unavailable">Unavailable</span>`;
-}
-
-function renderCampaignEvidenceRow(c) {
-  const jr = c.junk_rate_pct;
-  const junkCls = jr == null ? "" :
-                  jr < uiThresholds.junk_rate.low_pct   ? "junk--low" :
-                  jr <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
-  const junkRateStr = jr != null ? jr.toFixed(1) + "%" : "—";
-  // PR-ADS-161B — "Leads acquired" is the cohort: the same population the
-  // row's SQLs and CPQL are drawn from, so the three can be read together.
-  const cohortPartial = campaignCohortPopulationPartial(_campaignCohort);
-  const leads = c.cohort_contacts_acquired == null
-    ? `<span class="detail-unavailable">—</span>`
-    : (cohortPartial ? campaignPartialCount(fmtCount(c.cohort_contacts_acquired))
-      : fmtCount(c.cohort_contacts_acquired));
-  const junk  = c.confirmed_junk == null ? `<span class="detail-unavailable">—</span>` : fmtCount(c.confirmed_junk);
-
-  // PR-ADS-161B review round 3 — a withheld SQL count is NOT rendered at all.
-  // It used to stay visible with a "not published" suffix, which published the
-  // exact number the verdict refused. The backend no longer sends it either;
-  // this is the second wall, not the only one.
-  const pub = campaignRowSqlPublication(_campaignCohort, c);
-  const gapNote = (pub.publish && c.cohort_sqls_missing_event_timestamp)
-    ? `<span class="td-sub" title="Proven by lifecycle stage with no exact SQL-entry timestamp — counted here, still a lifecycle-event coverage gap">${fmtCount(c.cohort_sqls_missing_event_timestamp)} undated</span>` : "";
-  const sqls = !pub.publish ? campaignSqlWithheld(pub, { compact: true })
-    : (c.cohort_sqls == null ? `<span class="detail-unavailable">—</span>`
-      : `${fmtCount(c.cohort_sqls)}${gapNote}`);
-
-  // CPQL: withheld entirely when the SQL gate is closed — its denominator IS
-  // the SQL count. Otherwise the row's own CPQL status decides; "N/A" is the
-  // genuine zero-SQL case, never a zero or an infinity.
-  let cpql;
-  if (!pub.publish) {
-    cpql = campaignSqlWithheld(pub, { compact: true });
-  } else if (c.cohort_cpql_status === "published" && c.cohort_cpql_usd != null) {
-    cpql = fmtDollar(c.cohort_cpql_usd);
-  } else if (c.cohort_cpql_status === "not_applicable") {
-    cpql = "N/A";
-  } else {
-    const label = c.cohort_cpql_status === "withheld" ? "Withheld" : "—";
-    cpql = `<span class="detail-unavailable" title="${escapeHtml(campaignCohortReason(c.cohort_cpql_reason))}">${label}</span>`;
-  }
-
-  // SQL-dependent outcome statuses stop publishing a confident conclusion.
-  // "Spend without SQL proof" is an accusation, and an unpublished SQL count
-  // is not proof of absence.
-  const statusCell = (!pub.publish && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(c.outcome_status))
-    ? `<span class="campaign-status-badge campaign-status-badge--muted" title="${escapeHtml(c.outcome_status || "")} depends on the SQL count. ${escapeHtml(pub.reason)}">SQL count not published</span>`
-    : campaignStatusBadge(c.outcome_status);
-  const nameEnc = encodeURIComponent(c.campaign_name || "");
-  // Stable key for drawer resolution — campaign_id/campaign_key, never display name alone.
-  const keyAttr = c.campaign_key != null ? ` data-campaign-key="${escapeHtml(String(c.campaign_key))}"` : "";
-  const aliasHint = (c.aliases && c.aliases.length)
-    ? `<span class="campaign-alias-hint" title="Also: ${escapeHtml(c.aliases.join(", "))}">+${c.aliases.length} alias${c.aliases.length === 1 ? "" : "es"}</span>` : "";
-  const mapNote = c.mapping_status === "unmatched"
-    ? `<span class="campaign-map-note" title="Lead label with no canonical Google Ads campaign mapping">unmapped</span>` : "";
-  return `
-    <tr class="campaign-decision-row" tabindex="0" role="button" data-campaign-open="${nameEnc}"${keyAttr}
-        aria-label="Open evidence for ${escapeHtml(c.campaign_name || "campaign")}">
-      <td class="td--name" data-label="Campaign">${escapeHtml(c.campaign_name || "—")}${aliasHint}${mapNote}</td>
-      <td data-label="Status">${statusCell}</td>
-      <td class="td--num" data-label="Spend">${campaignSpendCell(c)}</td>
-      <td class="td--num" data-label="Leads acquired">${leads}</td>
-      <td class="td--num" data-label="${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}">${sqls}</td>
-      <td class="td--num" data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}">${junk}</td>
-      <td class="td--num ${junkCls}" data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}">${junkRateStr}</td>
-      <td class="td--num ${cpql === "N/A" ? "td--na" : ""}" data-label="CPQL">${cpql}</td>
-      <td class="td--action" data-label="">
-        <span class="campaign-open-icon" aria-hidden="true" title="Open evidence">›</span>
-      </td>
-    </tr>`;
-}
-
-function wireCampaignEvidenceControls() {
-  const search = document.getElementById("campaign-search");
-  if (search) {
-    search.addEventListener("input", (e) => { _campaignFilters.search = e.target.value; renderCampaignDecisionTable(); });
-  }
-  const status = document.getElementById("campaign-status");
-  if (status) { status.addEventListener("change", (e) => { _campaignFilters.status = e.target.value; renderCampaignDecisionTable(); }); }
-  const outcome = document.getElementById("campaign-outcome");
-  if (outcome) { outcome.addEventListener("change", (e) => { _campaignFilters.outcome = e.target.value; renderCampaignDecisionTable(); }); }
-  const sort = document.getElementById("campaign-sort");
-  if (sort) { sort.addEventListener("change", (e) => { _campaignFilters.sort = e.target.value; renderCampaignDecisionTable(); }); }
-  const clear = document.getElementById("campaign-clear-filters");
-  if (clear) clear.addEventListener("click", () => {
-    _campaignFilters.search = ""; _campaignFilters.status = "all";
-    _campaignFilters.outcome = "all"; _campaignFilters.sort = "spend";
-    renderCampaignEvidencePage();
-  });
-}
 
 // ── Flagged Waste Terms page — RETIRED (PR-ADS-153D) ───────────────────────
 // The standalone page is gone. Its investigation functionality lives in
@@ -10822,39 +10226,9 @@ const GEO_ROW_SPEND_REASONS = {
   fx_rate_missing: "FX rate missing",
 };
 
-// ── Keywords page ──────────────────────────────────────────────────────────
-
-function normalizeMatchType(value) {
-  const text = (value || "").toLowerCase().trim();
-  if (text.includes("broad")) return "broad";
-  if (text.includes("phrase")) return "phrase";
-  if (text.includes("exact")) return "exact";
-  return "unknown";
-}
-
-function matchTypeBadge(value) {
-  const norm = normalizeMatchType(value);
-  const labels = { broad: "Broad", phrase: "Phrase", exact: "Exact", unknown: "Unknown" };
-  return `<span class="match-type-badge match-type-${norm}">${labels[norm]}</span>`;
-}
-
-function qualityScoreBadge(qs) {
-  if (qs === null || qs === undefined) {
-    return `<span class="quality-score-badge quality-score-none">—</span>`;
-  }
-  const n = parseFloat(qs);
-  if (isNaN(n)) return `<span class="quality-score-badge quality-score-none">—</span>`;
-  let cls;
-  if (n >= uiThresholds.quality_score.strong_min)      cls = "quality-score-strong";
-  else if (n >= uiThresholds.quality_score.medium_min) cls = "quality-score-medium";
-  else                                                  cls = "quality-score-weak";
-  return `<span class="quality-score-badge ${cls}">${n.toFixed(1)}</span>`;
-}
-
 // ── Search Terms evidence page (PR-ADS-144, consolidated in PR-ADS-153D) ────
-// The ONE search-term investigation destination. Three tabs — All Terms,
-// Flagged, Patterns — aligned with the Campaign Evidence design. Data comes
-// from the /api/search-term-evidence family: durable source_date-bounded
+// The ONE search-term investigation destination. Data comes from the
+// /api/search-term-evidence family: durable source_date-bounded
 // selected-window aggregates, tri-state review states, reported-search-term-
 // spend semantics, complete-population KPIs and server-side pagination.
 //
@@ -10866,8 +10240,10 @@ function qualityScoreBadge(qs) {
 // The only write anywhere on this page is a LOCAL review decision. Nothing here
 // adds negatives or writes to Google Ads / HubSpot.
 
-let _stTab = "terms";               // terms | flagged | patterns
-const ST_TABS = ["terms", "flagged", "patterns"];
+// PR-ADS-177C: one page, "Keywords & Search Terms" (owner decision 3,
+// 2026-11-24) — the Keyword Evidence page is its Keywords tab.
+let _stTab = "terms";               // terms | flagged | patterns | keywords
+const ST_TABS = ["terms", "flagged", "patterns", "keywords"];
 // Tab requested by a redirect before the page module has rendered (e.g. the
 // retired #/waste route landing on Flagged).
 let _stPendingTab = null;
@@ -10924,16 +10300,6 @@ function stStateBadge(state) {
   const tone = ST_STATE_TONE[state] || "muted";
   const label = ST_STATE_LABELS[state] || fmt(state);
   return `<span class="campaign-status-badge campaign-status-badge--${tone}">${label}</span>`;
-}
-
-// Compact tri-state mix pills (still used by the Campaign Evidence drawer's
-// N-Gram drilldown section — Campaign Evidence layout is unchanged).
-function ngramWasteStateMix(flagged, clean, unanalyzed) {
-  const parts = [];
-  if (flagged)    parts.push(`<span class="ngram-state-flagged" title="Flagged waste rows">${flagged}F</span>`);
-  if (clean)      parts.push(`<span class="ngram-state-clean" title="Reviewed clean rows">${clean}C</span>`);
-  if (unanalyzed) parts.push(`<span class="ngram-state-unanalyzed" title="Needs-review rows">${unanalyzed}U</span>`);
-  return parts.length ? `<span class="ngram-state-mix">${parts.join(" ")}</span>` : "—";
 }
 
 function stSignalBadge(signal) {
@@ -11028,6 +10394,7 @@ function loadSearchTermsEvidence() {
 function stLoadActiveTab() {
   if (_stTab === "patterns") loadPatternsTab();
   else if (_stTab === "flagged") loadFlaggedTab();
+  else if (_stTab === "keywords") loadKeywordsTab();
   else loadTermsTab();
 }
 
@@ -11037,22 +10404,26 @@ function loadSearchTerms() { loadSearchTermsEvidence(); }
 function renderSearchTermsShell() {
   const shell = document.getElementById("search-terms-shell");
   if (!shell) return;
+  // PR-ADS-177C: the page header and command bar are in index.html (the
+  // Dashboard design, as Campaigns); the shell holds the window chip, the
+  // four tabs and the active tab's body.
   shell.innerHTML = `
-    <header class="campaign-evidence-head">
-      <div class="campaign-evidence-head__text">
-        <h2 class="campaign-evidence-title">Search Terms</h2>
-        <p class="campaign-evidence-sub">Queries reported by Google Ads, with review state and waste evidence.</p>
+    <div class="dash-command-bar kst-command-bar">
+      <div class="dash-command-bar__truth">
+        <span class="dash-chip" title="Selected evidence window">Window: ${escapeHtml(stWindowLabel())}</span>
       </div>
-      <span class="campaign-evidence-window" title="Selected evidence window">${escapeHtml(stWindowLabel())}</span>
-    </header>
-    <div class="search-terms-tabs" role="tablist" aria-label="Search Terms tabs">
+    </div>
+    <div class="search-terms-tabs" role="tablist" aria-label="Keywords &amp; Search Terms tabs">
       <button id="tab-btn-terms" class="search-terms-tab${_stTab === "terms" ? " active" : ""}"
-        role="tab" aria-selected="${_stTab === "terms"}" data-tab="terms" type="button">All Terms</button>
+        role="tab" aria-selected="${_stTab === "terms"}" data-tab="terms" type="button">Terms</button>
       <button id="tab-btn-flagged" class="search-terms-tab${_stTab === "flagged" ? " active" : ""}"
         role="tab" aria-selected="${_stTab === "flagged"}" data-tab="flagged" type="button"
         title="Search terms flagged for human review by durable waste evidence">Flagged</button>
       <button id="tab-btn-patterns" class="search-terms-tab${_stTab === "patterns" ? " active" : ""}"
         role="tab" aria-selected="${_stTab === "patterns"}" data-tab="patterns" type="button">Patterns</button>
+      <button id="tab-btn-keywords" class="search-terms-tab${_stTab === "keywords" ? " active" : ""}"
+        role="tab" aria-selected="${_stTab === "keywords"}" data-tab="keywords" type="button"
+        title="Google Ads keyword activity, match-type exposure and quality diagnostics">Keywords</button>
     </div>
     <div id="st-tab-body"></div>`;
   shell.querySelectorAll(".search-terms-tab").forEach((tab) => {
@@ -12330,7 +11701,7 @@ function renderStTermDrawer(body, data) {
     <div class="drawer-section">
       <div class="drawer-section__title">Links</div>
       <div class="st-drawer-links">
-        ${mapped ? `<button type="button" class="revenue-filter-chip" id="st-link-campaign">Open Campaign Evidence</button>` : ""}
+        ${mapped ? `<button type="button" class="revenue-filter-chip" id="st-link-campaign">Open Campaigns</button>` : ""}
         <button type="button" class="revenue-filter-chip" id="st-link-waste">Open Flagged Waste Terms</button>
         <button type="button" class="revenue-filter-chip" id="st-link-patterns">Patterns with these words</button>
         <button type="button" class="revenue-filter-chip" id="st-link-copy">Copy term</button>
@@ -12342,12 +11713,11 @@ function renderStTermDrawer(body, data) {
     linkCampaign.addEventListener("click", () => {
       const c = campaigns[0];
       closeStDrawer();
+      // PR-ADS-177C: Campaign Evidence and its drawer are retired; the one
+      // Campaigns page opens, with this campaign's row drawer when the row is
+      // on it (matched by name — the page's rows are keyed by campaign name).
+      campaignsPageOpenName = c.campaign_name || null;
       navigate("campaigns", { updateHash: true });
-      setTimeout(() => {
-        if (typeof openCampaignDrawer === "function") {
-          openCampaignDrawer(c.campaign_name, c.campaign_key);
-        }
-      }, 250);
     });
   }
   const linkWaste = document.getElementById("st-link-waste");
@@ -12486,18 +11856,6 @@ function gclidStatusBadge(matchStatus) {
   };
   const value = map[normalized] || map.unknown;
   return `<span class="gclid-status-badge ${value.cls}">${value.label}</span>`;
-}
-
-function _gclidMiniStatusBadge(matchStatus) {
-  const normalized = (matchStatus || "unknown").toLowerCase();
-  const map = {
-    matched: { label: "Matched", cls: "gclid-mini-status-matched" },
-    url_fallback: { label: "URL Fallback", cls: "gclid-mini-status-url-fallback" },
-    unmatched: { label: "Unmatched", cls: "gclid-mini-status-unmatched" },
-    unknown: { label: "Unknown", cls: "gclid-mini-status-unknown" },
-  };
-  const value = map[normalized] || map.unknown;
-  return `<span class="gclid-mini-status-badge ${value.cls}">${value.label}</span>`;
 }
 
 function renderGclidAttributionKPIs(rows) {
@@ -12899,11 +12257,12 @@ async function loadGclidCoverageForAttribution() {
   }
 }
 
-// ── Keyword Evidence page (PR-ADS-146) ──────────────────────────────────────
-// Full-width, read-only. Durable keyword_daily_facts via /api/keyword-evidence:
+// ── Keyword Evidence page (PR-ADS-146) — since PR-ADS-177C, the Keywords tab
+//    of the one Keywords & Search Terms page ──────────────────────────────────
+// Read-only. Durable keyword_daily_facts via /api/keyword-evidence:
 // source_date selected-window totals (never SUM'd over overlapping snapshots),
 // per-source-date FX verified spend, latest-observed quality, factual review
-// signals. Layout mirrors the accepted Search Terms / Campaign Evidence pages.
+// signals.
 let _kwData = null;
 let _kwLoadState = "idle";
 let _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "",
@@ -12968,11 +12327,14 @@ function kwWindowLabel() {
   return (typeof CAMPAIGN_WINDOW_LABELS !== "undefined" && CAMPAIGN_WINDOW_LABELS[w]) || w;
 }
 
-// ── Entry point (router calls loadKeywords) ──────────────────────────────────
-function loadKeywords() {
-  renderPageDatasetFreshness("keywords");
+// ── Entry point: the Keywords tab of Keywords & Search Terms (PR-ADS-177C) ───
+// The Keyword Evidence page is retired as a page (#/keywords redirects here);
+// its module renders unchanged into the shared tab body.
+function loadKeywordsTab() {
+  const body = document.getElementById("st-tab-body");
+  if (!body || _stTab !== "keywords") return;
   _kwFilters.page = 1;
-  renderKeywordShell();
+  body.innerHTML = `<div id="kw-tab-body"></div>`;
   loadKeywordHistory();
   loadKeywordTab();
 }
@@ -12989,20 +12351,6 @@ async function loadKeywordHistory() {
   }
   // Re-render if the tab has already painted, so the note reflects completeness.
   if (_kwData && document.getElementById("kw-tab-body")) renderKeywordTab();
-}
-
-function renderKeywordShell() {
-  const shell = document.getElementById("keyword-evidence-shell");
-  if (!shell) return;
-  shell.innerHTML = `
-    <header class="campaign-evidence-head">
-      <div class="campaign-evidence-head__text">
-        <h2 class="campaign-evidence-title">Keyword Evidence</h2>
-        <p class="campaign-evidence-sub">Google Ads keyword activity, match-type exposure and quality diagnostics.</p>
-      </div>
-      <span class="campaign-evidence-window" title="Selected evidence window">${escapeHtml(kwWindowLabel())}</span>
-    </header>
-    <div id="kw-tab-body"></div>`;
 }
 
 function kwBuildParams() {
@@ -13425,7 +12773,7 @@ function renderKeywordTable() {
   const start = ((pg.page || 1) - 1) * (pg.page_size || 50);
   const shown = `${rows.length ? start + 1 : 0}–${start + rows.length}`;
   host.innerHTML = `
-    <table class="campaign-decision-table kw-table">
+    <table class="data-table campaign-decision-table kw-table">
       <thead><tr>
         <th>Keyword</th><th>Match</th><th>Campaign</th><th>Ad Group</th>
         <th class="num">Spend</th><th class="num">Clicks</th><th class="num">CTR</th>
@@ -14448,7 +13796,7 @@ function datasetRelatedPage(source, dataset) {
   const key = `${source}/${dataset}`;
   const map = {
     "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
-    "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
+    "google_ads_api/keyword_facts": { page: "search-terms", label: "Keywords & Search Terms" },
     "google_ads_api/canonical_geo": { page: "roas-countries", label: "Countries" },
     "google_ads_api/canonical_spend": { page: "campaigns",  label: "Campaigns"    },
     "hubspot/contacts":     { page: "pipeline",      label: "Pipeline" },
@@ -14887,1063 +14235,6 @@ async function loadGclidCoverage() {
   }
 }
 
-let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
-let _drawerPreviousFocus = null; // element to restore focus to on close
-let activeCampaignDrawerName = null;
-let campaignDrawerRequestId = 0;
-
-function isCurrentCampaignDrawerRequest(campaignName, requestId) {
-  if (activeCampaignDrawerName !== campaignName) return false;
-  if (requestId !== null && requestId !== campaignDrawerRequestId) return false;
-  return true;
-}
-
-async function loadCampaignAttributionPreview(campaignName, requestId = null) {
-  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-    return { status: "stale", rows: [], summary: null };
-  }
-
-  campaignAttributionStatus = "loading";
-  campaignAttributionRows = [];
-
-  try {
-    const params = new URLSearchParams();
-    // Campaign drawer opens from the Campaigns evidence page — follow its window
-    // exactly (incl. all_time = no lower bound), never a hidden 365-day downgrade.
-    params.set("window", getEvidenceWindow());
-    params.set("limit", "5");
-    params.set("campaign", campaignName);
-
-    const data = await fetchJSON(`/api/gclid-attribution?${params.toString()}`);
-
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-      return { status: "stale", rows: [], summary: null };
-    }
-
-    if (data.db_unavailable) {
-      campaignAttributionStatus = "db_unavailable";
-      campaignAttributionRows = [];
-      return { status: campaignAttributionStatus, rows: [], summary: data.summary || null };
-    }
-
-    campaignAttributionRows = data.rows || [];
-    campaignAttributionStatus = campaignAttributionRows.length ? "ok" : "empty";
-
-    return {
-      status: campaignAttributionStatus,
-      rows: campaignAttributionRows,
-      summary: data.summary || null,
-      pagination: data.pagination || null,
-    };
-  } catch (_) {
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-      return { status: "stale", rows: [], summary: null };
-    }
-    campaignAttributionStatus = "error";
-    campaignAttributionRows = [];
-    return { status: campaignAttributionStatus, rows: [], summary: null };
-  }
-}
-
-async function loadCampaignAttributionQuality(campaignName, requestId = null) {
-  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-    return { status: "stale", data: null };
-  }
-
-  campaignAttributionQualityStatus = "loading";
-  campaignAttributionQuality = null;
-
-  try {
-    const params = new URLSearchParams();
-    params.set("window", getEvidenceWindow());
-    params.set("campaign", campaignName);
-
-    const data = await fetchJSON(`/api/attribution/quality?${params.toString()}`);
-
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-      return { status: "stale", data: null };
-    }
-
-    if (data.db_unavailable) {
-      campaignAttributionQualityStatus = "db_unavailable";
-      campaignAttributionQuality = null;
-      return { status: campaignAttributionQualityStatus, data: null };
-    }
-
-    campaignAttributionQuality = data;
-    campaignAttributionQualityStatus =
-      data && data.summary && Number(data.summary.loaded_scope_rows) > 0 ? "ok" : "empty";
-    return { status: campaignAttributionQualityStatus, data };
-  } catch (_) {
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-      return { status: "stale", data: null };
-    }
-    campaignAttributionQualityStatus = "error";
-    campaignAttributionQuality = null;
-    return { status: campaignAttributionQualityStatus, data: null };
-  }
-}
-
-async function loadCampaignDrawerNgrams(campaignName, requestId = null) {
-  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-    return { status: "stale", rows: [] };
-  }
-
-  drawerNgramStatus = "loading";
-  drawerNgramRows   = [];
-
-  try {
-    const params = new URLSearchParams();
-    params.set("window",   getEvidenceWindow());
-    params.set("campaign", campaignName);
-    params.set("limit",    "20");
-
-    const data = await fetchJSON(`/api/search-terms/ngrams?${params.toString()}`);
-
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-      return { status: "stale", rows: [] };
-    }
-
-    if (data.db_unavailable) {
-      drawerNgramStatus = "db_unavailable";
-      drawerNgramRows   = [];
-      return { status: drawerNgramStatus, rows: [] };
-    }
-
-    drawerNgramRows   = data.rows || [];
-    drawerNgramStatus = drawerNgramRows.length ? "ok" : "empty";
-    return { status: drawerNgramStatus, rows: drawerNgramRows };
-  } catch (_) {
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
-      return { status: "stale", rows: [] };
-    }
-    drawerNgramStatus = "error";
-    drawerNgramRows   = [];
-    return { status: drawerNgramStatus, rows: [] };
-  }
-}
-
-
-async function openCampaignDrawer(campaignName, campaignKey = null) {
-  if (!campaignName) return;
-  _drawerOpenCampaign = campaignName;
-  activeCampaignDrawerName = campaignName;
-  campaignDrawerRequestId += 1;
-  const requestId = campaignDrawerRequestId;
-
-  const overlay   = document.getElementById("campaign-drawer-overlay");
-  const drawer    = document.getElementById("campaign-drawer");
-  const titleEl   = document.getElementById("drawer-campaign-title");
-  const bodyEl    = document.getElementById("campaign-drawer-body");
-
-  // Save the currently focused element so we can restore it on close
-  _drawerPreviousFocus = document.activeElement;
-
-  // Show overlay + drawer immediately with loading state
-  if (overlay) { overlay.hidden = false; overlay.removeAttribute("aria-hidden"); }
-  if (drawer)  { drawer.hidden  = false; }
-  if (titleEl) titleEl.textContent = campaignName;
-  if (bodyEl)  bodyEl.innerHTML = `<p class="empty-state"><span class="spinner"></span> Loading campaign detail…</p>`;
-
-  // Move focus into the drawer — prefer close button, fallback drawer itself
-  const closeBtn = document.getElementById("drawer-close-btn");
-  if (closeBtn) {
-    closeBtn.focus();
-  } else if (drawer) {
-    drawer.setAttribute("tabindex", "-1");
-    drawer.focus();
-  }
-
-  // Bind keyboard handlers: Escape closes, Tab traps focus inside drawer
-  document.addEventListener("keydown", _drawerKeyHandler);
-
-  try {
-    // Campaign detail is primary payload. Attribution preview/quality/ngrams are secondary.
-    campaignAttributionStatus = "loading";
-    campaignAttributionRows = [];
-    campaignAttributionQualityStatus = "loading";
-    campaignAttributionQuality = null;
-    drawerNgramStatus = "loading";
-    drawerNgramRows   = [];
-
-    const keyParam = campaignKey ? `&campaign_key=${encodeURIComponent(campaignKey)}` : "";
-    const detail = await fetchJSON(
-      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}${keyParam}&window=${encodeURIComponent(getEvidenceWindow())}`
-    );
-
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-    renderCampaignDrawer(detail);
-
-    loadCampaignAttributionPreview(campaignName, requestId)
-      .then(() => {
-        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-        renderCampaignDrawer(detail);
-      })
-      .catch(() => {
-        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-        campaignAttributionStatus = "error";
-        campaignAttributionRows = [];
-        renderCampaignDrawer(detail);
-      });
-
-    loadCampaignAttributionQuality(campaignName, requestId)
-      .then(() => {
-        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-        renderCampaignDrawer(detail);
-      })
-      .catch(() => {
-        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-        campaignAttributionQualityStatus = "error";
-        campaignAttributionQuality = null;
-        renderCampaignDrawer(detail);
-      });
-
-    loadCampaignDrawerNgrams(campaignName, requestId)
-      .then(() => {
-        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-        renderCampaignDrawer(detail);
-      })
-      .catch(() => {
-        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-        drawerNgramStatus = "error";
-        drawerNgramRows   = [];
-        renderCampaignDrawer(detail);
-      });
-  } catch (err) {
-    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-    if (bodyEl) {
-      bodyEl.innerHTML = `
-        <div class="drawer-section">
-          <p class="drawer-empty">Could not load campaign detail — ${escapeHtml(err.message || "network error")}.</p>
-        </div>`;
-    }
-  }
-}
-
-function closeCampaignDrawer() {
-  _drawerOpenCampaign = null;
-  activeCampaignDrawerName = null;
-  const overlay = document.getElementById("campaign-drawer-overlay");
-  const drawer  = document.getElementById("campaign-drawer");
-  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
-  if (drawer)  drawer.hidden = true;
-  document.removeEventListener("keydown", _drawerKeyHandler);
-
-  // Restore focus to the element that opened the drawer
-  if (_drawerPreviousFocus && typeof _drawerPreviousFocus.focus === "function" && document.contains(_drawerPreviousFocus)) {
-    _drawerPreviousFocus.focus();
-  }
-  _drawerPreviousFocus = null;
-}
-
-function _drawerKeyHandler(e) {
-  if (e.key === "Escape") {
-    closeCampaignDrawer();
-    return;
-  }
-  if (e.key === "Tab") {
-    _trapDrawerFocus(e);
-  }
-}
-
-function _trapDrawerFocus(e) {
-  const drawer = document.getElementById("campaign-drawer");
-  if (!drawer || drawer.hidden) return;
-
-  const focusable = Array.from(drawer.querySelectorAll(
-    'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
-  )).filter((el) => !el.closest("[hidden]"));
-
-  if (!focusable.length) {
-    e.preventDefault();
-    drawer.focus();
-    return;
-  }
-
-  const first = focusable[0];
-  const last  = focusable[focusable.length - 1];
-
-  if (e.shiftKey && document.activeElement === first) {
-    e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && document.activeElement === last) {
-    e.preventDefault();
-    first.focus();
-  }
-}
-
-function renderCampaignDrawer(data) {
-  const titleEl = document.getElementById("drawer-campaign-title");
-  const bodyEl  = document.getElementById("campaign-drawer-body");
-  if (!bodyEl) return;
-
-  if (data.db_unavailable) {
-    bodyEl.innerHTML = `
-      <div class="drawer-section">
-        <p class="drawer-empty">Campaign detail temporarily unavailable — database offline.</p>
-      </div>`;
-    return;
-  }
-
-  if (!data.campaign) {
-    // Headline card absent (no canonical spend + no lead evidence for this window)
-    // but supplementary evidence sections may still have data — render what we have.
-    const hasEvidence = (data.lead_quality && data.lead_quality.total_leads > 0) ||
-                        (data.countries  && data.countries.length  > 0) ||
-                        (data.keywords   && data.keywords.length   > 0) ||
-                        (data.waste_terms && data.waste_terms.length > 0) ||
-                        (data.recent_leads && data.recent_leads.length > 0);
-
-    if (!hasEvidence) {
-      bodyEl.innerHTML = `
-        <div class="drawer-section">
-          <p class="drawer-empty">No campaign detail available for this window.</p>
-        </div>`;
-      return;
-    }
-    // Partial render — note the missing headline summary at the top.
-    if (titleEl) titleEl.textContent = data.campaign_name || "";
-    // Inject a banner and fall through to the evidence sections below
-    bodyEl.innerHTML = "";
-    const banner = document.createElement("div");
-    banner.className = "drawer-section drawer-section--header";
-    banner.innerHTML = `<p class="drawer-source-note" style="color:var(--c-warning)">Campaign summary unavailable for this window — related evidence exists.</p>`;
-    bodyEl.appendChild(banner);
-    // render remaining evidence using partial helpers
-    _appendDrawerEvidenceSections(bodyEl, data, null);
-    return;
-  }
-
-  const camp = data.campaign;
-  const lq   = data.lead_quality;
-  if (titleEl) titleEl.textContent = camp.campaign_name || data.campaign_name;
-
-  // ── Header summary — factual outcome status for the selected window ───────
-  const winLabel = CAMPAIGN_WINDOW_LABELS[camp.window] || camp.window || "selected window";
-  const fxNote = (camp.spend_usd == null && camp.fx_complete === false)
-    ? " · USD withheld (FX coverage incomplete)" : "";
-  // PR-ADS-157 §2 — the drawer applies the SAME publication POLICY as the page,
-  // to its OWN evidence: the cohort verdict returned with this
-  // /api/campaign-detail response (see `drawerCohort` below). A missing verdict
-  // is unavailable, which is fail-closed.
-  //
-  // PR-ADS-161B: declared HERE, before its first use. It used to be declared
-  // after the status badge below read it — a `const` in its temporal dead
-  // zone, so every drawer with a campaign headline threw a ReferenceError
-  // (recorded as a known defect in the PR-ADS-158 SQL consumer inventory).
-  // PR-ADS-161B review round 3 — gated on THIS response's verdict
-  // (`data.cohort`, returned by /api/campaign-detail with the row), narrowed by
-  // the row's own copy. Never on the Campaign page's state: the drawer is also
-  // opened from another page (the Search Terms drawer), where that state may
-  // be absent or belong to an earlier request.
-  const drawerCohort = data.cohort || null;
-  const drawerSqlPub = campaignRowSqlPublication(drawerCohort, camp);
-  // The drawer headline status obeys the same gate as the table.
-  const drawerStatusBadge = (!drawerSqlPub.publish
-      && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(camp.outcome_status))
-    ? `<span class="campaign-status-badge campaign-status-badge--muted" title="${escapeHtml(camp.outcome_status || "")} depends on the SQL count. ${escapeHtml(drawerSqlPub.reason)}">SQL count not published</span>`
-    : campaignStatusBadge(camp.outcome_status);
-  const headerHtml = `
-    <div class="drawer-section drawer-section--header">
-      <div class="drawer-header-meta">
-        ${drawerStatusBadge}
-        <span class="drawer-verdict-reason">${escapeHtml(winLabel)} · selected-window evidence</span>
-      </div>
-      <div class="drawer-source-note">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        Canonical Google Ads spend against the outcomes of contacts acquired this window, as of the canonical contact-funnel watermark (${escapeHtml(campaignCohortAsOf(drawerCohort))})${fxNote}
-      </div>
-      ${(camp.aliases && camp.aliases.length) ? `<p class="drawer-source-note">Approved external aliases: ${camp.aliases.map((a) => escapeHtml(a)).join(", ")}</p>` : ""}
-      <p class="drawer-readonly-note">Outcome status is factual, evidence-based and read-only. No Google Ads changes are made.</p>
-    </div>`;
-
-  // ── KPI row — selected-window totals (matches the table row exactly) ──────
-  const cpqlStr = !drawerSqlPub.publish ? campaignSqlWithheld(drawerSqlPub)
-    : (camp.cohort_cpql_status === "published" && camp.cohort_cpql_usd != null
-      ? fmtDollar(camp.cohort_cpql_usd)
-      : (camp.cohort_cpql_status === "not_applicable" ? "N/A"
-        : `<span class="detail-unavailable" title="${escapeHtml(campaignCohortReason(camp.cohort_cpql_reason))}">${camp.cohort_cpql_status === "withheld" ? "Withheld" : "—"}</span>`));
-  const junkStr  = camp.junk_rate_pct  != null ? camp.junk_rate_pct.toFixed(1) + "%" : "—";
-  const spendVal = camp.spend_usd != null ? fmtDollar(camp.spend_usd)
-    : (camp.spend_native != null ? `${fmtGbp(camp.spend_native)} ${escapeHtml(camp.spend_currency || "GBP")}`
-       : `<span class="detail-unavailable">Unavailable</span>`);
-  const spendSub = (camp.spend_usd != null && camp.spend_native != null)
-    ? `<div class="drawer-kpi__note">${fmtGbp(camp.spend_native)} ${escapeHtml(camp.spend_currency || "GBP")}</div>` : "";
-  const cnt = (n) => n == null ? "—" : fmtCount(n);
-  const kpiHtml = `
-    <div class="drawer-section">
-      <div class="drawer-kpi-grid">
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Spend</div>
-          <div class="drawer-kpi__value">${spendVal}</div>${spendSub}
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Leads acquired</div>
-          <div class="drawer-kpi__value">${camp.cohort_contacts_acquired != null && campaignCohortPopulationPartial(drawerCohort) ? campaignPartialCount(cnt(camp.cohort_contacts_acquired)) : cnt(camp.cohort_contacts_acquired)}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}</div>
-          <div class="drawer-kpi__value">${drawerSqlPub.publish ? cnt(camp.cohort_sqls) : campaignSqlWithheld(drawerSqlPub, { compact: true })}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</div>
-          <div class="drawer-kpi__value">${cnt(camp.confirmed_junk)}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label" title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</div>
-          <div class="drawer-kpi__value">${junkStr}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">CPQL</div>
-          <div class="drawer-kpi__value">${cpqlStr}</div>
-        </div>
-      </div>
-    </div>`;
-
-  bodyEl.innerHTML = headerHtml + kpiHtml;
-  // The Lead Quality Split reads the SAME selected-window card so the drawer split
-  // matches the headline and the table exactly; falls back to the campaign-scoped
-  // lead query only when the window card carries no lead evidence.
-  const lqFromCard = (camp.total_leads != null) ? {
-    // The legacy lead-status "qualified" count, for the labelled split only.
-    total_leads: camp.total_leads,
-    confirmed_sqls: (camp.legacy_lead_status || {}).qualified,
-    in_progress: camp.in_progress, confirmed_junk: camp.confirmed_junk,
-    wrong_fit: camp.wrong_fit, unknown: camp.unknown,
-    verdicted_leads: camp.verdicted_leads, junk_rate_pct: camp.junk_rate_pct,
-  } : null;
-  _appendDrawerEvidenceSections(bodyEl, data, lqFromCard || lq);
-}
-
-/**
- * Appends lead quality, country, keyword, waste, recent leads, and source footer
- * sections to `container`. Shared between full and partial drawer renders.
- * `lq` is the lead_quality object (or null if absent).
- */
-// PR-ADS-157 §6/§7 — the drawer's structured section states.
-//
-// The six states a supplementary section can be in are genuinely different
-// answers, and the operator has to be able to tell them apart:
-//
-//   loading            · not yet known
-//   available + rows   · measured, and here is what was found
-//   certified empty    · measured, and there was nothing
-//   unavailable        · could not be measured
-//   identity unresolved· measured nothing because there was nothing to scope by
-//   partial coverage   · measured part of the window, so a total is not a total
-//
-// The old drawer rendered the middle four identically as "No rows".
-
-//: Reason code → the sentence an operator reads. Anything unmapped falls back
-//: to the raw code rather than a vague apology, because a reason code an
-//: operator can search for is more useful than prose that hides it.
-const DRAWER_SECTION_REASONS = {
-  window_not_resolved: "The evidence window could not be resolved for this request.",
-  campaign_identity_unresolved: "This campaign has no canonical Google Ads campaign identity, so there is nothing to scope the evidence by. Matching on display name instead is exactly the behaviour this section replaced — two campaigns sharing a name would share each other's rows.",
-  google_ads_customer_not_configured: "No Google Ads account is configured, so this evidence cannot be scoped to an account. Set GOOGLE_ADS_CUSTOMER_ID.",
-  keyword_evidence_unavailable: "The canonical keyword evidence could not be read.",
-  search_term_evidence_unavailable: "The canonical search-term evidence could not be read.",
-  keyword_scope_account_mismatch: "Rows were returned that do not belong to the configured account, so they have been withheld rather than shown under this campaign.",
-  search_term_truth_mismatch: "The canonical search-term population quarantined itself for this window. Showing its rows would present diagnosis output as evidence.",
-  keyword_preview_failed: "The keyword preview could not be built.",
-  flagged_preview_failed: "The flagged search-term preview could not be built.",
-  keyword_preview_context_failed: "The keyword section context could not be assembled.",
-  flagged_preview_context_failed: "The flagged search-term section context could not be assembled.",
-};
-
-function drawerSectionUnavailable(title, section) {
-  const s = section || {};
-  const reason = DRAWER_SECTION_REASONS[s.reason]
-    || (s.reason ? `Unavailable (${s.reason}).` : "Unavailable.");
-  const identity = s.identity_status === "unresolved" ? " Campaign identity unresolved." : "";
-  return `
-    <div class="drawer-section">
-      <div class="drawer-section__title">${escapeHtml(title)}</div>
-      <p class="drawer-empty" role="status">
-        <strong>Unavailable</strong> — ${escapeHtml(reason)}${escapeHtml(identity)}
-      </p>
-      <p class="drawer-source-note">Unavailable is not zero, and it is not "clean". No count is shown because none could be proven.${s.reason ? ` Reason code: <code>${escapeHtml(s.reason)}</code>.` : ""}</p>
-      ${drawerSectionProvenance(s, { minimal: true })}
-    </div>`;
-}
-
-/** Source, grain, identity and window for one drawer section (§6). */
-function drawerSectionProvenance(section, { minimal = false } = {}) {
-  const s = section || {};
-  if (!s.source_table) return "";
-  const win = s.all_time ? "all time"
-    : (s.window_start && s.window_end ? `${escapeHtml(s.window_start)} → ${escapeHtml(s.window_end)}`
-       : escapeHtml(s.window || "selected window"));
-  // Only a genuinely bounded, window-scoped result may call itself
-  // selected-window evidence. A snapshot or an unbounded read may not, so the
-  // phrase is derived from the window bounds rather than hardcoded.
-  const bounded = !!(s.all_time || (s.window_start && s.window_end));
-  const identityNote = s.identity_status === "name_derived"
-    ? ` <strong>Identity is name-derived</strong> — this campaign has no canonical campaign id, so these rows are matched by normalized display name and could be shared with another campaign of the same name.`
-    : "";
-  const coverageNote = (s.coverage_status && s.coverage_status !== "complete"
-                        && s.coverage_status !== "reconciled")
-    ? ` Coverage: <strong>${escapeHtml(s.coverage_status)}</strong> — a partial window does not produce a smaller total, it produces an unproven one.`
-    : "";
-  const annotation = s.annotation_table
-    ? ` <code>${escapeHtml(s.annotation_table)}</code> is ${escapeHtml(s.annotation_role || "annotation only")}.`
-    : "";
-  const truncated = (!minimal && s.truncated)
-    ? ` Showing the top ${escapeHtml(String((s.rows || []).length))} of ${escapeHtml(String(s.total_count))}.`
-    : "";
-  return `<p class="drawer-source-note">
-    Source: <code>${escapeHtml(s.source)}/${escapeHtml(s.source_dataset)}</code> (<code>${escapeHtml(s.source_table)}</code>) ·
-    grain ${escapeHtml(s.grain || "—")} ·
-    account <code>${escapeHtml(s.customer_id || "unresolved")}</code> ·
-    campaign <code>${escapeHtml(s.campaign_id || "unresolved")}</code> ·
-    ${bounded ? "selected-window evidence" : "window bounds unavailable"} ${win}.${identityNote}${coverageNote}${annotation}${truncated}
-  </p>`;
-}
-
-function _appendDrawerEvidenceSections(container, data, lq) {
-  // ── Lead Quality Split ─────────────────────────────────────────────────
-  let lqHtml;
-  if (!lq) {
-    lqHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Lead Quality Split</div>
-        <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
-      </div>`;
-  } else {
-    const lqJunkCls = lq.junk_rate_pct == null ? "" :
-                      lq.junk_rate_pct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
-                      lq.junk_rate_pct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
-    const lqJunkStr = lq.junk_rate_pct != null ? lq.junk_rate_pct.toFixed(1) + "%" : "—";
-    // PR-ADS-157 §2 — the qualified column is the SQL count under a different
-    // name. Junk, wrong-fit, in-progress and unknown are INDEPENDENT canonical
-    // lead evidence and stay published: a SQL reconciliation failure must not
-    // take down evidence that never depended on it.
-    const lqSqlPub = campaignSqlPublication(data.cohort || null);
-    lqHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Lead Quality Split</div>
-        <table class="drawer-table">
-          <thead>
-            <tr>
-              <th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th><th>Wrong Fit</th><th>Unknown</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>${lqSqlPub.publish ? lq.confirmed_sqls : campaignSqlWithheld(lqSqlPub, { compact: true })}</td>
-              <td>${lq.in_progress}</td>
-              <td>${lq.confirmed_junk}</td>
-              <td>${lq.wrong_fit}</td>
-              <td>${lq.unknown}</td>
-              <td class="${lqJunkCls}">${lqJunkStr}</td>
-            </tr>
-          </tbody>
-        </table>
-        <p class="drawer-source-note">Junk rate = confirmed junk ÷ verdicted leads (qualified + in-progress + junk + wrong fit). Unknown contacts are excluded from the denominator. Total in window (leads table, lead-status basis — not Leads acquired): ${lq.total_leads}.</p>
-        ${lqSqlPub.publish ? "" : `<p class="drawer-source-note" style="color:var(--c-warning)">${escapeHtml(lqSqlPub.reason)} Junk, wrong-fit, in-progress and unknown counts are independent canonical lead evidence and remain published.</p>`}
-      </div>`;
-  }
-
-  // ── Country Breakdown ──────────────────────────────────────────────────
-  let countryHtml;
-  const countries = data.countries || [];
-  if (countries.length === 0) {
-    countryHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Country Breakdown</div>
-        <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
-      </div>`;
-  } else {
-    // Same policy, same one decision function — the country split's SQL column
-    // is the campaign-attributable count sliced by country.
-    const countrySqlPub = campaignSqlPublication(data.cohort || null);
-    const rows = countries.map((r) => {
-      const junkCls = r.junk_rate_pct == null ? "" :
-                      r.junk_rate_pct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
-                      r.junk_rate_pct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
-      return `
-        <tr>
-          <td class="td--name">${escapeHtml(r.country)}</td>
-          <td>${r.total_leads}</td>
-          <td>${countrySqlPub.publish ? r.confirmed_sqls : campaignSqlWithheld(countrySqlPub, { compact: true })}</td>
-          <td>${r.in_progress != null ? r.in_progress : "—"}</td>
-          <td>${r.confirmed_junk}</td>
-          <td>${r.wrong_fit}</td>
-          <td>${r.unknown}</td>
-          <td class="${junkCls}">${r.junk_rate_pct != null ? r.junk_rate_pct.toFixed(1) + "%" : "—"}</td>
-        </tr>`;
-    }).join("");
-    countryHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Country Breakdown</div>
-        <table class="drawer-table">
-          <thead>
-            <tr><th>Country</th><th>Leads</th><th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th><th>Wrong Fit</th><th>Unknown</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th></tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>`;
-  }
-
-  // ── Keyword Preview ────────────────────────────────────────────────────
-  // PR-ADS-157 §3/§6 — canonical `keyword_daily_facts` over the SELECTED
-  // window, scoped by canonical campaign identity. `keyword_evidence` carries
-  // the section contract; `keywords` is its `rows` and is kept only so older
-  // consumers keep working.
-  const kwSection = data.keyword_evidence || null;
-  const keywords = data.keywords || [];
-  let kwHtml;
-  if (kwSection && kwSection.available === false) {
-    kwHtml = drawerSectionUnavailable("Keyword Preview", kwSection);
-  } else if (keywords.length === 0) {
-    kwHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Keyword Preview</div>
-        <p class="drawer-empty">No keyword activity recorded for this campaign in the selected window. This is a measured result, not a missing one.</p>
-        ${drawerSectionProvenance(kwSection)}
-      </div>`;
-  } else {
-    const kwRows = keywords.map((k) => `
-      <tr>
-        <td class="td--name">${escapeHtml(k.keyword || "—")}</td>
-        <td>${matchTypeBadge(k.match_type)}</td>
-        <td>${k.spend_usd != null ? fmtDollar(k.spend_usd) : `<span class="detail-unavailable" title="USD withheld — currency provenance unproven or FX coverage incomplete">—</span>`}</td>
-        <td>${k.clicks != null ? k.clicks : "—"}</td>
-        <td>${k.cpc_usd != null ? "$" + k.cpc_usd.toFixed(2) : "—"}</td>
-        <td>${k.platform_conversions != null ? k.platform_conversions.toFixed(1) : `<span class="detail-unavailable" title="Platform-conversion evidence unavailable — never rendered as a confirmed zero">—</span>`}</td>
-        <td>${qualityScoreBadge(k.quality_score)}</td>
-      </tr>`).join("");
-    kwHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Keyword Preview</div>
-        <table class="drawer-table">
-          <thead>
-            <tr><th>Keyword</th><th>Match</th><th>Spend</th><th>Clicks</th><th>CPC</th><th title="Google Ads platform-reported conversions — a different population from HubSpot-confirmed SQLs">Google Ads platform conversions</th><th>QS</th></tr>
-          </thead>
-          <tbody>${kwRows}</tbody>
-        </table>
-        ${drawerSectionProvenance(kwSection)}
-        <button class="btn btn--secondary drawer-keywords-fullpage-btn" type="button">Open full Keyword Evidence</button>
-      </div>`;
-  }
-
-  // ── Flagged Search Terms Preview ───────────────────────────────────────
-  // PR-ADS-157 §4/§6 — every metric here is a canonical `search_terms` fact.
-  // `waste_terms` supplies CLASSIFICATION only, through the evidence service's
-  // campaign-safe annotation join. `waste_terms.spend_usd` is not read at all.
-  const flaggedSection = data.flagged_evidence || null;
-  const wasteTerms = data.waste_terms || [];
-  let wasteHtml;
-  if (flaggedSection && flaggedSection.available === false) {
-    wasteHtml = drawerSectionUnavailable("Flagged Search Terms", flaggedSection);
-  } else if (wasteTerms.length === 0) {
-    wasteHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Flagged Search Terms</div>
-        <p class="drawer-empty">No search term for this campaign was flagged by durable evidence in the selected window. That is not a statement that its traffic is clean — only that nothing flagged it here.</p>
-        ${drawerSectionProvenance(flaggedSection)}
-      </div>`;
-  } else {
-    const wtRows = wasteTerms.map((t) => `
-      <tr>
-        <td class="td--name waste-pattern">${escapeHtml(t.search_term || "—")}</td>
-        <td>${t.spend_usd != null ? fmtDollar(t.spend_usd) : `<span class="detail-unavailable" title="USD withheld — currency provenance unproven or FX coverage incomplete">—</span>`}</td>
-        <td>${t.clicks != null ? fmtCount(t.clicks) : "—"}</td>
-        <td>${t.flag_reason_label ? escapeHtml(t.flag_reason_label) : (t.flag_reason ? escapeHtml(t.flag_reason) : "—")}</td>
-        <td>${t.flag_source ? escapeHtml(t.flag_source) : "—"}</td>
-      </tr>`).join("");
-    wasteHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Flagged Search Terms</div>
-        <table class="drawer-table">
-          <thead>
-            <tr><th>Search Term</th><th>Spend</th><th>Clicks</th><th>Flag reason</th><th title="Which durable source drove the classification">Classification source</th></tr>
-          </thead>
-          <tbody>${wtRows}</tbody>
-        </table>
-        ${drawerSectionProvenance(flaggedSection)}
-        <div style="margin-top:var(--space-3)">
-          <button class="btn btn--secondary waste-copy-btn" type="button" id="drawer-waste-copy-btn">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copy flagged terms from this campaign
-          </button>
-          <button class="btn btn--secondary drawer-waste-fullpage-btn" type="button" style="margin-left:var(--space-2)">Open full Search Term Evidence</button>
-          <p class="drawer-source-note" style="margin-top:var(--space-2)">Review-only — no action controls.</p>
-        </div>
-      </div>`;
-  }
-
-  // ── Recent Leads ───────────────────────────────────────────────────────
-  const recentLeads = data.recent_leads || [];
-  let leadsHtml;
-  if (recentLeads.length === 0) {
-    leadsHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Recent Leads</div>
-        <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
-      </div>`;
-  } else {
-    // PR-ADS-153C: this campaign-drawer evidence still reads the legacy
-    // /api/campaign-detail contract. It is a per-contact operational attribute,
-    // never a funnel count, and is disclosed as legacy pending Platform Evidence
-    // migration.
-    const rlRows = recentLeads.map((l) => {
-      const catCls = l.status_category === "qualified"   ? "junk--low"  :
-                     l.status_category === "junk"        ? "junk--high" :
-                     l.status_category === "in_progress" ? "junk--mid"  : "";
-      return `
-        <tr>
-          <td class="td--name">${escapeHtml(l.company || "—")}</td>
-          <td>${escapeHtml(l.country || "—")}</td>
-          <td>${escapeHtml(l.keyword || "—")}</td>
-          <td>${escapeHtml(l.mql_status || "—")}</td>
-          <td class="${catCls}" title="Legacy operational classification — not canonical funnel truth">${escapeHtml(l.status_category || "—")}</td>
-          <td>${escapeHtml(l.run_date || "—")}</td>
-        </tr>`;
-    }).join("");
-    leadsHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">Recent Leads</div>
-        <table class="drawer-table">
-          <thead>
-            <tr><th>Company</th><th>Country</th><th>Keyword</th><th>MQL Status</th><th>Category</th><th>Run Date</th></tr>
-          </thead>
-          <tbody>${rlRows}</tbody>
-        </table>
-      </div>`;
-  }
-
-  function renderCampaignAttributionQualityOverlay() {
-    const headerHtml = `
-      <div class="drawer-attribution-quality">
-        <div class="drawer-attribution-quality__title">Attribution Quality</div>
-        <p class="drawer-attribution-quality__subtitle">Campaign-scoped evidence quality based on stored GCLID rows.</p>`;
-
-    if (campaignAttributionQualityStatus === "loading" || campaignAttributionQualityStatus === "idle") {
-      return `${headerHtml}<p class="drawer-empty">Loading attribution quality…</p></div>`;
-    }
-
-    if (campaignAttributionQualityStatus === "db_unavailable") {
-      return `${headerHtml}<p class="drawer-empty">Attribution quality temporarily unavailable — database offline.</p></div>`;
-    }
-
-    if (campaignAttributionQualityStatus === "error") {
-      return `${headerHtml}<p class="drawer-empty">Could not load attribution quality for this campaign.</p></div>`;
-    }
-
-    if (campaignAttributionQualityStatus === "empty" || !campaignAttributionQuality) {
-      return `${headerHtml}<p class="drawer-empty">No attribution quality signals available for this campaign in the selected window.</p></div>`;
-    }
-
-    const qualityData = campaignAttributionQuality || {};
-    const rates = qualityData.rates || {};
-    const signals = qualityData.signals || [];
-    const signalByKey = {};
-    signals.forEach((signal) => {
-      if (signal && signal.key) signalByKey[String(signal.key)] = signal;
-    });
-
-    const cards = [
-      { key: "match_strength", label: "Match Strength" },
-      { key: "url_fallback_reliance", label: "URL Fallback Reliance" },
-      { key: "deal_linkage", label: "Deal Linkage" },
-      { key: "freshness", label: "Freshness" },
-    ];
-
-    const cardsHtml = cards.map((card) => {
-      const sig = signalByKey[card.key] || {};
-      const statusCls = _gclidQualityStatusClass(sig.status || "unknown");
-      const statusLabel = _gclidQualityStatusLabel(sig.status || "unknown");
-      const detail = sig.detail || "No quality detail available for this signal.";
-      return `
-        <div class="gclid-quality-card drawer-attribution-quality-card ${statusCls}">
-          <div class="gclid-quality-card__status">${escapeHtml(statusLabel)}</div>
-          <div class="gclid-quality-card__label">${escapeHtml(card.label)}</div>
-          <div class="gclid-quality-card__detail">${escapeHtml(detail)}</div>
-        </div>`;
-    }).join("");
-
-    const fmtPct = (value) => (value == null ? "—" : `${Number(value).toFixed(0)}%`);
-    const metricsLine = `Matched ${fmtPct(rates.matched_rate_pct)} · URL fallback ${fmtPct(rates.url_fallback_rate_pct)} · Deal link ${fmtPct(rates.deal_link_rate_pct)} · Amount coverage ${fmtPct(rates.deal_amount_coverage_pct)}`;
-
-    return `
-      ${headerHtml}
-        <div class="drawer-attribution-quality-grid">${cardsHtml}</div>
-        <p class="drawer-attribution-quality-metrics">${escapeHtml(metricsLine)}</p>
-      </div>`;
-  }
-
-  // ── GCLID Attribution Preview ──────────────────────────────────────────
-  let attrHtml;
-  if (campaignAttributionStatus === "loading") {
-    attrHtml = `
-      <div class="drawer-section drawer-attribution-section">
-        <div class="drawer-section__title">GCLID Attribution</div>
-        <p class="drawer-empty">Loading attribution evidence…</p>
-        ${renderCampaignAttributionQualityOverlay()}
-      </div>`;
-  } else if (campaignAttributionStatus === "db_unavailable") {
-    attrHtml = `
-      <div class="drawer-section drawer-attribution-section">
-        <div class="drawer-section__title">GCLID Attribution</div>
-        <p class="drawer-empty">GCLID attribution temporarily unavailable — database offline.</p>
-        ${renderCampaignAttributionQualityOverlay()}
-      </div>`;
-  } else if (campaignAttributionStatus === "error") {
-    attrHtml = `
-      <div class="drawer-section drawer-attribution-section">
-        <div class="drawer-section__title">GCLID Attribution</div>
-        <p class="drawer-empty">Could not load GCLID attribution for this campaign.</p>
-        ${renderCampaignAttributionQualityOverlay()}
-      </div>`;
-  } else if (campaignAttributionStatus === "empty" || !campaignAttributionRows.length) {
-    attrHtml = `
-      <div class="drawer-section drawer-attribution-section">
-        <div class="drawer-section__title">GCLID Attribution</div>
-        <p class="drawer-empty">No GCLID attribution rows found for this campaign in the selected window.</p>
-        <p class="drawer-source-note" style="margin-top:var(--space-3)">Campaign-linked Google click IDs connected to HubSpot contacts/deals.</p>
-        ${renderCampaignAttributionQualityOverlay()}
-        <div style="margin-top:var(--space-3)">
-          <button class="btn btn--secondary drawer-gclid-fullpage-btn" type="button">View full GCLID Attribution page</button>
-        </div>
-      </div>`;
-  } else {
-    // Compute preview KPIs from loaded rows
-    const attrRows = campaignAttributionRows;
-    const attrLoaded    = attrRows.length;
-    const attrMatched   = attrRows.filter((r) => (r.match_status || "").toLowerCase() === "matched").length;
-    const attrFallback  = attrRows.filter((r) => (r.match_status || "").toLowerCase() === "url_fallback").length;
-    const attrUnmatched = attrRows.filter((r) => (r.match_status || "").toLowerCase() === "unmatched").length;
-    const attrDealAmt   = attrRows.reduce((s, r) => s + (Number(r.deal_amount_usd) || 0), 0);
-
-    const attrKpiHtml = `
-      <div class="drawer-attribution-kpis">
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Loaded Rows</div>
-          <div class="drawer-kpi__value">${attrLoaded}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Matched Rows</div>
-          <div class="drawer-kpi__value">${attrMatched}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">URL Fallback</div>
-          <div class="drawer-kpi__value">${attrFallback}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Unmatched</div>
-          <div class="drawer-kpi__value">${attrUnmatched}</div>
-        </div>
-        <div class="drawer-kpi">
-          <div class="drawer-kpi__label">Loaded Deal Amount</div>
-          <div class="drawer-kpi__value">${fmtDollar(attrDealAmt)}</div>
-        </div>
-      </div>`;
-
-    const attrTableRows = attrRows.map((r) => `
-      <tr>
-        <td>${_gclidMiniStatusBadge(r.match_status)}</td>
-        <td class="td--name">${escapeHtml(r.company || "—")}</td>
-        <td>${escapeHtml(r.deal_id || "—")}</td>
-        <td>${escapeHtml(r.deal_stage_label || r.deal_stage || "—")}</td>
-        <td>${r.deal_amount_usd != null ? fmtDollar(r.deal_amount_usd) : "—"}</td>
-        <td>${escapeHtml(r.keyword || "—")}</td>
-        <td>${escapeHtml(r.search_term || "—")}</td>
-        <td>${fmtDate(r.contact_created_at)}</td>
-      </tr>`).join("");
-
-    attrHtml = `
-      <div class="drawer-section drawer-attribution-section">
-        <div class="drawer-section__title">GCLID Attribution</div>
-        <p class="drawer-source-note" style="margin-bottom:var(--space-3)">Campaign-linked Google click IDs connected to HubSpot contacts/deals.</p>
-        ${attrKpiHtml}
-        <div class="drawer-attribution-table" style="margin-top:var(--space-4)">
-          <table class="drawer-table">
-            <thead>
-              <tr>
-                <th>Match Status</th>
-                <th>Company</th>
-                <th>Deal ID</th>
-                <th>Deal Stage</th>
-                <th>Deal Amount</th>
-                <th>Keyword</th>
-                <th>Search Term</th>
-                <th>Contact Created</th>
-              </tr>
-            </thead>
-            <tbody>${attrTableRows}</tbody>
-          </table>
-        </div>
-        <p class="drawer-source-note" style="margin-top:var(--space-3)">
-          Google click evidence · HubSpot deal/contact evidence · Loaded preview values only.
-          Evidence context only · read-only view.
-        </p>
-        ${renderCampaignAttributionQualityOverlay()}
-        <div style="margin-top:var(--space-3)">
-          <button class="btn btn--secondary drawer-gclid-fullpage-btn" type="button">View full GCLID Attribution page</button>
-        </div>
-      </div>`;
-  }
-
-  // ── N-Gram Drilldown ──────────────────────────────────────────────────
-  let ngramDrawerHtml;
-  if (drawerNgramStatus === "loading" || drawerNgramStatus === "idle") {
-    ngramDrawerHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">N-Gram Patterns</div>
-        <p class="drawer-empty">Loading n-gram patterns…</p>
-      </div>`;
-  } else if (drawerNgramStatus === "db_unavailable") {
-    ngramDrawerHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">N-Gram Patterns</div>
-        <p class="drawer-empty">N-gram analysis temporarily unavailable — database offline.</p>
-      </div>`;
-  } else if (drawerNgramStatus === "error") {
-    ngramDrawerHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">N-Gram Patterns</div>
-        <p class="drawer-empty">Could not load n-gram patterns for this campaign.</p>
-      </div>`;
-  } else if (drawerNgramStatus === "empty" || !drawerNgramRows.length) {
-    ngramDrawerHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">N-Gram Patterns</div>
-        <p class="drawer-empty">No n-gram patterns found for this campaign in the selected window.</p>
-        <div style="margin-top:var(--space-3)">
-          <button class="btn btn--secondary drawer-ngrams-fullpage-btn" type="button">View N-Gram Intelligence page</button>
-        </div>
-      </div>`;
-  } else {
-    const ngramTableRows = drawerNgramRows.map((r) => `
-      <tr>
-        <td class="td--name">${escapeHtml(r.ngram || "—")}</td>
-        <td class="td--num">${r.n != null ? r.n : "—"}</td>
-        <td class="td--num">${r.row_count != null ? r.row_count : "—"}</td>
-        <td class="td--num">${r.total_spend_usd != null ? fmtDollar(r.total_spend_usd) : "—"}</td>
-        <td class="td--num">${r.total_clicks != null ? r.total_clicks : "—"}</td>
-        <td>${ngramWasteStateMix(r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows)}</td>
-      </tr>`).join("");
-    ngramDrawerHtml = `
-      <div class="drawer-section">
-        <div class="drawer-section__title">N-Gram Patterns</div>
-        <p class="drawer-source-note" style="margin-bottom:var(--space-3)">Top recurring word patterns from this campaign's search terms. Read-only — candidate patterns for human review only.</p>
-        <div class="drawer-attribution-table">
-          <table class="drawer-table">
-            <thead>
-              <tr>
-                <th>N-Gram</th>
-                <th class="td--num">N</th>
-                <th class="td--num">Rows</th>
-                <th class="td--num">Spend</th>
-                <th class="td--num">Clicks</th>
-                <th>Flagged / Clean / Unanalyzed</th>
-              </tr>
-            </thead>
-            <tbody>${ngramTableRows}</tbody>
-          </table>
-        </div>
-        <div style="margin-top:var(--space-3)">
-          <button class="btn btn--secondary drawer-ngrams-fullpage-btn" type="button">View N-Gram Intelligence page</button>
-        </div>
-      </div>`;
-  }
-
-  // ── Data source footer ─────────────────────────────────────────────────
-  const src = data.data_sources || {};
-  const footerHtml = `
-    <div class="drawer-section drawer-source-footer">
-      <p class="drawer-source-note">
-        Data sources: ${escapeHtml(src.campaign || "campaigns table")},
-        ${escapeHtml(src.lead_quality || "HubSpot-derived leads table")},
-        ${escapeHtml(src.keywords || "Google Ads API keyword performance")},
-        ${escapeHtml(src.waste_terms || "waste_terms table")}.
-      </p>
-    </div>`;
-
-  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + attrHtml + ngramDrawerHtml + footerHtml);
-
-  // Wire up waste copy button if present (must happen after DOM insertion)
-  const wcBtn = container.querySelector("#drawer-waste-copy-btn");
-  if (wcBtn) {
-    wcBtn.addEventListener("click", () => copyDrawerWasteTerms(data.waste_terms || [], wcBtn));
-  }
-
-  // Wire up "View full GCLID Attribution page" button
-  const gclidFullBtn = container.querySelector(".drawer-gclid-fullpage-btn");
-  if (gclidFullBtn) {
-    const _campName = _drawerOpenCampaign;
-    gclidFullBtn.addEventListener("click", () => {
-      if (_campName) gclidAttributionPrefill = { campaign: _campName };
-      closeCampaignDrawer();
-      navigate("gclid-attribution");
-    });
-  }
-
-  // Wire up "View N-Gram Intelligence page" button
-  const ngramsFullBtn = container.querySelector(".drawer-ngrams-fullpage-btn");
-  if (ngramsFullBtn) {
-    const _campName = _drawerOpenCampaign;
-    ngramsFullBtn.addEventListener("click", () => {
-      if (_campName) ngramsPrefill = { campaign: _campName };
-      closeCampaignDrawer();
-      navigate("ngrams");
-    });
-  }
-
-  // PR-ADS-142: "Open full Keyword / Waste Evidence" — navigate to the dedicated
-  // evidence page with the campaign filter prefilled (no duplicate table here).
-  const kwFullBtn = container.querySelector(".drawer-keywords-fullpage-btn");
-  if (kwFullBtn) {
-    const _campName = _drawerOpenCampaign;
-    kwFullBtn.addEventListener("click", () => {
-      if (_campName) keywordsPrefill = { campaign: _campName };
-      closeCampaignDrawer();
-      navigate("keywords");
-    });
-  }
-  const wasteFullBtn = container.querySelector(".drawer-waste-fullpage-btn");
-  if (wasteFullBtn) {
-    const _campName = _drawerOpenCampaign;
-    wasteFullBtn.addEventListener("click", () => {
-      // PR-ADS-153D: the standalone page is retired — go to the canonical
-      // Flagged view and carry the campaign the drawer was showing.
-      if (_campName) _flagFilters.campaign = _campName;
-      _flagFilters.page = 1;
-      closeCampaignDrawer();
-      stSetPendingTab("flagged");
-      navigate("search-terms");
-    });
-  }
-}
-
-function copyDrawerWasteTerms(terms, btn) {
-  const text = terms.map((t) => (t.search_term || "").trim()).filter(Boolean).join("\n");
-  if (!text) return;
-  const origHTML = btn ? btn.innerHTML : null;
-  const showFeedback = (success) => {
-    if (!btn) return;
-    btn.innerHTML = success
-      ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
-      : `Failed`;
-    btn.disabled = true;
-    setTimeout(() => {
-      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
-    }, 2000);
-  };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => showFeedback(true), () => showFeedback(false));
-  } else {
-    const ta = document.createElement("textarea");
-    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
-    document.body.removeChild(ta);
-    showFeedback(ok);
-  }
-}
-
 // ── Init ───────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -16067,12 +14358,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Keyword Evidence (PR-ADS-146) wires its own controls inside the page shell
   // (wireKeywordControls) — no global keyword filter wiring here.
-
-  // Wire up campaign drawer close controls
-  const drawerCloseBtn = document.getElementById("drawer-close-btn");
-  const drawerOverlay  = document.getElementById("campaign-drawer-overlay");
-  if (drawerCloseBtn) drawerCloseBtn.addEventListener("click", closeCampaignDrawer);
-  if (drawerOverlay)  drawerOverlay.addEventListener("click", closeCampaignDrawer);
 
   // Wire up dataset freshness refresh button
   const dfRefreshBtn = document.getElementById("dataset-freshness-refresh-btn");
@@ -16477,7 +14762,12 @@ function getConfidenceBadge(confidence) {
   }
 }
 
-function getBusinessVerdictBadge(verdict) {
+function getBusinessVerdictBadge(verdict, reason) {
+  // PR-ADS-177C-F1 (truth audit M-1): several Google Ads campaigns share the
+  // row's name — not a spend-mapping gap; its own words.
+  if (reason === CAMPAIGN_SHARED_NAME) {
+    return '<span class="roas-verdict-badge roas-verdict-badge--mapping" title="Several Google Ads campaigns share this name, so the figures are combined and the row is not judged as one campaign">Not judged — shared name</span>';
+  }
   switch ((verdict || "").toLowerCase()) {
     case "winner":   return '<span class="roas-verdict-badge roas-verdict-badge--scale" title="Revenue/customers exist and Period Revenue / Ad Spend (a non-cohort operational ratio) is healthy">Winner</span>';
     case "watch":    return '<span class="roas-verdict-badge roas-verdict-badge--hold" title="SQLs exist but weak customers/revenue">Watch</span>';
@@ -16716,55 +15006,6 @@ function martRoasReady(data, view) {
   return martSpendReady(data);
 }
 
-// Canonical Spend Truth card (PR-ADS-128): one shared, clean component across
-// Campaign / Country / Source / Deals. Renders ONLY mart fields — never computes
-// or fabricates anything. Native spend uses the native-currency formatter (never
-// "$" on GBP); USD reporting and the ROAS basis show "Unavailable" (never $0)
-// when the mart withholds them. The ROAS magnitude lives in the summary strip;
-// this card states the ROAS *basis* so the denominator is never ambiguous.
-function renderMartSpendTruth(data) {
-  const st = (data && data.spend_truth) || {};
-  const s = (data && data.summary) || {};
-  return `
-    <section class="revenue-spend-card revenue-spend-summary">
-      <div class="revenue-spend-card__title revenue-spend-summary__title">Canonical Spend Truth</div>
-      <div class="revenue-spend-card__grid revenue-spend-summary__grid">
-        <div><span>Native Spend</span><strong>${fmtNativeMoney(st.native_spend, st.native_currency)}</strong></div>
-        <div><span>USD Reporting</span><strong>${st.usd_spend == null ? "Unavailable" : fmtMoney(st.usd_spend)}</strong></div>
-        <div><span>FX Coverage</span><strong>${labelizeStatus(st.fx_status)}</strong></div>
-        <div><span>Period Ratio Basis</span><strong>${s.period_revenue_per_ad_spend == null ? "Unavailable" : "USD reporting spend"}</strong></div>
-      </div>
-    </section>
-  `;
-}
-
-// PR-ADS-161E: a mart summary metric with its canonical status and reason.
-function martMetricHtml(summary, key, formatter) {
-  const m = ((summary || {}).metrics || {})[key];
-  if (m && m.status) return canonicalMetricHtml(m, formatter, businessBlockerOpts());
-  const legacy = { revenue_usd: "won_revenue_usd" }[key] || key;
-  return dashValue((summary || {})[legacy], formatter);
-}
-
-// Business KPI strip from the canonical summary (identical across every view).
-function renderMartSummaryStrip(data) {
-  const s = (data && data.summary) || {};
-  return `
-    <div class="revenue-summary-strip">
-      <div><span>Spend (USD)</span><strong>${s.spend_usd == null ? "Unavailable" : fmtMoney(s.spend_usd)}</strong></div>
-      <div><span title="${escapeHtml(COHORT_COUNT_TITLE)}">Leads<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(data && data.cohort))}</small></span><strong>${cohortCountHtml(s.leads, data && data.cohort, null)}</strong></div>
-      <div><span title="${escapeHtml(COHORT_COUNT_TITLE)}">SQLs<small> · contacts acquired in window${escapeHtml(cohortThroughSuffix(data && data.cohort))}</small></span><strong>${cohortCountHtml(s.sqls, data && data.cohort, null)}</strong></div>
-      <div><span>Closed-Won Deals</span><strong>${martMetricHtml(s, "closed_won_deals", fmtCount)}</strong></div>
-      <div><span>Customers</span><strong>${martMetricHtml(s, "customers", fmtCount)}</strong></div>
-      <div><span>Won Revenue</span><strong>${martMetricHtml(s, "revenue_usd", fmtMoney)}</strong></div>
-      <div><span title="Campaign-attributed revenue closed this window ÷ this window's Google Ads USD spend. ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</span><strong>${martMetricHtml(s, "period_revenue_per_ad_spend", fmtPeriodRatio)}</strong></div>
-      <div><span title="This window's Google Ads USD spend ÷ campaign-attributed customers won this window. ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_SPEND_PER_CUSTOMER_LABEL}</span><strong>${martMetricHtml(s, "period_spend_per_customer_won", fmtMoney)}</strong></div>
-      <div><span>${CERTIFIED_RATIO_LABELS.roas}</span><strong>${martMetricHtml(s, "roas", fmtPeriodRatio)}</strong></div>
-      <div><span>${CERTIFIED_RATIO_LABELS.cac}</span><strong>${martMetricHtml(s, "cac", fmtMoney)}</strong></div>
-    </div>
-  `;
-}
-
 // Compact diagnostics — the mart's own explanation of why spend/ROAS are
 // (un)available. One tidy stack, never a warning wall.
 function renderMartDiagnostics(data) {
@@ -16856,6 +15097,9 @@ let campaignsPageRenderedRows = [];
 // Bumped by every load: a deal list read for an older response is dropped.
 let campaignsDrilldownGen = 0;
 let campaignsDrilldownCache = {};
+// PR-ADS-177C: a campaign another page asked to open (the search-term drawer's
+// "Open Campaigns" link). Consumed by the next render; matched by name.
+let campaignsPageOpenName = null;
 
 // Period Revenue / Ad Spend notation: a multiple (2.20x), not a percent.
 // "Unavailable" when null. Never called ROAS (PR-ADS-161E).
@@ -17125,15 +15369,15 @@ function renderCampaignsPageTable(rows, data) {
     </tr>`;
   const body = rows.length ? rows.map((r, i) => `
     <tr class="camp-row" data-campaign-page-row="${i}" tabindex="0" role="button" aria-label="${escapeHtml(`Open ${r.campaign_name || "campaign"} detail`)}">
-      <td class="camp-td camp-td--name">${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}</td>
+      <td class="camp-td camp-td--name">${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}${campaignSharedNameHtml(r)}</td>
       <td class="camp-num">${campaignsPageSpendCell(r)}</td>
       <td class="camp-num">${cohortCountHtml(r.leads, cohort, r)}</td>
       <td class="camp-num">${cohortCountHtml(r.sqls, cohort, r)}</td>
       <td class="camp-num">${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</td>
       <td class="camp-num">${rowMetricHtml(r, "customers", fmtCount, opts)}</td>
       <td class="camp-num">${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</td>
-      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</td>
-      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+      <td>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}${campaignSharedRatioNote(r)}</td>
+      <td>${getBusinessVerdictBadge(r.verdict, r.verdict_reason)}</td>
     </tr>`).join("")
     : `<tr><td colspan="9" class="rev-breakdown-empty">No campaigns match this decision filter.</td></tr>`;
   return `
@@ -17151,17 +15395,38 @@ function renderCampaignsPageTable(rows, data) {
 // `summary.attributed_revenue_scope` is the narrower scope the period ratio's
 // numerator used. Showing them together stops attributed revenue being mistaken
 // for total business revenue (kept by PR-ADS-177B on the one Campaigns page).
+// PR-ADS-177C (M6): plain words for the two revenue scopes, never the raw
+// keys, and the canonical verdict for a total that is not published —
+// "Withheld" with its reason for a withheld total (unpriced deals …),
+// "Unavailable" only when the ledger could not be read.
+const REVENUE_SCOPE_WORDS = {
+  "campaign_attributable": "revenue from closed-won deals placed on a Google Ads campaign",
+  "google_ads_source": "revenue from closed-won deals whose contact came from Google Ads",
+  "all_source": "closed-won revenue from every source",
+};
+function revenueScopeWords(key) {
+  return REVENUE_SCOPE_WORDS[key] || "closed-won revenue in this scope";
+}
+function revenueScopeAmountHtml(value, metric) {
+  if (value !== null && value !== undefined) return escapeHtml(fmtMoney(value));
+  const m = metric || {};
+  const word = m.status === "withheld" ? "Withheld" : "Unavailable";
+  const why = m.reason ? canonicalReasonLabel(m.reason) : "";
+  return `<strong class="dash-unavailable">${word}</strong>`
+    + (why ? ` <small class="metric-reason">(${escapeHtml(why)})</small>` : "");
+}
 function renderRevenueScopeDisclosure(data) {
   const summary = (data && data.summary) || {};
   const attributed = summary.attributed_revenue_scope;
   if (!attributed) return "";
   const business = summary.revenue_scope || "all_source";
-  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtMoney(v));
+  const metrics = summary.metrics || {};
   return `<p class="grace-note" data-revenue-scope="${escapeHtml(attributed)}">
-      Revenue scope: <strong>${escapeHtml(attributed)}</strong> —
-      ${money(summary.attributed_won_revenue_usd)} attributed to campaigns, out of
-      ${money(summary.won_revenue_usd)} across <strong>${escapeHtml(business)}</strong>.
-      Attributed revenue is a subset of total business revenue, not the same figure.
+      Revenue on this page is ${escapeHtml(revenueScopeWords(attributed))}:
+      ${revenueScopeAmountHtml(summary.attributed_won_revenue_usd, metrics.attributed_revenue_usd)}
+      this window, out of ${revenueScopeAmountHtml(summary.won_revenue_usd, metrics.revenue_usd)}
+      of ${escapeHtml(revenueScopeWords(business))}. The campaign figure is a subset of
+      total business revenue, not the same figure.
     </p>`;
 }
 
@@ -17237,6 +15502,12 @@ function renderCampaignsPage() {
     </section>
     ${meta}
     ${renderCampaignsTruthFooter(data)}`;
+  if (campaignsPageOpenName) {
+    const want = String(campaignsPageOpenName).trim().toLowerCase();
+    campaignsPageOpenName = null;
+    const idx = filtered.findIndex((r) => String(r.campaign_name || "").trim().toLowerCase() === want);
+    if (idx >= 0) openCampaignsPageDrawer(idx);
+  }
 }
 
 // ── The drawer: the row's figures, then the closed-won deals behind it ──────
@@ -17296,15 +15567,18 @@ function drilldownValue(v) {
 function renderCampaignsPageDrawer(r, data) {
   const opts = campBlockerOpts(data);
   const cohort = (data || {}).cohort;
-  const links = [["deals", "Open Deals"], ["keywords", "Open Keywords"],
-    ["search-terms", "Open Search Terms"], ["revenue-health", "Open Revenue Health"]]
+  // PR-ADS-177C: one Keywords & Search Terms page. PR-ADS-178B: Deals is a
+  // section of the one Pipeline page — the link names it, as on the Countries
+  // drawers (docs/61 §7 left this one to 177C).
+  const links = [["pipeline", "Open Pipeline"],
+    ["search-terms", "Open Keywords & Search Terms"], ["revenue-health", "Open Revenue Health"]]
     .filter(([page]) => dashCanNavigate(page))
     .map(([page, label]) => `<a class="camp-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
   const dealsWithheld = r.closed_won_deals === null || r.closed_won_deals === undefined;
   return `
     <div class="camp-drawer__head">
       <strong>${escapeHtml(r.campaign_name || "Campaign")}</strong>
-      ${getBusinessVerdictBadge(r.verdict)}
+      ${getBusinessVerdictBadge(r.verdict, r.verdict_reason)}
       ${r.campaign_id ? spendProofButton(r.campaign_id, r.campaign_name) : ""}
       <button type="button" class="camp-drawer__close" data-campaigns-drawer-close aria-label="Close">×</button>
     </div>
@@ -17315,8 +15589,9 @@ function renderCampaignsPageDrawer(r, data) {
       <div><dt>Won deals</dt><dd>${rowMetricHtml(r, "closed_won_deals", fmtCount, opts)}</dd></div>
       <div><dt>Customers</dt><dd>${rowMetricHtml(r, "customers", fmtCount, opts)}</dd></div>
       <div><dt>Won revenue</dt><dd>${rowMetricHtml(r, "won_revenue", fmtMoney, opts)}</dd></div>
-      <div><dt>${escapeHtml(PERIOD_RATIO_LABEL)}</dt><dd>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}</dd></div>
+      <div><dt>${escapeHtml(PERIOD_RATIO_LABEL)}</dt><dd>${rowMetricHtml(r, "period_revenue_per_ad_spend", fmtPeriodRatio, opts)}${campaignSharedRatioNote(r)}</dd></div>
     </dl>
+    ${campaignSharedIdsHtml(r)}
     <div class="camp-drawer__section">
       <div class="campaign-drilldown">${dealsWithheld
         ? `<p class="dash-unavailable">Closed-won deals are withheld for this campaign in this window.</p>`
@@ -17406,6 +15681,14 @@ document.addEventListener("keydown", (e) => {
 // goes through: a table that is not published, or rests on the owner's
 // retirement declaration without its disclosure, shows no figure.
 const META_ADSET_NOT_LINKED_TEXT = "No Meta ad set is joined to a HubSpot contact or deal yet";
+// PR-ADS-177C (M7): said on EVERY state of the table — published, withheld or
+// unreadable — because the Google Ads table above it counts London days. The
+// server's sentence names each account's zone; this is its fallback.
+const META_ADSET_DAY_BASIS_TEXT = "Each Meta ad account is read on its own calendar days, in its own time zone. These are not the Europe/London days the Google Ads table counts on; nothing on this page is divided by Meta spend.";
+function metaAdsetDayBasisHtml(data) {
+  const text = (data && data.day_basis_disclosure) || META_ADSET_DAY_BASIS_TEXT;
+  return `<p class="camp-keyword-note meta-adset-day-basis">${escapeHtml(text)}</p>`;
+}
 function metaAdsetTableGate(data) {
   if (!data) return { ok: false, reason: "meta_adset_source_unavailable", detail: null };
   if (data.status !== "published") {
@@ -17474,7 +15757,6 @@ function renderMetaAdsetTable(data) {
   const notes = [
     data.meta_reported_leads_disclosure,
     `SQLs, won deals and won revenue: not linked yet — ${META_ADSET_NOT_LINKED_TEXT}.`,
-    data.mixed_time_zones ? "Each Meta account is read in its own time zone." : null,
     data.owner_declared_retired_disclosure || null,
   ].filter(Boolean);
   return `
@@ -17497,6 +15779,7 @@ function renderMetaAdsetPanel(data) {
         </div>
       </div>
       ${renderMetaAdsetTable(data)}
+      ${metaAdsetDayBasisHtml(data)}
     </section>`;
 }
 

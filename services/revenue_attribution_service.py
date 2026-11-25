@@ -309,6 +309,9 @@ def confidence_from_tiers(tiers: list) -> str:
 #: PR-ADS-161E: the verdict of a row whose closed-won outcome is withheld or
 #: unreadable — never "waste" or "watch" over an unknown deal count.
 VERDICT_OUTCOME_WITHHELD = "outcome_withheld"
+#: PR-ADS-177C: a campaign row whose name more than one Google Ads campaign id
+#: spent under (``_build_db_rows``).
+SHARED_DISPLAY_NAME = "campaign_name_shared_by_google_ads_campaigns"
 #: PR-ADS-176B-F1 (truth audit M1): a row whose SPEND is unknown (the zero
 #: rule withheld it) or whose REVENUE is unknown beside known won deals is not
 #: judged either. ``classify_verdict`` reads None as 0, so such a row read
@@ -1084,6 +1087,10 @@ def _build_db_rows(spend_rows: list, cohort_slots: dict | None, revenue_rows: li
     for row in spend_rows:
         _, b = bucket_for(row.get(group_field), row.get("country_code"))
         b["spend"] += _safe_float(row.get("spend"))
+        if not by_country and row.get("campaign_id") is not None:
+            # PR-ADS-177C: every Google Ads campaign id whose spend this
+            # name-keyed row holds.
+            b.setdefault("google_ads_campaign_ids", set()).add(str(row["campaign_id"]))
         # PR-ADS-176A: a bucket that received a geo row has MEASURED spend; one
         # that received none is a zero only by the shared zero rule.
         b["spend_rows_seen"] = b.get("spend_rows_seen", 0) + 1
@@ -1190,6 +1197,26 @@ def _build_db_rows(spend_rows: list, cohort_slots: dict | None, revenue_rows: li
         if group_field == "campaign_name":
             finalized["campaign_id"] = key
             finalized["campaign_name"] = bucket["display"] or "unknown"
+            # PR-ADS-177C (port of Campaign Evidence's "two campaign ids with
+            # the same display name are never merged"): the rows are keyed by
+            # the normalised NAME, because HubSpot's labels are names. When
+            # more than one Google Ads campaign id spent under this name, the
+            # row is several campaigns: it says so, lists the ids, and is not
+            # judged as one campaign (its decision is mapping_required, the
+            # unmapped-label rule). Its figures stay — they are the name's —
+            # and are never presented as one campaign's.
+            ids = sorted(bucket.get("google_ads_campaign_ids") or ())
+            finalized["google_ads_campaign_ids"] = ids
+            if len(ids) > 1:
+                finalized["identity_status"] = SHARED_DISPLAY_NAME
+                finalized["identity_reason"] = (
+                    f"{len(ids)} Google Ads campaigns share this name; their "
+                    "figures are combined here and cannot be told apart, because "
+                    "HubSpot records the campaign by name")
+                finalized["verdict"] = "mapping_required"
+                finalized["verdict_reason"] = SHARED_DISPLAY_NAME
+            else:
+                finalized["identity_status"] = "single_campaign" if ids else None
             # PR-ADS-177B: the row's own deal population, so the Campaigns
             # drawer lists exactly the deals this row counts (as the country
             # rows do since PR-ADS-176A). A withheld deal count has no proof
@@ -1734,6 +1761,20 @@ def _cohort_contract_block(outcomes: dict, campaign_slots: dict, *,
             "problem_count": len(problems) if cohort is not None else None,
             "identities": list(_COHORT_IDENTITIES),
         },
+        # PR-ADS-177C: the cohort's own buckets (all sources, Google Ads,
+        # unattributed and excluded, proof counts, dedup), as the retired
+        # Campaign Evidence page published them, so the cohort audit can
+        # certify THIS surface against its independent SQL counts. Published
+        # only with the count: None otherwise (withheld means absent). The
+        # per-campaign working set and the contact ids stay server-side.
+        "breakdown": ({k: v for k, v in cohort_svc._jsonable_cohort(cohort).items()
+                       if k != "by_campaign"} if published else None),
+        # PR-ADS-177C: the other SQL family, declared not published here.
+        "lifecycle_event_coverage": cohort_svc.lifecycle_disclosure_skeleton(
+            counts_withheld=True, counts_withheld_reason="not_read_on_this_surface",
+            explanation=("Lifecycle-event SQLs (contacts that ENTERED SQL in a "
+                         "window) are not shown here and are not replaced by "
+                         "the acquisition-cohort count.")),
         "window_instants": {"start_at": outcomes.get("start_at"),
                             "end_before": outcomes.get("end_before")},
         # PR-ADS-177A-F1 (truth audit MINOR 1): the inclusive account-local
@@ -1858,7 +1899,11 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None, *,
         # diagnostic otherwise).
         campaign_spend_rows = [
             {"campaign_name": r.get("campaign_name"), "country": None,
-             "spend": (r.get("spend_usd") if use_usd else r.get("spend"))}
+             "spend": (r.get("spend_usd") if use_usd else r.get("spend")),
+             # PR-ADS-177C: the Google Ads identity behind the name, so a row
+             # whose name two campaign ids share is never presented as one
+             # campaign (``SHARED_DISPLAY_NAME``).
+             "campaign_id": r.get("campaign_id")}
             for r in canonical_rows
         ]
         # Geo reconciliation for Country ROAS: geo total must match canonical for
@@ -2901,29 +2946,21 @@ def _deal_detail_row(r: dict) -> dict:
 
 
 @_canonical_snapshot.single_snapshot
-def build_campaign_deal_details(window: str, campaign: str,
-                                now: datetime | None = None, *,
-                                settled_days: bool = False) -> dict:
-    """Closed-won client/deal detail rows behind ONE canonical campaign (PR-ADS-130).
+def campaign_deal_details_by_campaign(window: str, now: datetime | None = None, *,
+                                      settled_days: bool = False) -> dict:
+    """Every campaign drawer's closed-won deals for one window, read ONCE
+    (PR-ADS-177C-F1): ``{"available", "resolved", "base", "reason",
+    "by_campaign": {normalised campaign name: [detail rows]}}``.
 
-    Read-only drilldown for the Campaigns drawer. Reads the canonical ledger at
-    ``campaign_attributable`` scope, applies the SAME identity rule the
-    campaign rows use — the configured account's approved mappings, its "not
-    Google Ads" exclusions (PR-ADS-120b) and exact-normalised auto-links — and
-    returns the deals of the requested canonical campaign. Never writes
-    anything; never fabricates company/contact ids.
-
-    ``settled_days`` (PR-ADS-177B): the row's window is the settled campaign
-    view's — an open window ends yesterday — so the drawer reads the same
-    account-local days through ``settled_revenue_bounds``, the instants the
-    row's deals were read over. The drawer of a settled row then lists exactly
-    the row's ``deal_ids``. False keeps the window through today.
-
-    Raises ValueError for an unsupported window.
-    """
+    The one population rule behind every campaign drawer — the canonical ledger
+    at ``campaign_attributable`` scope, the configured account's approved
+    mappings, its "not Google Ads" exclusions (PR-ADS-120b) and exact-normalised
+    auto-links. ``build_campaign_deal_details`` answers one drawer from it; the
+    Campaigns certification (L6) checks every row's drawer against it without
+    re-reading the ledger per row. Raises ValueError for an unsupported
+    window."""
     resolved, start_date, end_date = _window_date_bounds(
         window, now, settled_days=settled_days)
-    generated_at = datetime.now(timezone.utc).isoformat()
 
     # PR-ADS-153E-B: the deals proving a campaign row come from the canonical
     # ledger at `campaign_attributable` scope — the SAME scope the row was
@@ -2933,17 +2970,8 @@ def build_campaign_deal_details(window: str, campaign: str,
         window, now=now,
         bounds=settled_revenue_bounds(resolved) if settled_days else None)
     if not base.get("available"):
-        return {
-            "window": resolved, "campaign": campaign, "details": [],
-            "settled_days": bool(settled_days),
-            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
-            "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
-            "revenue_available": False,
-            "revenue_unavailable_reason": base.get("reason"),
-            "legacy_fallback_used": False,
-            "source_health": {"status": base.get("reason") or "database_unavailable"},
-            "generated_at": generated_at,
-        }
+        return {"available": False, "resolved": resolved, "base": base,
+                "reason": base.get("reason"), "by_campaign": {}}
 
     rows = canonical_revenue.canonical_deal_rows(
         base, revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE)
@@ -2970,12 +2998,51 @@ def build_campaign_deal_details(window: str, campaign: str,
                       if canonical_access else {})
     mapped = _apply_identity_map(rows, resolution_map, []) if resolution_map else rows
 
-    target = _norm(campaign)
-    details = [_deal_detail_row(r) for r in mapped if _norm(r.get("campaign_name")) == target]
-    details.sort(
-        key=lambda d: (d.get("deal_close_date") or "", d.get("deal_amount_usd") or 0.0),
-        reverse=True,
-    )
+    by_campaign: dict = {}
+    for r in mapped:
+        by_campaign.setdefault(_norm(r.get("campaign_name")), []).append(_deal_detail_row(r))
+    for details in by_campaign.values():
+        details.sort(
+            key=lambda d: (d.get("deal_close_date") or "", d.get("deal_amount_usd") or 0.0),
+            reverse=True,
+        )
+    return {"available": True, "resolved": resolved, "base": base, "reason": None,
+            "by_campaign": by_campaign}
+
+
+def build_campaign_deal_details(window: str, campaign: str,
+                                now: datetime | None = None, *,
+                                settled_days: bool = False) -> dict:
+    """Closed-won client/deal detail rows behind ONE canonical campaign (PR-ADS-130).
+
+    Read-only drilldown for the Campaigns drawer: the campaign's entry of
+    ``campaign_deal_details_by_campaign`` (the same identity rule the campaign
+    rows use). Never writes anything; never fabricates company/contact ids.
+
+    ``settled_days`` (PR-ADS-177B): the row's window is the settled campaign
+    view's — an open window ends yesterday — so the drawer reads the same
+    account-local days through ``settled_revenue_bounds``, the instants the
+    row's deals were read over. The drawer of a settled row then lists exactly
+    the row's ``deal_ids``. False keeps the window through today.
+
+    Raises ValueError for an unsupported window.
+    """
+    generated_at = datetime.now(timezone.utc).isoformat()
+    grouped = campaign_deal_details_by_campaign(window, now, settled_days=settled_days)
+    resolved, base = grouped["resolved"], grouped["base"]
+    if not grouped["available"]:
+        return {
+            "window": resolved, "campaign": campaign, "details": [],
+            "settled_days": bool(settled_days),
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+            "revenue_available": False,
+            "revenue_unavailable_reason": base.get("reason"),
+            "legacy_fallback_used": False,
+            "source_health": {"status": base.get("reason") or "database_unavailable"},
+            "generated_at": generated_at,
+        }
+    details = list(grouped["by_campaign"].get(_norm(campaign), []))
     return {
         "window": resolved,
         "campaign": campaign,

@@ -196,7 +196,9 @@ def test_search_terms_stays_under_platform_evidence():
     section = _INDEX_HTML.split('data-section="campaigns"')[1].split("</nav>")[0]
     assert 'data-page="search-terms"' in section
     assert 'data-page="campaigns"' in section
-    assert 'data-page="keywords"' in section
+    # PR-ADS-177C: Keyword Evidence is the Keywords tab of the one Keywords &
+    # Search Terms page (no strip entry of its own).
+    assert 'data-page="keywords"' not in section
     assert 'data-page="roas-countries" data-nav-item="countries"' in _INDEX_HTML
     # And the retired page is not there.
     assert 'data-page="waste"' not in section

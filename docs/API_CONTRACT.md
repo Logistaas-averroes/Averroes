@@ -233,6 +233,8 @@ All endpoints below require authentication, accept a `?days=` query parameter (d
 ---
 
 #### `GET /api/campaigns?window=30d`
+
+> **Retired by PR-ADS-177C — this route answers 404.** Kept below as history only; see `docs/60` §9 for what replaced it.
 GENUINE selected-window campaign evidence (PR-ADS-143). The selected Evidence Window controls the **actual** metrics — spend, leads, SQLs, junk, junk rate and CPQL are computed from durable source tables for the window, **never** the `campaigns` scheduler snapshot.
 
 **Auth:** Auth
@@ -459,6 +461,8 @@ When database is unavailable: `{ "days": 30, "runs": [], "db_unavailable": true 
 ---
 
 #### `GET /api/keywords?days=30`
+
+> **Retired by PR-ADS-177C — this route answers 404.** Kept below as history only; see `docs/60` §9 for what replaced it.
 Google Ads API keyword performance data aggregated by campaign, ad group, keyword, and match type for the last N days.
 
 **Auth:** Auth
@@ -504,6 +508,8 @@ When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true 
 ---
 
 #### `GET /api/campaign-detail?campaign_name={encoded_name}&days=N` *(Preferred)*
+
+> **Retired by PR-ADS-177C — this route answers 404.** Kept below as history only; see `docs/60` §9 for what replaced it.
 Campaign drill-down detail — full investigation context for a single campaign.
 
 **Auth:** Auth required (cookie session, same as `/api/campaigns`)
@@ -831,6 +837,8 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 ---
 
 #### `GET /api/search-terms`
+
+> **Retired by PR-ADS-177C — this route answers 404.** Kept below as history only; see `docs/60` §9 for what replaced it.
 Paginated raw search-term fact rows for the last N days.
 
 **Auth:** Auth
@@ -952,6 +960,8 @@ HTTP 400.
 ---
 
 #### `GET /api/search-terms/summary`
+
+> **Retired by PR-ADS-177C — this route answers 404.** Kept below as history only; see `docs/60` §9 for what replaced it.
 Aggregate summary counts for the selected filter/window.
 
 **Auth:** Auth
@@ -1052,6 +1062,8 @@ Aggregate summary counts for the selected filter/window.
 ---
 
 #### `GET /api/search-terms/ngrams`
+
+> **Retired by PR-ADS-177C — this route answers 404.** Kept below as history only; see `docs/60` §9 for what replaced it.
 Read-only n-gram analysis over stored `search_terms` rows. (PR-ADS-055)
 
 **Auth:** Auth
@@ -2258,17 +2270,17 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | POST | `/run/daily` | Admin | Trigger daily |
 | POST | `/run/weekly` | Admin | Trigger weekly |
 | POST | `/run/monthly` | Admin | Trigger monthly |
-| GET | `/api/campaigns` | Auth | Campaign metrics (DB, ?days=) |
-| GET | `/api/campaign-detail` | Auth | Campaign drill-down detail, query-param form (DB, ?campaign_name=&days=) **Preferred** |
+| GET | `/api/campaigns` | — | **Retired (PR-ADS-177C) — answers 404.** Campaign metrics (DB, ?days=) |
+| GET | `/api/campaign-detail` | — | **Retired (PR-ADS-177C) — answers 404.** Campaign drill-down detail, query-param form (DB, ?campaign_name=&days=) **Preferred** |
 | GET | `/api/leads` | Auth | Lead rows (DB, ?days=) |
 | GET | `/api/waste` | Auth | Waste terms (DB, ?days=) |
 | GET | `/api/runs` | Auth | Run records (DB, ?days=) |
-| GET | `/api/keywords` | Auth | Google Ads API keyword performance by campaign/ad group/keyword (DB, ?days=) |
+| GET | `/api/keywords` | — | **Retired (PR-ADS-177C) — answers 404.** Google Ads API keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
-| GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
-| GET | `/api/search-terms/summary` | Auth | Aggregate summary counts for selected filter/window (search_terms table, no pagination) |
-| GET | `/api/search-terms/ngrams` | Auth | Read-only n-gram analysis over stored search_terms (aggregated, no pagination) |
+| GET | `/api/search-terms` | — | **Retired (PR-ADS-177C) — answers 404.** Paginated search-term fact rows (search_terms table, cursor pagination) |
+| GET | `/api/search-terms/summary` | — | **Retired (PR-ADS-177C) — answers 404.** Aggregate summary counts for selected filter/window (search_terms table, no pagination) |
+| GET | `/api/search-terms/ngrams` | — | **Retired (PR-ADS-177C) — answers 404.** Read-only n-gram analysis over stored search_terms (aggregated, no pagination) |
 | GET | `/api/search-term-evidence` | Auth | PR-ADS-144 Search Term Universe — selected-window source_date aggregates, complete-population KPIs, server-side pagination + audit block |
 | GET | `/api/search-term-evidence/term` | Auth | PR-ADS-144 search-term evidence drawer (campaign context, classification proof, daily source-date series) |
 | GET | `/api/search-term-evidence/patterns` | Auth | PR-ADS-144 Patterns (n-grams) derived from the same term population; unique-term KPI math + overlap disclosure |

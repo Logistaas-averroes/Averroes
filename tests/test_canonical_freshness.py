@@ -323,9 +323,12 @@ def test_all_datasets_have_config():
     ever report stale.
     """
     assert "campaigns" not in DATASET_FRESHNESS_CONFIG
+    # PR-ADS-177C: ``keywords`` (the legacy keyword snapshot) is retired the
+    # same way — the monthly job no longer writes it and nothing reads it.
+    assert "keywords" not in DATASET_FRESHNESS_CONFIG
     required = [
         "search_terms", "waste_terms",
-        "keywords", "geo", "leads", "deals",
+        "geo", "leads", "deals",
         "gclid_attribution", "gclid_coverage_snapshots",
         "canonical_spend", "canonical_geo",
     ]

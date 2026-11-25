@@ -96,11 +96,17 @@ AUDITS = (
      # PR-ADS-177A-F1 (MINOR 7): since PR-ADS-177A this audit covers every
      # mart / Dashboard surface of the one SQL count, not Campaign Evidence
      # alone.
-     "The acquisition cohort (Campaign Evidence and every mart / Dashboard "
+     # PR-ADS-177C: Campaign Evidence is retired; the per-window independent
+     # reconciliation now certifies the Campaigns page's settled view.
+     "The acquisition cohort (the Campaigns page and every mart / Dashboard "
      "leads and SQLs count) reconciles, conserves and discloses staleness, "
      "or is withheld"),
-    ("campaign_evidence", "scripts.audit_campaign_evidence_certification",
-     "Campaign Evidence spend and outcomes are certified"),
+    # PR-ADS-177C: replaces ("campaign_evidence",
+    # "scripts.audit_campaign_evidence_certification"), which certified the
+    # retired Campaign Evidence page. Its checks are ported onto the live
+    # Campaigns surfaces (docs/60 §9.4).
+    ("campaigns", "scripts.audit_campaigns_page_certification",
+     "The Campaigns page, its drawer and Dashboard → Campaigns are certified"),
 )
 
 HOLDS, VIOLATION, UNAVAILABLE, CRASHED = (

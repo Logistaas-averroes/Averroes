@@ -437,11 +437,12 @@ def test_12_search_term_freshness_is_canonical_not_windsor():
 def test_13_keyword_freshness_reads_the_durable_facts_not_the_snapshot():
     config = freshness_service.DATASET_FRESHNESS_CONFIG
     assert config["keyword_facts"]["table"] == "keyword_daily_facts"
-    assert config["keyword_facts"]["page"] == "keywords"
-    # The legacy snapshot keeps a freshness entry — it still has live
-    # non-evidence consumers — but it is NOT a page dependency.
-    assert config["keywords"]["table"] == "keywords"
-    assert config["keywords"]["page"] is None
+    # PR-ADS-177C: Keyword Evidence is the Keywords tab of Keywords & Search
+    # Terms, and the legacy snapshot is retired (no reader, no scheduled
+    # write), so it has no freshness entry at all — it is a RETIRED dataset.
+    assert config["keyword_facts"]["page"] == "search-terms"
+    assert "keywords" not in config
+    assert ("google_ads_api", "keywords") in freshness_service.RETIRED_DATASETS
 
 
 def test_14_stale_canonical_data_is_reported_stale_even_with_rows():
@@ -764,7 +765,7 @@ def test_28b_the_allowlist_is_narrow_and_every_entry_is_justified():
                     "diagnostic", "legacy", "retired", "writer")), (rel, reason)
 
 
-def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
+def test_28c_the_legacy_keyword_snapshot_has_no_reader_and_no_scheduled_write():
     """§5 required an inspection before stopping the scheduled legacy writes.
 
     PR-ADS-156 found FOUR live consumers of `keywords`, none of them Keyword
@@ -793,47 +794,38 @@ def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
     exists in the repository proves nothing if the Dashboard stops calling it.
     When that call goes, this test fails, and that is the moment to stop the
     legacy writes.
-    """
-    api_src = (_ROOT / "api" / "server.py").read_text(encoding="utf-8")
-    assert api_src.count("FROM keywords") >= 1
-    # The one that remains is the aggregated endpoint — not a leftover queue.
-    assert "FROM keywords" in api_src.split('@app.get("/api/keywords")')[1].split(
-        "\n@app.")[0]
-    assert "_build_keyword_queue_items" not in api_src
 
-    # And the migrated consumer is genuinely gone from the drawer builder.
-    from tests.test_pr_ads_157_campaign_evidence_certification import _function_code
-    builder = _function_code(_ROOT / "api" / "server.py", "_build_campaign_detail")
-    assert "FROM keywords" not in builder
-    revenue_repo = (_ROOT / "db" / "revenue_repository.py").read_text(encoding="utf-8")
-    assert "fetch_keyword_theme_snapshot" in revenue_repo
-    # The live reader, at its call site (PR-ADS-162G) — PR-ADS-177B REMOVED it:
-    # the Dashboard Campaigns tab's keyword-theme panel read this non-windowed
-    # snapshot and is dropped (docs/60 §3). This is the moment the docstring
-    # names: the legacy writes now have no in-product reader (only the orphan
-    # `/api/keywords`). Stopping them is its own decision, recorded in
-    # docs/60 §8, not taken here.
-    campaigns_tab = _function_code(
-        _ROOT / "services" / "dashboard_campaigns_service.py",
-        "build_dashboard_campaigns")
-    assert "fetch_keyword_theme_snapshot" not in campaigns_tab
-    services = "".join(p.read_text(encoding="utf-8")
-                       for p in (_ROOT / "services").glob("*.py"))
-    assert "fetch_keyword_theme_snapshot" not in services
-    # `/api/keywords` has no caller in the UI: an orphan, not a consumer.
+    PR-ADS-177C IS THAT MOMENT. The orphan `/api/keywords` is deleted (it
+    answers 404), so `keywords` has no reader left anywhere in production, and
+    the monthly scheduler no longer writes it (our own table only — nothing is
+    written to Google Ads or HubSpot either way). The table itself stays in the
+    schema with its history; its freshness entry is retired.
+    """
     import re as _re
+    for root in ("api", "services", "scheduler", "analysis"):
+        for f in (_ROOT / root).rglob("*.py"):
+            if f.name == "legacy_source_guard.py":
+                continue    # the scanner names the patterns it hunts for
+            src = f.read_text(encoding="utf-8")
+            assert not _re.search(r"\b(FROM|JOIN)\s+keywords\b", src), f
+            assert "write_keywords(" not in src, f
+    assert '@app.get("/api/keywords")' not in (_ROOT / "api" / "server.py").read_text(
+        encoding="utf-8")
+    revenue_repo = (_ROOT / "db" / "revenue_repository.py").read_text(encoding="utf-8")
+    assert "fetch_keyword_theme_snapshot" not in revenue_repo
+    assert "def write_keywords(" not in (_ROOT / "db" / "writers.py").read_text(
+        encoding="utf-8")
     app_js = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
     assert _re.search(r"/api/keywords(?![-\w])", app_js) is None
 
-    # Keyword EVIDENCE is not one of them.
+    # Keyword EVIDENCE never read it.
     kw_evidence = (_ROOT / "services" / "keyword_evidence_service.py").read_text(
         encoding="utf-8")
     assert "FROM keywords" not in kw_evidence
 
-    # The monthly scheduler still writes it, and still labels it legacy.
-    # (PR-ADS-165A: the weekly scheduler did too, until it was retired.)
-    for rel in ("scheduler/monthly.py",):
-        assert "write_keywords(" in (_ROOT / rel).read_text(encoding="utf-8"), rel
+    # The durable facts the Keywords tab reads are still written monthly.
+    assert "sync_keyword_daily_facts" in (_ROOT / "scheduler" / "monthly.py").read_text(
+        encoding="utf-8")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

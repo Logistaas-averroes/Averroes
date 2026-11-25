@@ -377,10 +377,12 @@ def test_geo_period_ratio_only_when_spend_and_revenue_safe(monkeypatch):
     assert (us["period_revenue_per_ad_spend"] == round(29000.0 / 8000.0, 2)
             and us["period_ratio_available"] is True)
     assert us.get("roas") is None  # attribution ROAS is never published
-    # A country with verified spend but ZERO revenue shows no misleading 0.00x —
-    # its status conveys the outcome.
+    # PR-ADS-177C (O1): a country with verified spend and a PUBLISHED zero
+    # revenue is a measured 0.00x — the mart row's reader-contract ratio, the
+    # figure the Countries page prints for the same market (this tab printed
+    # None). Its status still conveys the outcome.
     gb = _ctry(out, "GB")
-    assert gb["period_revenue_per_ad_spend"] is None and gb["period_ratio_available"] is False
+    assert gb["period_revenue_per_ad_spend"] == 0.0 and gb["period_ratio_available"] is True
     assert gb["status"] == "SQL producer"
 
 
@@ -395,7 +397,9 @@ def test_period_ratio_helper_never_fakes_zero():
     # PR-ADS-161E: `_roas` renamed `_period_ratio` (same math).
     from services.dashboard_countries_service import _period_ratio
     assert _period_ratio(29000, 8000) == round(29000 / 8000, 2)
-    assert _period_ratio(0, 8000) is None      # zero revenue → no 0.00x
+    # PR-ADS-177C (O1): a published zero revenue over verified positive spend
+    # is a measured 0.00x (the reader contract's rule); unknown revenue is not.
+    assert _period_ratio(0, 8000) == 0.0
     assert _period_ratio(29000, 0) is None     # zero spend → no divide
     assert _period_ratio(None, 8000) is None
     assert _period_ratio(29000, None) is None
@@ -725,8 +729,10 @@ def test_regional_mix_groups_countries(monkeypatch):
     assert mix["North America"]["won_revenue_usd"] == 29000.0
     assert mix["North America"]["closed_won_deals"] == 2
     assert mix["Europe"]["closed_won_deals"] == 0
-    # No fabricated percentages: a region's period ratio is only present when safe.
-    assert mix["Europe"]["period_revenue_per_ad_spend"] is None
+    # No fabricated percentages: a region's period ratio is only present when
+    # safe. PR-ADS-177C (O1): Europe's verified spend over a published zero
+    # revenue is a measured 0.00x, as on the Countries page.
+    assert mix["Europe"]["period_revenue_per_ad_spend"] == 0.0
 
 
 def test_decision_cards_shape_and_safety(monkeypatch):

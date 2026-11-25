@@ -6,7 +6,7 @@ Read-only Search Terms pipeline verification script.
 
 Inspects every stage of the Search Terms evidence pipeline:
   direct Google Ads API pull → shared canonical search-term sync service
-  → search_terms table → /api/search-terms → UI
+  → search_terms table → /api/search-term-evidence → UI (Keywords & Search Terms)
 
 Produces a final verdict indicating pipeline health or the specific failure point.
 
@@ -581,44 +581,56 @@ def _check_live_pull(days: int) -> dict[str, Any]:
 
 # ─── API Check ───────────────────────────────────────────────────────────────
 
+#: PR-ADS-177C: the legacy /api/search-terms and /api/search-terms/summary
+#: endpoints are retired. The live Terms tab reads /api/search-term-evidence,
+#: which takes an EVIDENCE WINDOW, not a day count.
+def _evidence_window_for_days(days: int) -> str:
+    """The smallest evidence window that covers ``days`` (else all_time) —
+    never a smaller one, so an API check cannot look at fewer days than the
+    database check it is compared with."""
+    from analysis.evidence_windows import EVIDENCE_WINDOW_DAYS  # noqa: PLC0415
+    for key, span in EVIDENCE_WINDOW_DAYS.items():
+        if span is not None and span >= days:
+            return key
+    return "all_time"
+
+
 def _check_api(api_url: str, admin_token: str, days: int) -> dict[str, Any]:
-    """Check /api/search-terms and /api/search-terms/summary via HTTP."""
+    """Check the live search-term evidence endpoint via HTTP (read-only GET).
+
+    ``search_terms_rows`` is the endpoint's own ``pagination.total_count``
+    (the complete filtered population, not one page); ``summary`` its KPIs.
+    """
     import urllib.request
     import urllib.error
 
+    window = _evidence_window_for_days(days)
     result: dict[str, Any] = {
         "search_terms_rows": None,
         "search_terms_data_quality": None,
         "summary": None,
+        "evidence_window": window,
         "error": None,
     }
 
     headers = {"Authorization": f"Bearer {admin_token}"}
 
-    # GET /api/search-terms
     try:
-        url = f"{api_url.rstrip('/')}/api/search-terms?days={days}&limit=5"
+        url = (f"{api_url.rstrip('/')}/api/search-term-evidence"
+               f"?window={window}&page=1&page_size=5")
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
-            result["search_terms_rows"] = len(data.get("rows", []))
-            result["search_terms_data_quality"] = data.get("data_quality")
-            result["search_terms_pagination"] = data.get("pagination")
+            pagination = data.get("pagination") or {}
+            total = pagination.get("total_count")
+            # Unknown is not zero: an unavailable payload has no count.
+            result["search_terms_rows"] = (None if data.get("db_unavailable")
+                                           else total)
+            result["search_terms_data_quality"] = data.get("truth_state") or data.get("coverage")
+            result["search_terms_pagination"] = pagination
+            result["summary"] = data.get("kpis")
     except Exception as exc:
-        result["error"] = f"search-terms: {exc}"
-
-    # GET /api/search-terms/summary
-    try:
-        url = f"{api_url.rstrip('/')}/api/search-terms/summary?days={days}"
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            result["summary"] = data.get("summary")
-    except Exception as exc:
-        if result["error"]:
-            result["error"] += f"; summary: {exc}"
-        else:
-            result["error"] = f"summary: {exc}"
+        result["error"] = f"search-term-evidence: {exc}"
 
     return result
 
@@ -865,7 +877,8 @@ def _print_pretty(result: dict[str, Any]):
     if "api" in result:
         api = result["api"]
         print("── API Check ─────────────────────────────────────────────────────")
-        print(f"  /api/search-terms rows: {api.get('search_terms_rows')}")
+        print(f"  /api/search-term-evidence ({api.get('evidence_window')}) rows: "
+              f"{api.get('search_terms_rows')}")
         print(f"  data_quality:           {api.get('search_terms_data_quality')}")
         print(f"  Summary:                {api.get('summary')}")
         if api.get("error"):

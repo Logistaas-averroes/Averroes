@@ -7312,3 +7312,16 @@ button.pipeline-funnel__stage.is-active { background: var(--surface); box-shadow
   #page-pipeline .dash-chip { white-space: normal; }
   #page-pipeline .dash-window-controls select { max-width: 100%; min-width: 0; }
 }
+
+/* PR-ADS-177C — Keywords & Search Terms: four tabs and the freshness chip
+   stay inside a phone-width page (the tab strip scrolls inside itself; the
+   chip wraps instead of running past the edge). */
+@media (max-width: 640px) {
+  .kst-page .search-terms-tabs { overflow-x: auto; scrollbar-width: none; }
+  .kst-page .search-terms-tab { flex: 0 0 auto; padding-left: 0.75rem; padding-right: 0.75rem; }
+  #page-search-terms .run-meta { white-space: normal; max-width: 100%; }
+}
+
+/* PR-ADS-177C-F1 — a row several Google Ads campaigns share by name. */
+.camp-shared-name { font-size: 11px; font-weight: 600; color: #b45309; margin-top: 2px; white-space: normal; }
+.camp-shared-ratio { display: block; color: #b45309; }

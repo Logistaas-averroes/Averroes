@@ -133,6 +133,26 @@ def _row(r: dict) -> dict:
     }
 
 
+def day_basis_disclosure(accounts) -> str:
+    """PR-ADS-177C (M7) — what a "day" is in this table, ALWAYS stated.
+
+    The truth reads each Meta ad account on its own calendar days, in its own
+    time zone (``docs/55`` §1). The Google Ads table beside it counts the
+    Google Ads account's days (``analysis.account_time.ACCOUNT_TZ``,
+    Europe/London). The table says so on every response — published, withheld
+    or with no settled day — naming each account's zone when it is known."""
+    from analysis.account_time import ACCOUNT_TZ  # noqa: PLC0415
+    zones = [f"{a.get('account_id')} on {a.get('time_zone')}" if a.get("time_zone")
+             else f"{a.get('account_id')} on an unknown time zone"
+             for a in (accounts or []) if isinstance(a, dict)]
+    head = ("Each Meta ad account is read on its own calendar days"
+            + (": " + "; ".join(zones) + "." if zones else ", in its own time zone."))
+    if len({a.get("time_zone") for a in (accounts or []) if isinstance(a, dict)}) > 1:
+        head += " The same date is a different 24 hours in each account."
+    return (head + f" These are not the {ACCOUNT_TZ} days the Google Ads table "
+            "counts on; nothing on this page is divided by Meta spend.")
+
+
 def build_meta_adset_table(window: str, now: datetime | None = None) -> dict:
     """The Meta ad-set table for business window ``window`` over its settled
     days (an open window ends yesterday). Raises ``ValueError`` for an
@@ -166,6 +186,7 @@ def build_meta_adset_table(window: str, now: datetime | None = None) -> dict:
                 "reason": canonical_contract.NO_SETTLED_DAY_IN_WINDOW,
                 "detail": rng.get("disclosure"), "rows": [], "totals": None,
                 "accounts": [], "time_zones": [], "mixed_time_zones": False,
+                "day_basis_disclosure": day_basis_disclosure([]),
                 "owner_declared_retired": [],
                 "owner_declared_retired_disclosure": None}
     start = (date.fromisoformat(str(settled["start_date"]))
@@ -186,6 +207,8 @@ def build_meta_adset_table(window: str, now: datetime | None = None) -> dict:
         "accounts": out.get("accounts") or [],
         "time_zones": out.get("time_zones") or [],
         "mixed_time_zones": bool(out.get("mixed_time_zones")),
+        # PR-ADS-177C (M7): every response says whose days these are.
+        "day_basis_disclosure": day_basis_disclosure(out.get("accounts") or []),
         "mixed_currencies": bool(out.get("mixed_currencies")),
         "settled_rule_applied": bool(out.get("settled_rule_applied")),
         "native_lead_action_type": out.get("native_lead_action_type"),

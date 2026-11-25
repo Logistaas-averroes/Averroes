@@ -23,7 +23,9 @@ SIX = {
     "scripts.audit_deal_company_association_coverage",
     "scripts.audit_crm_truth_exceptions",
     "scripts.audit_marketing_outcome_cohorts",
-    "scripts.audit_campaign_evidence_certification",
+    # PR-ADS-177C: the Campaign Evidence certification was ported onto the
+    # Campaigns page, its drawer and Dashboard → Campaigns (docs/60 §9).
+    "scripts.audit_campaigns_page_certification",
 }
 
 
@@ -73,7 +75,7 @@ def test_04_a_violation_outranks_an_unavailable_audit():
     report = apc.run(runner=_runner({
         _module("reader_cutover"): (2, json.dumps({"detail": "db down"}),
                                     "", None),
-        _module("campaign_evidence"): (1, json.dumps({"violations": ["x"]}),
+        _module("campaigns"): (1, json.dumps({"violations": ["x"]}),
                                        "", None)}))
     assert report["exit_code"] == apc.EXIT_VIOLATION
 
@@ -91,7 +93,7 @@ def test_05_one_unavailable_audit_is_not_certified_and_says_why():
 
 def test_06_an_escaped_exception_is_a_crash_not_a_violation_and_never_passes():
     traceback = "Traceback (most recent call last):\n  ...\nKeyError: 'x'"
-    m = _module("campaign_evidence")
+    m = _module("campaigns")
     report = apc.run(runner=_runner({m: (1, "", traceback, None)}))
     row = next(r for r in report["audits"] if r["module"] == m)
     assert row["outcome"] == "crashed"

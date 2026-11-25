@@ -186,8 +186,16 @@ def main() -> int:
         drawer_rich = svc.build_keyword_drawer("30d", "1|101|1001", now=NOW)
         drawer_qna = svc.build_keyword_drawer("30d", "2|201|2004", now=NOW)  # quality unavailable
 
-    base_path = os.path.join(ROOT, "scripts", "campaign_evidence_fixtures.json")
-    base = json.load(open(base_path, encoding="utf-8"))
+    # PR-ADS-177C: these two entries were read from the retired
+    # scripts/campaign_evidence_fixtures.json (deleted with Campaign Evidence).
+    base = {
+        "/auth/me": {"authenticated": True, "username": "viewer", "role": "viewer"},
+        "/api/config/ui-thresholds": {
+            "junk_rate": {"low_pct": 15, "high_pct": 30},
+            "spend": {"high_spend_usd": 100},
+            "quality_score": {"strong_min": 8, "medium_min": 5},
+        },
+    }
     fixtures = {
         "/auth/me": base["/auth/me"],
         "/api/config/ui-thresholds": base["/api/config/ui-thresholds"],

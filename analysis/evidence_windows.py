@@ -22,6 +22,8 @@ Doctrine:
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
+
 # Ordered evidence windows: value -> lookback days (None == all-time / no lower bound).
 EVIDENCE_WINDOW_DAYS: dict[str, int | None] = {
     "7d": 7,
@@ -75,3 +77,27 @@ def resolve_evidence_window(window, *, allow_all_time: bool = True) -> dict:
             "Evidence window 'all_time' is not available for this data source."
         )
     return {"key": window, "days": days, "is_all_time": is_all}
+
+
+def evidence_window_bounds(window, now: datetime | None = None) -> tuple[date | None, date, dict]:
+    """Resolve an evidence window to ``(start_date | None, end_date, resolved)``.
+
+    Rolling day windows are INCLUSIVE of exactly N calendar dates:
+    ``start = end - (N - 1)`` (so 7d covers exactly 7 dates, ending today). The
+    boundary date is the Google Ads account's own day
+    (``analysis.account_time.account_today``), not an implicit UTC date.
+    ``all_time`` -> start is None (NO lower bound). Raises
+    :class:`EvidenceWindowError` (callers answer HTTP 400) for an unknown window.
+
+    PR-ADS-177C: moved here unchanged from the retired
+    ``services.campaign_evidence_service._window_bounds``. The Keywords &
+    Search Terms services and two audits resolve their windows through it.
+    Still no I/O: the account day is a pure function of ``now``.
+    """
+    from analysis.account_time import account_today  # noqa: PLC0415
+
+    resolved = resolve_evidence_window(window)  # raises on an unknown window
+    end = account_today(now)
+    days = resolved["days"]
+    start = None if days is None else end - timedelta(days=days - 1)
+    return start, end, resolved

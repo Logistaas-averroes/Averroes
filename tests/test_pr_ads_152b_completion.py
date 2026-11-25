@@ -175,12 +175,14 @@ def test_evidence_window_uses_account_timezone_across_bst_boundary():
 
 
 def test_evidence_window_matches_campaign_evidence_resolver():
-    # The canonical evidence resolver and Campaign Evidence resolve the SAME
-    # boundary date (same account-tz "today").
-    from services.campaign_evidence_service import _account_today
+    # The canonical evidence resolver and the evidence pages resolve the SAME
+    # boundary date (same account-tz "today"). PR-ADS-177C: Campaign Evidence
+    # is retired; its window bounds moved, unchanged, to
+    # analysis.evidence_windows, which the Keywords & Search Terms page reads.
+    from analysis.evidence_windows import evidence_window_bounds
     now = datetime(2026, 6, 30, 23, 30, tzinfo=timezone.utc)
     w = canon.resolve_window_contract(canon.WINDOW_EVIDENCE, "30d", now=now)
-    assert w["end_date"] == _account_today(now).isoformat()
+    assert w["end_date"] == evidence_window_bounds("30d", now)[1].isoformat()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -467,7 +469,7 @@ def test_no_safe_label_fallback_in_source():
     ("services/source_attribution_service.py", "sql_reconciliation"),
     ("services/revenue_decision_mart.py", "sql_reconciliation"),
     ("services/keyword_evidence_service.py", "sql_reconciliation"),
-    ("services/campaign_evidence_service.py", "sql_reconciliation"),
+    # PR-ADS-177C: services/campaign_evidence_service.py is deleted.
     ("services/search_term_evidence_service.py", "sql_reconciliation"),
     ("api/server.py", "_lead_quality_sql_reconciliation"),
 ])

@@ -419,7 +419,7 @@ def _patch_incremental(monkeypatch, *, contacts_write=None, contacts_pull=None):
         monkeypatch.setattr("connectors.hubspot_pull.pull_deals_with_gclid", lambda c, *a, **k: _pull3())
         monkeypatch.setattr("connectors.hubspot_pull.pull_closed_won_deals_in_range", lambda *a, **k: [])
         monkeypatch.setattr("db.writers.write_campaigns", _spy_write)
-        monkeypatch.setattr("db.writers.write_keywords", _spy_write)
+        # PR-ADS-177C: db.writers.write_keywords is deleted.
         monkeypatch.setattr("db.writers.write_geo", _spy_write)
         monkeypatch.setattr("db.writers.write_leads", contacts_write or _spy_write)
         monkeypatch.setattr("db.writers.write_deals", _spy_write)

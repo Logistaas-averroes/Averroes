@@ -60,7 +60,7 @@ class KeywordBootstrapError(RuntimeError):
 
 
 def _account_today(now: datetime | None = None) -> date:
-    from services.campaign_evidence_service import _account_today as _at  # noqa: PLC0415
+    from analysis.account_time import account_today as _at  # noqa: PLC0415
     return _at(now)
 
 

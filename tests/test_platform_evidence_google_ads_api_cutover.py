@@ -36,7 +36,9 @@ SERVER_PY = (ROOT / "api" / "server.py").read_text(encoding="utf-8")
 
 # PR-ADS-176B: "geo" (the Countries evidence page) was deleted; Countries is
 # the business-window page "roas-countries" and #/geo redirects there.
-PLATFORM_EVIDENCE_ROUTES = ["campaigns", "search-terms", "keywords"]
+# PR-ADS-177C: "keywords" is the Keywords tab of the one Keywords & Search
+# Terms page ("search-terms"); its route key is retired into a redirect.
+PLATFORM_EVIDENCE_ROUTES = ["campaigns", "search-terms"]
 
 # Google Ads API datasets that back the Platform Evidence pages.
 #
@@ -45,7 +47,10 @@ PLATFORM_EVIDENCE_ROUTES = ["campaigns", "search-terms", "keywords"]
 # of the weekly / monthly report. The Campaigns page has read the canonical
 # daily-spend dataset since PR-ADS-143, so that is the dataset every rule
 # below is asserted for.
-GOOGLE_ADS_DATASETS = ["canonical_spend", "search_terms", "keywords", "geo"]
+# PR-ADS-177C: "keywords" — the legacy keyword snapshot — is retired like the
+# campaigns snapshot above (no writer, no reader); the Keywords tab reads
+# durable keyword_facts.
+GOOGLE_ADS_DATASETS = ["canonical_spend", "search_terms", "keyword_facts", "geo"]
 
 
 # ── JS extraction helpers (no JS execution) ─────────────────────────────────

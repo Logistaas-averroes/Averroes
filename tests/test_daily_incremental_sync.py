@@ -937,7 +937,9 @@ def _patch_all_datasets_success(
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)
-    monkeypatch.setattr("db.writers.write_keywords", keyword_write or _default_write)
+    # PR-ADS-177C: db.writers.write_keywords is deleted (the legacy keyword
+    # snapshot is no longer written); the daily sync never called it.
+    assert keyword_write is None, "write_keywords no longer exists"
     monkeypatch.setattr("db.writers.write_geo", geo_write or _default_write)
     monkeypatch.setattr("db.writers.write_leads", contacts_write or _default_write)
     monkeypatch.setattr("db.writers.write_deals", deals_write or _default_write)

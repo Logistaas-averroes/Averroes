@@ -60,7 +60,8 @@ EXPECTED_PAGES: set[str] = {
     "ngrams",
     # PR-ADS-176B: "geo" was deleted with the Countries evidence page. The one
     # Countries page (roas-countries) is a clean revenue page with no strip.
-    "keywords",
+    # PR-ADS-177C: "keywords" is the Keywords tab of Keywords & Search Terms;
+    # its dataset is in that page's strip ("search_terms" above).
     # PR-ADS-178B: "deals" (and "leads") are one page, "pipeline", whose strip
     # reads the contact funnel and the deal ledger.
     "pipeline",

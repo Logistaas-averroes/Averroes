@@ -97,7 +97,11 @@ def test_no_windsor_on_roas_pages():
 
 
 def test_no_windsor_in_revenue_attribution_endpoint():
-    idx = SERVER.find("async def get_revenue_attribution(")
+    # PR-ADS-177C retired GET /api/revenue-attribution (it answers 404, see
+    # tests/test_pr_ads_177c_campaign_feed_retired.py). The one route left on
+    # that path, /audit, must not read Windsor either.
+    assert "async def get_revenue_attribution(" not in SERVER
+    idx = SERVER.find('@app.get("/api/revenue-attribution/audit")')
     assert idx != -1
-    region = SERVER[idx:SERVER.find("@app.get", idx + 1)]
+    region = SERVER[idx:SERVER.find("@app.", idx + 1)]
     assert "windsor" not in region.lower()

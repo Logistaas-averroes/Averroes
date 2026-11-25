@@ -212,7 +212,8 @@ def test_01_the_old_bookmark_lands_on_campaigns_and_the_menu_has_one_campaigns_p
     assert out["redirect"] == {"page": "campaigns"}
     assert out["isPage"] is False and out["campaignsIsPage"] is True
     assert out["item"] == "campaigns"
-    assert out["pages"] == ["campaigns", "keywords", "search-terms"]
+    # PR-ADS-177C: Keywords is a tab of the one Keywords & Search Terms page.
+    assert out["pages"] == ["campaigns", "search-terms"]
     assert out["evidence"] is False, "Campaigns is on business windows now"
     assert out["revenue"] is True
 
@@ -232,7 +233,10 @@ def test_02_one_page_in_the_dashboard_design_on_the_five_business_windows():
     load = _fn("loadCampaignsPage")
     assert "view=campaign&settled=true" in load and "/api/meta-ads/adsets" in load
     assert "campaign-detail?settled=true" in _fn("loadCampaignsPageDrilldown")
-    assert _fn("loadCampaigns").count("loadCampaignsPage()") == 1
+    # PR-ADS-177C: the one-line ``loadCampaigns`` alias went with the Campaign
+    # Evidence code; the router calls the Campaigns page loader itself.
+    assert "function loadCampaigns(" not in JS
+    assert re.search(r'case "campaigns":\s+loadCampaignsPage\(\);', JS)
 
 
 def test_03_campaign_revenue_and_spend_is_deleted_whole():

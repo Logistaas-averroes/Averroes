@@ -171,6 +171,15 @@ RETIRED_DATASETS: dict[tuple[str, str], str] = {
         "PR-ADS-162H. No page reads the table. The Campaigns page reads "
         "google_ads_api/canonical_spend."
     ),
+    # PR-ADS-177C. The monthly job was its only scheduled writer and no longer
+    # writes it; nothing in the product reads it (docs/60 §9).
+    ("google_ads_api", "keywords"): (
+        "Legacy keyword snapshot. Its only scheduled writer was the monthly "
+        "job's keyword-snapshot step, removed in PR-ADS-177C after its last "
+        "reader (Dashboard → Campaigns' keyword themes, PR-ADS-177B) and the "
+        "orphaned /api/keywords endpoint were retired. The Keywords & Search "
+        "Terms page reads google_ads_api/keyword_facts."
+    ),
 }
 
 
@@ -204,7 +213,9 @@ MONTHLY_REFRESH_STALE_DAYS = 35
 #: The config keys that carry that threshold. Named so a test can prove the
 #: list is exactly the datasets the monthly job alone writes.
 MONTHLY_REFRESH_DATASETS: tuple[str, ...] = (
-    "waste_terms", "keywords", "geo", "gclid_coverage_snapshots",
+    # PR-ADS-177C: "keywords" (the legacy keyword snapshot) is retired —
+    # RETIRED_DATASETS above.
+    "waste_terms", "geo", "gclid_coverage_snapshots",
 )
 
 
@@ -327,16 +338,8 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     # "never run" permanently while the page worked fine. A freshness row with no
     # durable source is not evidence — the N-Gram page's real dependency is
     # `search_terms`, which has its own entry above.
-    "keywords": {
-        "table": "keywords",
-        "date_column": "run_date",
-        "source": "google_ads_api",
-        "dataset": "keywords",
-        "stale_threshold_days": MONTHLY_REFRESH_STALE_DAYS,
-        "refresh_cadence": "monthly",
-        "depends_on": [],
-        "page": None,   # legacy snapshot — audit-only; not a page dependency
-    },
+    # PR-ADS-177C: the "keywords" entry (the legacy keyword snapshot) stood
+    # here. It is retired — see RETIRED_DATASETS above.
     "keyword_facts": {
         "table": "keyword_daily_facts",
         "date_column": "source_date",
@@ -344,7 +347,9 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "dataset": "keyword_facts",
         "stale_threshold_days": 8,
         "depends_on": [],
-        "page": "keywords",   # PR-ADS-146: Keyword Evidence depends on durable facts
+        # PR-ADS-146: Keyword Evidence depends on durable facts. PR-ADS-177C:
+        # it is the Keywords tab of the one Keywords & Search Terms page.
+        "page": "search-terms",
     },
     # PR-ADS-165A: the legacy `geo` snapshot. `page` was "geo": the Google Ads
     # → Countries page summed this table over a day window. The monthly job is

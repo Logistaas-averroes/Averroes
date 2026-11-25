@@ -346,7 +346,8 @@ def test_06e_every_mart_and_dashboard_sql_cell_goes_through_the_gate():
                "renderCampaignsPageTable", "renderCampaignsPageSummary",
                "renderCampaignsResidualRow", "renderCampaignsPageDrawer",
                "renderCampLeaderboardResidual",
-               "renderMartSummaryStrip", "renderCampLeaderboard",
+               # PR-ADS-177C: renderMartSummaryStrip is deleted (no caller).
+               "renderCampLeaderboard",
                # PR-ADS-178B: the Deals tab's campaign table is deleted; its
                # one SQL figure is the Pipeline KPI card.
                "renderCtryLeaderboard", "renderCtryResidualPanel", "pipelineKpiCardsHtml"):

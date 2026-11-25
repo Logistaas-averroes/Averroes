@@ -233,13 +233,13 @@ def test_05_parity_the_settled_campaign_view_joins_the_settled_group(live_db, mo
     assert settled["status"] == "identical", settled
     r = settled["readings"]
     assert r["campaigns_page"] == r["dashboard_campaigns"] == r["countries_page"] \
-        == r["dashboard_countries"] == r["campaign_evidence"] == 4
+        == r["dashboard_countries"] == r["campaign_id_cohort"] == 4
     _, today = _window_dates(WINDOW)
     assert settled["window"]["end_date"] == (today - timedelta(days=1)).isoformat()
     cv = settled["campaign_view"]
     assert cv["window"]["end_date"] == today.isoformat()
     assert set(cv["readings"]) == {"mart_campaign_view", "dashboard_overview",
-                                   "campaign_evidence"}
+                                   "campaign_id_cohort"}
     by = {m["metric"]: m for m in report["metrics"]}
     for key in ("google_ads_spend_usd__settled_days",
                 "campaign_attributed_closed_won_deals__settled_days",

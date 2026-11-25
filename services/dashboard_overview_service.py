@@ -506,21 +506,76 @@ def _country_revenue_rows(deal_rows: list, *, revenue_published: bool) -> list:
     return list(by_country.values())
 
 
+def shared_name_count(row: dict | None) -> int:
+    """How many Google Ads campaign ids share this campaign row's name (0 when
+    the row is one campaign). PR-ADS-177C."""
+    from services.revenue_attribution_service import SHARED_DISPLAY_NAME  # noqa: PLC0415
+    if not row or row.get("identity_status") != SHARED_DISPLAY_NAME:
+        return 0
+    ids = row.get("google_ads_campaign_ids") or []
+    return len(ids) if len(ids) > 1 else -1
+
+
+def shared_name_label(row: dict | None) -> str | None:
+    """The plain-words label for a shared-name row, else None:
+    "N Google Ads campaigns share this name — figures combined"."""
+    n = shared_name_count(row)
+    if not n:
+        return None
+    return (f"{n if n > 0 else 'Several'} Google Ads campaigns share this name — "
+            "figures combined")
+
+
+def _pick_named(rows: list, pick):
+    """PR-ADS-177C-F2: the ONE row a signal or card names. A shared-name row is
+    passed over while a distinct campaign qualifies — a combined figure is not
+    "the best campaign" — but when it is the only candidate it is named, with
+    its label. ``pick(rows) -> row | None``. Returns ``(row, passed_over)``,
+    where ``passed_over`` counts the shared rows left out of the choice."""
+    shared = [r for r in rows if shared_name_count(r)]
+    distinct = [r for r in rows if not shared_name_count(r)]
+    chosen = pick(distinct) if distinct else None
+    if chosen is not None:
+        return chosen, len(shared)
+    return (pick(shared) if shared else None), 0
+
+
 def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
                    summary: dict, spend_truth: dict, period_change: dict,
                    revenue_published: bool = False) -> dict:
     """Ranked top signals, each computed from real canonical rows."""
     sqls_available = summary.get("sqls") is not None
 
-    best_campaign = _best_row(campaign_rows or [], revenue_key="won_revenue")
+    # PR-ADS-177C-F1/F2 (truth audit M-1): a row whose name several Google
+    # Ads campaign ids share carries a TRUE combined figure for that name,
+    # never one campaign's. It stays in every total and count; it is passed
+    # over only when ONE row is named, and named — labelled — when it is the
+    # only candidate (F2: F1 dropped it before counting, which understated
+    # the waste total and hid the only producer).
+    rows_all = list(campaign_rows or [])
+    best_campaign, best_passed_over = _pick_named(
+        rows_all, lambda rs: _best_row(rs, revenue_key="won_revenue"))
     best_campaign_signal = None
     if best_campaign:
+        # Carried minor 1 (round 3): a shared row that would have OUTRANKED the
+        # named distinct campaign is said to exist — the named row is the best
+        # single campaign, not the best row.
+        _rank = lambda r: (float(r.get("won_revenue") or 0.0),  # noqa: E731
+                           r.get("closed_won_deals") or 0)
+        bigger_shared = [r for r in rows_all if shared_name_count(r)
+                         and r is not best_campaign and _rank(r) > _rank(best_campaign)]
         best_campaign_signal = {
             "label": best_campaign.get("campaign_name"),
+            "shared_name_label": shared_name_label(best_campaign),
+            "bigger_shared_rows_skipped": [
+                {"campaign_name": r.get("campaign_name"),
+                 "shared_name_label": shared_name_label(r),
+                 "revenue_usd": _round2(r.get("won_revenue"))} for r in bigger_shared],
             "revenue_usd": _round2(best_campaign.get("won_revenue")),
             "closed_won_deals": best_campaign.get("closed_won_deals"),
             "period_revenue_per_ad_spend":
                 best_campaign.get("period_revenue_per_ad_spend"),
+            "shared_name_rows_excluded": best_passed_over,
             "target_page": "campaigns",
         }
 
@@ -555,7 +610,7 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
     biggest_waste_signal = None
     if sqls_available:
         waste_rows = [
-            r for r in campaign_rows or []
+            r for r in rows_all
             if (r.get("spend") or 0) > 0
             and (r.get("sqls") or 0) == 0
             # PR-ADS-161E: a withheld deal count is unknown, not zero — such a
@@ -564,7 +619,8 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
         ]
         if waste_rows:
             waste_total = sum(float(r.get("spend") or 0.0) for r in waste_rows)
-            top_waste = max(waste_rows, key=lambda r: float(r.get("spend") or 0.0))
+            top_waste, waste_passed_over = _pick_named(
+                waste_rows, lambda rs: max(rs, key=lambda r: float(r.get("spend") or 0.0)))
             biggest_waste_signal = {
                 "label": "Spend with no SQL or won-deal proof",
                 "value": _round2(waste_total),
@@ -572,8 +628,14 @@ def _build_signals(campaign_rows: list, deal_rows: list, source_mix: list,
                              else (spend_truth.get("native_currency") or "GBP")),
                 "campaign_count": len(waste_rows),
                 "top_campaign": top_waste.get("campaign_name"),
+                "top_campaign_shared_name_label": shared_name_label(top_waste),
+                # Shared-name rows ARE in value / campaign_count (their spend is
+                # real); this says how many, so the line can name the sharing.
+                "shared_name_rows_included": sum(1 for r in waste_rows
+                                                 if shared_name_count(r)),
+                "shared_name_rows_excluded": waste_passed_over,
                 "severity": "high" if waste_total > 0 else "low",
-                # Evidence lives in Campaign Revenue & Spend (its Waste decision filter
+                # Evidence lives on the Campaigns page (its Waste decision filter
                 # shows exactly these campaigns on the same business window).
                 # The #/waste page is ad-window search-term waste and cannot
                 # evidence this campaign-level signal; the Investigate decision
@@ -650,6 +712,24 @@ def _fmt_native_short(value, currency: str) -> str:
     return f"{sym}{body} {code}"
 
 
+def _named(name, label) -> str:
+    """A campaign named in a card, with its shared-name label when it has one."""
+    return f"{name} ({label})" if label else f"{name}"
+
+
+def _rows_headline(rows: list, what: str) -> str:
+    """"N campaigns <what>" — or, when any of the rows is a name several Google
+    Ads campaigns share (carried minor 2, round 3), "N campaign names <what>
+    (K shared by several Google Ads campaigns)": a shared row is one NAME,
+    not one campaign."""
+    n = len(rows)
+    k = sum(1 for r in rows if shared_name_count(r))
+    if not k:
+        return f"{n} campaign{'s' if n != 1 else ''} {what}"
+    return (f"{n} campaign name{'s' if n != 1 else ''} {what} ({k} shared by "
+            "several Google Ads campaigns)")
+
+
 def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                           spend_truth: dict, signals: dict, source_mix: list) -> list:
     """Four executive decision cards computed from real data — never generic."""
@@ -677,11 +757,17 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
         cards.append({
             "type": "scale",
             "title": "Scale",
-            "headline": f"{n} campaign{'s' if n != 1 else ''} producing won deals",
+            "headline": _rows_headline(producing, "producing won deals"),
             "body": (
-                f"{best['label']} won {best['closed_won_deals']} deal"
+                f"{_named(best['label'], best.get('shared_name_label'))} won "
+                f"{best['closed_won_deals']} deal"
                 f"{'s' if (best['closed_won_deals'] or 0) != 1 else ''} and "
                 f"{_fmt_usd_short(best['revenue_usd'])} closed-won revenue in this window."
+                + "".join(
+                    f" {_named(b['campaign_name'], b.get('shared_name_label'))} won more "
+                    f"({_fmt_usd_short(b['revenue_usd'])}), but it is not one campaign, "
+                    "so it is not named the best."
+                    for b in best.get("bigger_shared_rows_skipped") or [])
             ),
             "target_page": "campaigns",
             "target_label": "Open Campaigns",
@@ -713,14 +799,16 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
             if (r.get("sqls") or 0) > 0 and r.get("closed_won_deals") == 0
         ]
         if watch_rows:
-            top_watch = max(watch_rows, key=lambda r: r.get("sqls") or 0)
+            top_watch, _ = _pick_named(
+                watch_rows, lambda rs: max(rs, key=lambda r: r.get("sqls") or 0))
             n = len(watch_rows)
             cards.append({
                 "type": "watch",
                 "title": "Watch",
-                "headline": f"{n} campaign{'s' if n != 1 else ''} with SQLs but no won deals yet",
+                "headline": _rows_headline(watch_rows, "with SQLs but no won deals yet"),
                 "body": (
-                    f"{top_watch.get('campaign_name')} has {top_watch.get('sqls')} SQL"
+                    f"{_named(top_watch.get('campaign_name'), shared_name_label(top_watch))} "
+                    f"has {top_watch.get('sqls')} SQL"
                     f"{'s' if (top_watch.get('sqls') or 0) != 1 else ''} without "
                     "closed-won proof — promising, not yet verified."
                 ),
@@ -770,6 +858,10 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
                 f"{value_copy} across {waste['campaign_count']} campaign"
                 f"{'s' if waste['campaign_count'] != 1 else ''} has no SQL or "
                 "won-deal evidence in this window."
+                + (f" {waste['shared_name_rows_included']} of these "
+                   f"{'is a name' if waste['shared_name_rows_included'] == 1 else 'are names'}"
+                   " several Google Ads campaigns share — figures combined."
+                   if waste.get("shared_name_rows_included") else "")
             ),
             # PR-ADS-162G: this card restates the biggest_waste signal, so it
             # opens the page that signal names as its evidence.
