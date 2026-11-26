@@ -27,6 +27,14 @@ What is guarded here (the PostgreSQL half is
 
 Every producer runs for real; the repository is replaced at its fetch
 boundary only.
+
+PR-ADS-182A (owner decision, docs/67): the Pipeline funnel is the acquisition
+cohort (by create date), so it reads no stage-entry count and no undated
+reach. The m3 cases are ported: the same contacts now read EXACT on Pipeline
+(the cohort needs no stage-entry date) while Overview → Lifecycle Activity
+keeps the bound; Pipeline reads identically to Overview's acquisition block;
+the one stage-entry rule is Activity's. Removed with the Pipeline lead-filter
+narrowing it tested: 01_d, 01_g, 08 (see docs/67 §6).
 """
 from __future__ import annotations
 
@@ -98,13 +106,30 @@ def _patch(monkeypatch, rows, undated):
     monkeypatch.setattr(F, "_sync_state_block", lambda: {"available": True})
 
 
-def _pipeline_funnel(monkeypatch, rows, *, undated=None, scope="all_source", group=None,
-                     window="last_quarter"):
-    """The REAL Pipeline funnel producer (``pipeline_service._funnel``) over the
-    rows, JSON-normalised as the route serves it."""
-    from services import pipeline_service as ps
-    _patch(monkeypatch, rows, undated if undated is not None else _reach(rows))
-    return json.loads(json.dumps(ps._funnel(window, NOW, scope, group), default=str))
+def _cohort_rows(funnel_rows):
+    """The same contacts as ``fetch_acquisition_cohort_contacts`` rows (the
+    cohort read), PR-ADS-182A: created date, stage, source, and the MQL / SQL /
+    Opportunity / Customer entry dates as direct evidence."""
+    from tests.test_pr_ads_182a_pipeline_cohort_funnel import row
+    out = []
+    for i, r in enumerate(funnel_rows):
+        dates = {e: r.get(f"date_entered_{e}") for e in ("mql", "sql", "opportunity", "customer")
+                 if r.get(f"date_entered_{e}")}
+        out.append({**row(i, r["lifecycle_stage"], src=r.get("hs_analytics_source"),
+                          label=r.get("hs_analytics_source_data_1"),
+                          created=f"{r['created_at']}T10:00:00Z", **dates),
+                    "contact_id": r["contact_id"]})
+    return out
+
+
+def _pipeline_cohort(monkeypatch, funnel_rows, *, missing_created_at=0):
+    """PR-ADS-182A: the REAL Pipeline builder over the same contacts — its
+    funnel is the acquisition cohort of Q3 (last quarter at NOW)."""
+    from tests.test_pr_ads_182a_pipeline_cohort_funnel import cohort_contract, pipeline
+    contract = cohort_contract(monkeypatch, _cohort_rows(funnel_rows),
+                               missing_created_at=missing_created_at,
+                               start=date(2026, 7, 1), end=date(2026, 9, 30), now=NOW)
+    return contract, pipeline(monkeypatch, contract, window="last_quarter", now=NOW)
 
 
 def _activity(monkeypatch, rows, *, undated=None, window="last_quarter"):
@@ -131,6 +156,11 @@ def _render_pipeline(funnel):
     return _run_app("pipelineFunnelHtml(%s, null)" % json.dumps({"funnel": funnel}))
 
 
+def _render_overview_acquisition(block):
+    return _run_app("renderDashAcquisitionFunnel(%s)"
+                    % json.dumps({"lifecycle_acquisition_funnel": block}))
+
+
 def _render_activity(act):
     return _run_app("renderDashLifecycleActivity(%s)" % json.dumps({"lifecycle_activity": act}))
 
@@ -138,162 +168,98 @@ def _render_activity(act):
 # ═════════════════════════════════════════════════════════════════════════════
 # m3. Pipeline reads the same undated-reach bound as Overview Activity
 # ═════════════════════════════════════════════════════════════════════════════
-def test_01_a_the_pipeline_lead_count_is_a_lower_bound_naming_the_seven(monkeypatch):
-    """On 7cd5e22 the Pipeline read "Entered Lead 10", exact: the window's
-    rows hold no undated contact, and the seven outside them were never
-    read."""
-    f = _pipeline_funnel(monkeypatch, _outside_rows())
-    # The figure first: what the page prints.
-    cells = _stage_html(_render_pipeline(f))
+def test_01_a_the_pipeline_counts_the_seven_undated_contacts_exactly_where_activity_bounds(
+        monkeypatch):
+    """On 7cd5e22 the Pipeline read "Entered Lead 10", exact, while Activity
+    read "at least 10" (seven contacts reached Lead with no Lead date and lie
+    outside the window's rows); 180C made Pipeline "at least 10" too.
+    PR-ADS-182A: the Pipeline funnel counts by create date, which needs no
+    stage-entry date — the same seventeen contacts are counted EXACTLY there,
+    while the stage-entry Activity count keeps its bound."""
+    act = _activity(monkeypatch, _outside_rows())
+    cells = _stage_html(_render_activity(act))
     assert cells["contacts"] == (
         "at least 10", "Lower bound: 7 contacts reached this stage with no entry date "
         "recorded in HubSpot and could belong to this window"), cells["contacts"]
-    assert cells["mql"][0] == "10" and cells["mql"][1] is None
-    lead = f["events"]["lead"]
-    assert lead["count"] == 10
-    assert f["coverage"]["stage_reached_without_entry_date"]["lead"] == 0   # the rows: none
-    assert lead["undated_contacts_could_belong"] == 7
-    assert lead["count_is_bound"] is True
-    assert f["undated_reach"]["available"] is True
-    # MQL: the four October MQLs are dated, so nobody undated reached MQL.
-    assert f["events"]["mql"]["undated_contacts_could_belong"] == 0
-    assert f["events"]["mql"]["count_is_bound"] is False
+    _contract, p = _pipeline_cohort(monkeypatch, _outside_rows())
+    f = p["funnel"]
+    assert f["publication"]["status"] == "published"
+    assert (f["totals"]["contacts"], f["totals"]["reached_mql"]) == (17, 14)
+    pipe = _stage_html(_render_pipeline(f))
+    assert pipe["contacts"] == ("17", None), pipe
+    assert pipe["mql"] == ("14", None), pipe
+    assert all(note is None for _v, note in pipe.values()), pipe
 
 
-def test_01_b_the_same_population_reads_identically_on_both_pages(monkeypatch):
-    """The one rule: every stage's value and bound reason, Activity against
-    Pipeline, over the same contacts and the same window. Its counterpart on
+def test_01_b_the_same_cohort_reads_identically_on_pipeline_and_overview(monkeypatch):
+    """The one rule, now for the acquisition cohort: every column's value
+    and bound reason, Overview's block against Pipeline's, over the same
+    cohort — exact, and under a no-created-date bound. Its counterpart on
     the real table is PG case 01."""
+    from services.dashboard_overview_service import _acquisition_funnel_block
     rows = _outside_rows() + [
-        # An SQL contact in the window's rows with no SQL date (a gap the rows
-        # see), and an Opportunity outside them.
         _f_row(300, "salesqualifiedlead", created="2026-07-01", lead="2026-07-08",
                mql="2026-07-09"),
         _f_row(301, "opportunity", created="2026-08-01")]
-    act = _activity(monkeypatch, rows)
-    f = _pipeline_funnel(monkeypatch, rows)
-    activity = _stage_html(_render_activity(act))
-    pipeline = _stage_html(_render_pipeline(f))
-    assert activity == pipeline, (activity, pipeline)
-    by = {s["event"]: s for s in act["stages"]}
-    for e in _EVENTS:
-        assert f["events"][e]["count"] == by[e]["entered"], e
-        assert f["events"][e]["undated_contacts_could_belong"] \
-            == by[e]["undated_contacts_could_belong"], e
-        assert f["events"][e]["count_is_bound"] == by[e]["count_is_bound"], e
-    # And they are bounds exactly where the evidence says: Lead (the seven
-    # and c301 outside the rows), MQL (c301), SQL (c300 in the rows, c301),
-    # Opportunity (c301). Nobody undated reached Customer: exact.
-    assert pipeline == {
-        "contacts": ("at least 11", "Lower bound: 8 contacts reached this stage with no "
-                     "entry date recorded in HubSpot and could belong to this window"),
-        "mql": ("at least 11", "Lower bound: 1 contact reached this stage with no entry "
-                "date recorded in HubSpot and could belong to this window"),
-        "sql": ("at least 0", "Lower bound: 2 contacts reached this stage with no entry "
-                "date recorded in HubSpot and could belong to this window"),
-        "opportunity": ("at least 0", "Lower bound: 1 contact reached this stage with no "
-                        "entry date recorded in HubSpot and could belong to this window"),
-        "customer": ("0", None)}, pipeline
+    for missing in (0, 6):
+        contract, p = _pipeline_cohort(monkeypatch, rows, missing_created_at=missing)
+        overview = _stage_html(_render_overview_acquisition(
+            json.loads(json.dumps(_acquisition_funnel_block(contract), default=str))))
+        pipeline = _stage_html(_render_pipeline(p["funnel"]))
+        assert overview == pipeline, (missing, overview, pipeline)
+        assert pipeline["contacts"][0] == ("19" if not missing else "at least 19")
 
 
-def test_01_c_an_unreadable_reach_is_a_bound_on_every_pipeline_stage(monkeypatch):
-    f = _pipeline_funnel(monkeypatch, _outside_rows(),
-                         undated=lambda s, e: {"available": False, "counts": None})
-    cells = _stage_html(_render_pipeline(f))
+def test_01_c_an_unreadable_reach_is_a_bound_on_every_activity_stage(monkeypatch):
+    """PR-ADS-182A: the undated reach is Activity's alone now. Unread, every
+    Activity stage is a bound — never exact."""
+    act = _activity(monkeypatch, _outside_rows(),
+                    undated=lambda s, e: {"available": False, "counts": None})
+    cells = _stage_html(_render_activity(act))
     for slot, (value, note) in cells.items():
         assert value.startswith("at least"), (slot, value)
         assert "could not all be counted" in note, (slot, note)
-    for e in _EVENTS:
-        assert f["events"][e]["undated_contacts_could_belong"] is None, e
-        assert f["events"][e]["count_is_bound"] is True, e
-    assert f["undated_reach"]["available"] is False
+    for st in act["stages"]:
+        assert st["undated_contacts_could_belong"] is None, st["event"]
+        assert st["count_is_bound"] is True, st["event"]
 
     def raises(s, e):
         raise RuntimeError("connection reset")
-    f = _pipeline_funnel(monkeypatch, _outside_rows(), undated=raises)
-    assert all(f["events"][e]["count_is_bound"] is True for e in _EVENTS)
-
-
-def test_01_d_a_lead_filter_never_reads_the_all_source_figure_as_its_own(monkeypatch):
-    """Under a Scope or Source filter the undated reach (all sources) is an
-    upper limit on the subset's. Outside the window's rows it decides
-    nothing exact: how many the filter selects is not measured. Where
-    nothing lies outside the rows, the scope's own gap decides (178C)."""
-    # The seven outside the rows are ORGANIC; the scope is Google Ads.
-    rows = _outside_rows() + [
-        {**_f_row(400 + i, "marketingqualifiedlead", created="2026-07-01",
-                  lead="2026-07-06", mql="2026-07-11"),
-         "hs_analytics_source": "PAID_SEARCH", "hs_analytics_source_data_1": "brand - uk"}
-        for i in range(3)]
-    f = _pipeline_funnel(monkeypatch, rows, scope="google_ads_source")
-    value, note = _stage_html(_render_pipeline(f))["contacts"]
-    assert value == "at least 3"
-    lead = f["events"]["lead"]
-    assert lead["count"] == 3
-    assert lead["undated_contacts_could_belong"] is None      # not measured for the scope
-    assert lead["undated_contacts_all_sources"] == 7          # named as all sources
-    assert lead["count_is_bound"] is True
-    assert f["undated_reach"]["covers_selected_population"] is False
-    assert note == ("Lower bound: 7 contacts across all sources reached this stage with no "
-                    "entry date recorded in HubSpot and could belong to this window; how many "
-                    "of them the lead filters select is not measured")
-    # The same under a Source filter.
-    f = _pipeline_funnel(monkeypatch, rows, group="organic")
-    assert f["events"]["lead"]["undated_contacts_could_belong"] is None
-    assert f["events"]["lead"]["count_is_bound"] is True
-
-    # Nothing outside the rows: an all-source gap IN the rows (organic, SQL)
-    # does not bound the Google Ads scope, whose own gap is 0 — exact.
-    inside = [_f_row(i, "marketingqualifiedlead", created="2026-07-01", lead="2026-07-05",
-                     mql="2026-07-10") for i in range(10)]
-    inside += [_f_row(500, "salesqualifiedlead", created="2026-07-01", lead="2026-07-05",
-                      mql="2026-07-10")]
-    inside += [{**_f_row(600 + i, "salesqualifiedlead", created="2026-07-01",
-                         lead="2026-07-06", mql="2026-07-11", sql="2026-07-20"),
-                "hs_analytics_source": "PAID_SEARCH", "hs_analytics_source_data_1": "brand - uk"}
-               for i in range(2)]
-    whole = _pipeline_funnel(monkeypatch, inside)
-    assert whole["events"]["sql"]["undated_contacts_could_belong"] == 1
-    assert whole["events"]["sql"]["count_is_bound"] is True
-    google = _pipeline_funnel(monkeypatch, inside, scope="google_ads_source")
-    assert google["undated_reach"]["outside_window_rows"]["sql"] == 0
-    assert google["events"]["sql"]["undated_contacts_could_belong"] == 0
-    assert google["events"]["sql"]["count_is_bound"] is False
-    assert _stage_html(_render_pipeline(google))["sql"] == ("2", None)
-    # A read that does not say what lies outside the rows proves nothing for
-    # a subset.
-    no_outside = _reach(inside)
-    google = _pipeline_funnel(monkeypatch, inside, scope="google_ads_source",
-                              undated=lambda s, e: {**no_outside(s, e),
-                                                    "outside_window_rows": None})
-    assert google["events"]["sql"]["undated_contacts_could_belong"] is None
-    assert google["events"]["sql"]["count_is_bound"] is True
+    act = _activity(monkeypatch, _outside_rows(), undated=raises)
+    assert all(st["count_is_bound"] is True for st in act["stages"])
 
 
 def test_01_e_one_rule_not_a_copy():
-    """Both stage-entry adapters call ONE function, and the window-row rule
-    is reached only through it."""
+    """The stage-entry adapter calls ONE function, and the window-row rule
+    is reached only through it. PR-ADS-182A: that adapter is Activity's;
+    the Pipeline adapter is the acquisition adapter and reads no stage-entry
+    rule at all."""
     rule = _fn("stageEntryCountBounds")
     assert "stageEntryLowerBounds(" in rule and "undated_contacts_could_belong" in rule
     assert "count_is_bound" in rule
-    for adapter in ("pipelineFunnelModel", "dashActivityFunnelModel"):
-        body = _fn(adapter)
-        assert "stageEntryCountBounds(" in body, adapter
-        assert "stageEntryLowerBounds(" not in body, adapter
-        assert "undated_contacts_could_belong" not in body, adapter
+    body = _fn("dashActivityFunnelModel")
+    assert "stageEntryCountBounds(" in body
+    assert "stageEntryLowerBounds(" not in body
+    assert "undated_contacts_could_belong" not in body
+    pipe = _fn("pipelineFunnelModel")
+    assert "acquisitionFunnelModel(" in pipe
+    for gone in ("stageEntryCountBounds(", "stageEntryLowerBounds(", "count_is_bound",
+                 "undated_contacts_could_belong"):
+        assert gone not in pipe, gone
     callers = [m.start() for m in re.finditer(r"stageEntryLowerBounds\(", JS)]
     # The definition and the one call inside stageEntryCountBounds.
     assert len(callers) == 2, len(callers)
     assert "function dashActivityLowerBounds(" not in JS
-    # The backend: one rule in the funnel service; Overview and Pipeline call it.
+    # The backend: one rule in the funnel service; Overview calls it, and
+    # Pipeline reads neither it nor the reach.
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
     overview = (root / "services" / "dashboard_overview_service.py").read_text()
     pipeline = (root / "services" / "pipeline_service.py").read_text()
     assert "_funnel.stage_count_is_bound(" in overview
     assert "_funnel.undated_stage_reach(" in overview
-    assert "crm_funnel.stage_count_is_bound(" in pipeline
-    assert "crm_funnel.undated_stage_reach(" in pipeline
+    assert "stage_count_is_bound(" not in pipeline
+    assert "undated_stage_reach(" not in pipeline
     for src in (overview, pipeline):
         assert "fetch_undated_stage_reach(" not in src
 
@@ -316,39 +282,13 @@ def test_01_f_a_stage_the_server_does_not_state_complete_is_a_bound():
     cells = _stage_html(_render_activity(
         {**act, "stages": [{**stage, "count_is_bound": False}]}))
     assert cells["mql"] == ("12", None)
-    # The Pipeline reads the same rule.
-    f = {"available": True, "metric_family": "lifecycle_stage_events",
-         "events": {"mql": {"count": 12, "undated_contacts_could_belong": 0}},
-         "reconciliation": {"status": "reconciled"},
-         "undated_reach": {"available": True, "counts": {"mql": 0}}}
-    assert _stage_html(_render_pipeline(f))["mql"][0] == "at least 12"
-    f["events"]["mql"]["count_is_bound"] = False
-    assert _stage_html(_render_pipeline(f))["mql"] == ("12", None)
     # Defence in depth: a stage whose undated reach is not measured (None) is
-    # a bound even beside a server verdict that says complete.
-    f["events"]["mql"]["undated_contacts_could_belong"] = None
-    value, note = _stage_html(_render_pipeline(f))["mql"]
+    # a bound even beside a server verdict that says complete. (PR-ADS-182A:
+    # asserted on Activity, the one stage-entry funnel; the Pipeline half of
+    # this case went with Pipeline's stage-entry funnel.)
+    unmeasured = {**stage, "count_is_bound": False, "undated_contacts_could_belong": None}
+    value, note = _stage_html(_render_activity({**act, "stages": [unmeasured]}))["mql"]
     assert value == "at least 12" and "could not all be counted" in note
-
-
-def test_01_g_the_population_rule_unit():
-    from services.canonical_crm_funnel_service import undated_reach_for_population as rule
-    read = {"available": True, "counts": {"lead": 7, "sql": 0, "mql": 2},
-            "outside_window_rows": {"lead": 7, "sql": 0, "mql": 0}}
-    cov = {"stage_reached_without_entry_date": {"lead": 0, "sql": 0, "mql": 1}}
-    assert rule(read, cov, whole=True)["counts"] == {"lead": 7, "sql": 0, "mql": 2}
-    narrow = rule(read, cov, whole=False)
-    # Outside the rows: unknown. Nothing outside: the scope's own gap.
-    assert narrow["counts"] == {"lead": None, "sql": 0, "mql": 1}
-    assert narrow["all_source_counts"] == read["counts"]
-    # Unread, or a coverage silent on a stage: unknown, never 0.
-    assert rule({"available": False, "counts": None}, cov, whole=False)["counts"] is None
-    assert rule({"available": False, "counts": None}, cov, whole=True)["available"] is False
-    # A coverage silent on a stage, or a read that does not say what lies
-    # outside the rows: unknown — except where all sources hold none.
-    assert rule(read, {}, whole=False)["counts"] == {"lead": None, "sql": 0, "mql": None}
-    assert rule({**read, "outside_window_rows": None}, cov, whole=False)["counts"] \
-        == {"lead": None, "sql": 0, "mql": None}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -599,13 +539,3 @@ def test_07_the_reconciliation_summary_says_unknown_for_an_unread_exclusion_coun
         return _text(m.group(1)).strip()
     assert cell(None) == "Unknown"
     assert cell(0) == "0" and cell(3276) == "3,276"
-
-
-# ── F2 minor 4: the population label says whose counts these are ───────────
-def test_08_the_undated_reach_names_its_population(monkeypatch):
-    rows = _outside_rows()
-    assert _pipeline_funnel(monkeypatch, rows)["undated_reach"]["population"] == "all_source"
-    for kw in ({"scope": "google_ads_source"}, {"group": "organic"}):
-        reach = _pipeline_funnel(monkeypatch, rows, **kw)["undated_reach"]
-        assert reach["population"] == "selected_population_narrowed", kw
-        assert reach["covers_selected_population"] is False

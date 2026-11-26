@@ -308,7 +308,10 @@ def test_evidence_loaders_use_window_param():
     assert 'window_type: "business"' in contacts
     svc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "services", "pipeline_service.py"), encoding="utf-8").read()
-    assert 'crm_funnel.build("business", window,' in svc
+    # PR-ADS-182A: the funnel is the acquisition cohort of the mart's deal
+    # view, built on the same BUSINESS window (no evidence window anywhere).
+    assert 'build_revenue_decision_mart(view="deal", window=window, now=now)' in svc
+    assert "funnel = _funnel(cohort, scope, acquisition_group)" in svc
     assert "window: window_, scope: _leadsScope" in APP_JS.split("async function loadPipeline(")[1]
     # PR-ADS-165A: the Countries page fetched /api/geo and
     # /api/leads/country-summary and joined them in the browser by country

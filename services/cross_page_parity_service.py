@@ -576,6 +576,30 @@ METRIC_IDENTITIES = {
     },
 }
 
+#: PR-ADS-182A — the all-source ACQUISITION-COHORT funnel, one identity per
+#: column: Overview's block and the Pipeline page's (unfiltered — the parity
+#: audit builds Pipeline with no lead filter) are the same cohort build's
+#: ``all_sources`` slot through the same producer
+#: (``dashboard_overview_service.acquisition_funnel_block``), so they must
+#: agree, column for column. Both file their provenance under
+#: ``lifecycle_acquisition_funnel``. A filtered Pipeline funnel names another
+#: scope and is never compared.
+ACQUISITION_FUNNEL_COLUMNS = ("contacts", "reached_mql", "reached_sql",
+                              "reached_opportunity", "reached_customer_stage")
+for _col in ACQUISITION_FUNNEL_COLUMNS:
+    METRIC_IDENTITIES[f"all_source_acquisition_cohort_{_col}"] = {
+        "label": (f"Acquisition cohort, all sources · "
+                  f"{'contacts acquired' if _col == 'contacts' else _col.replace('_', ' ')}"),
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "all_source_acquisition_cohort",
+        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "contract_metric": "lifecycle_acquisition_funnel",
+        "consumers": [
+            ("dashboard/overview", f"lifecycle_acquisition_funnel.totals.{_col}"),
+            (CONSUMER_PIPELINE, f"funnel.totals.{_col}"),
+        ],
+    }
+
 #: PR-ADS-177C (M8): where the independent settled reading takes each figure.
 _INDEPENDENT_SOURCE = {
     "google_ads_spend_usd": "google_ads_api.canonical_campaign_spend",

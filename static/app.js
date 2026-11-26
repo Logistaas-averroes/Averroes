@@ -347,9 +347,9 @@ const PAGE_HELP_CONTENT = {
     checkNext: "Campaigns for canonical spend, leads, SQLs and closed-won outcomes, or the Flagged tab for the review queue."
   },
   pipeline: {
-    what: "Pipeline — leads and closed-won deals for one business window through today. SQLs are the Google Ads acquisition cohort (the same count as Overview and Campaigns). The funnel counts contacts that entered each lifecycle stage in the window; click a stage for its contacts. The deal list is every closed-won deal; customers are distinct companies.",
+    what: "Pipeline — leads and closed-won deals for one business window through today. SQLs are the Google Ads acquisition cohort (the same count as Overview and Campaigns). The funnel is the acquisition cohort: contacts created in these days, and how far they have got so far (the same funnel as Overview). The contact list below it is a different count — contacts that entered a stage in the window; pick a stage to list them. The deal list is every closed-won deal; customers are distinct companies.",
     source: "One builder (/api/pipeline): the Revenue Decision Mart's deal view and acquisition cohort, the canonical HubSpot contact funnel, the closed-won deal ledger. This does NOT use Google Ads conversion value.",
-    howToUse: "Pick a business window. The Scope and Source selectors filter leads only — the funnel and the leads list; deal figures never change with them. Filter the deal list by each deal's own source group.",
+    howToUse: "Pick a business window. The Scope and Source selectors filter leads only — the funnel and the leads list; deal figures never change with them. The funnel honours Source and Scope Google Ads-source; under Campaign- or Keyword-attributable it says it cannot be split that way. Filter the deal list by each deal's own source group.",
     doNotAssume: "Withheld and Unavailable are never zero. Customers are never summed and are not the contacts moved to the Customer stage. Open and lost deals are not in the deal ledger.",
     checkNext: "Campaigns for spend against these outcomes, or Revenue Health for blockers."
   },
@@ -2148,7 +2148,6 @@ const CANONICAL_REASON_LABELS = {
   no_closed_won_deals_in_window: "no closed-won deals in this window, so there is no average",
   average_deal_value_population_mismatch:
     "the average was computed over a different deal count or revenue than the figures beside it",
-  lifecycle_funnel_unreadable: "the lifecycle funnel could not be read",
   missing_stage_entry_date: "some contacts reached a stage with no entry date recorded in HubSpot",
   unknown_lifecycle_stage: "some contacts hold a lifecycle stage this funnel does not recognise",
   sql_to_customer_rate_needs_one_acquisition_cohort_and_scope:
@@ -2782,7 +2781,8 @@ function wireDashChartHover(root, d) {
 // ══ PR-ADS-180A — the ONE lifecycle funnel block (docs/63) ═══════════════════
 //
 // Every page that shows the lifecycle funnel draws it here and nowhere else:
-// Overview (Lifecycle Activity, Lifecycle Cohort), Pipeline and Channels. The
+// Overview (Lifecycle Activity, Acquisition Cohort), Pipeline, Campaigns,
+// Countries and Channels. The
 // block is the Dashboard's design (the owner's standard): five stage columns in
 // one row, a connector between each pair, the same classes on every page.
 //
@@ -2814,8 +2814,10 @@ function wireDashChartHover(root, d) {
 //                stage is a lower bound or unknown) · unavailable the word and
 //                its reason · none: a plain connector, no rate published.
 // opts           {ariaLabel, selectable, activeKey, layout}: presentation only. A
-//                selectable block (Pipeline) makes each stage a button carrying
+//                selectable block makes each stage a button carrying
 //                data-funnel-event; the selected stage is an ARGUMENT.
+//                (PR-ADS-182A: Pipeline, its one user, now draws the cohort
+//                block unselectable — its contact list is a different count.)
 //                PR-ADS-181A: layout "vertical" stacks the same five cells in
 //                one column (the Channels drawer). Same cells, same rules: it
 //                changes the CSS layout only, never what a cell says.
@@ -3011,8 +3013,8 @@ function funnelBlockConvHtml(conv, verdict) {
 
 /**
  * Which stage-entry counts are lower bounds, each with its reason in words
- * (PR-ADS-178B-F1 o1; shared by the two stage-entry adapters, Pipeline and
- * Overview's Lifecycle Activity, since PR-ADS-180A).
+ * (PR-ADS-178B-F1 o1; Overview's Lifecycle Activity — the Pipeline funnel
+ * left the stage-entry family in PR-ADS-182A).
  *
  * Under `reconciliation.status === "partial"` a stage some contacts reached
  * with no recorded entry date counts only the dated entries: the undated ones
@@ -3088,7 +3090,7 @@ function stageEntryConversion(conv, fromBound, toBound, exactTitle, basis) {
  *
  * PR-ADS-180A: drawn by the shared funnel block (funnelBlockHtml) from
  * dashActivityFunnelModel. A count some contacts reached with no entry date is
- * a lower bound, by the same rule as the Pipeline funnel.
+ * a lower bound (stageEntryCountBounds).
  */
 function renderDashLifecycleActivity(d) {
   const activity = d.lifecycle_activity || null;
@@ -3113,8 +3115,8 @@ function renderDashLifecycleActivity(d) {
 /**
  * PR-ADS-180A — the activity block's model, read from `lifecycle_activity`
  * alone. The family is the block's own `basis` ("stage_entry_events"); a count
- * some contacts reached with no entry date is a lower bound (the Pipeline rule,
- * one function for both stage-entry funnels); every connector is the canonical
+ * some contacts reached with no entry date is a lower bound
+ * (stageEntryCountBounds); every connector is the canonical
  * cohort conversion, whole.
  */
 function dashActivityFunnelModel(activity) {
@@ -3153,12 +3155,13 @@ function dashActivityFunnelModel(activity) {
 
 /**
  * The lower bounds of a stage-entry funnel, each with its reason in words —
- * ONE rule for both stage-entry funnels: Overview's Lifecycle Activity
- * (PR-ADS-180B) and the Pipeline funnel (PR-ADS-180C, docs/65).
+ * Overview's Lifecycle Activity (PR-ADS-180B / 180C, docs/65). PR-ADS-182A:
+ * the Pipeline funnel is the acquisition cohort now (acquisitionFunnelModel),
+ * so Activity is the one stage-entry funnel left, and the lead-filter branch
+ * (`undated_contacts_all_sources`, Pipeline's) went with it.
  *
- * `block` is the funnel block (`lifecycle_activity`, or Pipeline's `funnel`);
- * `stages` are its stages, each `{event, undated_contacts_could_belong,
- * count_is_bound, undated_contacts_all_sources?}`.
+ * `block` is the funnel block (`lifecycle_activity`); `stages` are its
+ * stages, each `{event, undated_contacts_could_belong, count_is_bound}`.
  *
  * The window-row rule (stageEntryLowerBounds) reads the gap in the window's
  * OWN rows; a contact that reached a stage undated but has no date in the
@@ -3174,13 +3177,7 @@ function stageEntryCountBounds(block, stages) {
   const measured = ((block || {}).undated_reach || {}).available === true;
   list.forEach((s) => {
     const n = s.undated_contacts_could_belong;
-    const all = s.undated_contacts_all_sources;
-    if (measured && (n === null || n === undefined) && all !== null && all !== undefined
-        && Number(all) > 0) {
-      // A lead filter narrows the funnel; the undated reach is counted over
-      // all sources. Its figure bounds the subset's, it is not the subset's.
-      out[s.event] = `${fmtCount(all)} contact${Number(all) === 1 ? "" : "s"} across all sources reached this stage with no entry date recorded in HubSpot and could belong to this window; how many of them the lead filters select is not measured`;
-    } else if (!measured || n === null || n === undefined) {
+    if (!measured || n === null || n === undefined) {
       out[s.event] = "the contacts that reached this stage with no entry date could not all be counted, so this count may be missing some";
     } else if (Number(n) > 0) {
       out[s.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot and could belong to this window`;
@@ -5975,10 +5972,13 @@ const LEADS_COMPANY_NAME_LABELS = {
 };
 const LEADS_COMPANY_NOT_RECORDED = "Company not recorded";
 
-// The funnel's stages. Each counts contacts that ENTERED the stage in the
-// window on its own HubSpot date — the label says so ("Entered SQL"), never a
-// bare "SQLs", which on this page is the acquisition cohort's KPI.
-const PIPELINE_FUNNEL_LABEL = "Entered stage in window";
+// PR-ADS-182A (owner decision): the Pipeline funnel is the ACQUISITION COHORT
+// — contacts created in the window, and how far they have got so far — drawn
+// by the one shared block (acquisitionFunnelModel → funnelBlockHtml).
+const PIPELINE_FUNNEL_LABEL = "Acquisition cohort";
+// The contact LIST's stages (not the funnel's): the list opens on contacts
+// that ENTERED a stage in the window, each on its own HubSpot date — the
+// label says so ("Entered SQL"), never a bare "SQLs".
 const LEADS_STAGES = [
   { event: "lead",        label: "Entered Lead",        stage: "Lead" },
   { event: "mql",         label: "Entered MQL",         stage: "MQL" },
@@ -6196,83 +6196,86 @@ function pipelineKpiCardsHtml(d, pc) {
     </div>`;
 }
 
-// ── The lifecycle funnel: stage ENTRIES in the window ───────────────────────
+// ── The lifecycle funnel: the acquisition cohort (PR-ADS-182A) ──────────────
 /**
- * The Pipeline funnel panel. `activeEvent` is the stage whose contacts the
- * leads list shows — an ARGUMENT (the caller passes its selection), so the
- * shared block never reads page state. The block itself is funnelBlockHtml.
+ * The Pipeline funnel panel: the SAME acquisition-cohort block the Overview,
+ * Campaigns, Countries and Channels draw (acquisitionFunnelModel →
+ * funnelBlockHtml), read from THIS response's `funnel` alone. Below it, the
+ * contact list's own stage picker: that list is a different count (contacts
+ * that ENTERED a stage in the window) and says so; the funnel's columns are
+ * not buttons onto it. `activeEvent` is the list's selection — an ARGUMENT.
  */
 function pipelineFunnelHtml(d, activeEvent) {
   const f = (d && d.funnel) || {};
-  const scopeLabel = f.scope_label || "All Sources";
-  const groupLabel = f.acquisition_group_label || "All sources";
+  const lf = f.lead_filters || {};
+  const published = ((f.publication || {}).status === "published") && !!f.totals;
+  const asOf = published && f.stale && f.as_of
+    ? ` <small class="metric-reason cohort-as-of">measured as of ${escapeHtml(fmtDate(f.as_of))}</small>` : "";
+  const scopeLabel = lf.scope_label || "All sources";
+  const groupLabel = lf.acquisition_group_label || "All sources";
   return `
     <div class="dash-panel__header">
       <div>
         <h3 class="dash-panel__title">Lifecycle funnel · ${escapeHtml(PIPELINE_FUNNEL_LABEL)}</h3>
-        <p class="dash-panel__sub">Contacts that entered each HubSpot lifecycle stage in this window, each on its own stage-entry date — a different metric and a different population (all sources, narrowed only by the lead filters) from the SQL card above (the Google Ads acquisition cohort). Click a stage to list its contacts.</p>
+        <p class="dash-panel__sub">${escapeHtml(PIPELINE_FUNNEL_DESCRIPTION)} ${escapeHtml(pipelineFunnelPopulationText(f))}${asOf}</p>
       </div>
     </div>
-    ${leadsTruthStateHtml(f.available === undefined ? null : f)}
-    ${funnelBlockHtml(pipelineFunnelModel(f), {
-      ariaLabel: PIPELINE_FUNNEL_LABEL, selectable: true, activeKey: activeEvent })}
-    <div class="pipeline-other-view">
-      <button type="button" class="search-terms-tab search-terms-tab--muted${activeEvent === LEADS_VIEW_OTHER ? " active" : ""}"
-        data-leads-view="${LEADS_VIEW_OTHER}">Disqualified / Other — working status, not a funnel stage</button>
+    ${funnelBlockHtml(pipelineFunnelModel(f), { ariaLabel: PIPELINE_FUNNEL_LABEL })}
+    <p class="lifecycle-legend">${escapeHtml(ACQUISITION_FUNNEL_LEGEND)}</p>
+    <div class="pipeline-list-picker" role="group" aria-label="Contact list">
+      <p class="grace-note pipeline-list-picker__note">${escapeHtml(PIPELINE_LIST_NOTE)}</p>
+      <div class="pipeline-other-view">
+        ${LEADS_STAGES.map((st) => `<button type="button" class="search-terms-tab${activeEvent === st.event ? " active" : ""}"
+          data-leads-stage="${escapeHtml(st.event)}" aria-pressed="${activeEvent === st.event ? "true" : "false"}"
+          title="${escapeHtml(st.event === "customer" ? LEADS_STAGE_MOVE_HELP
+            : `List the contacts that entered ${st.stage} in this window`)}">${escapeHtml(st.label)}</button>`).join("")}
+        <button type="button" class="search-terms-tab search-terms-tab--muted${activeEvent === LEADS_VIEW_OTHER ? " active" : ""}"
+          data-leads-view="${LEADS_VIEW_OTHER}">Disqualified / Other — working status, not a funnel stage</button>
+      </div>
     </div>
     <p class="grace-note">Lead filters — Scope: ${escapeHtml(scopeLabel)} · Source: ${escapeHtml(groupLabel)} ·
-      A contact counts in every stage it entered; a current Customer still counts in the period it became an SQL.</p>`;
+      they narrow the funnel and the contact list, never the SQL card or a deal figure.</p>`;
+}
+
+const PIPELINE_FUNNEL_DESCRIPTION = "Contacts created in these days, and how far they have got so far.";
+const PIPELINE_LIST_NOTE = "Contact list — a different count from the funnel above: "
+  + "contacts that ENTERED a stage in this window, each on its own HubSpot "
+  + "stage-entry date. Pick a stage to list them.";
+// The reasons a lead filter cannot be honoured on the cohort basis (the
+// server names them, `funnel.lead_filters.unavailable_reason`).
+const PIPELINE_FUNNEL_REASONS = {
+  lead_scope_not_on_cohort_basis: "the acquisition cohort is not split by campaign or keyword attribution, so this Scope cannot be applied to it; choose All sources or Google Ads-source (the contact list below still applies this Scope)",
+  lead_filters_select_no_contact: "Scope Google Ads-source and this Source select no contact together: a contact has one source group",
+  acquisition_funnel_counts_missing: "this response carries no cohort count for the selected population",
+};
+
+/** Whose contacts the funnel counts, in words, from the payload. */
+function pipelineFunnelPopulationText(f) {
+  const lf = (f && f.lead_filters) || {};
+  if (lf.honoured === false) return "";
+  const group = lf.source_group;
+  if (!group) {
+    return "All sources. The SQL card above is the Google Ads acquisition cohort only, and is not narrowed by the lead filters.";
+  }
+  return `Source group: ${sourceGroupLabel(group)} (HubSpot Original Source and its drill-down) — part of the same cohort. The SQL card above is the Google Ads acquisition cohort and is not narrowed by the lead filters.`;
 }
 
 /**
- * PR-ADS-180A — the Pipeline funnel's model, read from `d.funnel` alone.
- * An unreadable funnel is Unavailable and a scope-nesting mismatch is
- * "Reconciliation required" — never a count. Only a cohort-safe conversion is
- * ever shown, under the 178B-F2 lower-bound rule (stageEntryConversion).
+ * PR-ADS-182A — the Pipeline funnel's model: the shared acquisition adapter
+ * over `d.funnel`, exactly as Overview's (no rate: `shares: false`; a contact
+ * with no created date makes every column "at least N"). Nothing here
+ * divides or decides publication.
  */
 function pipelineFunnelModel(f) {
-  const events = f.events || {};
-  const available = f.available === true;
-  const mismatch = (f.reconciliation || {}).status === "mismatch";
-  const family = { key: f.metric_family,
-    basis: stageEntryWindowBasis(LEADS_STAGES.map((s) => events[s.event])) };
-  const convByPair = {};
-  // PR-ADS-180C: the Overview Activity rule, whole (stageEntryCountBounds) —
-  // the window's rows AND the undated reach over every contact that could
-  // belong to the window, and the server's own `count_is_bound`.
-  const lowerBound = stageEntryCountBounds(f,
-    LEADS_STAGES.map((s) => ({ ...(events[s.event] || {}), event: s.event })));
-  (f.conversions || []).forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
-  const verdict = mismatch
-    ? { status: "withheld", word: "Reconciliation required",
-        reason: "a scope invariant of the lifecycle funnel broke, so its counts are withheld until it holds" }
-    : (available ? { status: "published" }
-      : { status: "unavailable", reason: f.reason ? canonicalReasonLabel(f.reason) : "the lifecycle funnel could not be read" });
-
-  const stages = LEADS_STAGES.map((stage) => {
-    const block = events[stage.event] || {};
-    const count = (!available || mismatch) ? null : block.count;
-    const dateProp = block.event_date_property || "";
-    return {
-      slot: FUNNEL_EVENT_SLOTS[stage.event], key: stage.event, label: stage.label,
-      metric: funnelCountMetric(count, "the funnel sent no count for this stage"),
-      // o1 (PR-ADS-178B-F1): under partial evidence a stage with contacts that
-      // reached it with no entry date is a LOWER BOUND — "at least N".
-      bound_reason: lowerBound[stage.event] || null,
-      sub: dateProp ? "HubSpot stage-entry date" : "",
-      sub_title: dateProp ? `HubSpot property: ${dateProp}` : "",
-      help: stage.event === "customer" ? LEADS_STAGE_MOVE_HELP : "",
-      action_title: `List the contacts that entered ${stage.stage} in this window`,
-    };
+  const lf = (f && f.lead_filters) || {};
+  return acquisitionFunnelModel(f, {
+    head: "Contacts acquired",
+    headSub: lf.source_group ? `created in this window · ${sourceGroupLabel(lf.source_group)}`
+      : "created in this window · all sources",
+    reasonText: (code) => PIPELINE_FUNNEL_REASONS[code] || cohortFunnelReasonText(code),
+    note: lf.honoured === false ? "No figure is shown for this filter." : undefined,
+    shares: false,
   });
-  const conversions = LEADS_STAGES.slice(1).map((stage, i) => {
-    const prev = LEADS_STAGES[i];
-    const conv = convByPair[`${prev.event}->${stage.event}`];
-    return stageEntryConversion(conv, lowerBound[prev.event], lowerBound[stage.event],
-      `Cohort-safe: of contacts entering ${prev.stage} in this window, the share that later entered ${stage.stage}`, "")
-      || { kind: "unavailable", title: "Cohort-safe conversion unavailable for this window" };
-  });
-  return { family, verdict, stages, conversions };
 }
 
 function pipelineWireFunnel(root) {
@@ -6280,8 +6283,8 @@ function pipelineWireFunnel(root) {
     btn.addEventListener("click", async () => {
       _leadsView = LEADS_VIEW_OTHER;
       _leadsPage = 1;
-      (root || document).querySelectorAll("[data-funnel-event]").forEach((b) => {
-        b.classList.remove("is-active");
+      (root || document).querySelectorAll("[data-leads-stage]").forEach((b) => {
+        b.classList.remove("active");
         b.setAttribute("aria-pressed", "false");
       });
       btn.classList.add("active");
@@ -6290,13 +6293,13 @@ function pipelineWireFunnel(root) {
       if (leads && typeof leads.scrollIntoView === "function") leads.scrollIntoView({ block: "start" });
     });
   });
-  (root || document).querySelectorAll("[data-funnel-event]").forEach((btn) => {
+  (root || document).querySelectorAll("[data-leads-stage]").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      _leadsView = btn.getAttribute("data-funnel-event");
+      _leadsView = btn.getAttribute("data-leads-stage");
       _leadsPage = 1;
-      (root || document).querySelectorAll("[data-funnel-event]").forEach((b) => {
+      (root || document).querySelectorAll("[data-leads-stage]").forEach((b) => {
         const on = b === btn;
-        b.classList.toggle("is-active", on);
+        b.classList.toggle("active", on);
         b.setAttribute("aria-pressed", on ? "true" : "false");
       });
       (root || document).querySelectorAll("[data-leads-view]").forEach((b) => b.classList.remove("active"));
@@ -6719,7 +6722,7 @@ async function leadsRenderActiveView() {
     if (controls) controls.hidden = true;
     if (pager) pager.innerHTML = "";
     if (header) header.textContent = "Leads";
-    if (body) body.innerHTML = '<p class="empty-state" style="padding: var(--space-5);">Click a stage in the funnel above to list the contacts that entered it in this window.</p>';
+    if (body) body.innerHTML = '<p class="empty-state" style="padding: var(--space-5);">Pick a stage under the funnel above to list the contacts that entered it in this window.</p>';
     return;
   }
   if (controls) controls.hidden = false;
@@ -6862,47 +6865,6 @@ function leadsContactHeading(row) {
   const company = String((row && row.company) || "").trim();
   if (name && company) return `${name} — ${company}`;
   return name || company || leadsNameState(row).text;
-}
-
-/**
- * Compact truth banner: reconciliation state + historical bootstrap readiness.
- * Truth state is visible but never blocks a usable page.
- */
-function leadsTruthStateHtml(payload) {
-  if (!payload) {
-    return `<div class="mapping-notice mapping-notice--info">CRM funnel truth is unavailable. Numbers are withheld rather than shown as zero.</div>`;
-  }
-  const notes = [];
-  const recon = payload.reconciliation || {};
-  const sync = payload.sync || {};
-  const windowKey = (payload.window || {}).window_key;
-
-  if (payload.available === false) {
-    notes.push({ cls: "mapping-notice--info", text: "Canonical CRM contact store unavailable — counts are withheld, not zero." });
-  } else if (recon.status === "mismatch") {
-    notes.push({ cls: "mapping-notice--error", text: "Reconciliation required — funnel counts are withheld until the scope invariant holds." });
-  } else if (recon.status === "partial") {
-    // m4 (PR-ADS-178B-F1): reason codes in words, never raw identifiers.
-    const reasons = (recon.reasons || []).map(canonicalReasonLabel).join("; ");
-    notes.push({ cls: "mapping-notice--info", text: `Partial evidence: ${escapeHtml(reasons || "some stage evidence is missing")}.` });
-  }
-
-  if (payload.campaign_identity_available === false) {
-    notes.push({ cls: "mapping-notice--info", text: "Google Ads campaign identity unavailable — campaign- and keyword-attributable scopes are unavailable (not zero)." });
-  }
-
-  const bootstrap = sync.bootstrap_status;
-  if (bootstrap && bootstrap !== "complete") {
-    const allTime = windowKey === "all_time";
-    notes.push({
-      cls: allTime ? "mapping-notice--error" : "mapping-notice--info",
-      text: `Historical CRM sync in progress (bootstrap: ${escapeHtml(bootstrap)}).` +
-            (allTime ? " All Time does not yet represent complete history." : ""),
-    });
-  }
-
-  if (!notes.length) return "";
-  return notes.map((n) => `<div class="mapping-notice ${n.cls}">${n.text}</div>`).join("");
 }
 
 function sourceGroupLabel(group) {
@@ -8214,7 +8176,8 @@ function channelFunnelModel(data) {
 /**
  * PR-ADS-180B — the ACQUISITION COHORT as the shared funnel block, for every
  * page that publishes it: Channels and Overview (all sources), Campaigns and
- * Countries (Google Ads). `data` is Channels-shaped — `publication`,
+ * Countries (Google Ads), Pipeline (all sources, or the source group its lead
+ * filters select — PR-ADS-182A). `data` is Channels-shaped — `publication`,
  * `metric_family` / `window_basis`, `stages` (reached_* keys), `totals` and
  * `contacts_without_created_at` — read from ONE response, as an argument.
  *

@@ -10,7 +10,8 @@ renders the real payload with the real ``static/app.js`` in ``node``.
 
 Owner decisions 2026-11-25 (``docs/61`` §3): business windows through today;
 SQLs = the acquisition cohort; the funnel = lifecycle stage entries ("Entered
-stage in window"); lead filters apply to leads only and blank no deal figure;
+stage in window") — since PR-ADS-182A (owner decision, ``docs/67``) the funnel
+is the acquisition cohort too, by contact create date; lead filters apply to leads only and blank no deal figure;
 customers won is unavailable under a lead filter; a list only when it numbers
 its published count; Dashboard → Deals reads the same builder.
 """
@@ -86,12 +87,19 @@ def test_01_the_pipeline_builder_publishes_the_cohort_the_ledger_and_the_funnel_
     assert k["sqls"] == {"value": 4, "status": "published", "reason": None}
     assert (p["cohort"]["sql_status"], p["metric_family"], p["window_basis"]) == (
         "published", "acquisition_cohort_outcomes", "contact_created_at")
-    # The funnel: lifecycle stage ENTRIES (c-ae entered SQL yesterday) — a
-    # different metric from the cohort's 4, under its own label.
+    # The funnel (PR-ADS-182A): the SAME cohort build, all sources — the
+    # all-sources slot, the KPI's 4 being its Google Ads part.
     f = p["funnel"]
-    assert (f["label"], f["metric_family"]) == ("Entered stage in window",
-                                                "lifecycle_stage_events")
-    assert f["events"]["sql"]["count"] == 1 and f["available"] is True
+    assert (f["label"], f["metric_family"], f["window_basis"]) == (
+        "Acquisition cohort", "acquisition_cohort_outcomes", "contact_created_at")
+    assert f["publication"] == {"status": "published", "reason": None}
+    slot = p["cohort"]["breakdown"]["all_sources"]
+    assert f["totals"] == {"contacts": slot["contacts_acquired"],
+                           "reached_mql": slot["reached_mql"], "reached_sql": slot["sqls"],
+                           "reached_opportunity": slot["reached_opportunity"],
+                           "reached_customer_stage": slot["reached_customer_stage"]}
+    assert f["totals"]["reached_sql"] >= k["sqls"]["value"]
+    assert "events" not in f
     # Deals, customers, revenue, average: the mart deal view's reader contract.
     assert k["closed_won_deals"] == {"value": 3, "status": "published", "reason": None}
     assert (k["customers"]["value"], k["customers"]["status"]) == (1, "published")
@@ -119,7 +127,9 @@ def test_01_the_pipeline_builder_publishes_the_cohort_the_ledger_and_the_funnel_
     assert cw["rows"][0]["closed_won_deals"] == 3
     # Provenance for the parity audit; no ROAS / CAC anywhere.
     assert set(p["metric_truth"]) == {"closed_won_revenue_usd", "closed_won_deals",
-                                      "customers", "google_ads_cohort_sqls"}
+                                      "customers", "google_ads_cohort_sqls",
+                                      # PR-ADS-182A: the funnel's provenance.
+                                      "lifecycle_acquisition_funnel"}
     assert not re.search(r'"(roas|cac)[a-z_]*":\s*[0-9]', json.dumps(p))
 
 
@@ -132,8 +142,15 @@ def test_02_a_lead_filter_narrows_the_funnel_and_blanks_no_deal_figure(
     _seed(live_db)
     whole, narrowed = _pipeline(), _pipeline(**filters)
     assert narrowed["filters"]["lead_filtered"] is True
-    assert narrowed["funnel"]["acquisition_group"] == filters.get("acquisition_group")
-    assert narrowed["funnel"]["scope"] == filters.get("scope", "all_source")
+    lf = narrowed["funnel"]["lead_filters"]
+    assert lf["acquisition_group"] == filters.get("acquisition_group")
+    assert lf["scope"] == filters.get("scope", "all_source")
+    # PR-ADS-182A: the funnel is the cohort's part for that source group.
+    group = filters.get("acquisition_group") or "google_ads"
+    assert narrowed["funnel"]["source_group"] == group and lf["honoured"] is True
+    part = narrowed["cohort"]["breakdown"]["by_source_group"][group]
+    assert narrowed["funnel"]["totals"]["contacts"] == part["contacts_acquired"]
+    assert narrowed["funnel"]["totals"]["reached_sql"] == part["sqls"]
     # Every deal figure and the cohort KPI are the window's, filter or not.
     assert narrowed["kpis"] == whole["kpis"]
     assert narrowed["deals"] == whole["deals"]
@@ -332,7 +349,9 @@ def test_09_the_real_payload_renders_its_figures_lists_and_footer(live_db, monke
     assert re.search(r'data-kpi="deals">.*?>3<', html, re.DOTALL)
     assert re.search(r'data-kpi="customers">.*?>1<', html, re.DOTALL)
     assert html.count('data-pipeline-deal="') == 3 and "Acme Freight" in html
-    assert "Entered stage in window" in html
+    # PR-ADS-182A: the funnel is the acquisition cohort.
+    assert "Lifecycle funnel · Acquisition cohort" in html
+    assert "Entered stage in window" not in html
     assert html.count("dash-truth-footer") == 1
 
 

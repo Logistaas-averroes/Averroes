@@ -269,12 +269,22 @@ def test_05_the_average_deal_value_divides_by_the_published_deals_only():
 def test_05_b_every_pipeline_reason_has_plain_words_on_the_page():
     from services import pipeline_service as ps
     codes = [ps.REASON_AVERAGE_POPULATION_MISMATCH, ps.REASON_NO_DEALS_TO_AVERAGE,
-             ps.REASON_VERDICT_MISSING, ps.REASON_DEAL_LIST_MISMATCH,
-             ps.REASON_FUNNEL_UNREADABLE]
+             ps.REASON_VERDICT_MISSING, ps.REASON_DEAL_LIST_MISMATCH]
     labels = _run_app("%s.map((c) => [c, CANONICAL_REASON_LABELS[c] || null])"
                       % json.dumps(codes))
     for code, label in labels:
         assert label and "_" not in label, code
+    # PR-ADS-182A: the funnel's own reasons (a lead filter the cohort cannot
+    # honour) and the cohort's, in the words the funnel block prints.
+    # (REASON_FUNNEL_UNREADABLE went with the stage-entry funnel: an
+    # unreadable cohort says the cohort's own `canonical_funnel_unreadable`.)
+    funnel_codes = [ps.REASON_SCOPE_NOT_ON_COHORT_BASIS, ps.REASON_FILTERS_SELECT_NO_CONTACT,
+                    "acquisition_funnel_counts_missing", "canonical_funnel_unreadable",
+                    "source_bootstrap_incomplete", "cohort_reconciliation_failed"]
+    words = _run_app("%s.map((c) => [c, PIPELINE_FUNNEL_REASONS[c] || cohortFunnelReasonText(c)])"
+                     % json.dumps(funnel_codes))
+    for code, label in words:
+        assert label and "_" not in label and len(label) > 20, (code, label)
 
 
 # ── the Pipeline page renderers ─────────────────────────────────────────────
@@ -293,17 +303,26 @@ def _funnel_html(payload):
 
 # ── m4. no raw codes or HubSpot property names in the funnel's text ──────────
 def test_06_the_funnel_says_reasons_in_words_and_keeps_property_names_in_titles():
-    f = _funnel(reconciliation={"status": "partial", "reasons": [
-        "missing_stage_entry_date", "unknown_lifecycle_stage", "campaign_identity_unavailable"]},
-        coverage={"stage_reached_without_entry_date": {e: 0 for e in (
-            "lead", "mql", "sql", "opportunity", "customer")}})
-    html = _funnel_html(_payload(funnel=f))
-    visible = _text(re.sub(r'\s(title|aria-label|data-[a-z-]+)="[^"]*"', "", html))
-    assert not re.search(r"\b[a-z]+(_[a-z0-9]+)+\b", visible), visible
-    assert "hs_v2_date_entered" not in visible
-    assert 'title="HubSpot property: hs_v2_date_entered_sql"' in html
-    assert "no entry date recorded in HubSpot" in visible
-    assert "does not recognise" in visible
+    """PR-ADS-182A: the funnel is the acquisition cohort, which reads no
+    HubSpot stage-entry property (the stage-entry part of this case went
+    with the stage-entry funnel). What stays: no raw reason code in what a
+    person reads, in every state the funnel can be in."""
+    from tests.test_pr_ads_178b_pipeline_one_page import _COHORT, _funnel_block
+    states = [
+        _funnel_block(),
+        _funnel_block({**_COHORT, "sql_status": "withheld",
+                       "sql_reason": "source_last_incremental_failed", "breakdown": None}),
+        _funnel_block({**_COHORT, "sql_status": "unavailable",
+                       "sql_reason": "canonical_funnel_unreadable", "breakdown": None}),
+        _funnel_block(scope="keyword_attributable"),
+        _funnel_block(scope="google_ads_source", group="organic"),
+        _funnel_block({**_COHORT, "contacts_without_created_at": 5}),
+    ]
+    for f in states:
+        html = _funnel_html(_payload(funnel=f))
+        visible = _text(re.sub(r'\s(title|aria-label|data-[a-z-]+)="[^"]*"', "", html))
+        assert not re.search(r"\b[a-z]+(_[a-z0-9]+)+\b", visible), visible
+        assert "hs_v2_date_entered" not in visible
 
 
 # ── m5. the SQL card is not narrowed by the lead filters, and says so ────────
@@ -311,32 +330,36 @@ def test_07_the_sql_card_says_the_lead_filters_do_not_narrow_it():
     note = lambda s: re.search(r'data-kpi="sqls">(.*?)data-kpi="deals"', s, re.S).group(1)
     plain, _ = _page(_payload())
     assert "data-kpi-note" not in note(plain)
-    filt = _payload()
+    from tests.test_pr_ads_178b_pipeline_one_page import _funnel_block
+    filt = _payload(funnel=_funnel_block(scope="google_ads_source"))
     filt["filters"] = {"scope": "google_ads_source", "acquisition_group": None,
                        "lead_filtered": True}
     summary, _ = _page(filt)
     assert "not narrowed by the lead filters" in _text(note(summary))
-    assert "different population (all sources" in _text(_funnel_html(filt))
+    # PR-ADS-182A: the funnel names its population and says the SQL card is
+    # another (the Google Ads acquisition cohort, never narrowed).
+    text = _text(_funnel_html(filt))
+    assert "Source group: Google Ads" in text
+    assert "The SQL card above is the Google Ads acquisition cohort and is not narrowed" in text
 
 
-# ── o1. a partial stage count is a lower bound, never exact-looking ──────────
+# ── o1. a lower-bound count is "at least N", never exact-looking ─────────────
 def test_08_a_partial_stage_count_is_at_least_n_with_the_reason():
-    zero = {e: 0 for e in ("lead", "mql", "sql", "opportunity", "customer")}
-    part = _funnel(reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
-                   coverage={"stage_reached_without_entry_date": {**zero, "sql": 3}})
-    html = _funnel_html(_payload(funnel=part))
-    stages = dict(re.findall(r'data-funnel-event="([a-z]+)".*?dash-funnel__stage-value">(.*?)</span>\s*<span',
-                             html, re.S))
-    assert "at least 11" in _text(stages["sql"])
-    assert "3 contacts reached this stage with no entry date" in html
-    for e in ("lead", "mql", "opportunity", "customer"):
-        assert "at least" not in stages[e], e
-    # The payload cannot say which stage: every stage is a lower bound.
-    unknown = _funnel(reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]})
-    unknown.pop("coverage", None)
-    html2 = _funnel_html(_payload(funnel=unknown))
-    assert _text(html2).count("at least") == 5
-    # Reconciled evidence: exact counts.
+    """PR-ADS-182A: on the acquisition cohort a stage needs no entry date, so
+    the stage-entry gap of this case does not apply; the cohort's one gap is
+    a contact with no created date (in no window). While any exist every
+    column is "at least N" with the reason; not stated is a bound too;
+    none: exact."""
+    from tests.test_pr_ads_178b_pipeline_one_page import _COHORT, _funnel_block
+    bound = _funnel_html(_payload(funnel=_funnel_block({**_COHORT,
+                                                        "contacts_without_created_at": 3})))
+    assert _text(bound).count("at least") == 5
+    assert "at least 11" in _text(bound)
+    assert "3 contacts have no created date in HubSpot" in bound
+    unknown = _funnel_block()
+    unknown.pop("contacts_without_created_at")
+    assert _text(_funnel_html(_payload(funnel=unknown))).count("at least") == 5
+    # Every contact has a created date: exact counts.
     assert "at least" not in _text(_funnel_html(_payload()))
 
 
@@ -351,28 +374,22 @@ def _chips(html):
 
 
 def test_09_a_conversion_beside_a_lower_bound_stage_is_never_shown_as_exact():
-    """Truth audit round 2 (figure-affecting). ``cohort_conversion`` counts a
-    contact as converted only when it carries a TO-stage date, so an undated
-    TO stage undercounts the numerator: the rate is "at least X%". An undated
-    FROM stage leaves the cohort itself incomplete: the rate is unknown ("—").
-    On 2904d7f the chips read a bare "0%" / "40%" beside "at least N"."""
-    zero = {e: 0 for e in ("lead", "mql", "sql", "opportunity", "customer")}
-    convs = [_conv("lead", "mql", 50), _conv("mql", "sql", 40),
-             _conv("sql", "opportunity", 0), _conv("opportunity", "customer", 25)]
-    part = _funnel(conversions=convs,
-                   reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
-                   coverage={"stage_reached_without_entry_date": {**zero, "opportunity": 5}})
-    chips = _chips(_funnel_html(_payload(funnel=part)))
-    # lead→mql, mql→sql: neither side is a bound — exact.
-    assert chips[0] == "50%" and chips[1] == "40%", chips
-    # sql→opportunity: the TO stage is a bound — "at least".
-    assert chips[2] == "at least 0%", chips
-    # opportunity→customer: the FROM stage is a bound — unknown.
-    assert chips[3] == "—", chips
+    """Truth audit round 2 (figure-affecting): on 2904d7f the chips read a
+    bare "0%" / "40%" beside "at least N". PR-ADS-182A: the Pipeline funnel
+    is the acquisition cohort, which publishes no step rate, and the page
+    divides nothing: no rate chip is drawn at all — beside a bound or not."""
+    from tests.test_pr_ads_178b_pipeline_one_page import _COHORT, _funnel_block
+    f = _funnel_block({**_COHORT, "contacts_without_created_at": 5})
+    f["conversions"] = [_conv("lead", "mql", 50), _conv("mql", "sql", 40)]   # never read
+    html = _funnel_html(_payload(funnel=f))
+    assert _chips(html) == [], _chips(html)
+    assert not re.search(r"\d+(\.\d+)?%", _text(html)), _text(html)
 
 
-def test_09_b_reconciled_evidence_keeps_exact_rates():
-    convs = [_conv("lead", "mql", 50), _conv("mql", "sql", 40),
-             _conv("sql", "opportunity", 10), _conv("opportunity", "customer", 25)]
-    chips = _chips(_funnel_html(_payload(funnel=_funnel(conversions=convs))))
-    assert chips == ["50%", "40%", "10%", "25%"], chips
+def test_09_b_exact_evidence_draws_no_rate_either():
+    """PR-ADS-182A: exact evidence draws no rate either — the cohort funnel
+    has none to draw (``shares: false``), so nothing is computed in the
+    browser even where every count is exact."""
+    html = _funnel_html(_payload())
+    assert "at least" not in _text(html)
+    assert _chips(html) == [], _chips(html)

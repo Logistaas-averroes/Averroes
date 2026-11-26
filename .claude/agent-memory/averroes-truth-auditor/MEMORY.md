@@ -1110,3 +1110,12 @@ truncated list. Verified by execution on exported copies of both commits.
 - Evidence: compileall, node --check, diff --check clean. 87 related modules
   (grep for the touched symbols plus every edited test module, 12 PG modules):
   3207 passed, 1 skip (the 123 self-guard, not PG). Full suite NOT run.
+
+## 181A-F1 re-check (eb15747 on ccdfdc1, 2026-11-26) — merge
+- M1–M6 and the `stale` tally all close, checked by node render.
+  - The leader and table counts now go through `funnelBlockValueHtml` ("at least N" under a bound).
+  - The SQL-rate sort keeps API order under a bound.
+  - The Google card without a line takes the window's own reason (stale / withheld / unreadable); only a published window says partition.
+- The 180B 04_b edit is a correction (it now requires "at least"), not a weakening.
+- M5: the drawer stays readable at 0.55 opacity during a reload, then is redrawn, closed when its key is gone, and closed on a failed load. This is the same pattern as the dimmed body table. Accepted.
+- 181A/180B/180A/162A/162I/168A/171B/162C: 296 passed. Full suite not run (CI).

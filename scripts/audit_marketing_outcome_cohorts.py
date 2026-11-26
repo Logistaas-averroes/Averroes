@@ -250,6 +250,10 @@ _STAGE_FIELDS = ("reached_mql", "reached_opportunity", "reached_customer_stage")
 _ACQ_FUNNEL_FIELDS = {"contacts": "contacts_acquired", "reached_mql": "reached_mql",
                       "reached_sql": "sqls", "reached_opportunity": "reached_opportunity",
                       "reached_customer_stage": "reached_customer_stage"}
+#: PR-ADS-182A — every field of the cohort's source-group partition that must
+#: add back to the all-sources slot.
+_SOURCE_GROUP_FIELDS = ("contacts_acquired", "sqls", "sqls_missing_event_timestamp",
+                        "reached_mql", "reached_opportunity", "reached_customer_stage")
 _DASH_KPI_FIELDS = ("leads", "sqls", "sqls_residual", "leads_residual",
                     "google_ads_cohort_sqls", "campaign_row_cohort_sqls")
 #: The marker an itemised outside-market sub-row carries instead of a count.
@@ -293,9 +297,11 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
     # `readiness.missing_contact_created_at_count` and the coverage notes
     # publish it. Its copies are held equal by
     # :func:`created_at_disclosure_problems` instead.
-    # PR-ADS-180B: the Overview's acquisition-cohort funnel (all sources).
-    out += acquisition_funnel_exposures(payload.get("lifecycle_acquisition_funnel"),
-                                        published=False)
+    # PR-ADS-180B: the Overview's acquisition-cohort funnel (all sources);
+    # PR-ADS-182A: the Pipeline page's (and Dashboard → Deals', which
+    # republishes it) — the same block from the same producer.
+    for key in ACQUISITION_FUNNEL_BLOCK_KEYS:
+        out += acquisition_funnel_exposures(payload.get(key), published=False, label=key)
     meta = cohort.get("metadata") or {}
     out += [f"cohort.metadata.{k}" for k in _META_SQL_FIELDS if meta.get(k) is not None]
     # PR-ADS-180C (carried minor a): the coverage notes are a route too. A
@@ -370,12 +376,24 @@ def mart_withheld_exposures(payload: dict) -> list[str]:
     return out
 
 
-def acquisition_funnel_exposures(block, *, published: bool) -> list[str]:
-    """PR-ADS-180B — every count still present in an Overview acquisition
-    funnel (``lifecycle_acquisition_funnel``) that must carry none: under a
-    cohort that is not published (``published=False``), or whenever the block's
-    OWN publication is not ``published``. Empty when ``block`` is None."""
-    if not isinstance(block, dict):
+#: PR-ADS-182A — the payload keys an acquisition-cohort funnel block lives
+#: under: the Overview's and the Pipeline page's (one producer,
+#: ``dashboard_overview_service.acquisition_funnel_block``).
+ACQUISITION_FUNNEL_BLOCK_KEYS = ("lifecycle_acquisition_funnel", "funnel")
+
+
+def _is_acquisition_block(block) -> bool:
+    return isinstance(block, dict) and "publication" in block and "totals" in block
+
+
+def acquisition_funnel_exposures(block, *, published: bool,
+                                 label: str = "lifecycle_acquisition_funnel") -> list[str]:
+    """PR-ADS-180B — every count still present in an acquisition funnel
+    block (Overview ``lifecycle_acquisition_funnel``; PR-ADS-182A also
+    Pipeline ``funnel``) that must carry none: under a cohort that is not
+    published (``published=False``), or whenever the block's OWN publication
+    is not ``published``. Empty when ``block`` is None."""
+    if not _is_acquisition_block(block):
         return []
     own = (block.get("publication") or {}).get("status")
     if published and own == "published":
@@ -383,15 +401,15 @@ def acquisition_funnel_exposures(block, *, published: bool) -> list[str]:
     out = []
     totals = block.get("totals")
     if isinstance(totals, dict):
-        out += [f"lifecycle_acquisition_funnel.totals.{k}" for k, v in totals.items()
+        out += [f"{label}.totals.{k}" for k, v in totals.items()
                 if v is not None]
     elif totals is not None:
-        out.append("lifecycle_acquisition_funnel.totals")
+        out.append(f"{label}.totals")
     # PR-ADS-180B-F1 (m4): `contacts_without_created_at` is the cohort's
     # table-wide disclosure, not a count of this block (see
     # :func:`created_at_disclosure_problems`).
     if own == "published":
-        out.append("lifecycle_acquisition_funnel.publication=published")
+        out.append(f"{label}.publication=published")
     return out
 
 
@@ -426,46 +444,75 @@ def cohort_stage_problems(cohort: dict) -> list[str]:
         if al.get(f) is not None and al.get("contacts_acquired") is not None \
                 and al[f] > al["contacts_acquired"]:
             problems.append(f"breakdown all_sources.{f} exceeds the contacts acquired")
+    # PR-ADS-182A: the all-source partition by source group (the Pipeline
+    # Source filter reads one part) conserves every all-sources field.
+    # (A breakdown without the partition publishes no source-group funnel:
+    # the block producer reads that as counts missing — fail closed.)
+    groups = bd.get("by_source_group") if bd else None
+    if isinstance(groups, dict):
+        for f in _SOURCE_GROUP_FIELDS:
+            parts = [g.get(f) for g in groups.values()]
+            if al.get(f) is None or None in parts or sum(parts) != al[f]:
+                problems.append(f"breakdown by_source_group {f}: groups {parts} do not "
+                                f"sum to all_sources {al.get(f)}")
     return problems
 
 
-def acquisition_funnel_problems(payload: dict) -> list[str]:
-    """PR-ADS-180B — the Overview funnel against the cohort it republishes.
+def acquisition_funnel_problems(payload: dict,
+                                key: str = "lifecycle_acquisition_funnel") -> list[str]:
+    """PR-ADS-180B — an acquisition funnel block against the cohort it
+    republishes: the Overview's (``lifecycle_acquisition_funnel``) and,
+    PR-ADS-182A, the Pipeline page's (``funnel``).
 
     The block must exist, state the cohort's family and window basis, and
     carry the cohort's verdict (its own ``unavailable`` for a published slot
-    that lacks a count is the one narrowing). Unpublished: no count anywhere
+    that lacks a count, or — Pipeline — for a lead filter the cohort cannot
+    honour, is the one narrowing). Unpublished: no count anywhere
     (:func:`acquisition_funnel_exposures`). Published: every column EQUALS
-    the cohort breakdown's all-sources slot — the one cohort build both are
-    read from — and no stage exceeds the contacts acquired."""
-    block = payload.get("lifecycle_acquisition_funnel")
+    the cohort breakdown's slot it names — ``all_sources``, or
+    ``by_source_group[<group>]`` for a Pipeline Source filter — the one
+    cohort build both are read from, and no stage exceeds the contacts
+    acquired. A block that does not honour its filter publishes nothing."""
+    block = payload.get(key)
     cohort = payload.get("cohort") or {}
-    if not isinstance(block, dict):
-        return ["the Overview carries no lifecycle_acquisition_funnel block"]
+    if not _is_acquisition_block(block):
+        return [f"the {'Overview' if key == 'lifecycle_acquisition_funnel' else 'Pipeline'} "
+                f"carries no {key} block"]
     problems = []
-    for key in ("metric_family", "window_basis"):
-        if block.get(key) != cohort.get(key):
-            problems.append(f"lifecycle_acquisition_funnel.{key} {block.get(key)!r} != "
-                            f"cohort {cohort.get(key)!r}")
+    for meta in ("metric_family", "window_basis"):
+        if block.get(meta) != cohort.get(meta):
+            problems.append(f"{key}.{meta} {block.get(meta)!r} != "
+                            f"cohort {cohort.get(meta)!r}")
     own = (block.get("publication") or {}).get("status")
     status = cohort.get("sql_status")
-    if own != status and not (own == "unavailable" and status == "published"):
-        problems.append(f"lifecycle_acquisition_funnel is {own!r} under a {status!r} cohort")
-    problems += acquisition_funnel_exposures(block, published=status == "published")
+    filters = block.get("lead_filters") if isinstance(block.get("lead_filters"), dict) else {}
+    unhonoured = filters.get("honoured") is False
+    if unhonoured:
+        if own != "unavailable" or (block.get("publication") or {}).get("reason") \
+                != filters.get("unavailable_reason"):
+            problems.append(f"{key} does not honour its lead filter but is {own!r}, "
+                            "not unavailable with the filter's reason")
+    elif own != status and not (own == "unavailable" and status == "published"):
+        problems.append(f"{key} is {own!r} under a {status!r} cohort")
+    problems += acquisition_funnel_exposures(
+        block, published=status == "published" and not unhonoured, label=key)
     # PR-ADS-180B-F1 (m4): published whatever the verdict, so equal whatever it is.
     if block.get("contacts_without_created_at") != cohort.get("contacts_without_created_at"):
-        problems.append("lifecycle_acquisition_funnel.contacts_without_created_at differs "
-                        "from the cohort's")
+        problems.append(f"{key}.contacts_without_created_at differs from the cohort's")
     if own != "published" or status != "published":
         return problems
     totals = block.get("totals") or {}
-    slot = (cohort.get("breakdown") or {}).get("all_sources") or {}
-    for key, field in _ACQ_FUNNEL_FIELDS.items():
-        if totals.get(key) is None or totals.get(key) != slot.get(field):
-            problems.append(f"lifecycle_acquisition_funnel.totals.{key} {totals.get(key)} "
-                            f"!= cohort breakdown all_sources.{field} {slot.get(field)}")
-        elif key != "contacts" and totals[key] > totals.get("contacts", 0):
-            problems.append(f"lifecycle_acquisition_funnel.totals.{key} exceeds the contacts")
+    group = block.get("source_group")
+    bd = cohort.get("breakdown") or {}
+    slot = (bd.get("all_sources") if group is None
+            else (bd.get("by_source_group") or {}).get(group)) or {}
+    where = "all_sources" if group is None else f"by_source_group[{group}]"
+    for col, field in _ACQ_FUNNEL_FIELDS.items():
+        if totals.get(col) is None or totals.get(col) != slot.get(field):
+            problems.append(f"{key}.totals.{col} {totals.get(col)} "
+                            f"!= cohort breakdown {where}.{field} {slot.get(field)}")
+        elif col != "contacts" and totals[col] > totals.get("contacts", 0):
+            problems.append(f"{key}.totals.{col} exceeds the contacts")
     return problems
 
 
@@ -518,11 +565,12 @@ def created_at_disclosure_problems(payload: dict) -> list[str]:
         problems.append(f"readiness.missing_contact_created_at_count "
                         f"{readiness['missing_contact_created_at_count']!r} != "
                         f"cohort.contacts_without_created_at {value!r}")
-    block = payload.get("lifecycle_acquisition_funnel")
-    if isinstance(block, dict) and block.get("contacts_without_created_at") != value:
-        problems.append(f"lifecycle_acquisition_funnel.contacts_without_created_at "
-                        f"{block.get('contacts_without_created_at')!r} != "
-                        f"cohort.contacts_without_created_at {value!r}")
+    for key in ACQUISITION_FUNNEL_BLOCK_KEYS:
+        block = payload.get(key)
+        if _is_acquisition_block(block) and block.get("contacts_without_created_at") != value:
+            problems.append(f"{key}.contacts_without_created_at "
+                            f"{block.get('contacts_without_created_at')!r} != "
+                            f"cohort.contacts_without_created_at {value!r}")
     notes = (cohort.get("metadata") or {}).get("coverage_notes") or []
     stated = [int(m.group(1)) for m in (_NO_CREATED_DATE_NOTE.match(str(n)) for n in notes)
               if m]
@@ -657,16 +705,19 @@ def audit_mart_window(a: Audit, *, window: str, payloads: dict) -> dict:
             a.holds(f"{w} {name} created_at_disclosure",
                     "the no-created-date count is one value in every copy "
                     f"({(payload.get('cohort') or {}).get('contacts_without_created_at')!r})")
-        if name == "dashboard/overview":
-            # PR-ADS-180B: the Overview's acquisition-cohort funnel.
-            acq = acquisition_funnel_problems(payload)
+        # PR-ADS-180B: the Overview's acquisition-cohort funnel; PR-ADS-182A:
+        # the Pipeline page's (and Dashboard → Deals', which republishes it).
+        funnel_key = {"dashboard/overview": "lifecycle_acquisition_funnel",
+                      "pipeline": "funnel", "dashboard/deals": "funnel"}.get(name)
+        if funnel_key:
+            acq = acquisition_funnel_problems(payload, funnel_key)
             if acq:
                 a.broken(f"{w} {name} acquisition_funnel", "; ".join(acq[:6]))
             else:
                 a.holds(f"{w} {name} acquisition_funnel",
-                        "the all-source acquisition funnel carries the cohort's "
+                        "the acquisition funnel carries the cohort's "
                         "verdict and family; " + ("its columns equal the cohort's "
-                                                  "all-sources slot" if status == "published"
+                                                  "slot" if status == "published"
                                                   else "no count is present"))
         view = ("campaign" if name in ("mart/campaign", "mart/campaign_settled")
                 else "country" if name == "mart/country" else name)

@@ -12,6 +12,14 @@ the real ``static/app.js`` in ``node``.
 
 On ``7cd5e22`` the Overview read "Leads at least 10 … 7 contacts …" and the
 Pipeline, over the same population, "Entered Lead 10" — exact (case 01).
+
+PR-ADS-182A (owner decision, docs/67): the Pipeline funnel is the
+acquisition cohort (by create date) — one cohort read inside the mart, no
+stage-entry count, no undated reach. Case 01 is ported (the same contacts
+are counted EXACTLY there, Activity keeps its bound); 02 and 05 keep their
+counts and edges without ``outside_window_rows`` (removed with its one
+reader); 06 keeps Overview's two sites. Removed with the Pipeline
+lead-filter narrowing they tested: 03_a, 03_b, 04_a (docs/67 §6).
 """
 from __future__ import annotations
 
@@ -57,41 +65,41 @@ def _write(rows):
     writers.upsert_hubspot_contact_funnel(rows)
 
 
-# ── 1. one population, one reading, on both pages ───────────────────────────
-def test_01_overview_activity_and_pipeline_read_the_same_population_identically(
+# ── 1. one population: Activity bounds it, the cohort counts it ─────────────
+def test_01_activity_bounds_the_undated_contacts_and_the_pipeline_cohort_counts_them(
         live_db, monkeypatch):
-    """The m3 probe on the real table. Every stage's value and bound reason
-    is the same on both pages; Lead is "at least 10", naming the seven."""
+    """The m3 probe on the real table. Overview → Lifecycle Activity (stage
+    entries) is "at least 10", naming the seven undated contacts; the
+    Pipeline funnel (PR-ADS-182A: the acquisition cohort, the real mart read)
+    counts the same seventeen contacts created in the quarter EXACTLY — it
+    needs no stage-entry date."""
+    from tests.test_pr_ads_177a_one_sql_count_pg_integration import _ready
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
+    _ready(live_db)                       # the contact-funnel sync state: fresh
     _outside_fixture()
     now = datetime.now(timezone.utc)
     act = _activity(now)
     p = _pipeline()
     f = p["funnel"]
-    assert f["available"] is True and f["window"]["start_date"] == act["window"]["start_date"]
-    # The figure first: what each page prints.
+    assert f["publication"] == {"status": "published", "reason": None}
+    assert f["window"]["start_date"] == act["window"]["start_date"]
     activity = _stage_html(_render("renderDashLifecycleActivity(%s)"
                                    % json.dumps({"lifecycle_activity": act})))
-    pipeline = _stage_html(_render("pipelineFunnelHtml(%s, null)" % json.dumps(p)))
-    assert activity == pipeline, (activity, pipeline)
-    by = {s["event"]: s for s in act["stages"]}
-    for e in _EVENTS:
-        assert f["events"][e]["count"] == by[e]["entered"], e
-        assert f["events"][e]["undated_contacts_could_belong"] \
-            == by[e]["undated_contacts_could_belong"], e
-        assert f["events"][e]["count_is_bound"] == by[e]["count_is_bound"], e
-    assert f["events"]["lead"]["undated_contacts_could_belong"] == 7
-    assert pipeline["contacts"] == (
+    assert activity["contacts"] == (
         "at least 10", "Lower bound: 7 contacts reached this stage with no entry date "
         "recorded in HubSpot and could belong to this window")
-    # MQL: the four MQLs are dated (after the window), nobody undated: exact.
-    assert pipeline["mql"] == ("10", None)
+    pipeline = _stage_html(_render("pipelineFunnelHtml(%s, null)" % json.dumps(p)))
+    assert (f["totals"]["contacts"], f["totals"]["reached_mql"]) == (17, 14)
+    assert pipeline["contacts"] == ("17", None), pipeline
+    assert pipeline["mql"] == ("14", None), pipeline
+    assert "events" not in f and "undated_reach" not in f
 
 
-# ── 2. the read: what lies outside the window's own rows ────────────────────
-def test_02_the_undated_reach_says_what_lies_outside_the_windows_rows(live_db):
-    """``outside_window_rows`` is the part of each figure with no stage date
-    in the window — ``fetch_funnel_contacts``' own window clause."""
+# ── 2. the read: every undated contact that could belong to the window ──────
+def test_02_the_undated_reach_counts_inside_and_outside_the_windows_rows(live_db):
+    """The reach Overview Activity reads, over the whole table. (PR-ADS-182A:
+    ``outside_window_rows`` — its split by the window's rows — is gone with
+    its one reader, the Pipeline lead-filter narrowing.)"""
     from db import crm_funnel_repository as repo
     start, end = _outside_fixture()
     inside = _at(start + timedelta(days=6))
@@ -104,75 +112,9 @@ def test_02_the_undated_reach_says_what_lies_outside_the_windows_rows(live_db):
     read = repo.fetch_undated_stage_reach(start, end)
     # Lead: the seven outside; MQL: none undated; SQL: in-sql, in the rows.
     assert read["counts"] == {"lead": 7, "mql": 0, "sql": 1, "opportunity": 0, "customer": 0}
-    assert read["outside_window_rows"] == {"lead": 7, "mql": 0, "sql": 0,
-                                           "opportunity": 0, "customer": 0}
-    # All Time: every dated contact is in the rows; outside are the undated-only.
+    assert "outside_window_rows" not in read
     every = repo.fetch_undated_stage_reach(None, None)
     assert every["counts"]["lead"] == 8                     # + "late", never ruled out
-    assert every["outside_window_rows"]["lead"] == 4        # out-lead ×3 + late
-    assert every["outside_window_rows"]["sql"] == 0
-
-
-# ── 3. a lead filter: the all-source figure is never the subset's ───────────
-def _scope_fixture():
-    """Two Google Ads SQLs dated in the window, and one ORGANIC contact at SQL
-    in the window's rows (Lead / MQL dated in it) with no SQL date: an SQL gap
-    for All Sources only. Nothing undated lies outside the rows."""
-    start, _end = _quarter()
-    created, inside = _at(start), _at(start + timedelta(days=5))
-    paid = {"hs_analytics_source": "PAID_SEARCH", "hs_analytics_source_data_1": "brand - uk"}
-    _write([{"contact_id": f"g-{i}", "created_at": created, "last_modified_at": created,
-             "lifecycle_stage": "salesqualifiedlead", **paid,
-             "date_entered_lead": inside, "date_entered_mql": inside,
-             "date_entered_sql": inside} for i in range(2)]
-           + [{"contact_id": "o-gap", "created_at": created, "last_modified_at": created,
-               "lifecycle_stage": "salesqualifiedlead", "hs_analytics_source": "ORGANIC_SEARCH",
-               "date_entered_lead": inside, "date_entered_mql": inside}])
-    return created, paid
-
-
-def _sql_cell(payload):
-    return _stage_html(_render("pipelineFunnelHtml(%s, null)" % json.dumps(payload)))["sql"]
-
-
-def test_03_a_a_scope_is_exact_where_nothing_lies_outside_the_rows(live_db, monkeypatch):
-    """Positive control (178C's narrowing, now through the real read): the
-    organic gap in the rows bounds All Sources, not Google Ads-source, because
-    the read proves nothing undated lies outside the window's rows. On
-    7cd5e22 the figures are the same; the payload carries no such proof."""
-    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
-    _scope_fixture()
-    every, google = _pipeline(), _pipeline(scope="google_ads_source")
-    assert _sql_cell(every) == (
-        "at least 2", "Lower bound: 1 contact reached this stage with no entry date recorded "
-        "in HubSpot and could belong to this window")
-    assert _sql_cell(google) == ("2", None)
-    assert google["funnel"]["undated_reach"]["outside_window_rows"]["sql"] == 0
-    assert every["funnel"]["events"]["sql"]["count_is_bound"] is True
-    assert google["funnel"]["events"]["sql"]["undated_contacts_could_belong"] == 0
-    assert google["funnel"]["events"]["sql"]["count_is_bound"] is False
-
-
-def test_03_b_an_undated_contact_outside_the_rows_bounds_the_scope(live_db, monkeypatch):
-    """A Google Ads contact at SQL, undated, created in the window, with no
-    stage date in it: the window's rows never see it, so Google Ads-source
-    SQL is a lower bound naming the ALL-SOURCE figure — never stating how
-    many of them the scope holds. On 7cd5e22: "2", exact."""
-    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
-    created, paid = _scope_fixture()
-    _write([{"contact_id": "g-out", "created_at": created, "last_modified_at": created,
-             "lifecycle_stage": "salesqualifiedlead", **paid}])
-    google = _pipeline(scope="google_ads_source")
-    assert _sql_cell(google) == (
-        "at least 2", "Lower bound: 2 contacts across all sources reached this stage with no "
-        "entry date recorded in HubSpot and could belong to this window; how many of them "
-        "the lead filters select is not measured")
-    sql = google["funnel"]["events"]["sql"]
-    assert google["funnel"]["coverage"]["stage_reached_without_entry_date"]["sql"] == 0
-    assert google["funnel"]["undated_reach"]["outside_window_rows"]["sql"] == 1
-    assert sql["undated_contacts_could_belong"] is None
-    assert sql["undated_contacts_all_sources"] == 2
-    assert sql["count_is_bound"] is True
 
 
 # ── 4. PR-ADS-180C-F1 (minor 1): one database snapshot for the two reads ────
@@ -197,38 +139,6 @@ def _sync_mid_read(monkeypatch, rows):
     monkeypatch.setattr(repo, "fetch_funnel_contacts", fetch_then_sync)
     fired.append(real)            # fired[0]: the production read, to restore
     return fired
-
-
-def test_04_a_a_sync_between_the_pipeline_reads_never_prints_a_false_exact(
-        live_db, monkeypatch):
-    """Before the sync, g-out is an undated Google Ads SQL contact outside the
-    window's rows: "at least 2". After it, g-out has an in-window MQL date
-    and is in the rows, still with no SQL date: "at least 2". On 98cd829 the
-    rows were read before the sync and the undated reach after it:
-    `outside_window_rows.sql` 0, and Google Ads-source SQL printed "2"."""
-    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
-    created, paid = _scope_fixture()
-    start, _ = _quarter()
-    _write([{"contact_id": "g-out", "created_at": created, "last_modified_at": created,
-             "lifecycle_stage": "salesqualifiedlead", **paid}])
-    assert _sql_cell(_pipeline(scope="google_ads_source"))[0] == "at least 2"
-    fired = _sync_mid_read(monkeypatch, [{
-        "contact_id": "g-out", "created_at": created,
-        "last_modified_at": _at(start + timedelta(days=40)),
-        "lifecycle_stage": "salesqualifiedlead", **paid,
-        "date_entered_mql": _at(start + timedelta(days=10))}])
-    torn = _pipeline(scope="google_ads_source")
-    assert fired[1:] == [1]
-    assert _sql_cell(torn)[0] == "at least 2", _sql_cell(torn)
-    assert torn["funnel"]["events"]["sql"]["count_is_bound"] is True
-    # Both reads saw the database before the sync: g-out outside the rows.
-    assert torn["funnel"]["undated_reach"]["outside_window_rows"]["sql"] == 1
-    # The sync did commit: the next build sees g-out in the rows.
-    from db import crm_funnel_repository as repo
-    monkeypatch.setattr(repo, "fetch_funnel_contacts", fired[0])
-    after = _pipeline(scope="google_ads_source")
-    assert after["funnel"]["coverage"]["stage_reached_without_entry_date"]["sql"] == 1
-    assert _sql_cell(after)[0] == "at least 2"
 
 
 def test_04_b_a_sync_between_the_activity_reads_never_prints_a_false_exact(live_db):
@@ -302,14 +212,14 @@ def test_04_c_a_sync_between_the_previous_period_reads_leaves_no_baseline(live_d
 
 
 # ── 5. PR-ADS-180C-F1 (minor 2): the window's edges, one clause ─────────────
-def test_05_the_rows_and_the_outside_count_share_every_window_edge(live_db):
+def test_05_the_rows_and_the_reach_share_every_window_edge(live_db):
     """Four undated SQL contacts, each with ONE stage date (MQL) at an edge of
     the window, at the database's own instants (read back, so the case holds
     in any session time zone): one minute before the start, AT the start,
     one minute before the end of the last day, AT the day after. The two
-    inside are the window's rows; the two outside are `outside_window_rows`.
-    A second copy of the clause with a drifted edge (the audit's m2: end +2
-    days; m3: start -1 day) moves a contact across and fails here."""
+    inside are the window's rows; every one is in the reach (created before
+    the window). (PR-ADS-182A: the `outside_window_rows` half of this case
+    went with that field; the rows' edges and the reach's counts stay.)"""
     from db import crm_funnel_repository as repo
     start, end = _quarter()
     with live_db.connect() as conn, conn.cursor() as cur:
@@ -328,29 +238,27 @@ def test_05_the_rows_and_the_outside_count_share_every_window_edge(live_db):
     # Every one reached Lead and SQL undated, was created before the window,
     # and may belong to it; the two outside the rows are exactly the edges.
     assert read["counts"] == {"lead": 4, "mql": 0, "sql": 4, "opportunity": 0, "customer": 0}
-    assert read["outside_window_rows"] == {"lead": 2, "mql": 0, "sql": 2,
-                                           "opportunity": 0, "customer": 0}
+    assert "outside_window_rows" not in read
     # The same edges under an open start / end.
-    assert repo.fetch_undated_stage_reach(None, end)["outside_window_rows"]["sql"] == 1
-    assert repo.fetch_undated_stage_reach(start, None)["outside_window_rows"]["sql"] == 1
     assert {r["contact_id"] for r in repo.fetch_funnel_contacts(None, end)["rows"]} \
         == {"e-before", "e-start", "e-end"}
+    assert {r["contact_id"] for r in repo.fetch_funnel_contacts(start, None)["rows"]} \
+        == {"e-start", "e-end", "e-after"}
 
 
 # ── 6. PR-ADS-180C-F2: a snapshot that cannot be taken fails closed, fast ───
 def test_06_no_snapshot_means_no_funnel_at_every_site_within_the_web_wait(live_db):
     """A migration holds the schema lock (EXCLUSIVE, on its own connection),
-    so no pinned snapshot can start. Each of the three funnel-read sites must
-    report the funnel unreadable — never fall back to two unpinned reads —
-    and must give up within the web wait (5 s), not certification's 60 s."""
+    so no pinned snapshot can start. Each funnel-read site must report the
+    funnel unreadable — never fall back to two unpinned reads — and must give
+    up within the web wait (5 s), not certification's 60 s. (PR-ADS-182A: two
+    sites, both Overview's; the Pipeline funnel takes no snapshot of its own.)"""
     import time
     from db.connection import SCHEMA_LOCK_KEY
     from services import dashboard_overview_service as O
-    from services import pipeline_service as ps
     _outside_fixture()
     now = datetime.now(timezone.utc)
     # Positive control: with the lock free every site reads its funnel.
-    assert ps._funnel(WINDOW, now, "all_source", None)["available"] is True
     assert O._lifecycle_funnel_block(WINDOW, now=now)["available"] is True
     assert O._lifecycle_previous_period(WINDOW, now)["available"] is True
 
@@ -359,11 +267,7 @@ def test_06_no_snapshot_means_no_funnel_at_every_site_within_the_web_wait(live_d
         with holder.cursor() as cur:
             cur.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,))
         holder.commit()
-        t0 = time.monotonic()
-        f = ps._funnel(WINDOW, now, "all_source", None)
         t1 = time.monotonic()
-        assert (f["available"], f["reason"]) == (False, "lifecycle_funnel_unreadable"), f
-        assert f["events"] == {} and "undated_reach" not in f
         block = O._lifecycle_funnel_block(WINDOW, now=now)
         t2 = time.monotonic()
         assert block["available"] is False and block["lead"] is None
@@ -373,7 +277,7 @@ def test_06_no_snapshot_means_no_funnel_at_every_site_within_the_web_wait(live_d
         assert (prev["available"], prev["counts"], prev["reason"]) == (
             False, {}, "Previous period unavailable.")
         # The web wait, not the 60 s certification wait, per site.
-        for elapsed in (t1 - t0, t2 - t1, t3 - t2):
+        for elapsed in (t2 - t1, t3 - t2):
             assert 3 <= elapsed < 20, elapsed
     finally:
         try:
@@ -382,4 +286,4 @@ def test_06_no_snapshot_means_no_funnel_at_every_site_within_the_web_wait(live_d
             holder.commit()
         finally:
             holder.close()
-    assert ps._funnel(WINDOW, now, "all_source", None)["available"] is True
+    assert O._lifecycle_funnel_block(WINDOW, now=now)["available"] is True

@@ -205,11 +205,22 @@ def _pipeline_payload(_mt):
         "kpis": {"won_revenue_usd": m(33000.0), "closed_won_deals": m(3),
                  "customers": m(3), "sqls": m(25),
                  "average_deal_value_usd": m(11000.0)},
+        # PR-ADS-182A: the funnel is the all-source acquisition cohort (the
+        # Overview's block, same producer), published as `funnel.totals`.
+        "funnel": {"publication": {"status": "published", "reason": None},
+                   "totals": dict(_ACQ_TOTALS)},
         contract_mod.METRIC_TRUTH_KEY: _mt(
             ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
             ("closed_won_deals", _MART, "all_source_business_revenue"),
             ("customers", _MART, "all_source_business_revenue"),
-            ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))}
+            ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"),
+            ("lifecycle_acquisition_funnel", _MART, "all_source_acquisition_cohort"))}
+
+
+#: PR-ADS-182A — the all-source acquisition cohort both the Overview and the
+#: Pipeline page publish (one build, one producer): 140 contacts acquired.
+_ACQ_TOTALS = {"contacts": 140, "reached_mql": 70, "reached_sql": 31,
+               "reached_opportunity": 9, "reached_customer_stage": 4}
 
 
 def _payloads(**overrides):
@@ -260,6 +271,10 @@ def _payloads(**overrides):
             "lifecycle_funnel": {"available": True, "status": "reconciled",
                                  "sync": {"available": True,
                                           "bootstrap_status": "complete"}},
+            # PR-ADS-180B / 182A: the all-source acquisition-cohort funnel.
+            "lifecycle_acquisition_funnel": {
+                "publication": {"status": "published", "reason": None},
+                "totals": dict(_ACQ_TOTALS)},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
                 ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
@@ -268,7 +283,8 @@ def _payloads(**overrides):
                 ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"),
                 ("google_ads_cohort_leads", _MART, "google_ads_cohort_leads"),
                 *[(f"lifecycle_{s}", _FUNNEL, f"lifecycle_{s}")
-                  for s in ("leads", "mqls", "sqls", "opportunities", "customers")])},
+                  for s in ("leads", "mqls", "sqls", "opportunities", "customers")],
+                ("lifecycle_acquisition_funnel", _MART, "all_source_acquisition_cohort"))},
         "dashboard/revenue": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
@@ -1576,7 +1592,9 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
     # the settled campaign reference, not with the through-today pages.
     # PR-ADS-181A: 24 — "source_group_sqls" (Dashboard → Channels' one
     # identity of its own) is retired with the tab.
-    assert len(payload["results"][0]["metrics"]) == 24
+    # PR-ADS-182A: 29 — the all-source acquisition-cohort funnel, one identity
+    # per column, Overview against Pipeline.
+    assert len(payload["results"][0]["metrics"]) == 29
     assert all(c["certified"] for c in payload["results"][0]["consumer_certification"])
 
 

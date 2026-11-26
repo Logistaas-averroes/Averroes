@@ -22,8 +22,13 @@ closed-won snapshot and computes no business figure of its own:
     ``ledger_summary`` (the reader contract over the very rows the list shows),
     only when it counted the same deals and revenue. Customers are distinct
     HubSpot companies and are never summed.
-  * The lifecycle funnel — ``canonical_crm_funnel_service.build``: stage-ENTRY
-    events in the window ("Entered stage in window"), never called "SQLs".
+  * The lifecycle funnel — PR-ADS-182A (owner decision): the ACQUISITION
+    COHORT, by contact create date (``docs/67``). Contacts created in the
+    window and how many have reached each stage so far: the mart deal view's
+    ``cohort`` block (the build the SQL card reads), republished by the ONE
+    block producer Overview uses (``dashboard_overview_service.
+    acquisition_funnel_block``) under the cohort's one verdict. No
+    stage-entry count is published on this page any more.
   * The deal list — the mart deal view's rows (``build_revenue_deals``), only
     when the closed-won population is published AND the list has exactly that
     many deals; otherwise the list is absent (None) with the reason.
@@ -41,7 +46,10 @@ closed-won snapshot and computes no business figure of its own:
 
 The Scope and Source filters are LEAD filters: they narrow the funnel (and the
 paged contact list served by ``/api/crm-funnel/contacts``), never a deal
-figure. Read-only: no write to HubSpot, Google Ads or the database.
+figure. On the cohort funnel a Source filter (and Scope Google Ads-source) reads
+the cohort's own partition by source group; Campaign- / Keyword-attributable
+cannot be honoured there and the funnel says so (unavailable, with the reason).
+Read-only: no write to HubSpot, Google Ads or the database.
 """
 
 from __future__ import annotations
@@ -51,6 +59,7 @@ from datetime import date, datetime, timezone
 
 from analysis import closed_won_truth as cwt
 from analysis import revenue_scope
+from analysis.source_classification import GROUP_GOOGLE_ADS
 from services import canonical_contract
 from services import canonical_crm_funnel_service as crm_funnel
 from services import canonical_revenue_service as canonical_revenue
@@ -61,8 +70,22 @@ logger = logging.getLogger(__name__)
 
 PAGE = "pipeline"
 
-#: The funnel's label: stage-ENTRY events in the window. Never "SQLs".
-FUNNEL_LABEL = "Entered stage in window"
+#: The funnel's label (PR-ADS-182A): the acquisition cohort, by create date.
+FUNNEL_LABEL = "Acquisition cohort"
+#: What the funnel counts, in the page's words.
+FUNNEL_DESCRIPTION = ("Contacts created in these days, and how far they have got "
+                      "so far.")
+#: PR-ADS-182A — a lead Scope the acquisition cohort is not partitioned by
+#: (campaign- / keyword-attributable need the campaign resolver per contact):
+#: the funnel is unavailable under it, with this reason — never the
+#: unfiltered cohort under the filter's name.
+REASON_SCOPE_NOT_ON_COHORT_BASIS = "lead_scope_not_on_cohort_basis"
+#: Scope Google Ads-source with a Source other than Google Ads: a contact has
+#: one source group, so the two filters select no contact together.
+REASON_FILTERS_SELECT_NO_CONTACT = "lead_filters_select_no_contact"
+#: The metric-truth scope of an unfiltered Pipeline funnel — the Overview
+#: funnel's (the parity audit compares the two).
+FUNNEL_TRUTH_SCOPE_ALL_SOURCE = "all_source_acquisition_cohort"
 #: The lead filters (Scope, Source) apply to these sections only.
 LEAD_FILTER_APPLIES_TO = ("funnel", "leads")
 
@@ -79,8 +102,6 @@ REASON_VERDICT_MISSING = "closed_won_verdict_missing"
 #: published deals and revenue beside it: it describes other deals, so it is
 #: not shown (PR-ADS-178B-F1 m3).
 REASON_AVERAGE_POPULATION_MISMATCH = "average_deal_value_population_mismatch"
-#: The lifecycle funnel could not be built.
-REASON_FUNNEL_UNREADABLE = "lifecycle_funnel_unreadable"
 #: A deal whose source group the ledger does not carry. Shown as itself,
 #: never folded into another group.
 SOURCE_NOT_RECORDED = "not_recorded"
@@ -359,101 +380,60 @@ def _customers_won(base: dict, customers: dict, resolved: dict) -> dict:
     return {"status": cwt.PUBLISHED, "reason": None, "rows": rows, **reading}
 
 
-def _funnel_coverage(coverage, scope: str):
-    """``{"stage_reached_without_entry_date": {event: n | None}, "scope"}`` for
-    the selected scope, or None when the funnel reported no coverage.
+def _cohort_selection(scope: str, acquisition_group) -> tuple:
+    """``(source_group | None, unavailable_reason | None)``: which part of the
+    acquisition cohort the lead filters select (PR-ADS-182A).
 
-    The per-scope figures are the funnel's own; a scope it gives none for
-    (or a stage whose figure is unknown) is None, which the page reads as a
-    lower bound — never as complete. Without per-scope coverage at all the
-    whole-population figure is passed, which over-marks a narrow scope (it
-    fails safe: a stage can only be marked a lower bound it may not be)."""
-    if coverage is None:
-        return None
-    whole = coverage.get("stage_reached_without_entry_date")
-    by_scope = coverage.get("stage_reached_without_entry_date_by_scope")
-    if not isinstance(by_scope, dict):
-        return {"stage_reached_without_entry_date": whole, "scope": None}
-    events = whole.keys() if isinstance(whole, dict) else by_scope.keys()
-    return {"stage_reached_without_entry_date": {
-                e: (by_scope.get(e) or {}).get(scope) for e in events},
-            "scope": scope}
+    The cohort is partitioned by the contact's source group with the Source
+    filter's own rule (``by_source_group``), and Scope Google Ads-source IS
+    that group (``_contact_scopes``: the acquisition group is Google Ads). The
+    campaign- and keyword-attributable scopes are not on the cohort basis:
+    unavailable with the reason, never the wider cohort under their name."""
+    if scope in (crm_funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE, crm_funnel.SCOPE_KEYWORD_ATTRIBUTABLE):
+        return None, REASON_SCOPE_NOT_ON_COHORT_BASIS
+    if scope == crm_funnel.SCOPE_GOOGLE_ADS_SOURCE:
+        if acquisition_group not in (None, GROUP_GOOGLE_ADS):
+            return None, REASON_FILTERS_SELECT_NO_CONTACT
+        return GROUP_GOOGLE_ADS, None
+    return acquisition_group, None
 
 
-def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
-    """The lifecycle funnel (stage-entry events), trimmed to what the page
-    shows. An unreadable funnel is unavailable with the reason, never 0."""
-    try:
-        # PR-ADS-180C-F1: the window's rows and the undated reach in ONE
-        # database snapshot (crm_funnel.one_read_snapshot) — two reads at two
-        # instants could tear "outside the rows" and print a false exact.
-        with crm_funnel.one_read_snapshot():
-            f = crm_funnel.build("business", window, scope=scope,
-                                 acquisition_group=acquisition_group, now=now)
-            reach = (crm_funnel.undated_stage_reach(f.get("window"))
-                     if f.get("available") else None)
-    except ValueError:
-        raise
-    except Exception:  # noqa: BLE001 — an unreadable funnel is not a page outage
-        logger.exception("[pipeline] the lifecycle funnel could not be built")
-        return {"available": False, "reason": REASON_FUNNEL_UNREADABLE,
-                "label": FUNNEL_LABEL,
-                "metric_family": crm_funnel.METRIC_FAMILY_STAGE_EVENTS,
-                "events": {}, "conversions": None}
-    coverage = _funnel_coverage(f.get("coverage"), scope)
-    available = bool(f.get("available"))
-    # PR-ADS-180C (docs/65): the undated reach over EVERY contact that could
-    # belong to the window — the read Overview → Lifecycle Activity bounds its
-    # counts with, read above in the SAME database snapshot as the rows
-    # (PR-ADS-180C-F1). The window's own rows (coverage) never see an undated
-    # contact with no date in the window, so "0 there" does not prove a count
-    # exact. Unread is None, and None is a bound.
-    undated = (crm_funnel.undated_reach_for_population(
-        reach, coverage,
-        whole=scope == crm_funnel.SCOPE_ALL_SOURCE and acquisition_group is None)
-        if available else None)
-    counts = (undated or {}).get("counts") if (undated or {}).get("available") else None
-    all_source = (undated or {}).get("all_source_counts") or {}
-    events = {}
-    for event, block in (f.get("events") or {}).items():
-        events[event] = {
-            **(block or {}),
-            # The same two per-stage fields the Activity block publishes.
-            "undated_contacts_could_belong": (counts or {}).get(event) if available else None,
-            "count_is_bound": (crm_funnel.stage_count_is_bound(event, coverage, undated)
-                               if available else None),
-            # Under a lead filter: the all-source figure the subset's is
-            # bounded by — named as all sources, never as the subset's count.
-            "undated_contacts_all_sources": (
-                all_source.get(event)
-                if available and undated and not undated.get("covers_selected_population")
-                else None),
-        }
+def _funnel(cohort: dict, scope: str, acquisition_group) -> dict:
+    """The lifecycle funnel: the acquisition cohort (PR-ADS-182A, docs/67).
+
+    The mart deal view's ``cohort`` block — the SAME build the SQL card reads,
+    in the same request — through the one block producer the Overview uses.
+    No database read here and no verdict of its own: unpublished means no
+    count, a published slot that is missing is unavailable, never 0."""
+    from services.dashboard_overview_service import (  # noqa: PLC0415
+        acquisition_funnel_block,
+    )
+    source_group, reason = _cohort_selection(scope, acquisition_group)
+    block = acquisition_funnel_block(cohort, source_group=source_group,
+                                     unavailable_reason=reason)
+    unfiltered = scope == crm_funnel.SCOPE_ALL_SOURCE and acquisition_group is None
     return {
-        "available": f.get("available"),
-        "reason": None if f.get("available") else "canonical_contact_store_unavailable",
+        **block,
         "label": FUNNEL_LABEL,
-        "metric_family": crm_funnel.METRIC_FAMILY_STAGE_EVENTS,
-        "window": f.get("window"),
-        "scope": f.get("scope"), "scope_label": f.get("scope_label"),
-        "acquisition_group": f.get("acquisition_group"),
-        "acquisition_group_label": f.get("acquisition_group_label"),
-        "campaign_identity_available": f.get("campaign_identity_available"),
-        "events": events,
-        "conversions": f.get("conversions"),
-        # Which stages were reached without an entry date: the page marks
-        # those counts as lower bounds under partial evidence (F1 o1).
-        # PR-ADS-178C: for the SELECTED scope only (the counts shown are that
-        # scope's), so a narrow Scope no longer over-marks a stage that is
-        # complete for it.
-        "coverage": coverage,
-        "undated_reach": undated,
-        "reconciliation": f.get("reconciliation"),
-        "sync": f.get("sync"),
+        "description": FUNNEL_DESCRIPTION,
+        "lead_filters": {
+            "scope": scope,
+            "scope_label": crm_funnel.SCOPE_LABELS[scope],
+            "acquisition_group": acquisition_group,
+            "acquisition_group_label": (crm_funnel.GROUP_LABELS[acquisition_group]
+                                        if acquisition_group else "All sources"),
+            "source_group": source_group,
+            "honoured": reason is None,
+            "unavailable_reason": reason,
+        },
+        # The metric-truth scope: only the unfiltered funnel is the Overview's.
+        "truth_scope": (FUNNEL_TRUTH_SCOPE_ALL_SOURCE if unfiltered
+                        else f"lead_filtered_acquisition_cohort:{scope}:{acquisition_group or 'all'}"),
     }
 
 
-def _metric_truth(window_block: dict, kpis: dict, summary: dict, cohort: dict) -> dict:
+def _metric_truth(window_block: dict, kpis: dict, summary: dict, cohort: dict,
+                  funnel: dict) -> dict:
     """Per-metric provenance in the shape the cross-page parity audit checks.
     Every figure is the mart deal view's, so the all-source closed-won triple
     is the SAME identity the Overview, Revenue and Channels pages publish."""
@@ -491,6 +471,16 @@ def _metric_truth(window_block: dict, kpis: dict, summary: dict, cohort: dict) -
          "truth_status": ready(kpis["sqls"]),
          "unavailable_reason": (None if kpis["sqls"]["status"] == cwt.PUBLISHED
                                 else cohort.get("sql_reason"))},
+        # PR-ADS-182A: the funnel — the acquisition cohort under its one
+        # verdict; unfiltered, the Overview funnel's scope (parity-audited).
+        {"metric": "lifecycle_acquisition_funnel",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": funnel["truth_scope"],
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if funnel["publication"]["status"] == cwt.PUBLISHED
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if funnel["publication"]["status"] == cwt.PUBLISHED
+                                else funnel["publication"]["reason"])},
     ])
 
 
@@ -543,6 +533,8 @@ def build_pipeline(window: str = "current_quarter", now: datetime | None = None,
 
     # The same snapshot the mart's deal view read (one_snapshot is shared).
     base = canonical_revenue.load_won_deals(window, now=now)
+    # PR-ADS-182A: the funnel is the cohort block the SQL card reads.
+    funnel = _funnel(cohort, scope, acquisition_group)
 
     return {
         "page": PAGE,
@@ -575,7 +567,7 @@ def build_pipeline(window: str = "current_quarter", now: datetime | None = None,
         "metrics": {"closed_won_deals": deals_m, "customers": kpis["customers"],
                     "revenue_usd": revenue_m},
         "closed_won_population": population,
-        "funnel": _funnel(window, now, scope, acquisition_group),
+        "funnel": funnel,
         "deals": deal_rows,
         "deals_status": deals_status,
         "deals_reason": deals_reason,
@@ -583,5 +575,6 @@ def build_pipeline(window: str = "current_quarter", now: datetime | None = None,
         "customers_won": _customers_won(base or {}, kpis["customers"], resolved),
         "truth_footer": TRUTH_FOOTER,
         **_rates(),
-        canonical_contract.METRIC_TRUTH_KEY: _metric_truth(window_block, kpis, summary, cohort),
+        canonical_contract.METRIC_TRUTH_KEY: _metric_truth(window_block, kpis, summary,
+                                                           cohort, funnel),
     }

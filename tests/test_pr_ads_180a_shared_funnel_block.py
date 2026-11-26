@@ -164,9 +164,13 @@ def _chips(html: str) -> list:
 def test_01_a_every_funnel_surface_calls_the_one_renderer():
     for name in _SURFACES:
         assert "funnelBlockHtml(" in _strip_comments(_fn(name)), name
-    # The pipeline adapter passes its selection as an ARGUMENT.
+    # The pipeline adapter passes its selection as an ARGUMENT. PR-ADS-182A:
+    # the selection is the contact list's (its own stage picker); the cohort
+    # block itself is drawn unselectable — its columns are another count.
     assert "pipelineFunnelHtml(d, _leadsView)" in _fn("renderPipelinePage")
-    assert "selectable: true, activeKey: activeEvent" in _fn("pipelineFunnelHtml")
+    pf = _fn("pipelineFunnelHtml")
+    assert "activeEvent === st.event" in pf
+    assert "selectable: true" not in pf
 
 
 def _surface_outputs():
@@ -363,7 +367,9 @@ def test_04_b_each_surface_reads_its_family_from_its_own_payload():
     from tests.test_pr_ads_162i_channels_page_revamp import _payload as channels
     from tests.test_pr_ads_178b_pipeline_one_page import _payload as pipeline
     p = pipeline()
-    swapped = dict(p, funnel={**p["funnel"], "metric_family": "acquisition_cohort_outcomes"})
+    # PR-ADS-182A: the Pipeline funnel is the acquisition cohort; a payload
+    # naming another family is labelled as that family, never relabelled.
+    swapped = dict(p, funnel={**p["funnel"], "metric_family": "lifecycle_stage_events"})
     ch = {**channels(), "metric_family": "acquisition_cohort_outcomes",
           "window_basis": "contact_created_at"}
     out = _run_app(
@@ -378,8 +384,8 @@ def test_04_b_each_surface_reads_its_family_from_its_own_payload():
            json.dumps({**_acquisition(), "metric_family": None})))
     fam = [re.search(r'data-metric-family="([a-z_]+)" data-window-basis="([a-z_]+)"', h).groups()
            for h in out]
-    assert fam == [("lifecycle_stage_events", "stage_entry_date"),
-                   ("acquisition_cohort_outcomes", "stage_entry_date"),
+    assert fam == [("acquisition_cohort_outcomes", "contact_created_at"),
+                   ("lifecycle_stage_events", "contact_created_at"),
                    ("acquisition_cohort_outcomes", "contact_created_at"),
                    ("not_stated", "contact_created_at"),
                    ("stage_entry_events", "stage_entry_date"),
@@ -396,7 +402,8 @@ def test_04_c_two_pages_two_families_side_by_side():
     assert "Lifecycle stage events" not in _text(acquisition)
     assert "Lifecycle stage events" in _text(activity) and "Acquisition cohort" not in _text(activity)
     assert "Acquisition cohort" in _text(channels) and "Lifecycle stage events" not in _text(channels)
-    assert "Lifecycle stage events" in _text(pipeline)
+    # PR-ADS-182A: the Pipeline funnel is the acquisition cohort.
+    assert "Acquisition cohort" in _text(pipeline) and "Lifecycle stage events" not in _text(pipeline)
 
 
 def test_04_d_the_family_scan_bites_a_hard_coded_label():
@@ -462,7 +469,8 @@ def test_05_d_the_pipeline_selection_is_the_argument_not_the_global():
     from tests.test_pr_ads_178b_pipeline_one_page import _payload
     out = _run_app("_leadsView = 'mql'; [pipelineFunnelHtml(%s, 'sql'), pipelineFunnelHtml(%s, 'other')]"
                    % (json.dumps(_payload()), json.dumps(_payload())))
-    pressed = re.findall(r'data-funnel-event="([a-z]+)" aria-pressed="true"', out[0])
+    # PR-ADS-182A: the selection marks the contact list's stage picker.
+    pressed = re.findall(r'data-leads-stage="([a-z]+)" aria-pressed="true"', out[0])
     assert pressed == ["sql"]
     assert re.findall(r'aria-pressed="true"', out[1]) == []
     assert 'search-terms-tab--muted active"' in out[1]
@@ -800,17 +808,25 @@ def test_07_g_a_window_basis_needs_a_stage_entry_date_property():
 def test_07_h_pipeline_under_mismatch_draws_no_rate():
     """Recorded by the audit: on 9a09c6d, `/api/pipeline` under a scope
     mismatch drew cohort rates between "Reconciliation required" cells,
-    because pipeline_service._funnel passes the conversions through. Under any
-    unpublished verdict the block draws no connector rate."""
-    from tests.test_pr_ads_178b_pipeline_one_page import _page, _payload
+    because pipeline_service._funnel passed the conversions through. Under any
+    unpublished verdict the block draws no connector rate.
+
+    PR-ADS-182A: the Pipeline funnel is the acquisition cohort; its "mismatch"
+    is the cohort's bucket reconciliation (withheld,
+    ``cohort_reconciliation_failed``). A payload that still carries
+    conversions beside it draws neither a rate nor a count."""
+    from tests.test_pr_ads_178b_pipeline_one_page import _COHORT, _funnel_block, _page, _payload
     convs = [{"from_event": a, "to_event": b, "available": True, "basis": "cohort",
               "rate_pct": r} for a, b, r in (("lead", "mql", 50), ("mql", "sql", 40),
                                              ("sql", "opportunity", 10),
                                              ("opportunity", "customer", 25))]
-    f = {**_payload()["funnel"], "conversions": convs,
-         "reconciliation": {"status": "mismatch", "reasons": ["scope_nesting_broken:mql"]}}
+    f = {**_funnel_block({**_COHORT, "sql_status": "withheld",
+                          "sql_reason": "cohort_reconciliation_failed", "breakdown": None}),
+         "conversions": convs}
     summary, _ = _page(_payload(funnel=f))
     funnel = summary[summary.index('id="pipeline-funnel"'):]
-    assert "Reconciliation required" in funnel
+    assert "Withheld" in funnel and "did not reconcile" in _text(funnel)
     assert "dash-funnel__conv" not in funnel
     assert not re.search(r"\d+%", _text(funnel)), _text(funnel)
+    for cell in re.findall(r'dash-funnel__stage-value">(.*?)</span>\s*<span', funnel, re.S):
+        assert not re.search(r"\d", _text(cell)), cell

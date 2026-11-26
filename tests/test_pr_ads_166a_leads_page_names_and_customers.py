@@ -31,6 +31,15 @@ cases); the Customers card, the block's reader verdicts and the list are the
 builder's. A few renderer cases still feed a hand-built payload in the
 builder's shape for states the builder cannot send (a faulty server), and
 say so.
+
+PR-ADS-182A: the Pipeline funnel is the acquisition cohort (contacts created
+in the window, by create date). Its Customer column is "Reached Customer
+stage" — HubSpot lifecycle stage, in CONTACTS — and is still a different
+figure from Customers won (distinct companies). The substituted input is now
+the mart deal view's cohort block: the REAL cohort contract over fake contact
+rows (``tests.test_pr_ads_182a_pipeline_cohort_funnel``). The stage-move count
+("Moved to Customer stage in HubSpot") is no longer on the Pipeline funnel; it
+stays the contact list's stage and Overview → Lifecycle Activity's.
 """
 from __future__ import annotations
 
@@ -101,34 +110,42 @@ def _ledger(monkeypatch, *, companies=True, sync_state=None, available=True,
     return rows
 
 
-_EVENTS = ("lead", "mql", "sql", "opportunity", "customer")
+#: PR-ADS-182A — the Q3 cohort's contacts at the Customer stage: 206 with an
+#: Offline Sources / IMPORT original source (Offline), 13 Google Ads.
+COHORT_OFFLINE_CUSTOMERS = 206
 
 
-def _no_undated_anywhere(_start, _end):
-    """``fetch_undated_stage_reach`` for the hand-built slice: no contact
-    reached a stage without its entry date, in the window's rows or outside."""
-    return {"available": True, "counts": dict.fromkeys(_EVENTS, 0),
-            "outside_window_rows": dict.fromkeys(_EVENTS, 0)}
+def _cohort_rows(customers=STAGE_MOVES):
+    """PR-ADS-182A: contacts created in Q3 2026 (``fetch_acquisition_cohort_
+    contacts`` rows): ``customers`` at the Customer stage, plus 21 leads."""
+    from tests.test_pr_ads_182a_pipeline_cohort_funnel import row
+    offline = min(customers, COHORT_OFFLINE_CUSTOMERS)
+    return ([row(i, "customer", src="OFFLINE_SOURCES", label="IMPORT",
+                 created="2026-08-10T10:00:00Z") for i in range(offline)]
+            + [row(1000 + i, "customer", created="2026-08-10T10:00:00Z")
+               for i in range(customers - offline)]
+            + [row(2000 + i, "lead", created="2026-08-10T10:00:00Z") for i in range(21)])
 
 
-def _pipeline(monkeypatch, funnel=None, *, undated=_no_undated_anywhere, **kwargs) -> dict:
+def _cohort(monkeypatch, customers=STAGE_MOVES, *, readable=True):
+    """The mart deal view's cohort block for Q3 2026: the REAL cohort contract
+    over ``_cohort_rows`` (fresh source, every contact has a created date)."""
+    from datetime import date
+    from tests.test_pr_ads_182a_pipeline_cohort_funnel import cohort_contract
+    return cohort_contract(monkeypatch, _cohort_rows(customers), readable=readable,
+                           start=date(2026, 7, 1), end=date(2026, 9, 30), now=NOW)
+
+
+def _pipeline(monkeypatch, cohort=None, **kwargs) -> dict:
     """PR-ADS-178C (m7): the REAL Pipeline builder's payload for the window,
-    JSON-normalised as the route serves it. Its one substituted input is the
-    lifecycle funnel slice (``crm_funnel.build``): the production-shaped
-    slice by default, or the real funnel's own payload (database cases).
+    JSON-normalised as the route serves it.
 
-    PR-ADS-180C: the builder also reads the undated stage reach; a slice is
-    paired with its own (``undated``) — ``None`` keeps the real read
-    (database cases)."""
-    from db import crm_funnel_repository as repo
-    from services import canonical_crm_funnel_service as crm_funnel
-    from services.pipeline_service import build_pipeline
-    slice_ = _funnel_payload() if funnel is None else funnel
-    monkeypatch.setattr(crm_funnel, "build", lambda *a, **k: slice_)
-    if undated is not None:
-        monkeypatch.setattr(repo, "fetch_undated_stage_reach", undated)
-    return json.loads(json.dumps(build_pipeline(WINDOW, now=NOW, **kwargs),
-                                 default=str))
+    PR-ADS-182A: its one substituted input is the mart deal view's cohort
+    block (``_cohort``: the real contract over fake contact rows) — the
+    funnel's source since the funnel is the acquisition cohort."""
+    from tests.test_pr_ads_182a_pipeline_cohort_funnel import pipeline
+    return pipeline(monkeypatch, _cohort(monkeypatch) if cohort is None else cohort,
+                    window=WINDOW, now=NOW, **kwargs)
 
 
 def _stable(value):
@@ -149,20 +166,21 @@ def _won(monkeypatch, **kwargs) -> dict:
     return _pipeline(monkeypatch, **kwargs)["customers_won"]
 
 
-def _funnel_payload(count=STAGE_MOVES, window_key=WINDOW):
-    """The slice of ``/api/crm-funnel`` the customer figures read."""
-    return {"available": True, "window": {"window_key": window_key},
-            "reconciliation": {"status": "ok"},
-            # PR-ADS-180C: a real build always reports its coverage; without
-            # it no stage is proven complete (the stage would be a bound).
-            "coverage": {"stage_reached_without_entry_date": {"customer": 0},
-                         "stage_reached_without_entry_date_by_scope": {
-                             "customer": {"all_source": 0, "google_ads_source": 0,
-                                          "campaign_attributable": 0,
-                                          "keyword_attributable": 0}}},
-            "events": {"customer": {
-                "count": count, "metric_family": "lifecycle_stage_events",
-                "window_basis": "date_entered_customer"}}}
+def _funnel_payload(count=STAGE_MOVES):
+    """PR-ADS-182A: a Pipeline funnel block in production's shape — the REAL
+    block producer (``pipeline_service._funnel``) over a builder-shaped
+    published cohort whose all-sources slot has ``count`` contacts at the
+    Customer stage. For the renderer cases that feed a builder-shaped page."""
+    from services import pipeline_service as ps
+    slot = {"contacts_acquired": count + 21, "reached_mql": count, "sqls": count,
+            "sqls_missing_event_timestamp": 0, "reached_opportunity": count,
+            "reached_customer_stage": count}
+    return ps._funnel({"sql_status": "published", "sql_reason": None,
+                       "metric_family": "acquisition_cohort_outcomes",
+                       "window_basis": "contact_created_at",
+                       "window": {"start_date": "2026-07-01", "end_date": "2026-09-30"},
+                       "contacts_without_created_at": 0,
+                       "breakdown": {"all_sources": slot}}, "all_source", None)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -224,7 +242,16 @@ def _node(calls: dict, *, role=None, source: str | None = None) -> dict:
                   "  out[k] = fns[fn](...args);\n"
                   "}\n"
                   "console.log(JSON.stringify(out));\n")
-        res = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        # PR-ADS-182A: the script goes in a file — four real Pipeline payloads
+        # (each now carrying a published cohort block) exceed one argv string.
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write(script)
+        try:
+            res = subprocess.run([node, fh.name], capture_output=True, text=True)
+        finally:
+            Path(fh.name).unlink(missing_ok=True)
         if res.returncode == 0:
             return json.loads(res.stdout)
         missing = re.search(r"ReferenceError: (\w+) is not defined", res.stderr)
@@ -248,7 +275,9 @@ def _text(markup: str) -> str:
 def _figure(markup: str, which: str) -> str:
     """The visible text of ONE of the two figures (PR-ADS-178B: on the
     Pipeline page — the funnel's Customer-stage cell, and the Customers card
-    with the Customers won section)."""
+    with the Customers won section). PR-ADS-182A: the funnel's cell is the
+    acquisition cohort's "Reached Customer stage" (contacts); the key name
+    ``stage_moves`` is kept for the lifecycle-stage figure."""
     marker = {"stage_moves": "<!--stage_moves-->",
               "customers_won": "<!--customers_won-->"}[which]
     return _text(markup.split(marker)[1].split("<!--end-->")[0])
@@ -266,8 +295,8 @@ def _figures_markup(out: dict, key="p") -> str:
     """One markup holding the two figures, each between markers: the funnel's
     Customer-stage cell, and the Customers card + the Customers won section."""
     moves = out[f"{key}__moves"]
-    cell = moves[moves.index('data-funnel-event="customer"'):]
-    cell = cell[:cell.index("</button>")]
+    cell = moves[moves.index('data-funnel-slot="customer"'):]
+    cell = cell[:cell.index("</div>")]
     cards = out[f"{key}__cards"]
     card = cards[cards.index('data-kpi="customers"'):]
     card = card[:card.index('data-kpi="revenue"')]
@@ -308,8 +337,11 @@ def test_01_the_customer_stage_is_named_as_a_stage_move_on_the_strip_tab_and_tab
         assert "lifecycle customers" not in s["label"].lower()
 
 
-def test_02_the_production_quarter_shows_219_stage_moves_and_customers_won_separately(monkeypatch):
-    """219 contacts moved to the Customer stage; 8 deals won by 7 companies."""
+def test_02_the_funnels_customer_stage_contacts_and_customers_won_are_two_figures(monkeypatch):
+    """219 contacts of the quarter's cohort reached the Customer stage; 8
+    deals won by 7 companies. (PR-ADS-182A: the funnel is the acquisition
+    cohort; its Customer column is contacts at the lifecycle stage — the
+    stage-move count of the 166A report is no longer on this funnel.)"""
     _ledger(monkeypatch)
     p = _pipeline(monkeypatch)
     won = p["customers_won"]
@@ -327,13 +359,10 @@ def test_02_the_production_quarter_shows_219_stage_moves_and_customers_won_separ
     # and the Customers card beside the Customers won list.
     markup = _figures(p)
     moves, customers = _figure(markup, "stage_moves"), _figure(markup, "customers_won")
-    assert moves == (
-        # PR-ADS-178B-F1 m4: the stage's date-property sub-label is gone from the
-        # visible text (a title attribute when the payload names one; nothing
-        # when it does not — the old "—" was that empty label).
-        "Moved to Customer stage in HubSpot 219 Counts contacts whose HubSpot "
-        "lifecycle stage changed to Customer in this period, including old "
-        "contacts updated by the team. It is not new customers.")
+    # PR-ADS-182A: the shared acquisition block's Customer column — contacts
+    # at the lifecycle stage, never companies (its legend says so).
+    assert moves == "Reached Customer stage 219 of the contacts acquired, so far"
+    assert p["funnel"]["totals"]["reached_customer_stage"] == STAGE_MOVES
     assert customers.startswith(
         "Customers 7 Distinct HubSpot companies · never summed HubSpot companies "
         "on closed-won deals Customers won Distinct companies with a closed-won "
@@ -367,9 +396,11 @@ def test_03_customers_won_is_distinct_companies_never_the_deal_count_or_the_stag
     builder = source[source.index("def build_pipeline("):]
     assert "base = canonical_revenue.load_won_deals(window, now=now)" in builder
     assert '"customers_won": _customers_won(base or {}, kpis["customers"], resolved)' in builder
-    # Behaviour, not only text: the stage-move count moves, the reading does
-    # not (219 contacts or none moved — the same customers won).
-    assert _stable(_won(monkeypatch, funnel=_funnel_payload(count=0))) == _stable(won)
+    # Behaviour, not only text: the lifecycle-stage count moves, the reading
+    # does not (219 contacts at the stage or none — the same customers won).
+    # PR-ADS-182A: the funnel's input is the cohort block.
+    assert _stable(_won(monkeypatch, cohort=_cohort(monkeypatch, customers=0))) \
+        == _stable(won)
 
 
 def test_04_both_figures_say_which_metric_family_and_window_basis_they_are(monkeypatch):
@@ -420,9 +451,8 @@ def test_05_withheld_customers_render_the_word_and_the_reason_never_a_number(mon
                        .split("dash-kpi-card__sub")[0])
     assert not re.search(r"\d", value_cell), value_cell
     assert "—" not in value_cell
-    # The stage-move figure is untouched by the withholding.
-    assert _figure(markup, "stage_moves").startswith(
-        "Moved to Customer stage in HubSpot 219 ")
+    # The lifecycle-stage figure is untouched by the withholding.
+    assert _figure(markup, "stage_moves").startswith("Reached Customer stage 219 ")
 
 
 def test_06_an_unreadable_or_stale_ledger_is_unavailable_with_its_reason(monkeypatch):
@@ -476,19 +506,25 @@ def test_07_a_scope_or_source_filter_narrows_the_funnel_and_never_the_customers_
     whole = _pipeline(monkeypatch)
     assert whole["customers_won"]["status"] == "published"
     assert len(whole["customers_won"]["rows"]) == WON_COMPANIES
+    # PR-ADS-182A: the funnel is the acquisition cohort, narrowed to the
+    # selected source group (13 Google Ads, 206 Offline at the Customer
+    # stage); keyword attribution is not on the cohort basis (Unavailable).
+    expected = {"google_ads_source": "Reached Customer stage 13 ",
+                "offline": "Reached Customer stage 206 ",
+                "keyword_attributable": "Reached Customer stage Unavailable"}
     for kwargs in ({"scope": "google_ads_source"},
                    {"acquisition_group": "offline"},
                    {"scope": "keyword_attributable", "acquisition_group": "google_ads"}):
-        out = _pipeline(monkeypatch, funnel=_funnel_payload(count=206), **kwargs)
+        out = _pipeline(monkeypatch, **kwargs)
         assert out["filters"]["lead_filtered"] is True, kwargs
         # The same block — verdicts, window, list — and the same cards.
         assert _stable(out["customers_won"]) == _stable(whole["customers_won"]), kwargs
         assert out["kpis"]["customers"] == whole["kpis"]["customers"], kwargs
         assert out["customers_won"]["metric_family"] == "closed_won_customers"
-        # The two figures stay apart: the funnel says 206, customers won 7.
+        # The two figures stay apart: the funnel says its own, customers won 7.
         markup = _figures(out)
-        assert _figure(markup, "stage_moves").startswith(
-            "Moved to Customer stage in HubSpot 206 ")
+        want = expected[kwargs.get("scope") or kwargs["acquisition_group"]]
+        assert _figure(markup, "stage_moves").startswith(want), _figure(markup, "stage_moves")
         assert _figure(markup, "customers_won").startswith("Customers 7 ")
         assert "Unavailable" not in _figure(markup, "customers_won")
     # The retired refusal is not sent by any server, and its words are gone.
@@ -570,13 +606,12 @@ def test_10_the_page_never_falls_back_to_the_stage_moves_when_customers_won_is_m
         company_associations=company_evidence(
             old, companies={"d-may": ["co-may"]},
             scan_started_at=(NOW - timedelta(hours=2)).isoformat()))
-    zero = _pipeline(monkeypatch, funnel=_funnel_payload(count=0))
+    zero = _pipeline(monkeypatch, cohort=_cohort(monkeypatch, customers=0))
     assert zero["kpis"]["customers"]["value"] == 0
     assert zero["customers_won"]["status"] == "published"
     assert zero["customers_won"]["rows"] == []
     _ledger(monkeypatch)
-    moves_unknown = _pipeline(monkeypatch, funnel={
-        "available": False, "window": {"window_key": WINDOW}})
+    moves_unknown = _pipeline(monkeypatch, cohort=_cohort(monkeypatch, readable=False))
     assert moves_unknown["kpis"]["customers"]["value"] == WON_COMPANIES
 
     raw = _node({
@@ -594,14 +629,12 @@ def test_10_the_page_never_falls_back_to_the_stage_moves_when_customers_won_is_m
         assert not re.search(r"\d", customers), (key, customers)
         assert "219" in _figure(out[key], "stage_moves")
     # A published zero is "0" on both sides, not a word and not a dash.
-    assert _figure(out["zero"], "stage_moves").startswith(
-        "Moved to Customer stage in HubSpot 0 ")
+    assert _figure(out["zero"], "stage_moves").startswith("Reached Customer stage 0 ")
     assert _figure(out["zero"], "customers_won").startswith("Customers 0 ")
     assert "No customer was won in this period." in _figure(out["zero"], "customers_won")
     assert "<table" not in out["zero"]            # nothing to list
-    # An unknown stage-move count is a word; customers won is unaffected.
-    assert _figure(out["moves_unknown"], "stage_moves").startswith(
-        "Moved to Customer stage in HubSpot Unavailable ")
+    # An unknown lifecycle-stage count is a word; customers won is unaffected.
+    assert _figure(out["moves_unknown"], "stage_moves") == "Reached Customer stage Unavailable"
     assert _figure(out["moves_unknown"], "customers_won").startswith("Customers 7 ")
 
 
@@ -932,6 +965,11 @@ def test_22_an_existing_database_gains_the_name_columns_on_both_tables_and_keeps
 
 @needs_pg
 def test_23_the_production_quarter_over_the_real_funnel_219_moves_beside_8_won_deals(db, monkeypatch):
+    """PR-ADS-182A: the 219 stage moves are the real stage-entry funnel's
+    (the contact list's and Overview → Lifecycle Activity's family). The
+    Pipeline funnel is the acquisition cohort over the SAME real table: of
+    the 219, only the 37 created in the quarter are in its cohort — the
+    owner's create-date basis, read through the real repository."""
     fake = _HonestHubSpot([_q3_contact(n) for n in range(STAGE_MOVES)])
     m163c._load(fake, NOW - timedelta(hours=3))
 
@@ -952,17 +990,30 @@ def test_23_the_production_quarter_over_the_real_funnel_219_moves_beside_8_won_d
                      "WHERE hs_analytics_source = 'OFFLINE'") == 206
 
     _ledger(monkeypatch, durable=False)
-    # PR-ADS-178C (m7): the real Pipeline builder over the real funnel's
-    # payload and this ledger.
-    p = _pipeline(monkeypatch, funnel=payload, undated=None)
+    # PR-ADS-178C (m7) / PR-ADS-182A: the real Pipeline builder, its cohort
+    # block the REAL cohort build over the real table (the real repository
+    # read and the real freshness of the real sync state), and this ledger.
+    from datetime import date
+    from services import marketing_outcome_cohort_service as M
+    from services.revenue_attribution_service import _cohort_contract_block, _cohort_slots
+    q3 = (date(2026, 7, 1), date(2026, 9, 30))
+    outcomes = M.build_window_outcomes(*q3, resolve_label=lambda label: ("unmatched", label),
+                                       now=NOW)
+    contract = json.loads(json.dumps(_cohort_contract_block(
+        outcomes, _cohort_slots(outcomes)[0], start_date=q3[0], end_date=q3[1]), default=str))
+    assert contract["sql_status"] == "published", contract["sql_reason"]
+    p = _pipeline(monkeypatch, cohort=contract)
     won = p["customers_won"]
     assert won["customers"]["value"] == WON_COMPANIES
     assert won["closed_won_deals"]["value"] == WON_DEALS
-    assert p["funnel"]["events"]["customer"]["count"] == STAGE_MOVES
+    created_in_q3 = STAGE_MOVES - 182
+    assert p["funnel"]["totals"]["contacts"] == created_in_q3
+    assert p["funnel"]["totals"]["reached_customer_stage"] == created_in_q3
+    assert "events" not in p["funnel"]
 
     markup = _figures(p)
     assert _figure(markup, "stage_moves").startswith(
-        "Moved to Customer stage in HubSpot 219 ")
+        f"Reached Customer stage {created_in_q3} ")
     assert _figure(markup, "customers_won").startswith("Customers 7 ")
 
     # The page of contacts behind the stage-move count is those 219, named.

@@ -7763,3 +7763,42 @@ an open drawer is redrawn from a reloaded response or closed, and a row being
 replaced opens nothing; the chip says "Contacts updated"; SQL rate under a
 bound ranks nothing; a raw `stale` dataset counts as a warning. 181A 23, 25–30;
 10 mutations caught. Auditor's 181A note appended to its MEMORY.md.
+
+---
+
+## PR-ADS-182A — Pipeline counts by create date: the shared acquisition-cohort funnel
+
+`docs/67`. Owner decision: the Pipeline funnel is the acquisition cohort
+(contacts created in the window, how far they have got so far), not stage
+entries.
+
+* **One funnel.** `pipeline_service._funnel` republishes the mart deal view's
+  cohort (the SQL card's build) through Overview's producer,
+  `dashboard_overview_service.acquisition_funnel_block`; the page draws it with
+  `acquisitionFunnelModel` → `funnelBlockHtml`. The block carries the cohort's
+  `metric_family` / `window_basis`; withheld means absent; a contact with no
+  created date makes every column "at least N".
+* **Filters.** Source and Scope Google Ads-source are honoured through a new
+  all-source partition of the one cohort producer (`by_source_group`, the
+  Source filter's own rule, conserved by `reconcile_cohort`). Campaign- /
+  Keyword-attributable are unavailable on the funnel with the reason
+  (`lead_scope_not_on_cohort_basis`); the contact list still applies them.
+* **The contact list** (stage entries) opens from its own stage picker under
+  the funnel, labelled as a different count.
+* **Deleted** (Pipeline was the last consumer): `_funnel_coverage`,
+  `undated_reach_for_population`, `outside_window_rows`, `leadsTruthStateHtml`,
+  the Pipeline branch of `stageEntryCountBounds`. Overview Activity's reach,
+  bound rule and snapshot are kept.
+* **Audits.** Parity: five `all_source_acquisition_cohort_*` identities,
+  Overview against Pipeline. Cohort audit: the Pipeline / Deals `funnel` block
+  against its slot, its exposures, the partition's conservation. SQL doctrine
+  registry updated.
+* **Tests.** New `test_pr_ads_182a_pipeline_cohort_funnel.py` (17) and its PG
+  module (4, in the CI PG step and did-run list); all 21 fail on `6de7818`;
+  named mutations each caught (`docs/67` §7). 166A, 178B (+F1, PG), 178C
+  (+PG), 180A, 180C (+PG), 153C, 154C, 141, 177A-F1 ported; 180C 01_d, 01_g,
+  08 and PG 03_a, 03_b, 04_a removed with the narrowing they tested
+  (`docs/67` §6).
+* **CLAUDE.md** (owner-approved): the retired Dashboard → Channels rows and
+  the "Deals with no single source" label brought current; one landmine line
+  for this PR. Auditor's 181A-F1 re-check note appended to its MEMORY.md.

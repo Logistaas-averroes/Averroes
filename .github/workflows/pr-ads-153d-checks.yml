@@ -153,6 +153,7 @@ jobs:
             tests/test_pr_ads_166a_leads_page_names_and_customers.py \
             tests/test_pr_ads_180b_acquisition_cohort_funnel_pg_integration.py \
             tests/test_pr_ads_180c_pipeline_undated_bound_pg_integration.py \
+            tests/test_pr_ads_182a_pipeline_cohort_funnel_pg_integration.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -414,14 +415,18 @@ jobs:
                            # undated contacts OUTSIDE the window's rows
                            # (fetch_undated_stage_reach) on a real table.
                            "tests.test_pr_ads_180b_acquisition_cohort_funnel_pg_integration",
-                           # PR-ADS-180C. The Pipeline funnel reads the same
-                           # undated-reach bound as Overview Activity: one
-                           # population, one reading on both pages; the read's
-                           # outside-the-rows count; a lead filter exact only
-                           # where nothing undated lies outside the rows.
-                           # PR-ADS-180C-F1: both reads in one snapshot under
-                           # a concurrent sync; the window clause's edges.
+                           # PR-ADS-180C. The undated-reach bound on a real
+                           # table; PR-ADS-180C-F1: Activity's reads in one
+                           # snapshot under a concurrent sync; the window
+                           # clause's edges. (PR-ADS-182A: its Pipeline cases
+                           # moved to the acquisition cohort.)
                            "tests.test_pr_ads_180c_pipeline_undated_bound_pg_integration",
+                           # PR-ADS-182A. The Pipeline funnel is the
+                           # acquisition cohort: equal to the Overview's and
+                           # the audit's own SQL, the real parity audit
+                           # identical; the lead filters' source-group parts;
+                           # withheld absent; the no-created-date bound.
+                           "tests.test_pr_ads_182a_pipeline_cohort_funnel_pg_integration",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
