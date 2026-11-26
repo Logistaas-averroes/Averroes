@@ -27,6 +27,10 @@ HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 BUSINESS_WINDOWS = ["current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"]
 #: A figure no legitimate rendering of the fixture produces.
 SENTINEL = 7919
+#: PR-ADS-182A-F1 (m3): the sentinel in ANY rendering ("7919", "7,919",
+#: "7.919", "7 919", "$7,919.00") — a plain substring check could not fail
+#: once the page formats the figure.
+_SENTINEL_ANY = re.compile(r"7[,.\s\u202f\u00a0]?919")
 
 
 def _run(script, *, js=None):
@@ -223,7 +227,7 @@ def test_03_the_sql_kpi_is_the_acquisition_cohort_gated_on_the_responses_own_coh
     assert ">4" in card(cases["published"]) and "through 25 Nov 2026" in card(cases["published"])
     for key in ("withheld", "no_cohort"):
         c = card(cases[key])
-        assert str(SENTINEL) not in c, key
+        assert not _SENTINEL_ANY.search(c), key
         assert ("Withheld" in c) or ("Unavailable" in c), key
     assert "Withheld" in card(cases["withheld"])
     kpi = _fn("pipelineKpiCardsHtml")
@@ -302,7 +306,7 @@ def test_06_the_deal_list_is_shown_only_when_its_length_equals_the_published_cou
     extra = _deal(9, "organic", "2026-11-01T00:00:00+00:00", float(SENTINEL))
     _, bad = _page(_payload(deals=_DEALS + [extra], kpis={"closed_won_deals": _m(4)},
                             population=_m(4)))
-    assert 'data-pipeline-deal="' not in bad and str(SENTINEL) not in bad
+    assert 'data-pipeline-deal="' not in bad and not _SENTINEL_ANY.search(bad)
     assert "Unavailable" in bad and "Deal 1" not in bad
     assert "the deal rows received do not match the published count" in bad
     # The population withheld: the PR-ADS-164A card, no list, never "none".

@@ -7802,3 +7802,16 @@ entries.
 * **CLAUDE.md** (owner-approved): the retired Dashboard → Channels rows and
   the "Deals with no single source" label brought current; one landmine line
   for this PR. Auditor's 181A-F1 re-check note appended to its MEMORY.md.
+
+#### PR-ADS-182A-F1 — audit minors: cohort wording, Google Ads gap named, withheld test made real
+
+`docs/67` §9. One commit on `dc7e326`; the 182A truth audit said "merge with
+minors". The Pipeline subtitle, page explanation, API docstring and section
+comment describe the acquisition cohort (docs/61 and docs/65 point to
+docs/67); under the Google Ads source group the funnel says why the SQL card
+can be lower; the withheld sentinel checks match any rendering (182A, 180A,
+178B); the page shows no figure under an unhonoured filter whatever the server
+sends; the stage-entry contact list shows its campaign-identity and sync notes
+again; the 180C fake reach matches production; CLAUDE.md's "Leads page" stage
+count line names what exists now. 6 mutations caught. Auditor's 182A note
+appended to its MEMORY.md.

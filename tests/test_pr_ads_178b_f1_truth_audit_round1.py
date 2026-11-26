@@ -340,7 +340,9 @@ def test_07_the_sql_card_says_the_lead_filters_do_not_narrow_it():
     # another (the Google Ads acquisition cohort, never narrowed).
     text = _text(_funnel_html(filt))
     assert "Source group: Google Ads" in text
-    assert "The SQL card above is the Google Ads acquisition cohort and is not narrowed" in text
+    # PR-ADS-182A-F1 (m2): under the Google Ads group it also says why the
+    # card can be lower (the card leaves out not-Google-Ads campaign labels).
+    assert "so the card can be lower; it is not narrowed by the lead filters" in text
 
 
 # ── o1. a lower-bound count is "at least N", never exact-looking ─────────────

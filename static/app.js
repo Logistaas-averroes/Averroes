@@ -268,10 +268,10 @@ const PAGE_EXPLANATIONS = {
   // "search-terms" — its explanation is folded into that entry.
   pipeline: {
     title: "Pipeline",
-    purpose: "Leads and closed-won deals together: SQLs (the Google Ads acquisition cohort), the lifecycle funnel (contacts that entered each stage in the window), the closed-won deal list and the customers won.",
+    purpose: "Leads and closed-won deals together: SQLs (the Google Ads acquisition cohort), the lifecycle funnel (the acquisition cohort: contacts created in the window, and how far they have got so far), the closed-won deal list and the customers won.",
     source: "HubSpot lifecycle truth (hubspot_contact_funnel) and the canonical HubSpot closed-won deal ledger.",
     dependsOn: ["contact_funnel", "deals"],
-    emptyMeans: "No contact entered a stage and no deal closed-won in the selected window.",
+    emptyMeans: "No contact was created and no deal closed-won in the selected window.",
     nextAction: "Check System Status → HubSpot CRM, or run the canonical contact sync."
   },
   "gclid-attribution": {
@@ -5923,14 +5923,17 @@ const CAMPAIGN_WINDOW_LABELS = {
 // `/api/pipeline` (services/pipeline_service.build_pipeline, one closed-won
 // snapshot); the paged contact rows stay on `/api/crm-funnel/contacts`.
 // Sections, in order: command bar, KPI cards, the lifecycle funnel, the leads
-// list (opened from a funnel stage), the closed-won deal list, customers won,
+// list (opened from its stage picker under the funnel), the closed-won deal
+// list, customers won,
 // a one-line truth footer. Every figure is the server's {value, status,
 // reason}; the page decides no publication and sums nothing.
 //
 // Two "SQL" ideas, never one word: the KPI is the Google Ads ACQUISITION
 // COHORT (gated by cohortCountHtml on THIS response's cohort block, as on
-// Overview, Campaigns and Dashboard → Deals); the funnel counts contacts that
-// ENTERED each lifecycle stage in the window, labelled so.
+// Overview, Campaigns and Dashboard → Deals). PR-ADS-182A (docs/67): the
+// funnel is the acquisition cohort too — contacts created in the window, and
+// how far they have got so far, all sources (or the lead filters' source
+// group). The contact list is the stage-entry count, labelled as such.
 //
 // The Scope and Source selectors are LEAD filters: they narrow the funnel and
 // the leads list. They never blank or narrow a deal figure, and Customers won
@@ -6257,6 +6260,15 @@ function pipelineFunnelPopulationText(f) {
   if (!group) {
     return "All sources. The SQL card above is the Google Ads acquisition cohort only, and is not narrowed by the lead filters.";
   }
+  if (group === "google_ads") {
+    // PR-ADS-182A-F1 (m2): two Google Ads SQL figures on one page. The
+    // funnel's group is every Paid Search contact by original source; the
+    // SQL card's cohort also leaves out Paid Search contacts whose campaign
+    // label is not a Google Ads campaign — so the card can be lower.
+    return "Source group: Google Ads — every Paid Search contact by HubSpot Original Source. "
+      + "The SQL card above also leaves out Paid Search contacts whose campaign label is not "
+      + "a Google Ads campaign, so the card can be lower; it is not narrowed by the lead filters.";
+  }
   return `Source group: ${sourceGroupLabel(group)} (HubSpot Original Source and its drill-down) — part of the same cohort. The SQL card above is the Google Ads acquisition cohort and is not narrowed by the lead filters.`;
 }
 
@@ -6268,6 +6280,15 @@ function pipelineFunnelPopulationText(f) {
  */
 function pipelineFunnelModel(f) {
   const lf = (f && f.lead_filters) || {};
+  // PR-ADS-182A-F1 (o1): defence in depth — a lead filter the server says the
+  // cohort cannot honour is unavailable here whatever else the response
+  // carries; its totals are never read.
+  if (lf.honoured === false) {
+    f = { ...f, totals: null,
+      publication: { status: "unavailable",
+        reason: lf.unavailable_reason || (f.publication || {}).reason
+          || "lead_scope_not_on_cohort_basis" } };
+  }
   return acquisitionFunnelModel(f, {
     head: "Contacts acquired",
     headSub: lf.source_group ? `created in this window · ${sourceGroupLabel(lf.source_group)}`
@@ -6867,6 +6888,31 @@ function leadsContactHeading(row) {
   return name || company || leadsNameState(row).text;
 }
 
+/**
+ * PR-ADS-182A-F1 (o3) — the stage-entry contact list's truth notes, from the
+ * list's own response (`/api/crm-funnel/contacts`): the campaign-identity
+ * outage and an incomplete contact sync. The wording of the retired funnel
+ * banner (leadsTruthStateHtml, PR-ADS-153C), which the list read until
+ * PR-ADS-182A moved the funnel to the acquisition cohort. Notes, never a gate.
+ */
+function leadsListTruthNotesHtml(payload) {
+  const p = payload || {};
+  const notes = [];
+  if (p.campaign_identity_available === false) {
+    notes.push({ cls: "mapping-notice--info", text: "Google Ads campaign identity unavailable — campaign- and keyword-attributable scopes are unavailable (not zero)." });
+  }
+  const bootstrap = (p.sync || {}).bootstrap_status;
+  if (bootstrap && bootstrap !== "complete") {
+    const allTime = (p.window || {}).window_key === "all_time";
+    notes.push({
+      cls: allTime ? "mapping-notice--error" : "mapping-notice--info",
+      text: `Historical CRM sync in progress (bootstrap: ${bootstrap}).`
+        + (allTime ? " All Time does not yet represent complete history." : ""),
+    });
+  }
+  return notes.map((n) => `<div class="mapping-notice ${n.cls}" data-leads-list-note>${escapeHtml(n.text)}</div>`).join("");
+}
+
 function sourceGroupLabel(group) {
   const found = LEADS_SOURCE_GROUPS.find((g) => g.key === group);
   return found ? found.label : (group || "—");
@@ -7044,8 +7090,11 @@ async function leadsRenderContacts(event) {
   }
 
   const rows = payload.rows || [];
+  // PR-ADS-182A-F1 (o3): the stage-entry list's own truth notes (the funnel
+  // above is the acquisition cohort and carries none of this list's state).
+  const notes = leadsListTruthNotesHtml(payload);
   if (!rows.length) {
-    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">No contacts entered the ${escapeHtml(stage.stage)} stage in this window.</p>`;
+    body.innerHTML = `${notes}<p class="empty-state" style="padding: var(--space-5);">No contacts entered the ${escapeHtml(stage.stage)} stage in this window.</p>`;
     if (pager) pager.innerHTML = "";
     return;
   }
@@ -7066,7 +7115,7 @@ async function leadsRenderContacts(event) {
     </tr>`;
   }).join("");
 
-  body.innerHTML = `<div class="deal-scroll"><table class="data-table">
+  body.innerHTML = `${notes}<div class="deal-scroll"><table class="data-table">
     <thead><tr>
       <th title="The contact's first and last name in HubSpot">Contact${leadsNamesNoteHtml(payload.names_progress)}</th>
       <th title="The Company field on the HubSpot contact">Company</th>

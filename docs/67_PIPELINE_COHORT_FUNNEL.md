@@ -77,8 +77,10 @@ withholds the cohort); the mart publishes it inside `cohort.breakdown`
 The Google Ads-source funnel is **not** the SQL card's population: the card
 is the Google Ads acquisition cohort (Paid Search minus approved
 not-Google-Ads labels, `contact_bucket`); the scope is Paid Search by original
-source. The page says the card "is the Google Ads acquisition cohort and is
-not narrowed by the lead filters".
+source. As first committed the page only said the card "is the Google Ads
+acquisition cohort and is not narrowed by the lead filters" — it did not say
+why the two Google Ads SQL figures can differ (the 182A audit's m2). Since
+F1 (§9) it does, under the Google Ads group.
 
 The no-created-date count is table-wide (all sources); under a Source filter
 it only widens "at least" (as 180B §7.4 for Countries).
@@ -227,7 +229,7 @@ Each applied alone to a copy of the tree; the 182A modules, 154C and 180B run
 | --- | --- | --- |
 | M1 | Pipeline's block relabelled as the stage-event family | 01_a, 01_b, 03_a, 05_a, 06_a, PG 01, PG 02, PG 03 |
 | M1b | Pipeline reads stage events again (`pipeline_service`, the funnel service and the repository reverted to `6de7818`) | all 17 unit, all 4 PG, 154C f1_9, f2_7 |
-| M2 | the shared adapter draws totals under a withheld verdict | 03_d, 180B 03_f |
+| M2 | the shared adapter draws totals under a withheld verdict | 03_d (on its "Withheld" assertion — its sentinel check was vacuous until F1, §9), 180B 03_f |
 | M2b | the cohort audit does not scan the Pipeline `funnel` block | 03_a |
 | M3 | Pipeline states 0 contacts without a created date (bound dropped) | 01_b, 03_a, 03_b, 04_a, PG 04 |
 | M4 | Campaign-/Keyword-attributable silently shows the unfiltered cohort | 02_c, PG 02 |
@@ -258,3 +260,67 @@ the viewport in every shot; no clipped figure (`report.json`).
   `stage_reached_without_entry_date_by_scope` if no consumer appears.
 * The production volume of the extra `by_source_group` slot is five small
   dicts per cohort build; not measured on production.
+
+## 9. PR-ADS-182A-F1 — the truth audit's minors
+
+The audit of `dc7e326` returned "merge with minors" (no Blocker or Major).
+One commit on top.
+
+* **m1 — stale stage-entry wording.** The Pipeline page subtitle
+  (`static/index.html`), `PAGE_EXPLANATIONS.pipeline` (`purpose`,
+  `emptyMeans`), the `/api/pipeline` docstring (shown in OpenAPI) and the
+  app.js Pipeline section comment now say the funnel is the acquisition
+  cohort: contacts created in the window, and how far they have got so far.
+  `docs/61` (§3 items 2–3, the payload sketch, the page layout) and
+  `docs/65` carry a "superseded by `docs/67`" pointer. Overview Activity's
+  `DASH_ACTIVITY_SUBTITLE` is stage entries and is unchanged. 05_a now scans
+  the subtitle, the explanation and the docstring for stage-entry phrasing.
+* **m2 — two Google Ads SQL figures, the gap named.** Under the Google Ads
+  source group (Scope Google Ads-source or Source Google Ads) the funnel says
+  its group is every Paid Search contact by HubSpot Original Source, while
+  the SQL card also leaves out Paid Search contacts whose campaign label is
+  not a Google Ads campaign, so the card can be lower. 02_e: a Paid Search SQL
+  with an approved not-Google-Ads label — card 1, funnel 2, the sentence
+  shown. §2.2 corrected.
+* **m3 — the withheld test made real.** 182A 03_d asserted `"7919" not in
+  panel`, which cannot fail: the page prints 7919 as "7,919". It now asserts
+  no rendering of the sentinel (`7[,.\s]?919`) and checks the pattern bites.
+  The same vacuous pattern is fixed in 180A (4 cases) and 178B (2 cases). Known,
+  not changed here (module untouched by this PR): 180B lines 342 and 448.
+  The M2 row of §7.1 is corrected: 03_d caught it on its "Withheld" assertion.
+* **o1 — defence in depth.** `pipelineFunnelModel` renders the block
+  Unavailable (the server's reason, else `lead_scope_not_on_cohort_basis`)
+  whenever `lead_filters.honoured === false`, even beside totals (02_f, and
+  03_d's second half).
+* **o2.** The 180C unit fake `_reach` no longer returns `outside_window_rows`
+  (production does not).
+* **o3 — the stage-entry list's notes restored.** `leadsListTruthNotesHtml`
+  shows, above the contact list, the retired banner's two notes from the
+  list's own response: campaign identity unavailable, and an incomplete
+  contact sync (All Time qualified). 05_c.
+* **o4.** CLAUDE.md's "The Leads page's stage count" names what exists now:
+  counted on Overview → Lifecycle Activity, listed by the Pipeline contact
+  list (the Leads page was retired in PR-ADS-178C).
+* The auditor's "PR-ADS-182A audit" note is appended to its MEMORY.md.
+
+### 9.1 Evidence
+
+On `dc7e326`: 02_e, 02_f, 05_a and 05_c fail. 03_d passes there by design:
+production drew no leaked total; its strengthening is held by mutation A
+(`scratchpad/pipeline_review/failbefore_dc7e326_F1.log`).
+
+| | Mutation | Failed |
+| --- | --- | --- |
+| A | the auditor's mutant: the funnel subtitle prints `fmtCount(f.totals.contacts)` beside a withheld verdict | 03_d |
+| B | the page trusts a published verdict under an unhonoured filter | 02_f |
+| C | the Google Ads gap is not named | 02_e, 178B-F1 07 |
+| D | the list's truth notes are not rendered | 05_c |
+| E | the stage-entry Pipeline subtitle restored | 05_a |
+| F | the stage-entry page explanation restored | 05_a |
+
+Each applied alone to a copy of the tree, with the 182A, 180A, 178B, 178B-F1
+and 180C unit modules (`scratchpad/pipeline_review/mutations_f1/`). None
+survives.
+
+Screenshots re-taken (published, Source Google Ads):
+`scratchpad/pipeline_review/after/`.

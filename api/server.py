@@ -4579,7 +4579,9 @@ async def get_pipeline(
     ``cohort`` block), closed-won deals, customers (distinct HubSpot
     companies, never summed), won revenue and average deal value (the mart
     deal view's reader contract, as ``{value, status, reason}``), the
-    lifecycle funnel ("Entered stage in window"), the closed-won deal list and
+    lifecycle funnel (PR-ADS-182A, docs/67: the acquisition cohort — contacts
+    created in the window, and how far they have got so far), the closed-won
+    deal list and
     customers won — each list only when its count is published and the list
     numbers exactly that count. Withheld means absent, with the reason.
 

@@ -64,8 +64,8 @@ Opportunity→Customer); `_deal_row`'s Company and Age were always null.
    THIS response's own `cohort` block. The funnel stays lifecycle stage
    entries, labelled **"Entered stage in window"**; its stages read "Entered
    Lead", "Entered MQL", "Entered SQL", "Entered Opportunity", "Moved to
-   Customer stage in HubSpot". No bare "SQLs" label sits on the funnel.
-3. **Lead lists open on a funnel-stage click**, names shown, no emails — the
+   Customer stage in HubSpot". No bare "SQLs" label sits on the funnel. *(Superseded by PR-ADS-182A, `docs/67`: the funnel is the acquisition cohort.)*
+3. **Lead lists open on a funnel-stage click** *(PR-ADS-182A, `docs/67`: from a stage picker under the funnel.)*, names shown, no emails — the
    current Leads behaviour and the current contacts route contract.
 4. **Drop the legacy "Qualified (lead status)" backlog** and the source
    breakdown's lead-status column. Not replaced by "cohort SQLs with no won
@@ -146,7 +146,7 @@ window, scope or group):
        won_revenue_usd, average_deal_value_usd},       # each {value, status, reason}
  metrics {closed_won_deals, customers, revenue_usd},  # the list's own verdicts (audit sibling rule)
  closed_won_population,                               # the deal view's verdict
- funnel {available, reason, label: "Entered stage in window",
+ funnel {available, reason, label: "Entered stage in window",   # superseded by docs/67 (PR-ADS-182A)
          metric_family: "lifecycle_stage_events", window, scope(_label),
          acquisition_group(_label), campaign_identity_available,
          events, conversions, reconciliation, sync},
@@ -174,7 +174,7 @@ window, scope or group):
    Closed-won deals; Customers ("Distinct HubSpot companies · never summed");
    Won revenue; Average deal value. Withheld / Unavailable with the reason
    (`canonicalMetricHtml`, View blockers for admins).
-3. **Funnel** "Lifecycle funnel · Entered stage in window": five stage
+3. **Funnel** "Lifecycle funnel · Entered stage in window" *(Superseded by PR-ADS-182A, `docs/67`: the funnel is the acquisition cohort.)*: five stage
    buttons (cohort-safe conversion chips between them), the Customer stage's
    help text, the truth notes (`leadsTruthStateHtml`), the lead-filter line,
    and the "Disqualified / Other — working status" button.

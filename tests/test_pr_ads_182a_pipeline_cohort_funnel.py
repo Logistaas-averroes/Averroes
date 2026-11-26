@@ -54,6 +54,10 @@ JS = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 NOW = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
 START, END = date(2026, 11, 1), date(2026, 11, 19)
 SENTINEL = 7919
+#: PR-ADS-182A-F1 (m3): the sentinel in ANY rendering ("7919", "7,919",
+#: "7.919", "7 919", "$7,919.00") — a plain substring check could not fail
+#: once the page formats the figure.
+_SENTINEL_ANY = re.compile(r"7[,.\s\u202f\u00a0]?919")
 COLUMNS = ("contacts", "reached_mql", "reached_sql", "reached_opportunity",
            "reached_customer_stage")
 #: block ``totals`` key → cohort slot field.
@@ -108,6 +112,10 @@ BY_GROUP = {"google_ads": (3, 2, 1, 1, 1), "organic": (2, 1, 2, 1, 0),
 def _resolver(label):
     if (label or "").strip().lower() == "brand - uk":
         return ("google_ads", "brand - uk")
+    # PR-ADS-182A-F1 (m2): an approved "not Google Ads" label (the mart's
+    # excluded_label_keys) — a Paid Search contact the SQL card leaves out.
+    if (label or "").strip().lower() == "partner newsletter":
+        return ("not_google_ads", None)
     return ("unmatched", str(label))
 
 
@@ -363,6 +371,47 @@ def test_02_d_the_page_names_the_population_it_counts(monkeypatch):
     assert c["sql"].startswith("Reached SQL 2 ")
 
 
+def test_02_e_a_google_ads_funnel_names_why_the_sql_card_can_be_lower(monkeypatch):
+    """PR-ADS-182A-F1 (m2): two Google Ads SQL figures on one page. A Paid
+    Search contact at SQL whose campaign label is an approved "not Google Ads"
+    label is in the funnel's Google Ads source group (original source) but
+    not in the SQL card's Google Ads acquisition cohort. The page says so."""
+    extra = row(9, "salesqualifiedlead", label="partner newsletter")
+    contract = cohort_contract(monkeypatch, rows() + [extra])
+    for filters in ({"scope": "google_ads_source"}, {"acquisition_group": "google_ads"}):
+        p = pipeline(monkeypatch, contract, **filters)
+        card = contract["totals"]["sqls"]          # what the SQL card republishes
+        funnel = p["funnel"]["totals"]["reached_sql"]
+        assert (card, funnel) == (1, 2), (card, funnel)
+        text = _text(funnel_panel(page(p)))
+        assert "every Paid Search contact by HubSpot Original Source" in text, filters
+        assert ("also leaves out Paid Search contacts whose campaign label is not a Google "
+                "Ads campaign, so the card can be lower") in text, filters
+    # Another source group does not carry the sentence.
+    org = _text(funnel_panel(page(pipeline(monkeypatch, contract, acquisition_group="organic"))))
+    assert "so the card can be lower" not in org
+
+
+def test_02_f_an_unhonoured_filter_is_unavailable_on_the_page_whatever_the_server_sends(
+        monkeypatch):
+    """PR-ADS-182A-F1 (o1), defence in depth: a payload whose lead filter is
+    not honoured but which (wrongly) says published with totals draws no
+    figure — Unavailable with the server's reason, or the scope reason."""
+    p = pipeline(monkeypatch, scope="campaign_attributable")
+    p["funnel"]["publication"] = {"status": "published", "reason": None}
+    p["funnel"]["totals"] = {"contacts": 12, "reached_mql": 11, "reached_sql": 10,
+                             "reached_opportunity": 9, "reached_customer_stage": 8}
+    panel = funnel_panel(page(p))
+    for slot, cell in cells(panel).items():
+        assert "Unavailable" in cell and not re.search(r"\d", cell), (slot, cell)
+    assert "is not split by campaign or keyword attribution" in _text(panel)
+    # No reason in the filter block: the scope reason, never a figure.
+    p["funnel"]["lead_filters"]["unavailable_reason"] = None
+    panel = funnel_panel(page(p))
+    assert "is not split by campaign or keyword attribution" in _text(panel)
+    assert all("Unavailable" in c for c in cells(panel).values())
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. withheld means absent; unreadable is unavailable
 # ═════════════════════════════════════════════════════════════════════════════
@@ -428,8 +477,15 @@ def test_03_d_a_faulty_servers_totals_beside_a_withheld_verdict_are_never_drawn(
     p = pipeline(monkeypatch, cohort_contract(monkeypatch, fresh=False))
     p["funnel"]["totals"] = dict.fromkeys(COLUMNS, SENTINEL)
     panel = funnel_panel(page(p))
-    assert str(SENTINEL) not in panel
+    # PR-ADS-182A-F1 (m3): in ANY format — "7919" never renders as such
+    # (fmtCount prints "7,919"), so a plain substring check could not fail.
+    assert _SENTINEL_ANY.search(r"<b>7,919</b> 7919 7.919") is not None  # the guard bites
+    assert _SENTINEL_ANY.search(panel) is None, panel
     assert "Withheld" in panel
+    # The same under an unhonoured filter (o1): totals sent, none drawn.
+    q = pipeline(monkeypatch, cohort_contract(monkeypatch), scope="keyword_attributable")
+    q["funnel"]["totals"] = dict.fromkeys(COLUMNS, SENTINEL)
+    assert _SENTINEL_ANY.search(funnel_panel(page(q))) is None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -475,6 +531,23 @@ def test_05_a_the_block_carries_the_cohorts_family_and_says_what_it_counts(monke
     assert [c.split(" ")[0] for c in cells(panel).values()] == [
         "Contacts", "Reached", "Reached", "Reached", "Reached"]
     assert "never companies, never deals" in text
+    # PR-ADS-182A-F1 (m1): no other Pipeline copy describes the funnel as
+    # stage entries — the page subtitle, the page explanation, the API doc.
+    stage_entry = re.compile(r"entered each|enter(ed)? (a|each) (lifecycle )?stage in the "
+                             r"window|Entered stage in window|stage-entry", re.I)
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    section = html[html.index('<section id="page-pipeline"'):]
+    subtitle = re.search(r'<p class="page-subtitle">(.*?)</p>', section, re.S).group(1)
+    assert not stage_entry.search(subtitle), subtitle
+    assert "contacts created in the window, and how far they have got so far" in subtitle
+    expl = _run_app("PAGE_EXPLANATIONS.pipeline")
+    for key in ("purpose", "emptyMeans"):
+        assert not stage_entry.search(expl[key]), (key, expl[key])
+    assert "contacts created in the window" in expl["purpose"]
+    server = (ROOT / "api" / "server.py").read_text(encoding="utf-8")
+    route = server[server.index('@app.get("/api/pipeline")'):]
+    route = route[:route.index('"""', route.index('"""') + 3)]
+    assert not stage_entry.search(route), route
 
 
 def test_05_b_the_contact_list_is_a_different_count_and_says_so(monkeypatch):
@@ -493,6 +566,30 @@ def test_05_b_the_contact_list_is_a_different_count_and_says_so(monkeypatch):
     wire = wire[:wire.index("\n}\n")]
     assert '_leadsView = btn.getAttribute("data-leads-stage")' in wire
     assert "data-funnel-event" not in wire
+
+
+def test_05_c_the_stage_entry_list_keeps_its_own_truth_notes():
+    """PR-ADS-182A-F1 (o3): the retired funnel banner warned the stage-entry
+    list when campaign identity was unavailable or the contact sync was
+    incomplete. The list says it again, from its own response."""
+    out = _run_app(
+        "[leadsListTruthNotesHtml({campaign_identity_available: false,"
+        "   sync: {bootstrap_status: 'running'}, window: {window_key: 'all_time'}}),"
+        " leadsListTruthNotesHtml({campaign_identity_available: true,"
+        "   sync: {bootstrap_status: 'running'}, window: {window_key: 'last_quarter'}}),"
+        " leadsListTruthNotesHtml({campaign_identity_available: true,"
+        "   sync: {bootstrap_status: 'complete'}, window: {window_key: 'all_time'}})]")
+    both, running, none = (_text(h) for h in out)
+    assert ("Google Ads campaign identity unavailable — campaign- and keyword-attributable "
+            "scopes are unavailable (not zero).") in both
+    assert "Historical CRM sync in progress (bootstrap: running). All Time does not yet " \
+           "represent complete history." in both
+    assert running == "Historical CRM sync in progress (bootstrap: running)."
+    assert none == ""
+    contacts = JS[JS.index("async function leadsRenderContacts("):]
+    contacts = contacts[:contacts.index("\n}\n")]
+    assert "const notes = leadsListTruthNotesHtml(payload);" in contacts
+    assert contacts.count("${notes}") == 2            # the empty list and the table
 
 
 # ═════════════════════════════════════════════════════════════════════════════

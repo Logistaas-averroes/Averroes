@@ -1,5 +1,10 @@
 # 65 — Pipeline reads the undated-reach bound (PR-ADS-180C)
 
+> **Superseded for Pipeline by PR-ADS-182A (`docs/67`):** the Pipeline funnel is
+> the acquisition cohort (by create date) and reads no undated reach; the
+> lead-filter narrowing (§1.1) and `outside_window_rows` are removed. The
+> bound stays Overview → Lifecycle Activity's.
+
 Builds on `docs/64` (PR-ADS-180B / 180B-F1). Closes `docs/64` §8's open
 item "Pipeline's stage-entry bound reads only the window's rows" (the 180B
 truth audit's m3) and the two minors the 180B-F1 re-review carried.

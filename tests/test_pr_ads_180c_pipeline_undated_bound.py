@@ -62,10 +62,10 @@ def _reach(rows):
     documented rule (the SQL is proven on PostgreSQL in the PG module): a
     contact whose stage implies the event and that has no date for it, ruled
     out only when created after the window AND no date of it falls in the
-    window; ``outside_window_rows`` the part with no date in the window."""
+    window. (PR-ADS-182A-F1: no ``outside_window_rows`` — production removed
+    it; the fake returns what the real read returns.)"""
     def read(start, end):
         counts = dict.fromkeys(_EVENTS, 0)
-        outside = dict.fromkeys(_EVENTS, 0)
         for r in rows:
             dates = [date.fromisoformat(v) for k, v in r.items()
                      if k.startswith("date_entered_") and v]
@@ -78,8 +78,7 @@ def _reach(rows):
                 if _RANK.get(r["lifecycle_stage"], 0) >= _EVENT_RANK[e] \
                         and not r.get(f"date_entered_{e}"):
                     counts[e] += 1
-                    outside[e] += 0 if in_window else 1
-        return {"available": True, "counts": counts, "outside_window_rows": outside}
+        return {"available": True, "counts": counts}
     return read
 
 

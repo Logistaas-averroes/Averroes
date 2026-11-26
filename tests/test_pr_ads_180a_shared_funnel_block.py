@@ -61,6 +61,10 @@ _CLASS_TOKEN = re.compile(r"(?<![\w-])(?:dash-funnel|funnel-block)(?:__[a-z0-9-]
 
 _EVENTS = ("lead", "mql", "sql", "opportunity", "customer")
 SENTINEL = 7919
+#: PR-ADS-182A-F1 (m3): the sentinel in ANY rendering ("7919", "7,919",
+#: "7.919", "7 919", "$7,919.00") — a plain substring check could not fail
+#: once the page formats the figure.
+_SENTINEL_ANY = re.compile(r"7[,.\s\u202f\u00a0]?919")
 
 
 def _strip_comments(src: str) -> str:
@@ -274,7 +278,7 @@ def test_03_c_a_withheld_funnel_shows_no_figure_even_beside_a_faulty_value():
         s["metric"]["value"] = SENTINEL
         s["bound_reason"] = "a bound"
     html = _isolated("funnelBlockHtml(%s, {})" % json.dumps(m))
-    assert str(SENTINEL) not in html and "at least" not in html
+    assert not _SENTINEL_ANY.search(html) and "at least" not in html
     assert "<strong>Withheld</strong> — the last contact sync failed." in html
     assert list(_cells(html).values()) == [
         "Entered Lead Withheld", "Entered MQL Withheld", "Entered SQL Withheld",
@@ -634,12 +638,12 @@ def test_06_f_channels_withheld_is_the_block_with_the_word_and_no_figure():
     p["channels"][0]["contacts"] = SENTINEL
     for html in _run_app("[channelDrawerHtml(%s, '__all__'), channelDrawerHtml(%s, 'PAID_SOCIAL')]"
                          % (json.dumps(p), json.dumps(p))):
-        assert str(SENTINEL) not in html
+        assert not _SENTINEL_ANY.search(html)
         assert html.count('class="funnel-block"') == 1
         assert "<strong>Withheld</strong> — the last contact sync failed." in html
         assert all(c.endswith("Withheld") for c in _cells(html).values())
     page = _run_app("renderChannelFunnel(%s, {})" % json.dumps(p))
-    assert str(SENTINEL) not in page and "7,919" not in page
+    assert not _SENTINEL_ANY.search(page) and "7,919" not in page
     group = page[page.index('aria-label="Contacts acquired"'):]
     group = group[:group.index("</section>")]
     assert "<strong>Withheld</strong> — the last contact sync failed." in group
@@ -663,7 +667,7 @@ def test_06_g_the_revenue_tab_strip_is_no_longer_a_funnel_and_keeps_every_figure
                   "revenue_per_sql_reason": "sql_to_customer_not_one_cohort"}}
     html = _run_app('_currentUser = {"role": "viewer"}; renderRevCustomerEfficiency(%s)' % json.dumps(d))
     text = _text(html)
-    assert str(SENTINEL) not in html and "Withheld" in text
+    assert not _SENTINEL_ANY.search(html) and "Withheld" in text
     assert "Closed-Won Deals 0 By close date" in text
     assert "SQL-to-customer rate Unavailable" in text and "Revenue per SQL Unavailable" in text
     assert "&amp;amp;" not in html

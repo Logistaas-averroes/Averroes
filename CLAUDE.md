@@ -440,8 +440,9 @@ disclosure. A re-read never takes a day with verified spend to zero
   are not Pipeline's; never write a Pipeline-local funnel.
 
 - **"Moved to Customer stage" is a lifecycle event, never a customer**
-  (PR-ADS-166A, `docs/49_*`). The Leads page's stage count
-  (`hubspot_contact_funnel.date_entered_customer`) counts contacts whose
+  (PR-ADS-166A, `docs/49_*`). The stage count
+  (`hubspot_contact_funnel.date_entered_customer`; counted on Overview →
+  Lifecycle Activity, listed by the Pipeline contact list) counts contacts whose
   HubSpot lifecycle stage was changed, old contacts edited in bulk included:
   219 for Q3 2026 against 8 won deals. Never label it "Customers", add it to,
   or derive it from a customer figure. "Customers won" comes only from the
