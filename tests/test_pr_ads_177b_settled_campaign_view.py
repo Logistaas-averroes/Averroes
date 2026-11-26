@@ -34,7 +34,8 @@ def test_01_the_settled_campaign_view_is_asked_for_never_the_default():
     # settled view always do.
     import services.dashboard_campaigns_service as dc
     for name in ("dashboard_overview_service", "dashboard_revenue_service",
-                 "dashboard_deals_service", "dashboard_channels_service"):
+                 # PR-ADS-181A: dashboard_channels_service is deleted.
+                 "dashboard_deals_service"):
         src = inspect.getsource(__import__(f"services.{name}", fromlist=["x"]))
         assert "settled=True" not in src, name
     src = inspect.getsource(dc)

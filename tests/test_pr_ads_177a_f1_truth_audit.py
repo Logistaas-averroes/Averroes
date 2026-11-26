@@ -213,31 +213,15 @@ def test_m2_c_under_a_withheld_cohort_the_funnel_says_withheld_and_the_reason(
     assert "backfill is still running" in first        # the reason, in words
 
 
-def _channels_payload(monkeypatch):
-    import tests.test_pr_ads_136_dashboard_channels as t136
-    return json.loads(json.dumps(t136._channels(monkeypatch), default=str))
-
-
-def test_m2_d_the_real_channels_payload_never_says_sql_over_its_lead_status_counts(
-        monkeypatch):
-    d = _channels_payload(monkeypatch)
-    assert d["kpis"]["total_sqls_label"] == "Qualified (lead status)"
-    assert d["kpis"]["total_sqls_metric_family"] == "legacy_lead_status_category"
-    out = _render(
-        "const d = %s; [renderChanKpiRow(d), renderChanQualityPanel(d),"
-        " renderChanPlatformMatrix(d), renderChanChannelList(d), renderDashDecisionCards(d)]"
-        % json.dumps(d))
-    for name, html in zip(("kpis", "quality", "matrix", "channel list", "cards"), out):
-        assert not _BARE_SQL.search(_text(html)), (name, _BARE_SQL.findall(_text(html)))
-    kpi = out[0][out[0].index('data-kpi="sqls"'):]
-    assert "Qualified (lead status)" in kpi
-    for card in d["decision_cards"]:
-        assert not _BARE_SQL.search(card["headline"] + " " + card["body"]), card
-    # The drawer is wired on click (DOM): its header names the same thing.
-    i = APP.index("function wireChanChannelDrawers(")
-    drawer = APP[i:APP.index("\n}\n", i)]
-    assert "<th>SQLs</th>" not in drawer and "${LEAD_STATUS_QUALIFIED_LABEL}" in drawer
-    assert "Platform-level SQLs" not in drawer
+# PR-ADS-181A: _channels_payload and
+# test_m2_d_the_real_channels_payload_never_says_sql_over_its_lead_status_counts
+# stood here. They rendered the Dashboard → Channels tab (renderChanKpiRow,
+# renderChanQualityPanel, renderChanPlatformMatrix, renderChanChannelList,
+# wireChanChannelDrawers) over /api/dashboard/channels' legacy lead-status
+# count. The tab, its renderers, its route and its builder are retired, and
+# with them the only page that showed that count beside channels. Its rule —
+# the legacy count is never labelled "SQLs" — still holds where the count
+# survives (Revenue Health's mapping cards, LEAD_STATUS_QUALIFIED_LABEL).
 
 
 # ══ MINOR 1 — each count says the last day it counts ═══════════════════════

@@ -1248,7 +1248,9 @@ function hashToPage(hash) {
 
 // Dashboard inner-tab state (PR-ADS-135). Overview is the default; Revenue is
 // linkable/bookmarkable via #/dashboard?tab=revenue.
-const DASHBOARD_TABS = ["overview", "revenue", "channels", "campaigns", "countries", "deals"];
+// PR-ADS-181A: "channels" is retired (the Channels page is the one channel
+// surface); hashToDashTab sends a bookmarked ?tab=channels there.
+const DASHBOARD_TABS = ["overview", "revenue", "campaigns", "countries", "deals"];
 
 function hashToDashTab(hash) {
   const q = (hash || "").split("?")[1] || "";
@@ -1284,6 +1286,11 @@ function navigateToHash(page, options) {
         (term ? `&term=${encodeURIComponent(term)}` : "");
     }
   }
+  // PR-ADS-181A: the Channels period travels as ?window= so a refresh (or a
+  // shared link) holds it; the default period needs none.
+  if (page === "channels") {
+    hash = channelsHashFor(channelsWindowFromHash(window.location.hash) || _channelsWindow);
+  }
   // PR-ADS-161E: "View blockers" deep links carry the CRM Truth Exceptions
   // filters (#/health?cte_window=business/ytd&cte_family=customer_identity).
   if (page === "health") {
@@ -1311,6 +1318,8 @@ function navigate(page, options) {
 
   // PR-ADS-153C: retired pages redirect to their canonical destination and
   // carry the old page's filter intent, so no old link becomes a dead end.
+  // PR-ADS-181A: so does the retired Dashboard → Channels tab's bookmark.
+  if (page === "dashboard" && dashTabIsRetiredChannels(window.location.hash)) page = "channels";
   const retired = RETIRED_PAGE_REDIRECTS[page];
   if (retired) {
     if (retired.status) leadsSetPendingStatus(retired.status);
@@ -1525,7 +1534,7 @@ async function loadDataFreshness() {
   _latestRunForMeta = latestRun;
 
   const status     = normalizeRunStatus(latestRun);
-  const runType    = latestRun.run_type || "unknown";
+  const runType    = runTypeLabel(latestRun.run_type);
   const timestamp  = latestRun.finished_at || latestRun.started_at;
   const dateStr    = fmtDate(timestamp);
   const ageDays    = timestamp
@@ -1553,6 +1562,25 @@ async function loadDataFreshness() {
     statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-ok";
   }
+}
+
+// PR-ADS-181A: a recorded run type in plain words (api/monitoring.py
+// RUN_TYPE_CADENCE and RETIRED_RUN_TYPES, and the jobs that write `runs`).
+// A run type not listed here is shown AS ITSELF — never hidden, never renamed
+// into a neighbour: an unregistered scheduler is something to see.
+const RUN_TYPE_LABELS = {
+  daily: "Daily check (morning)",
+  daily_incremental_sync: "Daily data sync",
+  monthly: "Monthly refresh",
+  weekly: "Weekly refresh (retired)",
+  backfill: "Backfill",
+  revenue_recovery: "Revenue recovery",
+};
+
+function runTypeLabel(runType) {
+  const key = runType === null || runType === undefined || runType === "" ? "" : String(runType);
+  if (!key) return "unknown run";
+  return Object.prototype.hasOwnProperty.call(RUN_TYPE_LABELS, key) ? RUN_TYPE_LABELS[key] : key;
 }
 
 // ── Monitoring status banner ────────────────────────────────────────────────
@@ -1623,7 +1651,7 @@ function renderRunMeta(sectionKey) {
 
   const run       = _latestRunForMeta;
   const status    = normalizeRunStatus(run);
-  const runType   = run.run_type || "unknown";
+  const runType   = runTypeLabel(run.run_type);
   const timestamp = run.finished_at || run.started_at;
   const dateStr   = fmtDate(timestamp);
   const ageDays   = timestamp
@@ -1805,6 +1833,7 @@ function renderPageDatasetFreshness(sectionKey) {
     s === "fresh_but_empty" || s === "stale_with_data" || s === "dependency_blocked"
     || s === "data_available_latest_sync_failed" || s === "not_run_but_derivable"
     || s === "empty_success" || s === "data_available_latest_sync_partial"
+    || s === "partial" || s === "stale"
   ).length;
   const errorCount   = statuses.filter((s) =>
     s === "failed" || s === "stale_and_empty" || s === "db_unavailable"
@@ -1823,6 +1852,10 @@ function renderPageDatasetFreshness(sectionKey) {
       stale_and_empty: "Stale+Empty", failed: "Failed", running: "Running",
       not_run: "Not run", dependency_blocked: "Blocked", db_unavailable: "DB down",
       unknown: "Unknown", success: "Fresh", stale: "Stale",
+      // PR-ADS-181A: datasetDisplayStatus passes a row's own run status
+      // through when it has no canonical status — a partial sync among them.
+      // Without this key it read "Unknown" beside a tally that missed it.
+      partial: "Partial",
       // PR-ADS-095 refined states
       data_available_latest_sync_failed: "Degraded",
       failed_no_data:                    "Failed",
@@ -1914,6 +1947,13 @@ const DASH_DELTA_VALENCE = {
 // Overview is the default; Revenue is linkable via #/dashboard?tab=revenue.
 // Both roots reuse the same PR-134 design system — no new visual language.
 
+// PR-ADS-181A: the retired Dashboard → Channels tab. A bookmark of it opens the
+// Channels page (the one channel surface) instead of a silent Overview.
+function dashTabIsRetiredChannels(hash) {
+  const q = new URLSearchParams(String(hash || "").split("?")[1] || "");
+  return q.get("tab") === "channels";
+}
+
 function loadDashboardTab() {
   const tab = hashToDashTab(window.location.hash);
   activateDashboardTab(tab, { updateHash: false });
@@ -1932,13 +1972,11 @@ function activateDashboardTab(tab, options) {
 
   const overviewRoot = document.getElementById("dashboard-overview-root");
   const revenueRoot = document.getElementById("dashboard-revenue-root");
-  const channelsRoot = document.getElementById("dashboard-channels-root");
   const campaignsRoot = document.getElementById("dashboard-campaigns-root");
   const countriesRoot = document.getElementById("dashboard-countries-root");
   const dealsRoot = document.getElementById("dashboard-deals-root");
   if (overviewRoot) overviewRoot.hidden = target !== "overview";
   if (revenueRoot) revenueRoot.hidden = target !== "revenue";
-  if (channelsRoot) channelsRoot.hidden = target !== "channels";
   if (campaignsRoot) campaignsRoot.hidden = target !== "campaigns";
   if (countriesRoot) countriesRoot.hidden = target !== "countries";
   if (dealsRoot) dealsRoot.hidden = target !== "deals";
@@ -1950,7 +1988,6 @@ function activateDashboardTab(tab, options) {
   }
 
   if (target === "revenue") loadDashboardRevenue();
-  else if (target === "channels") loadDashboardChannels();
   else if (target === "campaigns") loadDashboardCampaigns();
   else if (target === "countries") loadDashboardCountries();
   else if (target === "deals") loadDashboardDeals();
@@ -2776,9 +2813,12 @@ function wireDashChartHover(root, d) {
 //                stage is a lower bound) · unknown "—" with the reason (the FROM
 //                stage is a lower bound or unknown) · unavailable the word and
 //                its reason · none: a plain connector, no rate published.
-// opts           {ariaLabel, selectable, activeKey}: presentation only. A
+// opts           {ariaLabel, selectable, activeKey, layout}: presentation only. A
 //                selectable block (Pipeline) makes each stage a button carrying
 //                data-funnel-event; the selected stage is an ARGUMENT.
+//                PR-ADS-181A: layout "vertical" stacks the same five cells in
+//                one column (the Channels drawer). Same cells, same rules: it
+//                changes the CSS layout only, never what a cell says.
 const FUNNEL_BLOCK_SLOTS = ["contacts", "mql", "sql", "opportunity", "customer"];
 // A column's caption when the adapter gives no label of its own (a withheld or
 // unavailable funnel): the owner's five columns. The last is the lifecycle
@@ -2853,8 +2893,9 @@ function funnelBlockHtml(model, opts) {
     return `${link}${funnelBlockStageHtml(stage, i, verdict, o)}`;
   }).join("");
   const family = funnelBlockFamily(m.family);
+  const layout = o.layout === "vertical" ? ' data-funnel-layout="vertical"' : "";
   return `
-    <div class="funnel-block" data-metric-family="${escapeHtml(family.key)}" data-window-basis="${escapeHtml(family.basis)}">
+    <div class="funnel-block"${layout} data-metric-family="${escapeHtml(family.key)}" data-window-basis="${escapeHtml(family.basis)}">
       <p class="funnel-block__family"><span class="funnel-block__family-label">${escapeHtml(family.label)}</span> · <span class="funnel-block__basis">${escapeHtml(family.basisLabel)}</span></p>
       ${funnelBlockVerdictHtml(verdict)}
       <div class="dash-funnel" role="group" aria-label="${escapeHtml(o.ariaLabel || family.label)}">${cells}</div>
@@ -4219,788 +4260,16 @@ function renderRevTruthFooter(d) {
     </footer>`;
 }
 
-// ── Dashboard — Channels & Platforms tab (PR-ADS-136) ──────────────────────
-//
-// Third dashboard tab. Reuses the PR-134/135 design system end to end (command
-// header, tabs, business-window selector, KPI cards, chart shell, decision
-// cards, truth footer, loading/refetch/unavailable states) — NO new visual
-// language. It answers: which channels and platforms produce SQLs, customers,
-// and closed-won revenue — and which are revenue-only because spend is not
-// connected? Truth doctrine is identical: only Google Ads / Paid Search is
-// spend-connected and ROAS-eligible; every other channel is revenue/SQL/customer
-// attribution only — spend and ROAS render "Unavailable — no connected spend
-// source", never a fabricated Meta/LinkedIn/Organic spend or ROAS, never a $0.
+// ── Dashboard — Channels & Platforms tab: retired (PR-ADS-181A) ───────────
+// The third Dashboard tab (PR-ADS-136, /api/dashboard/channels) is retired by
+// owner decision: the Channels page (#/channels, /api/channel-funnel) is the
+// one channel surface. A bookmarked #/dashboard?tab=channels opens it.
 
-let dashChannels = null;
-let dashChannelsStatus = "loading";
-// Channel momentum metric toggle — closed-won deals is the executive default.
-// PR-ADS-161E: a channel bucket counts won DEALS; customers (distinct
-// companies) are not additive across channels or buckets.
-let _chanMomentumMetric = "closed_won_deals";
-
-// Executive channel palette (8 buckets). Presentation only — never a taxonomy.
-const CHAN_COLORS = {
-  google_ads: "#129ef5",
-  paid_social: "#7c5cff",
-  other_paid: "#ff8a3d",
-  organic_search_direct: "#22b07d",
-  organic_social: "#12b5c9",
-  referrals_partner: "#e0568a",
-  offline: "#8896a6",
-  unclassified: "#b6bfca",
-};
-const CHAN_ORDER = [
-  "google_ads", "paid_social", "other_paid", "organic_search_direct",
-  "organic_social", "referrals_partner", "offline", "unclassified",
-];
 // PR-ADS-177A-F1 (truth audit MAJOR 2): the LEGACY lead-status count
 // (`leads.status_category = 'qualified'`) — a different metric from the
-// cohort's SQLs, never shown under the bare word "SQL" / "SQLs".
+// cohort's SQLs, never shown under the bare word "SQL" / "SQLs". (Revenue
+// Health's mapping cards read it.)
 const LEAD_STATUS_QUALIFIED_LABEL = "Qualified (lead status)";
-// (PR-ADS-177A-F2: declared before CHAN_METRICS, which reads it at load.)
-const CHAN_METRICS = [
-  // PR-ADS-177A-F2 (truth audit round 2, MINOR 1): the Momentum series counts
-  // the legacy lead-status population (`status_category = 'qualified'`).
-  { key: "sqls", label: LEAD_STATUS_QUALIFIED_LABEL },
-  { key: "closed_won_deals", label: "Won deals" },
-  { key: "revenue", label: "Revenue" },
-];
-
-function chanColor(channel) {
-  return CHAN_COLORS[channel] || "#b6bfca";
-}
-
-function chanOrderIndex(channel) {
-  const i = CHAN_ORDER.indexOf(channel);
-  return i === -1 ? CHAN_ORDER.length : i;
-}
-
-async function loadDashboardChannels() {
-  const window_ = getRoasBusinessWindow();
-  const token = ++_revReqSeq.dashChannels;
-  setWindowRangeLoading("dashboard-range");
-
-  const root = document.getElementById("dashboard-channels-root");
-  const genEl = document.getElementById("dashboard-generated");
-  if (root) {
-    if (dashChannels && dashChannelsStatus === "ok") {
-      root.classList.add("is-refreshing");
-    } else {
-      root.innerHTML = renderDashSkeleton();
-    }
-  }
-
-  try {
-    const data = await fetchJSON(
-      `/api/dashboard/channels?window=${encodeURIComponent(window_)}`
-    );
-    if (token !== _revReqSeq.dashChannels) return;
-    if (!_revResponseIsCurrent("dashChannels", token, data)) return;
-    dashChannels = data;
-    dashChannelsStatus = "ok";
-    renderWindowRange("dashboard-range", data.window || null);
-    if (genEl) genEl.textContent = data.generated_at ? `Generated ${fmtDate(data.generated_at)}` : "";
-    renderDashboardChannels();
-  } catch (err) {
-    console.error("[loadDashboardChannels]", err);
-    if (token !== _revReqSeq.dashChannels) return;
-    dashChannels = null;
-    dashChannelsStatus = "error";
-    if (genEl) genEl.textContent = "";
-    renderWindowRange("dashboard-range", null);
-    renderDashboardChannels();
-  }
-}
-
-function renderDashboardChannels() {
-  const root = document.getElementById("dashboard-channels-root");
-  if (!root) return;
-  root.classList.remove("is-refreshing");
-
-  if (dashChannelsStatus !== "ok" || !dashChannels) {
-    const nextStep = dashCanNavigate("health")
-      ? 'Next step: check <a href="#/health">System Status</a> or retry with Refresh.'
-      : "Next step: retry with Refresh, or contact your administrator.";
-    root.innerHTML = `
-      <div class="revenue-blocked-card dash-error-card">
-        <h3 class="revenue-blocked-card__title">Channels &amp; Platforms unavailable</h3>
-        <p>The dashboard channels service could not be reached. Nothing is shown
-        because nothing safe could be computed — metrics are never fabricated.</p>
-        <p class="revenue-blocked-card__next">${nextStep}</p>
-      </div>`;
-    return;
-  }
-
-  const d = dashChannels;
-  root.innerHTML = `
-    <div class="dash-tab-intro dash-anim">
-      <h2 class="dash-tab-intro__title">Channels &amp; Platforms</h2>
-      <p class="dash-tab-intro__sub">Which channels and platforms produce qualified leads (HubSpot lead status), closed-won deals and revenue — and which are revenue-only because spend is not connected. Only Google Ads spend is compared with revenue; Meta Ads spend is shown on its own line.</p>
-    </div>
-    ${renderChanKpiRow(d)}
-    <div class="dash-main-grid">
-      <section class="dash-panel dash-chart-panel dash-anim" aria-label="Channel momentum">
-        ${renderChanMomentumPanel(d)}
-      </section>
-      <aside class="dash-panel dash-anim chan-mix-panel" aria-label="Channel mix">
-        ${renderChanMixPanel(d)}
-      </aside>
-    </div>
-    <section class="dash-panel dash-anim chan-quality-panel" aria-label="Channel quality vs revenue">
-      ${renderChanQualityPanel(d)}
-    </section>
-    <section class="dash-panel dash-anim chan-platform-panel" aria-label="Platform matrix">
-      ${renderChanPlatformMatrix(d)}
-    </section>
-    ${d.meta_ads_line ? `<section class="dash-panel dash-anim chan-meta-panel" aria-label="Meta Ads spend">
-      ${renderChanMetaPanel(d.meta_ads_line)}
-    </section>` : ""}
-    <section class="dash-panel dash-anim chan-channels-panel" aria-label="Channel detail">
-      ${renderChanChannelList(d)}
-    </section>
-    <section class="dash-decisions dash-anim" aria-label="Channel decision cards">
-      ${renderDashDecisionCards(d)}
-    </section>
-    ${renderChanTruthFooter(d)}
-  `;
-  wireChanMomentumToggle(root, d);
-  wireChanMomentumHover(root, d);
-  wireChanQualityHover(root, d);
-  wireChanChannelDrawers(root, d);
-}
-
-function renderChanKpiRow(d) {
-  const k = d.kpis || {};
-  const pc = d.period_change || {};
-  const shareSub = (k.spend_connected_share !== null && k.spend_connected_share !== undefined)
-    ? `${(k.spend_connected_share * 100).toFixed(0)}% of closed-won revenue`
-    : "Share unavailable";
-
-  const cards = [
-    {
-      key: "revenue", label: "Closed-Won Revenue",
-      value: canonicalValueHtml(k.closed_won_revenue_usd, (k.metrics || {}).revenue_usd, fmtMoney, { windowType: "business", windowKey: (d.window || {}).key }),
-      sub: "USD · HubSpot closed-won",
-      delta: dashDeltaChip("closed_won_revenue_usd", pc),
-      source: "HubSpot Closed-Won",
-      ok: k.closed_won_revenue_usd !== null && k.closed_won_revenue_usd !== undefined,
-    },
-    {
-      key: "spend_connected", label: "Spend-Connected Revenue",
-      value: dashValue(k.spend_connected_revenue_usd, fmtMoney),
-      sub: shareSub,
-      delta: `<span class="dash-delta dash-delta--none">Google Ads only</span>`,
-      source: "Google Ads · spend-connected",
-      ok: k.spend_connected_revenue_usd !== null && k.spend_connected_revenue_usd !== undefined,
-    },
-    {
-      key: "revenue_only", label: "Revenue-Only Revenue",
-      value: dashValue(k.revenue_only_revenue_usd, fmtMoney),
-      sub: "No connected spend source",
-      delta: `<span class="dash-delta dash-delta--none">Attribution only</span>`,
-      source: "HubSpot Closed-Won",
-      ok: k.revenue_only_revenue_usd !== null && k.revenue_only_revenue_usd !== undefined,
-    },
-    {
-      // PR-ADS-161E: distinct proven HubSpot companies — the canonical window
-      // metric, never the sum of per-channel deal counts.
-      key: "customers", label: "Customers",
-      value: canonicalMetricHtml(
-        { value: k.customers, status: k.customers_status, reason: k.customers_reason },
-        fmtCount, { windowType: "business", windowKey: (d.window || {}).key }),
-      sub: `${dashValue(k.total_closed_won_deals, fmtCount)} closed-won deals`
-        + (k.top_channel ? ` · Top: ${escapeHtml(k.top_channel)}` : ""),
-      delta: dashDeltaChip("total_closed_won_deals", pc),
-      source: "HubSpot companies on closed-won deals",
-      ok: k.customers_status === "published",
-    },
-    {
-      // PR-ADS-177A-F1 (truth audit MAJOR 2): this page's counts are the
-      // LEGACY lead-status population (the source groups), not the
-      // acquisition cohort the Dashboard's SQL cards count — so the word
-      // "SQLs" never sits over them.
-      key: "sqls", label: LEAD_STATUS_QUALIFIED_LABEL,
-      value: dashValue(k.total_sqls, fmtCount),
-      sub: k.top_platform ? `Top platform: ${escapeHtml(k.top_platform)}` : "HubSpot lead status · not the acquisition cohort",
-      delta: dashDeltaChip("total_sqls", pc),
-      source: "HubSpot lead status (qualified)",
-      ok: k.total_sqls !== null && k.total_sqls !== undefined,
-    },
-  ];
-
-  const compareNote = pc.available
-    ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
-    : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
-
-  return `
-    <div class="dash-kpi-grid">
-      ${cards.map((c) => `
-        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
-          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
-          <div class="dash-kpi-card__value">${c.value}</div>
-          <div class="dash-kpi-card__sub">${c.sub}</div>
-          <div class="dash-kpi-card__meta">${c.delta}</div>
-          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
-        </div>`).join("")}
-    </div>
-    ${compareNote}`;
-}
-
-// Value of one trend channel for the selected metric. Revenue may be null
-// (unknown amount) — never coerced to 0; counts (sqls/won deals) are always real.
-function chanMetricVal(ch, metric) {
-  if (metric === "revenue") return ch.revenue_usd;
-  return ch[metric];
-}
-
-function renderChanMomentumPanel(d) {
-  const trend = d.trend || {};
-  const metric = _chanMomentumMetric;
-  const bucketLabel = trend.bucket === "month" ? "Monthly" : (trend.bucket === "week" ? "Weekly" : "");
-  const note = trend.status !== "ready"
-    ? `<p class="dash-series-note">Channel series unavailable — ${escapeHtml(trend.reason || "not verified")}</p>` : "";
-  const toggle = CHAN_METRICS.map((m) => `
-    <button type="button" class="chan-metric-btn ${m.key === metric ? "is-active" : ""}" data-chan-metric="${m.key}" aria-pressed="${m.key === metric}">${escapeHtml(m.label)}</button>`).join("");
-  // Legend of the channels present in the series (order-stable).
-  const present = new Set();
-  (trend.points || []).forEach((p) => (p.channels || []).forEach((ch) => present.add(ch.channel)));
-  const legend = CHAN_ORDER.filter((c) => present.has(c)).map((c) => {
-    const label = ((d.channel_mix || []).find((r) => r.channel === c) || {}).channel_label || c;
-    return `<span class="dash-legend__item"><span class="dash-legend__swatch" style="background:${chanColor(c)}"></span>${escapeHtml(label)}</span>`;
-  }).join("");
-
-  return `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Channel Momentum</h3>
-        <p class="dash-panel__sub">Which channels are growing?${bucketLabel ? ` · ${bucketLabel}` : ""}</p>
-      </div>
-      <div class="chan-metric-toggle" role="group" aria-label="Momentum metric">${toggle}</div>
-    </div>
-    ${note}
-    ${chanMomentumChartSVG(trend, metric)}
-    <div class="dash-legend chan-legend">${legend}</div>`;
-}
-
-// Stacked channel bars per period for the selected metric. A channel whose
-// revenue is unknown (null) is omitted from a revenue stack — never drawn as $0;
-// the tooltip still names it Unavailable so real activity is never hidden.
-function chanMomentumChartSVG(trend, metric) {
-  const points = (trend && trend.points) || [];
-  if (!trend || trend.status !== "ready" || !points.length) {
-    return '<div class="dash-chart-empty">No chartable channel activity in this window.</div>';
-  }
-  const W = 760, H = 250, padL = 52, padR = 14, padT = 18, padB = 34;
-  const plotW = W - padL - padR, plotH = H - padT - padB, n = points.length;
-  const slot = plotW / n, barW = Math.min(30, slot * 0.6);
-  const stackTotal = (p) => (p.channels || []).reduce((s, ch) => {
-    const v = chanMetricVal(ch, metric);
-    return s + (v === null || v === undefined || v <= 0 ? 0 : v);
-  }, 0);
-  const totals = points.map(stackTotal);
-  const yMax = dashNiceCeil(Math.max(1, ...totals));
-  const xCenter = (i) => padL + slot * i + slot / 2;
-  const baseline = padT + plotH;
-  const hOf = (v) => plotH * (v / yMax);
-
-  const ticks = [0.25, 0.5, 0.75, 1];
-  const grid = ticks.map((t) => {
-    const y = (padT + plotH * (1 - t)).toFixed(1);
-    const lbl = metric === "revenue" ? dashCompactMoney(yMax * t) : fmtCount(Math.round(yMax * t));
-    return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="#e0e6ef" stroke-width="1"/>
-      <text x="${padL - 8}" y="${Number(y) + 3}" text-anchor="end" class="dash-chart-tick">${escapeHtml(lbl)}</text>`;
-  }).join("");
-
-  const bars = points.map((p, i) => {
-    let yTop = baseline;
-    const segs = (p.channels || []).slice().sort((a, b) => chanOrderIndex(b.channel) - chanOrderIndex(a.channel)).map((ch) => {
-      const v = chanMetricVal(ch, metric);
-      if (v === null || v === undefined || v <= 0) return "";
-      const h = hOf(v);
-      const x = xCenter(i) - barW / 2;
-      const y = yTop - h;
-      yTop = y;
-      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${chanColor(ch.channel)}" fill-opacity="0.92"/>`;
-    }).join("");
-    return segs;
-  }).join("");
-
-  const labelEvery = Math.max(1, Math.ceil(n / 6));
-  const xLabels = points.map((p, i) => {
-    if (i !== 0 && i !== n - 1) {
-      if (i % labelEvery !== 0) return "";
-      if (n - 1 - i < Math.max(2, Math.ceil(labelEvery * 0.6))) return "";
-    }
-    return `<text x="${xCenter(i).toFixed(1)}" y="${H - 8}" text-anchor="middle" class="dash-chart-tick">${escapeHtml(p.period_label || "")}</text>`;
-  }).join("");
-
-  const hitBands = points.map((p, i) =>
-    `<rect class="dash-chart-hit" data-chan-idx="${i}" x="${(padL + slot * i).toFixed(1)}" y="${padT}"
-      width="${slot.toFixed(1)}" height="${plotH}" fill="transparent"/>`).join("");
-
-  return `
-    <div class="dash-chart-wrap chan-momentum-wrap">
-      <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
-        aria-label="Channel ${escapeHtml(metric)} per ${escapeHtml(trend.bucket || "period")}, stacked by channel">
-        ${grid}
-        <line x1="${padL}" x2="${W - padR}" y1="${baseline}" y2="${baseline}" stroke="#cbd5e1" stroke-width="1"/>
-        ${bars}
-        ${xLabels}
-        ${hitBands}
-      </svg>
-      <div class="dash-chart-tooltip" hidden></div>
-    </div>`;
-}
-
-function wireChanMomentumToggle(root, d) {
-  root.querySelectorAll(".chan-metric-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const m = btn.dataset.chanMetric;
-      if (!m || m === _chanMomentumMetric) return;
-      _chanMomentumMetric = m;
-      renderDashboardChannels();
-    });
-  });
-}
-
-function chanMetricDisplay(ch, metric) {
-  const v = chanMetricVal(ch, metric);
-  if (v === null || v === undefined) return "Unavailable";
-  return metric === "revenue" ? fmtMoney(v) : String(v);
-}
-
-function wireChanMomentumHover(root, d) {
-  const wrap = root.querySelector(".chan-momentum-wrap");
-  if (!wrap) return;
-  const tooltip = wrap.querySelector(".dash-chart-tooltip");
-  const points = ((d.trend || {}).points) || [];
-  const metric = _chanMomentumMetric;
-
-  function hide() {
-    if (tooltip) tooltip.hidden = true;
-    wrap.querySelectorAll(".dash-chart-hit.is-hover").forEach((el) => el.classList.remove("is-hover"));
-  }
-  wrap.addEventListener("pointermove", (e) => {
-    const band = e.target.closest(".dash-chart-hit");
-    if (!band || !tooltip) { hide(); return; }
-    const p = points[Number(band.dataset.chanIdx)];
-    if (!p) { hide(); return; }
-    wrap.querySelectorAll(".dash-chart-hit.is-hover").forEach((el) => el.classList.remove("is-hover"));
-    band.classList.add("is-hover");
-    tooltip.textContent = "";
-    const title = document.createElement("div");
-    title.className = "dash-chart-tooltip__title";
-    title.textContent = p.period_label || "";
-    tooltip.appendChild(title);
-    const chans = (p.channels || []).slice().sort((a, b) => chanOrderIndex(a.channel) - chanOrderIndex(b.channel));
-    if (!chans.length) {
-      const row = document.createElement("div");
-      row.className = "dash-chart-tooltip__row";
-      row.textContent = "No channel activity";
-      tooltip.appendChild(row);
-    }
-    chans.forEach((ch) => {
-      const row = document.createElement("div");
-      row.className = "dash-chart-tooltip__row";
-      const key = document.createElement("span");
-      key.className = "dash-chart-tooltip__key";
-      key.style.background = chanColor(ch.channel);
-      row.appendChild(key);
-      const strong = document.createElement("strong");
-      strong.textContent = chanMetricDisplay(ch, metric);
-      const name = document.createElement("span");
-      name.textContent = ` ${ch.channel_label || ch.channel}`;
-      row.appendChild(strong);
-      row.appendChild(name);
-      tooltip.appendChild(row);
-    });
-    const wrapRect = wrap.getBoundingClientRect();
-    const bandRect = band.getBoundingClientRect();
-    tooltip.hidden = false;
-    const tipW = tooltip.offsetWidth || 160;
-    let left = bandRect.left - wrapRect.left + bandRect.width / 2 - tipW / 2;
-    left = Math.max(4, Math.min(left, wrapRect.width - tipW - 4));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = "8px";
-  });
-  wrap.addEventListener("pointerleave", hide);
-}
-
-function renderChanMixPanel(d) {
-  const rows = (d.channel_mix || []).slice().sort((a, b) => (b.closed_won_deals || 0) - (a.closed_won_deals || 0));
-  const legend = rows.map((r) => `
-    <li class="chan-mix-row">
-      <span class="chan-mix-row__dot" style="background:${chanColor(r.channel)}"></span>
-      <span class="chan-mix-row__name" title="${escapeHtml(r.channel_label || "")}">${escapeHtml(r.channel_label || "—")}</span>
-      <span class="chan-mix-row__cust">${dashValue(r.closed_won_deals, fmtCount)} won</span>
-      <span class="chan-mix-row__rev">${dashValue(r.won_revenue_usd, fmtMoney)}</span>
-    </li>`).join("");
-  return `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Channel Mix</h3>
-        <p class="dash-panel__sub">Closed-won deal share by channel</p>
-      </div>
-    </div>
-    <div class="chan-mix">
-      <div class="chan-donut-wrap">${chanMixDonutSVG(rows)}</div>
-      <ul class="chan-mix-list">${legend || '<li class="rev-breakdown-empty">No channels in this window.</li>'}</ul>
-    </div>`;
-}
-
-function chanMixDonutSVG(rows) {
-  // PR-ADS-161E: a withheld channel count makes every share unknown.
-  if ((rows || []).some((r) => r.closed_won_deals === null || r.closed_won_deals === undefined)) {
-    return '<div class="dash-chart-empty">Closed-won deals are withheld for this window — no share is drawn.</div>';
-  }
-  const data = (rows || [])
-    .map((r) => ({ label: r.channel_label, channel: r.channel, value: r.closed_won_deals || 0 }))
-    .filter((r) => r.value > 0);
-  const total = data.reduce((s, r) => s + r.value, 0);
-  if (!total) return '<div class="dash-chart-empty">No closed-won deals to attribute in this window.</div>';
-  const cx = 90, cy = 90, rOuter = 78, rInner = 48;
-  let a0 = -Math.PI / 2;
-  const arcs = data.map((r) => {
-    const frac = r.value / total;
-    // A single full-circle slice can't be drawn as one arc; nudge it just short.
-    const a1 = a0 + Math.min(frac, 0.9999) * 2 * Math.PI;
-    const large = (a1 - a0) > Math.PI ? 1 : 0;
-    const x0 = cx + rOuter * Math.cos(a0), y0 = cy + rOuter * Math.sin(a0);
-    const x1 = cx + rOuter * Math.cos(a1), y1 = cy + rOuter * Math.sin(a1);
-    const xi1 = cx + rInner * Math.cos(a1), yi1 = cy + rInner * Math.sin(a1);
-    const xi0 = cx + rInner * Math.cos(a0), yi0 = cy + rInner * Math.sin(a0);
-    const path = `M${x0.toFixed(1)},${y0.toFixed(1)} A${rOuter},${rOuter} 0 ${large} 1 ${x1.toFixed(1)},${y1.toFixed(1)} L${xi1.toFixed(1)},${yi1.toFixed(1)} A${rInner},${rInner} 0 ${large} 0 ${xi0.toFixed(1)},${yi0.toFixed(1)} Z`;
-    a0 = a1;
-    return `<path d="${path}" fill="${chanColor(r.channel)}" fill-opacity="0.92"><title>${escapeHtml(r.label || r.channel)}: ${escapeHtml(fmtCount(r.value))} closed-won deals (${Math.round(frac * 100)}%)</title></path>`;
-  }).join("");
-  return `
-    <svg viewBox="0 0 180 180" class="chan-donut" role="img" aria-label="Closed-won deal mix by channel">
-      ${arcs}
-      <text x="90" y="86" text-anchor="middle" class="chan-donut__total">${escapeHtml(fmtCount(total))}</text>
-      <text x="90" y="103" text-anchor="middle" class="chan-donut__label">won deals</text>
-    </svg>`;
-}
-
-function renderChanQualityPanel(d) {
-  const pts = d.quality_matrix || [];
-  return `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Quality vs Revenue</h3>
-        <p class="dash-panel__sub">Qualified leads (lead status) × Closed-won deals · bubble size = closed-won revenue</p>
-      </div>
-    </div>
-    ${chanQualityBubbleSVG(pts)}`;
-}
-
-function chanQualityBubbleSVG(points) {
-  const pts = (points || []);
-  if (!pts.length) return '<div class="dash-chart-empty">No channel quality data in this window.</div>';
-  const W = 760, H = 300, padL = 56, padR = 22, padT = 20, padB = 42;
-  const plotW = W - padL - padR, plotH = H - padT - padB;
-  // Headroom (×1.15) so the largest bubble at the max-x/max-y corner sits inside
-  // the plot instead of clipping against the frame.
-  const maxX = dashNiceCeil(Math.max(1, ...pts.map((p) => p.sqls || 0)) * 1.15);
-  const maxY = dashNiceCeil(Math.max(1, ...pts.map((p) => p.closed_won_deals || 0)) * 1.15);
-  const maxRev = Math.max(1, ...pts.map((p) => p.revenue_usd || 0));
-  const xOf = (v) => padL + plotW * ((v || 0) / maxX);
-  const yOf = (v) => padT + plotH * (1 - (v || 0) / maxY);
-  // Null revenue → smallest neutral bubble (never sized as if $0 were a value).
-  const rOf = (rev) => (rev === null || rev === undefined) ? 6 : 9 + 24 * Math.sqrt(rev / maxRev);
-
-  const ticks = [0, 0.25, 0.5, 0.75, 1];
-  const gridY = ticks.map((t) => {
-    const y = (padT + plotH * (1 - t)).toFixed(1);
-    return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="#eef1f6" stroke-width="1"/>
-      <text x="${padL - 8}" y="${Number(y) + 3}" text-anchor="end" class="dash-chart-tick">${escapeHtml(fmtCount(Math.round(maxY * t)))}</text>`;
-  }).join("");
-  const gridX = ticks.map((t) => {
-    const x = xOf(maxX * t).toFixed(1);
-    return `<text x="${x}" y="${H - 10}" text-anchor="middle" class="dash-chart-tick">${escapeHtml(fmtCount(Math.round(maxX * t)))}</text>`;
-  }).join("");
-
-  const bubbles = pts.slice().sort((a, b) => rOf(b.revenue_usd) - rOf(a.revenue_usd)).map((p) => {
-    const i = pts.indexOf(p);
-    const r = rOf(p.revenue_usd);
-    const cx = xOf(p.sqls).toFixed(1), cy = yOf(p.closed_won_deals).toFixed(1);
-    const stroke = p.spend_connected ? "#0a5f92" : "#ffffff";
-    return `<circle class="dash-chart-hit chan-bubble" data-chan-bubble="${i}" cx="${cx}" cy="${cy}" r="${r.toFixed(1)}"
-      fill="${chanColor(p.channel)}" fill-opacity="0.55" stroke="${stroke}" stroke-width="1.6"/>`;
-  }).join("");
-
-  return `
-    <div class="dash-chart-wrap chan-bubble-wrap">
-      <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
-        aria-label="Channel quality: qualified leads (lead status) on x, closed-won deals on y, revenue as bubble size">
-        ${gridY}
-        <line x1="${padL}" x2="${W - padR}" y1="${(padT + plotH).toFixed(1)}" y2="${(padT + plotH).toFixed(1)}" stroke="#cbd5e1" stroke-width="1"/>
-        <line x1="${padL}" x2="${padL}" y1="${padT}" y2="${(padT + plotH).toFixed(1)}" stroke="#cbd5e1" stroke-width="1"/>
-        ${gridX}
-        <text x="${(padL + plotW / 2).toFixed(1)}" y="${H - 26}" text-anchor="middle" class="dash-chart-axis">Qualified (lead status) →</text>
-        ${bubbles}
-      </svg>
-      <div class="dash-chart-tooltip" hidden></div>
-    </div>`;
-}
-
-function wireChanQualityHover(root, d) {
-  const wrap = root.querySelector(".chan-bubble-wrap");
-  if (!wrap) return;
-  const tooltip = wrap.querySelector(".dash-chart-tooltip");
-  const pts = d.quality_matrix || [];
-
-  function hide() {
-    if (tooltip) tooltip.hidden = true;
-    wrap.querySelectorAll(".chan-bubble.is-hover").forEach((el) => el.classList.remove("is-hover"));
-  }
-  wrap.addEventListener("pointermove", (e) => {
-    const dot = e.target.closest(".chan-bubble");
-    if (!dot || !tooltip) { hide(); return; }
-    const p = pts[Number(dot.dataset.chanBubble)];
-    if (!p) { hide(); return; }
-    wrap.querySelectorAll(".chan-bubble.is-hover").forEach((el) => el.classList.remove("is-hover"));
-    dot.classList.add("is-hover");
-    tooltip.textContent = "";
-    const title = document.createElement("div");
-    title.className = "dash-chart-tooltip__title";
-    title.textContent = p.channel_label || p.channel || "";
-    tooltip.appendChild(title);
-    [[LEAD_STATUS_QUALIFIED_LABEL, p.sqls === null || p.sqls === undefined ? "Unavailable" : String(p.sqls)],
-     ["Won deals", p.closed_won_deals === null || p.closed_won_deals === undefined ? "Unavailable" : String(p.closed_won_deals)],
-     ["Revenue", p.revenue_usd === null || p.revenue_usd === undefined ? "Unavailable" : fmtMoney(p.revenue_usd)],
-     ["Spend", p.spend_connected ? "Connected (Google Ads)" : "Not connected"]].forEach(([label, val]) => {
-      const rowEl = document.createElement("div");
-      rowEl.className = "dash-chart-tooltip__row";
-      const strong = document.createElement("strong");
-      strong.textContent = val;
-      const name = document.createElement("span");
-      name.textContent = ` ${label}`;
-      rowEl.appendChild(strong);
-      rowEl.appendChild(name);
-      tooltip.appendChild(rowEl);
-    });
-    const wrapRect = wrap.getBoundingClientRect();
-    const dotRect = dot.getBoundingClientRect();
-    tooltip.hidden = false;
-    const tipW = tooltip.offsetWidth || 160;
-    let left = dotRect.left - wrapRect.left + dotRect.width / 2 - tipW / 2;
-    left = Math.max(4, Math.min(left, wrapRect.width - tipW - 4));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = "8px";
-  });
-  wrap.addEventListener("pointerleave", hide);
-}
-
-// Platform matrix. Only Google Ads carries spend / ROAS; every other platform
-// renders "Unavailable — no connected spend source" and NEVER a ROAS number.
-const CHAN_SPEND_UNAVAILABLE = "Unavailable — no connected spend source";
-
-function chanPlatformSpendCell(p) {
-  // Show USD spend whenever present (Google Ads, FX-verified). Spend is
-  // independent of the period ratio, gated separately by period_ratio_available.
-  if (p.spend_usd !== null && p.spend_usd !== undefined) {
-    return escapeHtml(fmtMoney(p.spend_usd));
-  }
-  // FX/USD unavailable but the Google Ads spend source is connected: show native
-  // GBP (never $) so the row is not mislabelled "no connected spend source".
-  const nat = p.native_spend;
-  if (nat && nat.amount !== null && nat.amount !== undefined) {
-    return escapeHtml(fmtCompactCurrency(nat.amount, nat.currency || "GBP"));
-  }
-  return `<span class="dash-unavailable" title="${escapeHtml(CHAN_SPEND_UNAVAILABLE)}">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
-}
-
-function chanPlatformRoasCell(p) {
-  // The period ratio is shown ONLY when the platform is spend-connected (Google
-  // Ads) with a real value. Non-connected platforms never show a multiple — not
-  // even $0/0.00x.
-  if (p.period_ratio_available && p.period_revenue_per_ad_spend !== null
-      && p.period_revenue_per_ad_spend !== undefined) {
-    return escapeHtml(fmtPeriodRatio(p.period_revenue_per_ad_spend));
-  }
-  return `<span class="dash-unavailable">Unavailable</span>`;
-}
-
-function renderChanPlatformMatrix(d) {
-  const rows = d.platform_matrix || [];
-  if (!rows.length) {
-    return `
-      <div class="dash-panel__header">
-        <div><h3 class="dash-panel__title">Platform Matrix</h3></div>
-      </div>
-      <p class="rev-breakdown-empty">No platform activity in this window.</p>`;
-  }
-  const head = ["Platform", "Channel", "Leads", LEAD_STATUS_QUALIFIED_LABEL, "Won deals", "Revenue", "Spend", PERIOD_RATIO_LABEL, "Status"]
-    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-  const body = rows.map((p) => `
-    <tr class="chan-platform-row">
-      <td class="chan-platform-td chan-platform-td--name">
-        <span class="chan-mix-row__dot" style="background:${chanColor(p.channel)}"></span>${escapeHtml(p.platform_label || "—")}
-      </td>
-      <td>${escapeHtml(p.channel_label || "—")}</td>
-      <td class="chan-num">${dashValue(p.leads, fmtCount)}</td>
-      <td class="chan-num">${dashValue(p.sqls, fmtCount)}</td>
-      <td class="chan-num">${dashValue(p.closed_won_deals, fmtCount)}</td>
-      <td class="chan-num">${dashValue(p.won_revenue_usd, fmtMoney)}</td>
-      <td class="chan-num">${chanPlatformSpendCell(p)}</td>
-      <td class="chan-num">${chanPlatformRoasCell(p)}</td>
-      <td><span class="chan-status ${p.spend_connected ? "chan-status--connected" : "chan-status--revenue"}">${escapeHtml(p.status || "")}</span></td>
-    </tr>`).join("");
-  return `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Platform Matrix</h3>
-        <p class="dash-panel__sub">Every platform's qualified leads (lead status), closed-won deals and revenue · spend &amp; Period Revenue / Ad Spend only where a spend source is connected · ${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</p>
-      </div>
-    </div>
-    <div class="chan-platform-scroll">
-      <table class="chan-platform-table">
-        <thead><tr>${head}</tr></thead>
-        <tbody>${body}</tbody>
-      </table>
-    </div>`;
-}
-
-function renderChanChannelList(d) {
-  const rows = d.channel_mix || [];
-  if (!rows.length) {
-    return `
-      <div class="dash-panel__header">
-        <div><h3 class="dash-panel__title">Channels — Detail</h3></div>
-      </div>
-      <p class="rev-breakdown-empty">No channel activity in this window.</p>`;
-  }
-  const body = rows.map((r, i) => {
-    // Show USD spend when present (append ROAS only when it is a real, trusted
-    // value — never a "· Unavailable" suffix, never on a non-Google row); else
-    // fall back to native GBP (spend source connected, FX/USD unavailable); else
-    // Unavailable. Mirrors chanPlatformSpendCell / chanPlatformRoasCell gating.
-    const spendKnown = r.spend_usd !== null && r.spend_usd !== undefined;
-    const ratioKnown = r.period_ratio_available && r.period_revenue_per_ad_spend !== null && r.period_revenue_per_ad_spend !== undefined;
-    const nat = r.native_spend;
-    const nativeKnown = nat && nat.amount !== null && nat.amount !== undefined;
-    let spendCell;
-    if (spendKnown) {
-      spendCell = `${escapeHtml(fmtMoney(r.spend_usd))}${ratioKnown ? ` · <span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${escapeHtml(PERIOD_RATIO_LABEL + " " + fmtPeriodRatio(r.period_revenue_per_ad_spend))}</span> <small class="metric-reason">${escapeHtml(PERIOD_RATIO_DISCLOSURE)}</small>` : ""}`;
-    } else if (nativeKnown) {
-      spendCell = escapeHtml(fmtCompactCurrency(nat.amount, nat.currency || "GBP"));
-    } else {
-      spendCell = `<span class="dash-unavailable">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
-    }
-    return `
-    <li class="chan-channel-row" data-chan-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.channel_label || "channel")} detail">
-      <span class="chan-channel-row__dot" style="background:${chanColor(r.channel)}"></span>
-      <span class="chan-channel-row__name">${escapeHtml(r.channel_label || "—")}</span>
-      <span class="chan-channel-row__metric">${dashValue(r.sqls, fmtCount)} qualified (lead status)</span>
-      <span class="chan-channel-row__metric">${dashValue(r.closed_won_deals, fmtCount)} won</span>
-      <span class="chan-channel-row__metric">${dashValue(r.won_revenue_usd, fmtMoney)}</span>
-      <span class="chan-channel-row__spend">${spendCell}</span>
-      <span class="chan-status ${r.spend_connected ? "chan-status--connected" : "chan-status--revenue"}">${escapeHtml(r.status || "")}</span>
-    </li>`;
-  }).join("");
-  return `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">Channels — Detail</h3>
-        <p class="dash-panel__sub">Click a channel for its platform breakdown</p>
-      </div>
-    </div>
-    <ul class="chan-channel-list">${body}</ul>`;
-}
-
-function wireChanChannelDrawers(root, d) {
-  const rows = d.channel_mix || [];
-  const platforms = d.platform_matrix || [];
-  const open = (i) => {
-    const r = rows[i];
-    if (!r) return;
-    const own = platforms.filter((p) => p.channel === r.channel);
-    const pfBody = own.length
-      ? own.map((p) => `
-          <tr>
-            <td>${escapeHtml(p.platform_label || "—")}</td>
-            <td class="chan-num">${dashValue(p.sqls, fmtCount)}</td>
-            <td class="chan-num">${dashValue(p.closed_won_deals, fmtCount)}</td>
-            <td class="chan-num">${dashValue(p.won_revenue_usd, fmtMoney)}</td>
-            <td class="chan-num">${chanPlatformSpendCell(p)}</td>
-            <td class="chan-num">${chanPlatformRoasCell(p)}</td>
-          </tr>`).join("")
-      : `<tr><td colspan="6" class="rev-breakdown-empty">No platform rows for this channel.</td></tr>`;
-    let drawer = root.querySelector(".chan-channel-drawer");
-    if (!drawer) {
-      drawer = document.createElement("div");
-      drawer.className = "chan-channel-drawer";
-      root.querySelector(".chan-channels-panel").appendChild(drawer);
-    }
-    drawer.innerHTML = `
-      <div class="chan-channel-drawer__head">
-        <strong>${escapeHtml(r.channel_label || "Channel")} — platform breakdown</strong>
-        <span class="chan-status ${r.spend_connected ? "chan-status--connected" : "chan-status--revenue"}">${escapeHtml(r.status || "")}</span>
-        <button type="button" class="chan-channel-drawer__close" aria-label="Close">×</button>
-      </div>
-      <p class="chan-channel-drawer__note">Platform-level qualified leads (lead status), closed-won deals and revenue for this channel — not individual client/deal records.</p>
-      <table class="chan-drawer-table">
-        <thead><tr><th>Platform</th><th>${LEAD_STATUS_QUALIFIED_LABEL}</th><th>Won deals</th><th>Revenue</th><th>Spend</th><th title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_LABEL}</th></tr></thead>
-        <tbody>${pfBody}</tbody>
-      </table>`;
-    drawer.querySelector(".chan-channel-drawer__close").addEventListener("click", () => drawer.remove());
-    drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  };
-  root.querySelectorAll(".chan-channel-row").forEach((li) => {
-    li.addEventListener("click", () => open(Number(li.dataset.chanRow)));
-    li.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(Number(li.dataset.chanRow)); }
-    });
-  });
-}
-
-// PR-ADS-171B: the Meta Ads (spend) line — the same line, gating and
-// disclosures as the Channels page, in this tab's panel style. Spend only:
-// it sits apart from the channel rows and nothing is divided by it.
-function renderChanMetaPanel(line) {
-  const l = line || {};
-  const native = metaLineNativeHtml(l);
-  return `
-    <div class="dash-panel__header">
-      <div>
-        <h3 class="dash-panel__title">${escapeHtml(l.label || "Meta Ads (spend)")}</h3>
-        <p class="dash-panel__sub">Meta's own ad accounts, for the settled days of this window · not matched to HubSpot's Paid Social contacts or deals, so no ratio is shown</p>
-      </div>
-    </div>
-    <div class="dash-outcomes chan-meta-panel__figures">
-      <div class="dash-outcomes__cell">
-        <div class="dash-outcomes__label">Meta Ads spend</div>
-        <div class="dash-outcomes__value">${canonicalMetricHtml(metaLineSpendMetric(l), fmtMoney)}</div>
-        <div class="dash-outcomes__sub">USD${native ? ` · ${native}` : ""}</div>
-      </div>
-    </div>
-    <ul class="chan-meta-panel__accounts">${metaLineNotes(l).map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`;
-}
-
-function renderChanTruthFooter(d) {
-  const ts = d.truth_status || {};
-  const chip = (label, status) => `
-    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
-      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
-    </span>`;
-  const allGood = ts.revenue === "ready" && ts.source_attribution === "ready"
-    && ts.google_ads_spend === "ready" && ts.platform_classification === "ready";
-  return `
-    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
-      ${chip("Revenue", ts.revenue)}
-      ${chip("Source attr.", ts.source_attribution)}
-      ${chip("Google Ads spend", ts.google_ads_spend)}
-      ${chip("Non-Google spend", ts.non_google_spend)}
-      ${ts.meta_ads_spend ? chip("Meta Ads spend", ts.meta_ads_spend) : ""}
-      ${chip("Platform class.", ts.platform_classification)}
-      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
-      ${allGood
-        ? '<span class="dash-footer-note">Channel truth verified — only Google Ads spend is compared with revenue; other channels are revenue-only by design.</span>'
-        : (dashCanNavigate("revenue-health")
-          ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
-          : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
-    </footer>`;
-}
 
 // ── Dashboard — Campaigns & Keywords tab (PR-ADS-137) ──────────────────────
 //
@@ -8730,9 +7999,10 @@ document.addEventListener("click", (e) => {
   runLeadReconciliationJob(btn.dataset.reconcileAction === "preview");
 });
 
-// ── Channels: the acquisition-cohort funnel for every channel (PR-ADS-162A) ──
-// One table, one publication verdict. When the cohort is not published the
-// page shows the withholding word and its reason — never a number.
+// ── Channels (PR-ADS-162A; redesigned in PR-ADS-181A) ─────────────────────
+// The acquisition cohort per channel beside the deals that closed in the same
+// days. Each half publishes or withholds on its own verdict; when one is not
+// published the page shows the withholding word and its reason — never a number.
 
 const CHANNEL_FUNNEL_REASON_LABELS = {
   canonical_funnel_unreadable: "the contact data could not be read",
@@ -8751,22 +8021,14 @@ let _channelsWindow = "180d";
 let _channelsData = null;
 // What the reader chose to look at. It changes the presentation only: every
 // figure on the page is a count the API published, or a share of two of them.
-const _channelsView = { stage: null, sort: "contacts" };
+// `sort` / `dir`: the table's order (null: the default, customers first);
+// `drawer`: the key of the channel whose drawer is open (null: closed).
+const _channelsView = { sort: null, dir: null, drawer: null };
 
 // PR-ADS-162I. A rate on a handful of contacts moves by several points with
 // each one. Below this many contacts a channel's rates are still shown, but
 // marked, and ranked after the channels with enough contacts to compare.
 const CHANNEL_FUNNEL_SMALL_SAMPLE = 30;
-const CHANNEL_FUNNEL_STAGE_COLORS = ["#8ecdf9", "#129ef5", "#0b68b8", "#011931"];
-// How a stage is named when counting contacts in it. A stage the API adds
-// later falls back to "<its label> contacts".
-function channelFunnelPlural(stage) {
-  const plurals = {
-    reached_mql: "MQLs", reached_sql: "SQLs",
-    reached_opportunity: "opportunities", reached_customer_stage: "customer-stage contacts",
-  };
-  return plurals[stage.key] || `${stage.label} contacts`;
-}
 
 // A missing count is unknown, never zero: it renders as a dash with no share.
 function channelFunnelCount(v) {
@@ -8775,26 +8037,10 @@ function channelFunnelCount(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function channelFunnelNum(v) {
-  const n = channelFunnelCount(v);
-  return n === null ? "—" : n.toLocaleString();
-}
-
 function channelFunnelRate(part, whole) {
   const p = channelFunnelCount(part);
   const w = channelFunnelCount(whole);
   return (p === null || !w) ? null : 100 * p / w;
-}
-
-function channelFunnelPct(part, whole) {
-  const r = channelFunnelRate(part, whole);
-  return r === null ? "" : ` <span class="channel-funnel-pct">(${r.toFixed(1)}%)</span>`;
-}
-
-function channelFunnelBar(pct, color) {
-  if (pct === null) return "";
-  const w = Math.max(0, Math.min(100, pct)).toFixed(1);
-  return `<span class="channel-funnel-bar" aria-hidden="true"><span class="channel-funnel-bar__fill" style="width:${w}%;background:${color}"></span></span>`;
 }
 
 function channelFunnelIsSmall(row) {
@@ -8809,41 +8055,6 @@ function channelFunnelSmallBadge() {
 function channelFunnelHasDrill(ch) {
   const d = ch.drilldowns || [];
   return d.length > 1 || (d.length === 1 && d[0].value !== "(none)");
-}
-
-function channelFunnelRowHtml(row, stages, opts) {
-  const o = opts || {};
-  let name;
-  if (o.drill) {
-    name = `<span class="channel-funnel-drill">${escapeHtml(row.value)}</span>`;
-  } else if (o.platform) {
-    name = `<span class="channel-funnel-platform">${escapeHtml(row.value)}</span>`;
-  } else if (o.children) {
-    name = `<button type="button" class="channel-funnel-toggle" data-channel-toggle="${escapeHtml(row.source)}" aria-expanded="false">
-        <span class="channel-funnel-caret" aria-hidden="true">▸</span><strong>${escapeHtml(row.label)}</strong>
-        <span class="channel-funnel-count">${o.children} ${o.children === 1 ? "source" : "sources"}</span></button>`;
-  } else {
-    name = `<span class="channel-funnel-leaf"><strong>${escapeHtml(row.label)}</strong></span>`;
-  }
-  if (!o.total && !o.drill && !o.platform && channelFunnelIsSmall(row)) name += channelFunnelSmallBadge();
-  if (o.sub) name += `<div class="channel-funnel-sub">${escapeHtml(o.sub)}</div>`;
-  const cells = stages.map((st, i) => {
-    const color = CHANNEL_FUNNEL_STAGE_COLORS[i % CHANNEL_FUNNEL_STAGE_COLORS.length];
-    return `<td class="num channel-funnel-cell">${channelFunnelNum(row[st.key])}${channelFunnelPct(row[st.key], row.contacts)}${
-      channelFunnelBar(channelFunnelRate(row[st.key], row.contacts), color)}</td>`;
-  }).join("");
-  const attrs = o.total ? ' class="channel-funnel-total"'
-    : o.drill ? ` class="channel-funnel-child" data-channel-child="${escapeHtml(o.parent)}" hidden`
-    : o.platform ? ' class="channel-funnel-platform-row"'
-    : o.unresolved ? ' class="channel-outcome-unresolved"'
-    : o.gads ? ' class="channel-outcome-gads"' : "";
-  // PR-ADS-168A: `funnel` replaces the funnel cells (a row that is not a
-  // contact source, or a funnel that is withheld); `outcome` appends the
-  // outcome and paid-media cells. Neither changes a funnel number.
-  const funnel = o.funnel !== undefined ? o.funnel
-    : `<td class="num">${channelFunnelNum(row.contacts)}</td>${cells}`;
-  return `<tr${attrs}><td>${name}</td>
-    ${funnel}${o.outcome || ""}</tr>`;
 }
 
 // ── PR-ADS-168A — outcomes: the deals that CLOSED in the same days ─────────
@@ -8861,11 +8072,7 @@ const CHANNEL_OUTCOME_CLASS_LABELS = {
   contact_not_in_funnel: "a contact is not in the contact data",
   contact_has_no_source: "a contact has no original source",
 };
-const CHANNEL_OUTCOME_HEADS = ["Closed-won deals", "Customers won (distinct companies)", "Revenue"];
-function channelPaidHeads() { return ["Spend", PERIOD_RATIO_LABEL, PERIOD_SPEND_PER_CUSTOMER_LABEL]; }
-
 function channelOutcomeInt(v) { return Number(v).toLocaleString(); }
-function channelOutcomeMoney(v) { return "$" + Math.round(Number(v)).toLocaleString(); }
 function channelOutcomeRatio(v) { return Number(v).toFixed(2) + "x"; }
 
 function channelOutcomeOpts(o) {
@@ -8875,22 +8082,6 @@ function channelOutcomeOpts(o) {
 // Rows exist only when the window's deal count is published.
 function channelOutcomesPublished(o) {
   return !!(o && Array.isArray(o.channels));
-}
-
-function channelOutcomeCellsHtml(row, opts) {
-  const r = row || {};
-  return [
-    rowMetricHtml(r, "closed_won_deals", channelOutcomeInt, opts),
-    rowMetricHtml(r, "customers", channelOutcomeInt, opts),
-    rowMetricHtml(r, "won_revenue", channelOutcomeMoney, opts),
-    canonicalMetricHtml(r.spend, channelOutcomeMoney, opts),
-    rowMetricHtml(r, "period_revenue_per_ad_spend", channelOutcomeRatio, opts),
-    rowMetricHtml(r, "period_spend_per_customer_won", channelOutcomeMoney, opts),
-  ].map((h) => `<td class="num channel-outcome-cell">${h}</td>`).join("");
-}
-
-function channelOutcomeNoteCells(text) {
-  return `<td class="channel-outcome-na" colspan="6">${escapeHtml(text)}</td>`;
 }
 
 // A published row whose deal count is a number above zero.
@@ -8997,49 +8188,10 @@ function metaLineNativeHtml(line) {
   return escapeHtml(metaNativeMoney(n.value, n.currency));
 }
 
-function channelOutcomeRange(o) {
-  const w = (o && o.window) || {};
-  return w.is_all_time || !w.start_date ? `in all time, to ${w.end_date}` : `${w.start_date} to ${w.end_date}`;
-}
-
-// The strip: the window's OWN figures. Customers won is the window's count of
-// distinct companies — never a sum of the rows.
-function channelOutcomeStripHtml(o) {
-  const t = o.totals || {};
-  const m = t.metrics || {};
-  const pub = o.publication || {};
-  const opts = channelOutcomeOpts(o);
-  const metricOf = (k) => m[k] || pub[k] || { status: "unavailable", reason: "channel_outcomes_failed" };
-  const google = (o.spend || {}).google_ads
-    || { status: "unavailable", reason: "google_ads_usd_spend_unavailable" };
-  const cells = [
-    ["Closed-won deals", metricOf("closed_won_deals"), channelOutcomeInt, "deals closed in these days"],
-    ["Customers won", metricOf("customers"), channelOutcomeInt, "distinct companies · not additive across channels"],
-    ["Revenue", metricOf("revenue_usd"), channelOutcomeMoney, "closed-won, USD"],
-    ["Google Ads spend", google, channelOutcomeMoney, "compared only with the Google Ads line"],
-  ];
-  // PR-ADS-171B: Meta spend, from Meta's own accounts. Its cell carries the
-  // owner's declaration whenever the figure rests on it.
-  const meta = o.meta_ads_line;
-  if (meta) {
-    cells.push(["Meta Ads spend", metaLineSpendMetric(meta), channelOutcomeMoney,
-      ["Meta's own ad accounts · not matched to any HubSpot count",
-        // Each account is read on its own calendar days — say so here too.
-        meta.day_basis_disclosure
-          || "Each ad account is read on its own calendar days, not this page's Europe/London days",
-        metaLineRetired(meta) && meta.owner_declared_retired_disclosure ? meta.owner_declared_retired_disclosure : ""]
-        .filter(Boolean).join(" · ")]);
-  }
-  const html = cells.map(([label, metric, fmt, sub]) => `<div class="dash-outcomes__cell channel-outcome-stat">
-      <div class="dash-outcomes__label">${escapeHtml(label)}</div>
-      <div class="dash-outcomes__value">${canonicalMetricHtml(metric, fmt, opts)}</div>
-      <div class="dash-outcomes__sub">${escapeHtml(sub)}</div></div>`);
-  return `<div class="dash-outcomes channel-outcome-totals">${html.join("")}</div>`;
-}
-
 // PR-ADS-180A — the Channels funnel as the shared block: the acquisition
 // cohort's totals, read from THIS response's `totals`, `stages` and
-// `publication` alone. A withheld cohort is the word and its reason in every
+// `publication` alone (PR-ADS-181A: the page's "Contacts acquired" cards and
+// each channel's drawer read this model — one set of stage rules). A withheld cohort is the word and its reason in every
 // stage — the totals are never read. The block shows no step conversion here
 // (the page publishes none); each stage's share of the contacts acquired stays
 // in its sub-line, as before.
@@ -9235,265 +8387,750 @@ const ACQUISITION_FUNNEL_LEGEND = "Each stage counts every contact of this cohor
   + "one, so a later column can exceed an earlier one. 'Customer stage' is the "
   + "HubSpot lifecycle stage, counted in contacts — never companies, never deals.";
 
-// Two rankings for one stage: who brings the most, and who converts best.
-function channelFunnelRankHtml(data, stage, mode) {
-  const total = channelFunnelCount((data.totals || {})[stage.key]);
-  const rows = (data.channels || []).map((ch) => ({
-    label: ch.label, contacts: channelFunnelCount(ch.contacts),
-    count: channelFunnelCount(ch[stage.key]),
-    rate: channelFunnelRate(ch[stage.key], ch.contacts),
-    small: channelFunnelIsSmall(ch),
-  })).filter((r) => r.count !== null);
-  if (!rows.length) return '<p class="channel-funnel-empty">No channel has a count for this stage.</p>';
-  if (mode === "volume") {
-    if (!total) {
-      return `<p class="channel-funnel-empty">No contact acquired in this period has reached ${escapeHtml(stage.label)} yet.</p>`;
-    }
-    const max = Math.max(...rows.map((r) => r.count));
-    return rows.sort((a, b) => b.count - a.count).map((r) => `
-      <div class="channel-funnel-rank">
-        <div class="channel-funnel-rank__name">${escapeHtml(r.label)}</div>
-        <div class="channel-funnel-rank__track">${channelFunnelBar(max ? 100 * r.count / max : 0, "#129ef5")}</div>
-        <div class="channel-funnel-rank__value"><strong>${r.count.toLocaleString()}</strong>
-          <span class="channel-funnel-rank__sub">${(100 * r.count / total).toFixed(1)}% of all</span></div>
-      </div>`).join("");
-  }
-  const rated = rows.filter((r) => r.rate !== null);
-  const line = (r) => `
-      <div class="channel-funnel-rank${r.small ? " channel-funnel-rank--small" : ""}">
-        <div class="channel-funnel-rank__name">${escapeHtml(r.label)}</div>
-        <div class="channel-funnel-rank__track">${channelFunnelBar(r.rate, r.small ? "#cbd5e1" : "#0b68b8")}</div>
-        <div class="channel-funnel-rank__value"><strong>${r.rate.toFixed(1)}%</strong>
-          <span class="channel-funnel-rank__sub">${r.count.toLocaleString()} of ${r.contacts.toLocaleString()}</span></div>
+// ── PR-ADS-181A — the Channels page: where your customers come from ─────────
+// A presentation change over the same /api/channel-funnel response. It
+// computes no figure the API did not publish: every count, sum and verdict is
+// the payload's, and the page divides only two published counts of ONE
+// population (a channel's SQLs by its own new contacts, a row's revenue by the
+// window's revenue). Two populations share the page and never meet:
+//   * deals CLOSED in these days (outcomes: customers, revenue) — the reader
+//     contract's {value, status, reason}, rendered by canonicalMetricHtml /
+//     rowMetricHtml: a published 0 is "0", anything else the word and why;
+//   * contacts CREATED in these days (the acquisition cohort: new contacts,
+//     SQLs) — published or withheld as ONE funnel, through the shared funnel
+//     model (channelFunnelModel → acquisitionFunnelModel). Withheld means
+//     absent: no count is read under an unpublished verdict.
+// Each group follows its own verdict. Customers are distinct companies: the
+// "All channels" figure is the window's own count, never a sum of the rows.
+
+const CHANNELS_WINDOWS = ["30d", "60d", "180d", "all_time"];
+const CHANNELS_ALL = "__all__";
+const CHANNELS_UNRESOLVED_LABEL = "Deals with no single source";
+
+// (The reader's choices live in _channelsView, declared above.)
+
+/** The period in the URL hash (#/channels?window=<period>), or null. */
+function channelsWindowFromHash(hash) {
+  const q = new URLSearchParams(String(hash || "").split("?")[1] || "");
+  const w = q.get("window");
+  return CHANNELS_WINDOWS.includes(w) ? w : null;
+}
+
+/** The hash that keeps a period across a refresh. The default needs none. */
+function channelsHashFor(windowKey) {
+  return windowKey && windowKey !== "180d" && CHANNELS_WINDOWS.includes(windowKey)
+    ? `#/channels?window=${windowKey}` : "#/channels";
+}
+
+// ── formats (the Overview's): $k / $M money, "26 Nov" dates, 1-decimal % ──
+function channelMoney(v) { return fmtMoney(Number(v)); }
+
+function channelPct(part, whole) {
+  const r = channelFunnelRate(part, whole);
+  return r === null ? null : `${r.toFixed(1)}%`;
+}
+
+const CHANNELS_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-11-26" → "26 Nov" (with the year when `withYear`). Unknown is "". */
+function channelsDay(iso, withYear) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
+  if (!m) return "";
+  const text = `${Number(m[3])} ${CHANNELS_MONTHS[Number(m[2]) - 1]}`;
+  return withYear ? `${text} ${m[1]}` : text;
+}
+
+/** A window's days in words: "31 May – 25 Nov"; the years when they differ. */
+function channelsRange(w) {
+  const x = w || {};
+  if (!x.end_date) return "dates not stated";
+  if (x.is_all_time || !x.start_date) return `All time, to ${channelsDay(x.end_date, true)}`;
+  const years = String(x.start_date).slice(0, 4) !== String(x.end_date).slice(0, 4);
+  return `${channelsDay(x.start_date, years)} – ${channelsDay(x.end_date, years)}`;
+}
+
+/**
+ * "Contacts updated 26 Nov, 06:06 UTC" — the funnel's freshness.as_of, which
+ * is the contact sync's last successful incremental (not the deals' time).
+ */
+function channelsUpdatedText(data) {
+  const asOf = String(((data || {}).freshness || {}).as_of || "");
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(asOf);
+  return m ? `Contacts updated ${channelsDay(m[1])}, ${m[2]} UTC` : "Contacts update time not stated";
+}
+
+// ── the published inputs, per population ────────────────────────────────────
+/** The funnel half, through the shared model (one set of stage rules). */
+function channelsFunnelState(data) {
+  const d = data || {};
+  const model = channelFunnelModel(d);
+  const ok = model.verdict.status === "published";
+  const stage = (slot) => model.stages.find((s) => s.slot === slot) || null;
+  return {
+    model, ok,
+    verdict: model.verdict,
+    contacts: stage("contacts"),
+    sql: stage("sql"),
+    // One reason for every lower bound on the page: the model's.
+    bound: ok ? (stage("contacts") || {}).bound_reason || null : null,
+    rows: ok ? d.channels : null,
+  };
+}
+
+/** The window's own outcome metric (never a sum of the rows). */
+function channelOutcomeMetric(o, key) {
+  const m = (((o || {}).totals || {}).metrics || {})[key];
+  return m || ((o || {}).publication || {})[key]
+    || { value: null, status: "unavailable", reason: "channel_outcomes_failed" };
+}
+
+/** A row's published value for an outcome metric, or null (not published). */
+function channelOutcomeValue(row, key) {
+  const m = (((row || {}).metrics) || {})[ROW_METRIC_KEYS[key] || key];
+  return m && m.status === "published" && typeof m.value === "number" ? m.value : null;
+}
+
+/**
+ * "Most from <channel> · N" — the leading channel, or null when the answer is
+ * not clear. Every candidate must be published (a withheld row could be the
+ * largest); the leader must beat the runner-up by more than `uncertain`, the
+ * part no channel holds (deals with no single source, contacts with no source
+ * or no created date) — any of it could belong to the runner-up. A tie, a
+ * zero, an unpublished row or an unknown `uncertain` says nothing.
+ */
+function channelLeader(candidates, uncertain) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (!list.length || uncertain === null || uncertain === undefined) return null;
+  if (list.some((c) => typeof c.value !== "number" || !Number.isFinite(c.value))) return null;
+  const sorted = list.slice().sort((a, b) => b.value - a.value);
+  const top = sorted[0];
+  const second = sorted.length > 1 ? sorted[1].value : 0;
+  if (!(top.value > 0) || !(top.value > second + uncertain)) return null;
+  return { label: top.label, value: top.value };
+}
+
+// `valueHtml` renders the figure: a lower-bound cohort count goes through the
+// block's own renderer (channelCountHtml), so a leader is "at least N" too.
+function channelLeaderHtml(leader, valueHtml) {
+  if (!leader) return "";
+  return `<div class="channels-kpi__lead">Most from <strong>${escapeHtml(leader.label)}</strong> · ${valueHtml(leader.value)}</div>`;
+}
+
+/** The outcome leader for one metric: channel rows only. */
+function channelOutcomeLeader(o, key) {
+  if (!channelOutcomesPublished(o)) return null;
+  const rows = o.channels.filter((r) => r.source !== CHANNEL_OUTCOME_UNRESOLVED);
+  const un = o.channels.find((r) => r.source === CHANNEL_OUTCOME_UNRESOLVED);
+  const uncertain = un ? channelOutcomeValue(un, key) : 0;
+  return channelLeader(rows.map((r) => ({ label: r.label, value: channelOutcomeValue(r, key) })), uncertain);
+}
+
+/** The funnel leader for one count: channel rows only, the cohort published. */
+function channelFunnelLeader(data, st, key) {
+  if (!st.ok) return null;
+  const d = data || {};
+  const rows = st.rows.filter((r) => r.source !== CHANNEL_OUTCOME_NO_SOURCE);
+  const none = st.rows.find((r) => r.source === CHANNEL_OUTCOME_NO_SOURCE);
+  const noSource = none ? channelFunnelCount(none[key]) : 0;
+  const undated = channelFunnelCount(d.contacts_without_created_at);
+  const uncertain = noSource === null || undated === null ? null : noSource + undated;
+  return channelLeader(rows.map((r) => ({ label: r.label, value: channelFunnelCount(r[key]) })), uncertain);
+}
+
+// ── 1. the two KPI groups ──────────────────────────────────────────────────
+function channelsKpiCard(label, valueHtml, sub, lead) {
+  return `
+      <div class="channels-kpi">
+        <div class="channels-kpi__label">${escapeHtml(label)}</div>
+        <div class="channels-kpi__value">${valueHtml}</div>
+        <div class="channels-kpi__sub">${sub}</div>${lead || ""}
       </div>`;
-  const enough = rated.filter((r) => !r.small).sort((a, b) => b.rate - a.rate);
-  const few = rated.filter((r) => r.small).sort((a, b) => b.rate - a.rate);
-  return enough.map(line).join("")
-    + (few.length ? `<div class="channel-funnel-rank__divider">Fewer than ${CHANNEL_FUNNEL_SMALL_SAMPLE} contacts — too few to compare</div>${few.map(line).join("")}` : "");
 }
 
-function channelFunnelSorted(channels, view, stages) {
-  const key = view.sort;
-  const rows = channels.slice();
-  if (!key || key === "contacts") {
-    return rows.sort((a, b) => (channelFunnelCount(b.contacts) || 0) - (channelFunnelCount(a.contacts) || 0));
-  }
-  if (!stages.some((st) => st.key === key)) return rows;
-  return rows.sort((a, b) => (channelFunnelCount(b[key]) || 0) - (channelFunnelCount(a[key]) || 0));
+/** Deals closed: customers won and closed-won revenue, the window's own. */
+function channelOutcomeGroupHtml(o) {
+  const opts = channelOutcomeOpts(o);
+  const w = (o && o.window) || {};
+  const customers = channelOutcomeMetric(o, "customers");
+  const revenue = channelOutcomeMetric(o, "revenue_usd");
+  const deals = channelOutcomeMetric(o, "closed_won_deals");
+  const dealsPublished = deals.status === "published" && typeof deals.value === "number";
+  const dealSub = dealsPublished
+    ? `${escapeHtml(channelOutcomeInt(deals.value))} ${deals.value === 1 ? "deal" : "deals"} · USD`
+    : `Closed-won deals: ${canonicalMetricHtml(deals, channelOutcomeInt, opts)}`;
+  const range = o && o.window ? channelsRange(w) : "";
+  return `
+    <section class="channels-group dash-anim" aria-label="Deals closed" data-metric-family="${escapeHtml((o && o.metric_family) || "not_stated")}" data-window-basis="${escapeHtml((o && o.window_basis) || "not_stated")}">
+      <div class="channels-group__head"><span>Deals closed</span>${range ? `<em${w.disclosure ? ` title="${escapeHtml(w.disclosure)}"` : ""}>${escapeHtml(range)}</em>` : ""}</div>
+      <div class="channels-group__cards">
+        ${channelsKpiCard("Customers won", canonicalMetricHtml(customers, channelOutcomeInt, opts), "distinct companies",
+          channelLeaderHtml(channelOutcomeLeader(o, "customers"), (v) => escapeHtml(channelOutcomeInt(v))))}
+        ${channelsKpiCard("Closed-won revenue", canonicalMetricHtml(revenue, channelMoney, opts), dealSub,
+          channelLeaderHtml(channelOutcomeLeader(o, "revenue_usd"), (v) => escapeHtml(channelMoney(v))))}
+      </div>
+    </section>`;
 }
 
-// The Meta line's spend cell: USD as the API decided it, the native total
-// beside it when one currency (or when only the native total is published).
-function channelMetaSpendCellHtml(line, opts) {
-  const usd = canonicalMetricHtml(metaLineSpendMetric(line), channelOutcomeMoney, opts);
-  const native = metaLineNativeHtml(line);
-  return native ? `${usd} <small class="metric-reason">${native}</small>` : usd;
+/** Contacts acquired: new contacts and reached SQL, from the shared model. */
+function channelFunnelGroupHtml(data, st) {
+  const d = data || {};
+  const verdict = st.verdict;
+  const contacts = st.contacts || { slot: "contacts", key: "contacts" };
+  const sql = st.sql || { slot: "sql", key: "reached_sql" };
+  // Withheld means absent: under an unpublished verdict the cards carry the
+  // word (funnelBlockValueHtml reads no figure) and the line says why.
+  const value = (stage) => funnelBlockValueHtml(stage, verdict);
+  const bound = st.ok && st.bound
+    ? `<span class="channels-kpi__bound" title="${escapeHtml(st.bound)}">Lower bound: ${escapeHtml(st.bound)}</span>` : "";
+  const sqlSub = st.ok ? escapeHtml(sql.sub || "") : "";
+  return `
+    <section class="channels-group dash-anim" aria-label="Contacts acquired" data-metric-family="${escapeHtml(d.metric_family || "not_stated")}" data-window-basis="${escapeHtml(d.window_basis || "not_stated")}">
+      <div class="channels-group__head"><span>Contacts acquired</span>${d.window && d.window.end_date ? `<em>${escapeHtml(channelsRange(d.window))}</em>` : ""}</div>
+      ${funnelBlockVerdictHtml(verdict)}
+      <div class="channels-group__cards">
+        ${channelsKpiCard("New contacts", value(contacts), st.ok ? "created in these days" : "",
+          channelLeaderHtml(channelFunnelLeader(d, st, "contacts"), (v) => channelCountHtml(v, st.bound, "contacts")) + bound)}
+        ${channelsKpiCard("Reached SQL so far", value(sql), sqlSub,
+          channelLeaderHtml(channelFunnelLeader(d, st, "reached_sql"), (v) => channelCountHtml(v, st.bound, "reached_sql")))}
+      </div>
+    </section>`;
 }
 
-// PR-ADS-171B: Paid Social's contacts by platform, from HubSpot's drill-down
-// as stored. Same funnel columns; a contact with no drill-down is unknown.
-function channelPlatformSplitHtml(ch, stages, outcome) {
-  const split = (ch || {}).platform_split;
-  if (!Array.isArray(split) || !split.length) return "";
-  return split.map((p) => {
-    const vals = (p.drilldown_values || []).join(", ");
-    const sub = p.platform === "other"
-      ? (vals ? `drill-down: ${vals}${p.drilldown_value_count > (p.drilldown_values || []).length ? ` (+${p.drilldown_value_count - p.drilldown_values.length} more)` : ""}` : "")
-      : p.platform === "unknown" ? "no drill-down recorded — never counted as Meta"
-      : vals ? `drill-down: ${vals}` : "";
-    return channelFunnelRowHtml({ value: p.label, ...p }, stages, {
-      platform: true, sub, outcome });
-  }).join("");
-}
+// ── 2. one ranked table ────────────────────────────────────────────────────
+const CHANNEL_TABLE_COLUMNS = [
+  { key: "channel", label: "Channel", half: null },
+  { key: "customers", label: "Customers", half: "outcome" },
+  { key: "revenue", label: "Revenue", half: "outcome" },
+  { key: "share", label: "Share of revenue", half: "outcome", wide: true },
+  { key: "contacts", label: "New contacts", half: "funnel", wide: true },
+  { key: "sqls", label: "SQLs", half: "funnel" },
+  { key: "sql_rate", label: "SQL rate", half: "funnel", wide: true },
+];
 
-function renderChannelFunnel(data, view) {
-  const v = view || {};
-  const pub = data.publication || {};
-  const stages = data.stages || [];
-  const w = data.window || {};
-  const range = w.is_all_time ? `All time, to ${w.end_date}` : `${w.start_date} to ${w.end_date}`;
-  const asOf = (data.freshness || {}).as_of;
-  const funnelOk = pub.status === "published" && !!data.channels && !!data.totals;
-  // PR-ADS-168A: each half publishes or withholds on its own — a withheld
-  // funnel never hides the outcomes, and withheld outcomes never hide the funnel.
-  const o = data.outcomes || null;
+const CHANNEL_TABLE_TITLES = {
+  channel: "channel name", customers: "customers won", revenue: "revenue",
+  share: "share of revenue", contacts: "new contacts", sqls: "SQLs", sql_rate: "SQL rate",
+};
+
+/**
+ * The table's rows, from the published halves only. A funnel channel carries
+ * its funnel row and (when outcomes publish) its outcome row. A channel with
+ * closed deals and no contact acquired in these days is added with a measured
+ * 0 (the published funnel lists every source). "No source recorded" (a funnel
+ * row) and the deals with no single source (an outcome row) are not channels:
+ * they are kept, pinned last, and never lead.
+ */
+function channelTableRows(data, st, o) {
   const outRows = channelOutcomesPublished(o) ? o.channels : null;
-  const oOpts = channelOutcomeOpts(o);
-  // PR-ADS-180A: the funnel is the shared block, published or not. Withheld,
-  // it is the word and the reason in every stage and no figure anywhere.
-  const funnelPanel = `
-    <div class="dash-panel dash-anim channel-funnel-block-panel">
-      ${funnelBlockHtml(channelFunnelModel(data), { ariaLabel: "Channel funnel" })}
-    </div>`;
-  if (!funnelOk && !o) return funnelPanel;
-  const stage = funnelOk ? (stages.find((st) => st.key === v.stage)
-    || stages.find((st) => st.key === "reached_sql") || stages[0]) : null;
-  const sortKey = v.sort || "contacts";
-  const stagePicker = stage && stages.length > 1 ? `<div class="channel-funnel-seg" role="group" aria-label="Stage to compare">${
-    stages.map((st) => `<button type="button" class="channel-funnel-seg__btn${st === stage ? " is-active" : ""}" data-channel-stage="${escapeHtml(st.key)}" aria-pressed="${st === stage}">${escapeHtml(st.label)}</button>`).join("")}</div>` : "";
-  const rankings = stage ? `
-    <div class="channel-funnel-grid">
-      <div class="dash-panel dash-anim">
-        <div class="dash-panel__header"><div>
-          <h3 class="dash-panel__title">Where your ${escapeHtml(channelFunnelPlural(stage))} come from</h3>
-          <p class="dash-panel__sub">Contacts acquired in this period that have reached ${escapeHtml(stage.label)}, by channel.</p></div></div>
-        ${channelFunnelRankHtml(data, stage, "volume")}
-      </div>
-      <div class="dash-panel dash-anim">
-        <div class="dash-panel__header"><div>
-          <h3 class="dash-panel__title">Which channels convert best to ${escapeHtml(stage.label)}</h3>
-          <p class="dash-panel__sub">Share of each channel's own contacts that have reached ${escapeHtml(stage.label)}.</p></div></div>
-        ${channelFunnelRankHtml(data, stage, "rate")}
-      </div>
-    </div>` : "";
-  const stageHead = (st) => (outRows && st.key === "reached_customer_stage") ? `${st.label} (contacts)` : st.label;
-  const head = stages.map((st) =>
-    `<th class="num"><button type="button" class="channel-funnel-sort${sortKey === st.key ? " is-active" : ""}" data-channel-sort="${escapeHtml(st.key)}" title="Sort by ${escapeHtml(st.label)}">${escapeHtml(stageHead(st))}</button></th>`).join("");
-  const contactsHead = `<th class="num"><button type="button" class="channel-funnel-sort${sortKey === "contacts" ? " is-active" : ""}" data-channel-sort="contacts" title="Sort by contacts">Contacts</button></th>`;
   const byKey = {};
   (outRows || []).forEach((r) => { byKey[r.source] = r; });
-  const funnelSpan = 1 + stages.length;
-  const outcomeFor = (source) => {
-    if (!outRows) return "";
-    if (source === CHANNEL_OUTCOME_NO_SOURCE) return channelOutcomeNoteCells("n/a — counted under Source not resolved");
-    return byKey[source] ? channelOutcomeCellsHtml(byKey[source], oOpts)
-      : channelOutcomeNoteCells("Unavailable — the server sent no outcome row for this channel");
-  };
-  const blankOutcome = outRows ? '<td class="channel-outcome-blank" colspan="6"></td>' : "";
-  let body = "";
-  let total = "";
-  const funnelSources = {};
-  if (funnelOk) {
-    body = channelFunnelSorted(data.channels, v, stages).map((ch) => {
-      funnelSources[ch.source] = true;
-      const drill = channelFunnelHasDrill(ch) ? ch.drilldowns : [];
-      return channelFunnelRowHtml(ch, stages, { children: drill.length, outcome: outcomeFor(ch.source) })
-        + channelPlatformSplitHtml(ch, stages, outRows ? channelOutcomeNoteCells("n/a — deals are counted per channel, not per platform") : "")
-        + drill.map((d) => channelFunnelRowHtml(d, stages, { drill: true, parent: ch.source, outcome: blankOutcome })).join("");
-    }).join("");
-    total = channelFunnelRowHtml({ label: "All channels", ...data.totals }, stages,
-      { total: true, outcome: outRows ? channelOutcomeCellsHtml(o.totals, oOpts) : "" });
-  } else if (outRows) {
-    total = channelFunnelRowHtml({ label: "All channels" }, stages,
-      { total: true, funnel: "", outcome: channelOutcomeCellsHtml(o.totals, oOpts) });
+  const rows = [];
+  const seen = {};
+  (st.rows || []).forEach((ch, i) => {
+    seen[ch.source] = true;
+    rows.push({ key: ch.source, label: ch.label, order: i, f: ch,
+      out: outRows ? (byKey[ch.source] || null) : null,
+      kind: ch.source === CHANNEL_OUTCOME_NO_SOURCE ? "no_source" : "channel",
+      small: channelFunnelIsSmall(ch) });
+  });
+  (outRows || []).forEach((r, i) => {
+    if (r.source === CHANNEL_OUTCOME_UNRESOLVED || seen[r.source]) return;
+    if (st.ok && !channelOutcomeHasDeals(r)) return;
+    rows.push({ key: r.source, label: r.label, order: 1000 + i, out: r, kind: "channel",
+      f: st.ok ? { source: r.source, label: r.label, contacts: 0, reached_sql: 0 } : null, small: false });
+  });
+  const un = outRows ? byKey[CHANNEL_OUTCOME_UNRESOLVED] : null;
+  if (un) rows.push({ key: CHANNEL_OUTCOME_UNRESOLVED, label: CHANNELS_UNRESOLVED_LABEL, order: 9999,
+    out: un, f: null, kind: "unresolved", small: false });
+  return rows;
+}
+
+/** A row's value for a column, or null (unknown: sorted last, never as 0). */
+function channelSortValue(row, key, st) {
+  const f = row.f || {};
+  switch (key) {
+    case "channel": return row.label || "";
+    case "customers": return channelOutcomeValue(row.out, "customers");
+    case "revenue": case "share": return channelOutcomeValue(row.out, "revenue_usd");
+    case "contacts": return row.f ? channelFunnelCount(f.contacts) : null;
+    case "sqls": return row.f ? channelFunnelCount(f.reached_sql) : null;
+    case "sql_rate": return row.f && !st.bound ? channelFunnelRate(f.reached_sql, f.contacts) : null;
+    default: return null;
   }
-  if (outRows) {
-    // Channels with closed deals but no contact acquired in this period, then
-    // the deals whose source is not resolved.
-    const zero = {};
-    stages.forEach((st) => { zero[st.key] = 0; });
-    body += outRows.filter((r) => r.source !== CHANNEL_OUTCOME_UNRESOLVED
-        && !funnelSources[r.source] && channelOutcomeHasDeals(r))
-      .map((r) => channelFunnelRowHtml({ label: r.label, contacts: 0, ...zero }, stages,
-        { funnel: funnelOk ? undefined : "", outcome: channelOutcomeCellsHtml(r, oOpts) })).join("");
-    const un = byKey[CHANNEL_OUTCOME_UNRESOLVED];
-    if (un) {
-      body += channelFunnelRowHtml({ label: un.label || "Source not resolved" }, stages, {
-        unresolved: true, sub: channelOutcomeClassText(un),
-        funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — not a contact source</td>` : "",
-        outcome: channelOutcomeCellsHtml(un, oOpts) });
+}
+
+/** The columns this response can fill: a withheld half is absent, not zero. */
+function channelTableColumns(st, o) {
+  const outOk = channelOutcomesPublished(o);
+  return CHANNEL_TABLE_COLUMNS.filter((c) => !c.half
+    || (c.half === "outcome" && outOk) || (c.half === "funnel" && st.ok));
+}
+
+/** The sort in force: the view's when its column is shown, else the default. */
+function channelTableSort(view, columns) {
+  const v = view || {};
+  const keys = columns.map((c) => c.key);
+  const key = keys.includes(v.sort) ? v.sort
+    : (keys.includes("customers") ? "customers" : (keys.includes("contacts") ? "contacts" : "channel"));
+  const dir = (v.sort === key && (v.dir === "asc" || v.dir === "desc")) ? v.dir
+    : (key === "channel" ? "asc" : "desc");
+  return { key, dir };
+}
+
+/**
+ * Channel rows in sort order; the two rows that are not channels stay last.
+ * Unknown values go last whatever the direction. Sorting by SQL rate ranks a
+ * channel with fewer than CHANNEL_FUNNEL_SMALL_SAMPLE contacts after the ones
+ * with enough to compare (PR-ADS-162I): a 5-of-9 rate never tops the list.
+ */
+function channelTableSorted(rows, sort, st) {
+  const chans = rows.filter((r) => r.kind === "channel");
+  const rest = rows.filter((r) => r.kind !== "channel");
+  const sign = sort.dir === "asc" ? 1 : -1;
+  chans.sort((a, b) => {
+    const x = channelSortValue(a, sort.key, st);
+    const y = channelSortValue(b, sort.key, st);
+    // Only between two KNOWN rates: an unknown rate (a lower-bound cohort)
+    // ranks nothing, so the API's order stands.
+    if (sort.key === "sql_rate" && x !== null && y !== null && a.small !== b.small) return a.small ? 1 : -1;
+    if (x === null && y === null) return a.order - b.order;
+    if (x === null) return 1;
+    if (y === null) return -1;
+    if (typeof x === "string") return sign * x.localeCompare(y) || a.order - b.order;
+    return sign * (x - y) || a.order - b.order;
+  });
+  return chans.concat(rest);
+}
+
+function channelNa(title) {
+  return `<span class="channels-na" title="${escapeHtml(title)}">n/a</span>`;
+}
+
+/**
+ * A cohort count off the funnel block: "—" when not sent; otherwise the
+ * block's own value renderer (funnelBlockValueHtml) — the count, or "at least
+ * N" with the reason under a lower bound. No local wording.
+ */
+function channelCountHtml(v, bound, key) {
+  const n = channelFunnelCount(v);
+  if (n === null) return '<span class="channels-unknown" title="the server sent no count">—</span>';
+  return funnelBlockValueHtml({ key: key || "count", metric: funnelCountMetric(n, null),
+    bound_reason: bound || null }, { status: "published" });
+}
+
+function channelRateHtml(f, bound) {
+  if (bound) return `<span class="channels-unknown" title="Rate unknown: ${escapeHtml(bound)}">—</span>`;
+  const pct = channelPct(f.reached_sql, f.contacts);
+  return pct === null ? '<span class="channels-unknown" title="no rate without new contacts">—</span>' : escapeHtml(pct);
+}
+
+/** The share-of-revenue bar: a row's published revenue over the window's. */
+function channelShareHtml(row, total) {
+  const v = channelOutcomeValue(row.out, "revenue_usd");
+  const pct = v === null || !(total > 0) ? null : 100 * v / total;
+  if (pct === null) return "";
+  const w = Math.max(0, Math.min(100, pct)).toFixed(1);
+  return `<span class="channels-share" aria-hidden="true"><span class="channels-share__fill" style="width:${w}%"></span></span><span class="channels-share__pct">${pct.toFixed(1)}%</span>`;
+}
+
+function channelCellHtml(row, col, ctx) {
+  const f = row.f || {};
+  switch (col.key) {
+    case "customers": case "revenue": {
+      if (row.kind === "no_source") return channelNa(`These contacts' deals are counted under ${CHANNELS_UNRESOLVED_LABEL}`);
+      if (!row.out) return canonicalMetricHtml({ status: "unavailable", reason: "the server sent no outcome row for this channel" }, null, ctx.oOpts);
+      return col.key === "customers"
+        ? rowMetricHtml(row.out, "customers", channelOutcomeInt, ctx.oOpts)
+        : rowMetricHtml(row.out, "revenue_usd", channelMoney, ctx.oOpts);
+    }
+    case "share": return row.kind === "no_source" ? "" : channelShareHtml(row, ctx.totalRevenue);
+    case "contacts": return row.kind === "unresolved" ? channelNa("not a contact source") : channelCountHtml(f.contacts, ctx.bound);
+    case "sqls": return row.kind === "unresolved" ? channelNa("not a contact source") : channelCountHtml(f.reached_sql, ctx.bound);
+    case "sql_rate": return row.kind === "unresolved" ? "" : channelRateHtml(f, ctx.bound);
+    default: return "";
+  }
+}
+
+/** The "All channels" row: the window's OWN totals — customers never summed. */
+function channelTotalCellHtml(col, ctx, data, o) {
+  const t = (data || {}).totals || {};
+  switch (col.key) {
+    case "customers": return canonicalMetricHtml(channelOutcomeMetric(o, "customers"), channelOutcomeInt, ctx.oOpts);
+    case "revenue": return canonicalMetricHtml(channelOutcomeMetric(o, "revenue_usd"), channelMoney, ctx.oOpts);
+    case "share": return "";
+    case "contacts": return channelCountHtml(t.contacts, ctx.bound);
+    case "sqls": return channelCountHtml(t.reached_sql, ctx.bound);
+    case "sql_rate": return channelRateHtml(t, ctx.bound);
+    default: return "";
+  }
+}
+
+function channelTableHtml(data, view, st, o) {
+  const columns = channelTableColumns(st, o);
+  if (columns.length === 1) return "";
+  const sort = channelTableSort(view, columns);
+  const total = channelOutcomeMetric(o, "revenue_usd");
+  const ctx = { oOpts: channelOutcomeOpts(o), bound: st.bound,
+    totalRevenue: total.status === "published" && typeof total.value === "number" ? total.value : null };
+  const sorted = channelTableSorted(channelTableRows(data, st, o), sort, st);
+  const colClass = (c) => `${c.key === "channel" ? "" : "num "}channels-col--${c.key}${c.wide ? " channels-col--wide" : ""}`;
+  const head = columns.map((c) => {
+    const on = c.key === sort.key;
+    return `<th class="${colClass(c)}"${on ? ` aria-sort="${sort.dir === "asc" ? "ascending" : "descending"}"` : ""}><button type="button" class="channels-sort${on ? ` is-active is-${sort.dir}` : ""}" data-channel-sort="${c.key}" title="Sort by ${escapeHtml(c.label.toLowerCase())}">${escapeHtml(c.label)}</button></th>`;
+  }).join("");
+  const totalRow = `<tr class="channels-row channels-row--total" data-channel-open="${CHANNELS_ALL}" tabindex="0">${columns.map((c) =>
+    `<td class="${colClass(c)}">${c.key === "channel" ? "<strong>All channels</strong>" : channelTotalCellHtml(c, ctx, data, o)}</td>`).join("")}</tr>`;
+  const body = sorted.map((row) => {
+    const zero = row.kind !== "channel" || channelOutcomeValue(row.out, "customers") === 0;
+    const cls = `channels-row${zero && columns.some((c) => c.half === "outcome") ? " channels-row--dim" : ""}${row.kind !== "channel" ? ` channels-row--${row.kind}` : ""}`;
+    return `<tr class="${cls}" data-channel-open="${escapeHtml(row.key)}" tabindex="0">${columns.map((c) => {
+      if (c.key !== "channel") return `<td class="${colClass(c)}">${channelCellHtml(row, c, ctx)}</td>`;
+      const pill = row.kind === "channel" && row.small ? channelFunnelSmallBadge() : "";
+      return `<td class="${colClass(c)}"><span class="channels-name">${escapeHtml(row.label)}</span>${pill}</td>`;
+    }).join("")}</tr>`;
+  }).join("");
+  // The panel says what the order is: "customers won" (distinct companies).
+  const title = CHANNEL_TABLE_TITLES[sort.key] || "channel name";
+  const held = [];
+  if (!st.ok) held.push(`New contacts, SQLs and SQL rate are ${escapeHtml((st.verdict.status === "withheld" ? "withheld" : "unavailable"))} — ${escapeHtml(st.verdict.reason || "the funnel is not published")}.`);
+  if (!channelOutcomesPublished(o)) {
+    const m = channelOutcomeMetric(o, "closed_won_deals");
+    held.push(`Customers and revenue are ${m.status === "withheld" ? "withheld" : "unavailable"} — ${escapeHtml(canonicalReasonLabel(m.reason) || "the channel outcomes could not be loaded")}.`);
+  }
+  return `
+    <section class="dash-panel dash-anim channels-table-panel" aria-label="Channels ranked">
+      <div class="dash-panel__header"><div>
+        <h3 class="dash-panel__title">Channels ranked by ${escapeHtml(title)}</h3>
+        <p class="dash-panel__sub">Click any column to re-rank. Click a channel to see its full funnel and sources.</p>
+        ${held.map((h) => `<p class="channels-held">${h}</p>`).join("")}
+      </div></div>
+      <table class="data-table channels-table">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${totalRow}${body}</tbody>
+      </table>
+      ${channelLegendHtml(data, o)}
+    </section>`;
+}
+
+// ── the legend line and the collapsed "How this is counted" ────────────────
+function channelsExpander(id, label) {
+  return `<button type="button" class="channels-link" data-channels-expand="${id}" aria-expanded="false">${escapeHtml(label)}</button>`;
+}
+
+function channelsExpandPanel(id, inner) {
+  return `<div class="channels-more" data-channels-panel="${id}" hidden>${inner}</div>`;
+}
+
+function channelLegendHtml(data, o) {
+  const d = data || {};
+  const notes = d.notes || {};
+  const on = (o && o.notes) || {};
+  const customers = channelOutcomeMetric(o, "customers");
+  const total = customers.status === "published" && typeof customers.value === "number"
+    ? channelOutcomeInt(customers.value) : "the total";
+  const w = (o && o.window) || {};
+  const howto = [
+    notes.channels, notes.stages, notes.maturity, notes.platforms,
+    on.cohorts, on.attribution, on.original_source, on.customers,
+    w.disclosure ? `Deals closed: ${w.disclosure}` : "",
+    ACQUISITION_FUNNEL_LEGEND,
+  ].filter(Boolean);
+  return `
+      <p class="channels-legend">Customers are distinct companies, and a company can appear under two channels, so the rows don't add up to ${escapeHtml(total)}. Customers and revenue count deals closed in these days, while new contacts and SQLs count people created in these days, so no rate joins the two. ${channelsExpander("howto", "How this is counted")}</p>
+      ${channelsExpandPanel("howto", `<ul>${howto.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`)}`;
+}
+
+// ── 3. the paid channels block ─────────────────────────────────────────────
+// The disclosure beside every period value, in short (its full text is the
+// title and the line under the figures). Never named as an attribution ratio.
+const PERIOD_RATIO_SHORT_DISCLOSURE = "Non-cohort operational ratio";
+
+/** A period ratio: the value with its disclosure beside it, or the word. */
+function channelPeriodRatioHtml(metric, fmt, opts) {
+  const m = metric || {};
+  if (m.status === "published" && m.value !== null && m.value !== undefined) {
+    return `<span title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${escapeHtml(fmt(m.value))}</span>`
+      + ` <small class="metric-reason channels-ratio-note" title="${escapeHtml(PERIOD_RATIO_DISCLOSURE)}">${PERIOD_RATIO_SHORT_DISCLOSURE}</small>`;
+  }
+  return canonicalMetricHtml(m, fmt, opts);
+}
+
+function channelPaidFigure(label, html) {
+  return `<div class="channels-paid__figure"><div class="channels-paid__label">${escapeHtml(label)}</div><div class="channels-paid__value">${html}</div></div>`;
+}
+
+/** Google Ads: the measured line — spend beside the deals it is compared with. */
+function channelGoogleCardHtml(o) {
+  const opts = channelOutcomeOpts(o);
+  const line = (o && o.google_ads_line) || null;
+  const spend = (line && line.spend) || ((o || {}).spend || {}).google_ads
+    || { status: "unavailable", reason: o ? "google_ads_usd_spend_unavailable" : "channel_outcomes_failed" };
+  // No line: when the window's own figure is not published (a stale ledger,
+  // an unreadable one) the card says THAT reason; only a published window
+  // with no line is a missing evidence partition.
+  const missing = (windowKey) => {
+    const m = channelOutcomeMetric(o, windowKey);
+    return m.status === "published"
+      ? { status: "unavailable", reason: "google_ads_evidence_partition_unavailable" } : m;
+  };
+  const basis = { revenue_usd: "revenue_usd", period_revenue_per_ad_spend: "revenue_usd",
+    period_spend_per_customer_won: "customers" };
+  const metric = (key) => (line && (line.metrics || {})[key]) || missing(basis[key] || key);
+  const customers = channelOutcomeValue(line, "customers");
+  const deals = channelOutcomeValue(line, "closed_won_deals");
+  const count = customers !== null && deals !== null
+    ? `${channelOutcomeInt(customers)} ${customers === 1 ? "customer" : "customers"} from ${channelOutcomeInt(deals)} ${deals === 1 ? "deal" : "deals"} with a Google click ID or HubSpot Paid Search. ` : "";
+  const on = (o && o.notes) || {};
+  const matched = [channelOutcomeSplitText(line), on.spend].filter(Boolean);
+  return `
+      <div class="channels-paid__card channels-paid__card--google">
+        <div class="channels-paid__head"><h4>Google Ads</h4>${matched.length ? channelsExpander("gads", "How deals are matched") : ""}</div>
+        <div class="channels-paid__figures">
+          ${channelPaidFigure("Spend", canonicalMetricHtml(spend, channelMoney, opts))}
+          ${channelPaidFigure("Revenue", canonicalMetricHtml(metric("revenue_usd"), channelMoney, opts))}
+          ${channelPaidFigure(PERIOD_RATIO_LABEL, channelPeriodRatioHtml(metric("period_revenue_per_ad_spend"), channelOutcomeRatio, opts))}
+          ${channelPaidFigure(PERIOD_SPEND_PER_CUSTOMER_LABEL, channelPeriodRatioHtml(metric("period_spend_per_customer_won"), channelMoney, opts))}
+        </div>
+        <p class="channels-paid__note">${escapeHtml(count)}Deals closed in these days may come from earlier ads.</p>
+        ${matched.length ? channelsExpandPanel("gads", matched.map((t) => `<p>${escapeHtml(t)}</p>`).join("")) : ""}
+      </div>`;
+}
+
+// The Meta line's spend: USD as the API decided it, through the one gate
+// (metaLineSpendMetric). Its own currency's total beside it only when it says
+// something the USD figure does not (another currency, or USD unpublished).
+function channelMetaSpendCellHtml(line, opts) {
+  const usd = canonicalMetricHtml(metaLineSpendMetric(line), channelMoney, opts);
+  const n = (line || {}).native_spend || {};
+  const native = metaLineNativeHtml(line);
+  const usdPublished = metaLineSpendMetric(line).status === "published";
+  return native && (!usdPublished || (n.currency && n.currency !== "USD"))
+    ? `${usd} <small class="metric-reason">${native}</small>` : usd;
+}
+
+/** Meta Ads: spend only. Nothing on the page is divided by it. */
+function channelMetaCardHtml(o) {
+  const opts = channelOutcomeOpts(o);
+  const line = (o && o.meta_ads_line) || null;
+  const spend = line ? channelMetaSpendCellHtml(line, opts)
+    : canonicalMetricHtml(metaLineSpendMetric(null), channelMoney, opts);
+  // The owner's retirement declaration stays BESIDE the figure it carries.
+  const retired = line && metaLineRetired(line) && line.owner_declared_retired_disclosure
+    ? `<p class="channels-paid__note channels-paid__note--disclosure">${escapeHtml(line.owner_declared_retired_disclosure)}</p>` : "";
+  const notes = line ? metaLineNotes(line).filter((t) => !retired || t !== line.owner_declared_retired_disclosure) : [];
+  return `
+      <div class="channels-paid__card channels-paid__card--meta">
+        <div class="channels-paid__head"><h4>Meta Ads</h4>${notes.length ? channelsExpander("meta", "Account details") : ""}</div>
+        <div class="channels-paid__figures channels-paid__figures--one">${channelPaidFigure("Spend", spend)}</div>
+        ${retired}
+        <p class="channels-paid__note">Not yet matched to HubSpot deals, so there is no revenue ratio. Shown for spend tracking only.</p>
+        ${notes.length ? channelsExpandPanel("meta", `<ul>${notes.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`) : ""}
+      </div>`;
+}
+
+function channelPaidBlockHtml(o) {
+  return `
+    <section class="dash-panel dash-anim channels-paid" aria-label="Paid channels">
+      <div class="dash-panel__header"><div>
+        <h3 class="dash-panel__title">Paid channels</h3>
+        <p class="dash-panel__sub">Spend in the same days, with what we can honestly set against it.</p>
+      </div></div>
+      <div class="channels-paid__grid">${channelGoogleCardHtml(o)}${channelMetaCardHtml(o)}</div>
+    </section>`;
+}
+
+/**
+ * The page. `data` is ONE /api/channel-funnel response and `view` the
+ * reader's sort — both arguments; nothing here reads page state.
+ */
+function renderChannelFunnel(data, view) {
+  const d = data || {};
+  const st = channelsFunnelState(d);
+  const o = d.outcomes || null;
+  return `
+    <div class="channels-groups">
+      ${channelOutcomeGroupHtml(o)}
+      ${channelFunnelGroupHtml(d, st)}
+    </div>
+    ${channelTableHtml(d, view, st, o)}
+    ${channelPaidBlockHtml(o)}`;
+}
+
+// ── 4. the channel drawer ──────────────────────────────────────────────────
+/** One channel's row of the funnel response (null: not a funnel row). */
+function channelFunnelRow(data, key) {
+  const d = data || {};
+  if (key === CHANNELS_ALL) return d.totals || null;
+  return (Array.isArray(d.channels) ? d.channels : []).find((c) => c.source === key) || null;
+}
+
+// HubSpot's drill-down values as stored, largest first as the API sent them.
+// "(none)" is a contact with no detail recorded: named so, never dropped.
+function channelDrawerSourcesHtml(ch, st) {
+  if (!st.ok) return "";
+  const drills = channelFunnelHasDrill(ch) ? ch.drilldowns.slice(0, 6) : [];
+  if (!drills.length) return "";
+  const name = (v) => (v === "(none)" ? "No detail recorded" : v);
+  return `
+      <h4 class="channels-drawer__h">Top sources (HubSpot detail)</h4>
+      <ul class="channels-drawer__list">${drills.map((dd) =>
+        `<li><span>${escapeHtml(name(dd.value))}</span><strong>${channelCountHtml(dd.contacts, st.bound)}</strong></li>`).join("")}</ul>`;
+}
+
+function channelDrawerPlatformsHtml(ch, st) {
+  const split = st.ok ? (ch || {}).platform_split : null;
+  if (!Array.isArray(split) || !split.length) return "";
+  return `
+      <h4 class="channels-drawer__h">By platform (HubSpot drill-down)</h4>
+      <ul class="channels-drawer__list">${split.map((p) => {
+        const vals = (p.drilldown_values || []).join(", ");
+        const sub = p.platform === "unknown" ? "no drill-down recorded — never counted as Meta"
+          : (vals ? `drill-down: ${vals}` : "");
+        return `<li><span>${escapeHtml(p.label)}${sub ? `<small>${escapeHtml(sub)}</small>` : ""}</span><strong>${channelCountHtml(p.contacts, st.bound)}</strong></li>`;
+      }).join("")}</ul>
+      <p class="channels-drawer__note">New contacts by platform, from HubSpot. Not Meta's own figures, and no spend is divided by them.</p>`;
+}
+
+/**
+ * A row's deals closed in these days — its own closed-won deals, customers
+ * and revenue, each the reader contract's {value, status, reason}. All
+ * channels: the window's own figures (customers never a sum of the rows).
+ */
+function channelDrawerOutcomesHtml(o, key) {
+  const opts = channelOutcomeOpts(o);
+  let cells;
+  if (key === CHANNELS_ALL) {
+    cells = [canonicalMetricHtml(channelOutcomeMetric(o, "closed_won_deals"), channelOutcomeInt, opts),
+      canonicalMetricHtml(channelOutcomeMetric(o, "customers"), channelOutcomeInt, opts),
+      canonicalMetricHtml(channelOutcomeMetric(o, "revenue_usd"), channelMoney, opts)];
+  } else if (key === CHANNEL_OUTCOME_NO_SOURCE) {
+    return `<p class="channels-drawer__note">Deals whose contacts have no source are counted under ${escapeHtml(CHANNELS_UNRESOLVED_LABEL)}.</p>`;
+  } else {
+    const row = channelOutcomesPublished(o) ? o.channels.find((r) => r.source === key) : null;
+    if (!row) {
+      const m = channelOutcomeMetric(o, "closed_won_deals");
+      const gap = channelOutcomesPublished(o)
+        ? canonicalMetricHtml({ status: "unavailable", reason: "the server sent no outcome row for this channel" }, null, opts)
+        : canonicalMetricHtml(m.status === "published" ? { status: "unavailable", reason: "channel_outcomes_failed" } : m, null, opts);
+      cells = [gap, gap, gap];
+    } else {
+      cells = [rowMetricHtml(row, "closed_won_deals", channelOutcomeInt, opts),
+        rowMetricHtml(row, "customers", channelOutcomeInt, opts),
+        rowMetricHtml(row, "revenue_usd", channelMoney, opts)];
     }
   }
-  // The measured comparison with Google Ads spend: deals with Google Ads
-  // evidence wherever HubSpot put them. Not a channel row, never summed.
-  const gads = outRows && o.google_ads_line ? channelFunnelRowHtml(
-    { label: o.google_ads_line.label || "Google Ads (canonical evidence)" }, stages, {
-      gads: true,
-      sub: [channelOutcomeSplitText(o.google_ads_line),
-        "Google click ID on any channel row, or HubSpot Paid Search unless the label is approved as not Google Ads — not part of the rows above and not added to the total"]
-        .filter(Boolean).join(" · "),
-      funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — paid-media line, not a contact source</td>` : "",
-      outcome: channelOutcomeCellsHtml(o.google_ads_line, oOpts) }) : "";
-  // PR-ADS-171B: Meta spend on its own line, beside the Google Ads line.
-  // Spend only — the outcome and ratio cells say why nothing is beside it.
-  const metaLine = o && o.meta_ads_line;
-  const meta = outRows && metaLine ? channelFunnelRowHtml(
-    { label: metaLine.label || "Meta Ads (spend)" }, stages, {
-      gads: true,
-      sub: metaLineNotes(metaLine).join(" · "),
-      funnel: funnelOk ? `<td class="channel-outcome-na" colspan="${funnelSpan}">n/a — paid-media line, not a contact source</td>` : "",
-      outcome: `<td class="channel-outcome-na" colspan="3">n/a — Meta spend is not matched to HubSpot deals</td>`
-        + `<td class="num channel-outcome-cell">${channelMetaSpendCellHtml(metaLine, oOpts)}</td>`
-        + `<td class="channel-outcome-na" colspan="2">n/a — no rate: ${escapeHtml(canonicalReasonLabel((metaLine.comparison || {}).reason || "channel_population_is_not_meta_spend_population"))}</td>` }) : "";
-  const metaPanel = !outRows && metaLine ? `
-    <div class="dash-panel dash-anim channel-meta-panel">
-      <div class="dash-panel__header"><div>
-        <h3 class="dash-panel__title">${escapeHtml(metaLine.label || "Meta Ads (spend)")}</h3>
-        <p class="dash-panel__sub">${escapeHtml(metaLineNotes(metaLine).join(" · "))}</p></div></div>
-      <div class="channel-meta-panel__value">${channelMetaSpendCellHtml(metaLine, oOpts)}</div>
-    </div>` : "";
-  const anyDrill = funnelOk && data.channels.some(channelFunnelHasDrill);
-  const thead = outRows
-    ? `<thead><tr><th rowspan="2">Channel</th>${funnelOk ? `<th class="channel-funnel-group" colspan="${funnelSpan}">Funnel · contacts acquired</th>` : ""}
-          <th class="channel-funnel-group" colspan="3">Outcomes · deals closed</th>
-          <th class="channel-funnel-group" colspan="3">Paid media · same days</th></tr>
-        <tr>${funnelOk ? contactsHead + head : ""}${CHANNEL_OUTCOME_HEADS.concat(channelPaidHeads()).map((h) => `<th class="num">${escapeHtml(h)}</th>`).join("")}</tr></thead>`
-    : `<thead><tr><th>Channel</th>${contactsHead}${head}</tr></thead>`;
-  const table = (funnelOk || outRows) ? `
-    <div class="dash-panel dash-anim channel-funnel-panel">
-      <div class="dash-panel__header"><div>
-        <h3 class="dash-panel__title">Every channel, every stage</h3>
-        <p class="dash-panel__sub">${funnelOk ? "Each percentage is the share of that row's contacts. Click a column to sort" : "Outcomes only: the funnel is withheld"}${anyDrill ? "; click a channel to see its sources" : ""}.${
-          outRows ? " Outcome columns count deals closed in the same days — a different group from the contacts, with no percentage between them." : ""}</p></div>
-        ${anyDrill ? '<button type="button" class="btn btn--secondary channel-funnel-expand" data-channel-expand-all aria-pressed="false">Show all sources</button>' : ""}
-      </div>
-      <div style="overflow-x:auto">
-        <table class="data-table channel-funnel-table">
-          ${thead}
-          <tbody>${total}${body}${gads}${meta}</tbody>
-        </table>
-      </div>
-    </div>` : "";
-  const notes = data.notes || {};
-  const on = (o && o.notes) || {};
-  const outcomeContext = o && o.window ? `
-    <p class="channel-funnel-context channel-outcome-context">Deals closed <strong>${escapeHtml(channelOutcomeRange(o))}</strong>${
-      (o.window || {}).disclosure ? ` · ${escapeHtml(o.window.disclosure)}` : ""} The funnel counts contacts acquired ${escapeHtml(range)}, today included: a different group, so no rate joins the two.</p>` : "";
-  const outcomeBullets = o ? [
-    on.cohorts || "The funnel counts contacts acquired in this period; outcomes count deals closed in the same days. No rate is calculated between them.",
-    on.attribution || "A won deal is placed on a channel only when every associated contact has that original source; otherwise it is under Source not resolved.",
-    on.original_source || "Channel is HubSpot's original source, unchanged.",
-    on.customers || "Customers won are distinct companies and are not additive across channels.",
-    on.spend || "Google Ads spend is compared with the Google Ads line, not the Paid Search row.",
-    on.meta_spend || "Meta Ads spend is shown on its own line and is not matched to any HubSpot count.",
-    `${PERIOD_RATIO_LABEL} and ${PERIOD_SPEND_PER_CUSTOMER_LABEL}: ${PERIOD_RATIO_DISCLOSURE}.`,
-  ] : ["Deals, revenue and spend by channel could not be loaded."];
   return `
-    ${funnelOk ? `<p class="channel-funnel-context">Contacts acquired <strong>${escapeHtml(range)}</strong> · stage reached so far${
-      asOf ? ` · measured as of ${escapeHtml(String(asOf).slice(0, 16).replace("T", " "))} UTC` : ""}</p>` : ""}
-    ${funnelPanel}
-    ${outcomeContext}
-    ${o ? channelOutcomeStripHtml(o) : ""}
-    ${stage ? `<div class="channel-funnel-compare"><span class="channel-funnel-compare__label">Compare channels on:</span>${stagePicker}</div>` : ""}
-    ${rankings}
-    ${table}
-    ${metaPanel}
-    <div class="dash-panel channel-funnel-howto">
-      <h3 class="dash-panel__title">How to read this page</h3>
-      <ul>
-        <li>${escapeHtml(notes.channels || "Channel is HubSpot's original source for the contact.")}</li>
-        <li>${escapeHtml(notes.stages || "Each stage counts contacts with evidence of reaching it.")}</li>
-        <li>${escapeHtml(notes.maturity || "Recent contacts have had less time to progress.")}</li>
-        ${notes.platforms ? `<li>${escapeHtml(notes.platforms)}</li>` : ""}
-        ${outcomeBullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-      </ul>
-    </div>`;
+      <h4 class="channels-drawer__h">Deals closed ${escapeHtml(channelsRange((o || {}).window))}</h4>
+      <ul class="channels-drawer__list">
+        <li><span>Closed-won deals</span><strong>${cells[0]}</strong></li>
+        <li><span>Customers won</span><strong>${cells[1]}</strong></li>
+        <li><span>Revenue</span><strong>${cells[2]}</strong></li>
+      </ul>`;
+}
+
+/**
+ * The drawer for one row (`key`: a source, CHANNELS_ALL or the unresolved
+ * deals). The funnel is the shared block in its vertical layout, built from
+ * THIS response's row by the shared model — the bound and withheld rules are
+ * the block's own.
+ */
+function channelDrawerHtml(data, key) {
+  const d = data || {};
+  const o = d.outcomes || null;
+  const st = channelsFunnelState(d);
+  const links = `
+      <p class="channels-drawer__links"><a href="#/campaigns">Open in Campaigns →</a> <a href="#/pipeline">Open in Pipeline →</a></p>`;
+  const close = '<button type="button" class="channels-drawer__close" data-channels-drawer-close aria-label="Close">×</button>';
+  if (key === CHANNEL_OUTCOME_UNRESOLVED) {
+    const un = channelOutcomesPublished(o) ? o.channels.find((r) => r.source === CHANNEL_OUTCOME_UNRESOLVED) : null;
+    const opts = channelOutcomeOpts(o);
+    const why = un ? channelOutcomeClassText(un) : "";
+    return `
+    <div class="channels-drawer__head"><h3 id="channels-drawer-title">${escapeHtml(CHANNELS_UNRESOLVED_LABEL)}</h3>${close}</div>
+    <p class="channels-drawer__sub">Deals closed ${escapeHtml(channelsRange((o || {}).window))} · not a contact source</p>
+    <ul class="channels-drawer__list">
+      <li><span>Closed-won deals</span><strong>${rowMetricHtml(un, "closed_won_deals", channelOutcomeInt, opts)}</strong></li>
+      <li><span>Customers won</span><strong>${rowMetricHtml(un, "customers", channelOutcomeInt, opts)}</strong></li>
+      <li><span>Revenue</span><strong>${rowMetricHtml(un, "revenue_usd", channelMoney, opts)}</strong></li>
+    </ul>
+    ${why ? `<p class="channels-drawer__note">${escapeHtml(why)}</p>` : ""}
+    ${((o || {}).notes || {}).attribution ? `<p class="channels-drawer__note">${escapeHtml(o.notes.attribution)}</p>` : ""}
+    ${links}`;
+  }
+  const row = channelFunnelRow(d, key);
+  const label = key === CHANNELS_ALL ? "All channels"
+    : (row ? row.label : (((o || {}).channels || []).find((r) => r.source === key) || {}).label || String(key));
+  // A channel with deals and no contact in these days has no funnel row: its
+  // funnel is a measured zero only because the published funnel lists every
+  // source with a contact.
+  const funnelData = key === CHANNELS_ALL ? d
+    : { ...d, totals: st.ok ? (row || { contacts: 0, reached_mql: 0, reached_sql: 0,
+      reached_opportunity: 0, reached_customer_stage: 0 }) : null };
+  const block = funnelBlockHtml(channelFunnelModel(funnelData), { ariaLabel: `${label} funnel`, layout: "vertical" });
+  return `
+    <div class="channels-drawer__head"><h3 id="channels-drawer-title">${escapeHtml(label)}</h3>${close}</div>
+    <p class="channels-drawer__sub">Contacts created ${escapeHtml(channelsRange(d.window))}</p>
+    ${block}
+    ${channelDrawerOutcomesHtml(o, key)}
+    ${row && key !== CHANNELS_ALL ? channelDrawerSourcesHtml(row, st) + channelDrawerPlatformsHtml(row, st) : ""}
+    ${links}`;
 }
 
 function renderChannelsFromCache() {
   const body = document.getElementById("channels-body");
   if (body && _channelsData) body.innerHTML = renderChannelFunnel(_channelsData, _channelsView);
+  renderChannelDrawer();
+}
+
+/** Opens, refreshes or closes the drawer from the view (the one writer). */
+function renderChannelDrawer() {
+  const root = document.getElementById("channels-drawer-root");
+  if (!root) return;
+  const key = _channelsView.drawer;
+  if (!key || !_channelsData) {
+    root.innerHTML = "";
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  root.innerHTML = `<div class="channels-drawer-overlay" data-channels-drawer-close></div>
+    <aside class="channels-drawer" role="dialog" aria-modal="true" aria-labelledby="channels-drawer-title">${channelDrawerHtml(_channelsData, key)}</aside>`;
+  const btn = root.querySelector(".channels-drawer__close");
+  if (btn) btn.focus();
+}
+
+/** Whether `key` is a row of THIS response (the drawer's channel survives a reload). */
+function channelDrawerKeyExists(data, key) {
+  const d = data || {};
+  if (key === CHANNELS_ALL) return true;
+  const inFunnel = Array.isArray(d.channels) && d.channels.some((c) => c.source === key);
+  const o = d.outcomes || null;
+  const inOutcomes = channelOutcomesPublished(o) && o.channels.some((r) => r.source === key);
+  return inFunnel || inOutcomes;
+}
+
+function closeChannelDrawer() {
+  if (!_channelsView.drawer) return;
+  _channelsView.drawer = null;
+  renderChannelDrawer();
 }
 
 async function loadChannels() {
   const body = document.getElementById("channels-body");
-  const window_ = _channelsWindow || "180d";
+  // PR-ADS-181A: the period lives in the hash, so a refresh holds it.
+  const window_ = channelsWindowFromHash(window.location.hash) || _channelsWindow || "180d";
+  _channelsWindow = window_;
   const token = ++_channelsReqSeq;
+  // An open drawer is dimmed until the new response arrives, then redrawn
+  // from it (or closed): it never shows one period beside another's table.
+  const drawerRoot = document.getElementById("channels-drawer-root");
+  if (drawerRoot && _channelsView.drawer) drawerRoot.classList.add("is-refreshing");
   document.querySelectorAll("[data-channels-window]").forEach((btn) => {
     const on = btn.dataset.channelsWindow === window_;
     btn.classList.toggle("is-active", on);
     btn.setAttribute("aria-pressed", on ? "true" : "false");
   });
+  const updated = document.getElementById("channels-updated");
   if (body) {
     if (_channelsData) body.classList.add("is-refreshing");
     else body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading channels…</p>';
@@ -9502,12 +9139,20 @@ async function loadChannels() {
     const data = await fetchJSON(`/api/channel-funnel?window=${encodeURIComponent(window_)}`);
     if (token !== _channelsReqSeq) return;  // a newer request superseded this one
     _channelsData = data;
+    if (updated) { updated.textContent = channelsUpdatedText(data); updated.hidden = false; }
     if (body) { body.classList.remove("is-refreshing"); body.innerHTML = renderChannelFunnel(data, _channelsView); }
+    if (_channelsView.drawer && !channelDrawerKeyExists(data, _channelsView.drawer)) _channelsView.drawer = null;
+    if (drawerRoot) drawerRoot.classList.remove("is-refreshing");
+    renderChannelDrawer();
   } catch (err) {
     console.error("[loadChannels]", err);
     if (token !== _channelsReqSeq) return;
     // A failed load never leaves the previous window's figures on screen.
     _channelsData = null;
+    _channelsView.drawer = null;
+    if (drawerRoot) drawerRoot.classList.remove("is-refreshing");
+    renderChannelDrawer();
+    if (updated) updated.hidden = true;
     if (body) {
       body.classList.remove("is-refreshing");
       body.innerHTML = '<div class="panel"><p class="empty-state" style="padding:var(--space-5)"><strong>Unavailable</strong> — the channel funnel could not be loaded.</p></div>';
@@ -9683,7 +9328,7 @@ function systemCertCard(cert) {
       <p class="system-card__headline">${escapeHtml(text.headline)}</p>
       <p>${escapeHtml(detail)} ${when}</p>
       ${list ? `<ul class="system-checks">${list}</ul>` : ""}
-      <p class="system-card__note">This check runs every morning. It covers won deals, customers, revenue and the Campaigns page's lead and SQL counts. It does not re-check ad spend, the Channels page, Leads or search terms, and it cannot see a deal or contact that was never entered in HubSpot.</p>
+      <p class="system-card__note">This check runs every morning. It covers won deals, customers, revenue and the Campaigns page's lead and SQL counts. It does not re-check ad spend, the Channels page's contact counts, the Pipeline page's lead counts or search terms, and it cannot see a deal or contact that was never entered in HubSpot.</p>
     </div></div>`;
 }
 
@@ -14852,42 +14497,61 @@ document.addEventListener("DOMContentLoaded", async () => {
     navigate(el.dataset.systemGoto, { updateHash: true });
   });
 
-  // Wire up Channels controls (PR-ADS-162A acquisition windows; PR-ADS-162I
-  // segmented window buttons, stage comparison, sorting and source rows).
+  // Wire up Channels controls (PR-ADS-162A acquisition windows; PR-ADS-181A
+  // the period in the hash, column sorting, the channel drawer and the
+  // collapsed notes). Every control changes the presentation only.
   const channelsWindow = document.getElementById("channels-window");
   if (channelsWindow) channelsWindow.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-channels-window]");
     if (!btn) return;
     _channelsWindow = btn.dataset.channelsWindow;
+    history.replaceState(null, "", channelsHashFor(_channelsWindow));
     loadChannels();
   });
   const channelsBody = document.getElementById("channels-body");
+  const openChannel = (row) => {
+    // A row of the table being replaced opens nothing: its figures are the
+    // previous period's.
+    if (channelsBody.classList.contains("is-refreshing")) return;
+    _channelsView.drawer = row.dataset.channelOpen;
+    renderChannelDrawer();
+  };
   if (channelsBody) channelsBody.addEventListener("click", (e) => {
-    const stageBtn = e.target.closest("[data-channel-stage]");
-    if (stageBtn) { _channelsView.stage = stageBtn.dataset.channelStage; renderChannelsFromCache(); return; }
     const sortBtn = e.target.closest("[data-channel-sort]");
-    if (sortBtn) { _channelsView.sort = sortBtn.dataset.channelSort; renderChannelsFromCache(); return; }
-    const rowsOf = (source) => Array.from(channelsBody.querySelectorAll("[data-channel-child]"))
-      .filter((tr) => tr.dataset.channelChild === source);
-    const toggle = e.target.closest("[data-channel-toggle]");
-    if (toggle) {
-      const open = toggle.getAttribute("aria-expanded") !== "true";
-      toggle.setAttribute("aria-expanded", open ? "true" : "false");
-      rowsOf(toggle.dataset.channelToggle).forEach((tr) => { tr.hidden = !open; });
+    if (sortBtn) {
+      const key = sortBtn.dataset.channelSort;
+      const on = sortBtn.classList.contains("is-active");
+      const was = sortBtn.classList.contains("is-asc") ? "asc" : "desc";
+      _channelsView.sort = key;
+      _channelsView.dir = on ? (was === "asc" ? "desc" : "asc") : (key === "channel" ? "asc" : "desc");
+      renderChannelsFromCache();
       return;
     }
-    const all = e.target.closest("[data-channel-expand-all]");
-    if (all) {
-      const open = all.getAttribute("aria-pressed") !== "true";
-      all.setAttribute("aria-pressed", open ? "true" : "false");
-      all.textContent = open ? "Hide all sources" : "Show all sources";
-      channelsBody.querySelectorAll("[data-channel-toggle]").forEach((t) => t.setAttribute("aria-expanded", open ? "true" : "false"));
-      channelsBody.querySelectorAll("[data-channel-child]").forEach((tr) => { tr.hidden = !open; });
+    const more = e.target.closest("[data-channels-expand]");
+    if (more) {
+      const panel = channelsBody.querySelector(`[data-channels-panel="${more.dataset.channelsExpand}"]`);
+      const open = more.getAttribute("aria-expanded") !== "true";
+      more.setAttribute("aria-expanded", open ? "true" : "false");
+      if (panel) panel.hidden = !open;
+      return;
     }
+    if (e.target.closest("a, button")) return;
+    const row = e.target.closest("[data-channel-open]");
+    if (row) openChannel(row);
   });
-
-
-
+  if (channelsBody) channelsBody.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest("[data-channel-open]");
+    if (row && e.target === row) { e.preventDefault(); openChannel(row); }
+  });
+  const channelsDrawerRoot = document.getElementById("channels-drawer-root");
+  if (channelsDrawerRoot) channelsDrawerRoot.addEventListener("click", (e) => {
+    if (e.target.closest("[data-channels-drawer-close]")) { closeChannelDrawer(); return; }
+    if (e.target.closest("a[href^='#/']")) closeChannelDrawer();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && _channelsView.drawer) closeChannelDrawer();
+  });
 
   // Force-close help drawer on startup (PR-ADS-098: ensures clean state)
   closeHelpDrawer();
@@ -15205,7 +14869,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, pipeline: 0, health: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, pipeline: 0, health: 0, overview: 0, dashRevenue: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

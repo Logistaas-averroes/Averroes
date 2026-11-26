@@ -1246,9 +1246,11 @@ def test_20_the_reader_cutover_audit_still_holds(monkeypatch):
     builders = dict(audit._page_builders())                      # noqa: SLF001
     assert "unit_economics" not in builders
     assert {"revenue_decision_mart", "revenue_attribution", "revenue_by_source",
-            "dashboard_overview", "dashboard_revenue", "dashboard_channels",
+            "dashboard_overview", "dashboard_revenue",
             "dashboard_campaigns", "dashboard_countries",
             "dashboard_deals", "pipeline"} <= set(builders)
+    # PR-ADS-181A: Dashboard → Channels is retired; it is built no more.
+    assert "dashboard_channels" not in builders
 
     # Counterfactual: leave the deleted file in the inventory and the audit
     # says so — the row was removed because it had to be, not for tidiness.

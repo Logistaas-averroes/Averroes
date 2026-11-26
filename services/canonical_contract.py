@@ -169,7 +169,9 @@ def end_at_settled_day(resolved: dict) -> dict:
          "not included until tomorrow morning's sync.") if empty else
         (f"Through {_fmt_day(through)} — today is not included until tomorrow "
          "morning's sync."))
-    disclosure += (" Other revenue pages, such as Deals, already count deals "
+    # PR-ADS-181A: the Deals page was retired in PR-ADS-178B; Pipeline (a
+    # business window through today) is the page that counts today now.
+    disclosure += (" Other revenue pages, such as Pipeline, already count deals "
                    "closed today.")
     out.update({
         "end_date": through.isoformat(),

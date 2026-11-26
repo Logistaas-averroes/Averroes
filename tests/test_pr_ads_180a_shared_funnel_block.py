@@ -50,8 +50,10 @@ _RENDERERS = ("funnelBlockHtml", "funnelBlockFamily", "funnelBlockVerdictHtml",
 #: PR-ADS-180B: the Overview's Lead cohort panel is replaced by the acquisition
 #: cohort (renderDashAcquisitionFunnel); Campaigns and Countries draw the block
 #: through martCohortFunnelHtml.
+#: PR-ADS-181A: the Channels page draws its funnel in each channel's drawer
+#: (channelDrawerHtml); the page's KPI cards read the same model.
 _SURFACES = ("renderDashLifecycleActivity", "renderDashAcquisitionFunnel",
-             "pipelineFunnelHtml", "renderChannelFunnel", "martCohortFunnelHtml")
+             "pipelineFunnelHtml", "channelDrawerHtml", "martCohortFunnelHtml")
 
 #: The block's class tokens: `dash-funnel`, `dash-funnel__*`, `funnel-block`,
 #: `funnel-block__*` — exact tokens (``dash-funnel-panel`` is not one).
@@ -173,7 +175,7 @@ def _surface_outputs():
     return _run_app(
         "[renderDashLifecycleActivity({lifecycle_activity: %s}),"
         " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s}),"
-        " pipelineFunnelHtml(%s, null), renderChannelFunnel(%s, {})]"
+        " pipelineFunnelHtml(%s, null), channelDrawerHtml(%s, \"__all__\")]"
         % (json.dumps(_activity()), json.dumps(_acquisition()), json.dumps(pipeline()),
            json.dumps({**channels(), "metric_family": "acquisition_cohort_outcomes",
                        "window_basis": "contact_created_at"})))
@@ -365,8 +367,8 @@ def test_04_b_each_surface_reads_its_family_from_its_own_payload():
     ch = {**channels(), "metric_family": "acquisition_cohort_outcomes",
           "window_basis": "contact_created_at"}
     out = _run_app(
-        "[pipelineFunnelHtml(%s), pipelineFunnelHtml(%s), renderChannelFunnel(%s, {}),"
-        " renderChannelFunnel(%s, {}), renderDashLifecycleActivity({lifecycle_activity: %s}),"
+        "[pipelineFunnelHtml(%s), pipelineFunnelHtml(%s), channelDrawerHtml(%s, '__all__'),"
+        " channelDrawerHtml(%s, '__all__'), renderDashLifecycleActivity({lifecycle_activity: %s}),"
         " renderDashLifecycleActivity({lifecycle_activity: %s}),"
         " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s}),"
         " renderDashAcquisitionFunnel({lifecycle_acquisition_funnel: %s})]"
@@ -616,14 +618,24 @@ def test_06_e_the_customer_column_is_the_lifecycle_stage_never_companies():
 
 
 def test_06_f_channels_withheld_is_the_block_with_the_word_and_no_figure():
+    """PR-ADS-181A: the Channels funnel is the block in every channel's drawer,
+    and the page's "Contacts acquired" cards; withheld, neither reads a count."""
     from tests.test_pr_ads_162i_channels_page_revamp import _payload
     p = _payload(publication={"status": "withheld", "reason": "source_last_incremental_failed"})
     p["totals"] = {**p["totals"], "contacts": SENTINEL}
-    html = _run_app("renderChannelFunnel(%s, {})" % json.dumps(p))
-    assert str(SENTINEL) not in html
-    assert html.count('class="funnel-block"') == 1
-    assert "<strong>Withheld</strong> — the last contact sync failed." in html
-    assert all(c.endswith("Withheld") for c in _cells(html).values())
+    p["channels"][0]["contacts"] = SENTINEL
+    for html in _run_app("[channelDrawerHtml(%s, '__all__'), channelDrawerHtml(%s, 'PAID_SOCIAL')]"
+                         % (json.dumps(p), json.dumps(p))):
+        assert str(SENTINEL) not in html
+        assert html.count('class="funnel-block"') == 1
+        assert "<strong>Withheld</strong> — the last contact sync failed." in html
+        assert all(c.endswith("Withheld") for c in _cells(html).values())
+    page = _run_app("renderChannelFunnel(%s, {})" % json.dumps(p))
+    assert str(SENTINEL) not in page and "7,919" not in page
+    group = page[page.index('aria-label="Contacts acquired"'):]
+    group = group[:group.index("</section>")]
+    assert "<strong>Withheld</strong> — the last contact sync failed." in group
+    assert _text(group).count("Withheld") == 3        # the line and both cards
 
 
 def test_06_g_the_revenue_tab_strip_is_no_longer_a_funnel_and_keeps_every_figure():

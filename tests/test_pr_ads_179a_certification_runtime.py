@@ -295,7 +295,8 @@ MARKETING_PAYLOADS = {"mart/campaign", "mart/country", "mart/campaign_settled",
                       "pipeline"}
 READER_PAGES = {"revenue_decision_mart", "revenue_decision_mart_country",
                 "revenue_attribution", "revenue_by_source", "dashboard_overview",
-                "dashboard_revenue", "dashboard_channels", "dashboard_campaigns",
+                # PR-ADS-181A: "dashboard_channels" is retired with its tab.
+                "dashboard_revenue", "dashboard_campaigns",
                 "dashboard_countries", "dashboard_deals", "pipeline",
                 "revenue_decision_mart_campaign_settled", "meta_ads_adsets"}
 READER_EVIDENCE_PAGES = {"channel_outcomes"}
@@ -480,7 +481,8 @@ PAGE_BUILDERS = (
     ("services.dashboard_countries_service", "build_dashboard_countries"),
     ("services.dashboard_revenue_service", "build_dashboard_revenue"),
     ("services.dashboard_deals_service", "build_dashboard_deals"),
-    ("services.dashboard_channels_service", "build_dashboard_channels"),
+    # PR-ADS-181A: ("services.dashboard_channels_service",
+    # "build_dashboard_channels") is deleted with the Dashboard → Channels tab.
     ("services.pipeline_service", "build_pipeline"),
     ("services.source_attribution_service", "build_revenue_by_source"),
     ("services.source_attribution_service", "build_channel_outcomes"),

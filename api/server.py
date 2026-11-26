@@ -58,7 +58,6 @@ Protected endpoints (require authenticated session):
   GET  /api/source-attribution-backfill/status — Latest source backfill progress/result (admin-only; PR-ADS-117).
   GET  /api/dashboard/overview     — Read-only Executive Overview command-center contract by business window (PR-ADS-134).
   GET  /api/dashboard/revenue      — Read-only Dashboard Revenue & Customers contract by business window (PR-ADS-135).
-  GET  /api/dashboard/channels     — Read-only Dashboard Channels & Platforms contract by business window (PR-ADS-136).
   GET  /api/dashboard/campaigns    — Read-only Dashboard Campaigns & Keywords contract by business window (PR-ADS-137).
   GET  /api/dashboard/countries    — Read-only Dashboard Countries & Geo Intelligence contract by business window (PR-ADS-138).
   GET  /api/dashboard/deals        — Read-only Dashboard → Deals contract by business window: the Pipeline builder's figures (PR-ADS-139; PR-ADS-178B).
@@ -4438,47 +4437,10 @@ async def get_dashboard_revenue(
         ) from exc
 
 
-@app.get("/api/dashboard/channels")
-async def get_dashboard_channels(
-    window: str = Query(default="current_quarter"),
-    _user=Depends(require_auth),
-):
-    """Dashboard Channels & Platforms contract (PR-ADS-136).
-
-    ONE read-only payload for the Dashboard → Channels tab: which channels and
-    platforms produce SQLs, customers, and closed-won revenue — and which are
-    revenue-only because spend is not connected. Re-presents the PR-ADS-133
-    source taxonomy in executive channel/platform language and composes the
-    canonical Revenue Decision Mart (top-line + the FX-gated Google Ads spend
-    truth) and Revenue by Source. It adds NO new taxonomy and NO new business
-    math.
-
-    Only Google Ads / Paid Search is spend-connected and ratio-eligible
-    (period revenue / ad spend, a non-cohort operational ratio); Paid
-    Social, Organic, Email, Events, Referrals, Direct and Offline are
-    revenue/SQL/customer attribution only — spend and the ratio stay null with
-    a "no connected spend source" status, never a fabricated
-    Meta/LinkedIn/Organic spend or ratio. HubSpot closed-won is the only revenue truth; the Google Ads
-    conversion value is never used.
-
-    Uses business windows (current_quarter | last_quarter | last_6_months | ytd
-    | all_time), not ad-style day windows. Unavailable metrics are null plus a
-    reason — never a fabricated $0 / 0.00x / 0%. Read-only: no writes to Google
-    Ads, HubSpot, budgets, bids, campaigns, keywords, or offline conversions.
-    """
-    from services.dashboard_channels_service import build_dashboard_channels  # noqa: PLC0415
-
-    try:
-        return build_dashboard_channels(window=window)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("Dashboard channels failed: %s", exc)
-        raise HTTPException(
-            status_code=500, detail="Dashboard channels computation failed"
-        ) from exc
-
-
+# PR-ADS-181A: GET /api/dashboard/channels (PR-ADS-136, the Dashboard → Channels
+# tab) stood here. The owner retired the tab; the Channels page
+# (/api/channel-funnel) is the one channel surface. The route answers 404, and
+# the reader-cutover audit (RETIRED_READER_ROUTES) fails if it is registered again.
 @app.get("/api/dashboard/campaigns")
 async def get_dashboard_campaigns(
     window: str = Query(default="current_quarter"),

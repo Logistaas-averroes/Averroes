@@ -131,7 +131,9 @@ def test_1d_every_production_consumer_uses_the_canonical_resolver():
     """
     migrated = [
         "services/dashboard_overview_service.py", "services/dashboard_revenue_service.py",
-        "services/dashboard_channels_service.py", "services/dashboard_campaigns_service.py",
+        # PR-ADS-181A: services/dashboard_channels_service.py is deleted with
+        # the Dashboard → Channels tab.
+        "services/dashboard_campaigns_service.py",
         "services/dashboard_countries_service.py", "services/dashboard_deals_service.py",
         "services/revenue_decision_mart.py", "services/source_attribution_service.py",
     ]
@@ -222,7 +224,6 @@ def _payloads(**overrides):
     for is the only kind that can catch that.
     """
     _MART = contract_mod.SOURCE_REVENUE_DECISION_MART
-    _BY_SOURCE = contract_mod.SOURCE_REVENUE_BY_SOURCE
     _SPEND = contract_mod.SOURCE_CANONICAL_SPEND
     _GEO = contract_mod.SOURCE_CANONICAL_GEO
     _FUNNEL = contract_mod.SOURCE_CANONICAL_FUNNEL
@@ -278,22 +279,8 @@ def _payloads(**overrides):
                 ("closed_won_deals", _MART, "all_source_business_revenue"),
                 ("customers", _MART, "all_source_business_revenue"),
                 ("google_ads_cohort_sqls", _MART, "google_ads_cohort_sqls"))},
-        "dashboard/channels": {
-            "window": dict(_WIN), "read_only": True,
-            "source_truth": "revenue_by_source_taxonomy",
-            "legacy_fallback_used": False,
-            # Channels renders the all-source totals from the source-group
-            # taxonomy, so it names THAT canonical authority — and its SQL count
-            # is a different population, registered under its own identity.
-            # PR-ADS-161E: deals add up across channels; customers do not, so
-            # the page republishes the mart's canonical customer metric.
-            "kpis": {"closed_won_revenue_usd": 33000.0, "total_closed_won_deals": 3,
-                     "customers": 3, "total_sqls": 0},
-            contract_mod.METRIC_TRUTH_KEY: _mt(
-                ("closed_won_revenue_usd", _BY_SOURCE, "all_source_business_revenue"),
-                ("closed_won_deals", _BY_SOURCE, "all_source_business_revenue"),
-                ("customers", _MART, "all_source_business_revenue"),
-                ("source_group_sqls", _BY_SOURCE, "source_group_sqls"))},
+        # PR-ADS-181A: the "dashboard/channels" payload stood here. The tab, its
+        # route and its builder are retired, so it is no consumer.
         "dashboard/campaigns": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_decision_mart_campaign_view",
@@ -981,8 +968,10 @@ def test_f1_4_a_missing_consumer_window_fails(monkeypatch):
 
 @pytest.mark.parametrize("field", ["end_date", "timezone", "key"])
 def test_f1_4b_an_incomplete_consumer_window_fails(monkeypatch, field):
+    # PR-ADS-181A: Dashboard → Channels is retired; the rule is per consumer,
+    # so the incomplete window is put on Dashboard → Revenue.
     out = _audit_with(monkeypatch, _payloads(
-        dashboard__channels={f"window.{field}": _DELETE}))
+        dashboard__revenue={f"window.{field}": _DELETE}))
     assert out["ok"] is False
     assert parity.V_WINDOW_MISSING in out["violation_codes"]
 
@@ -1192,7 +1181,8 @@ def test_f2_1_every_executive_page_contributes_a_certified_identity():
     from services.cross_page_parity_service import (
         CERTIFIED_CONSUMERS, METRIC_IDENTITIES)
 
-    for page in ("dashboard/overview", "dashboard/revenue", "dashboard/channels",
+    # PR-ADS-181A: "dashboard/channels" is retired (no page, no consumer).
+    for page in ("dashboard/overview", "dashboard/revenue",
                  "dashboard/campaigns", "dashboard/countries", "dashboard/deals",
                  "revenue_decision_mart"):
         assert page in CERTIFIED_CONSUMERS, f"{page} certifies no metric identity"
@@ -1206,15 +1196,17 @@ def test_f2_1b_a_page_that_certifies_nothing_is_a_violation(monkeypatch):
 
     Channels published no audited identity before this PR and the audit still
     counted it among the consumers inspected. Stripping its contracts must now
-    fail rather than pass quietly.
+    fail rather than pass quietly. PR-ADS-181A: Dashboard → Channels is
+    retired, so the same stripping is done on Dashboard → Revenue — the rule
+    is per consumer, and it holds for every one.
     """
     payloads = _payloads()
-    payloads["dashboard/channels"].pop(contract_mod.METRIC_TRUTH_KEY)
+    payloads["dashboard/revenue"].pop(contract_mod.METRIC_TRUTH_KEY)
     out = _audit_with(monkeypatch, payloads)
     assert out["ok"] is False
     assert parity.V_CONSUMER_UNCERTIFIED in out["violation_codes"]
     row = next(c for c in out["consumer_certification"]
-               if c["consumer"] == "dashboard/channels")
+               if c["consumer"] == "dashboard/revenue")
     assert row["certified"] is False
     assert row["identities_certified"] == 0
     assert row["identities_registered"] > 0
@@ -1242,18 +1234,23 @@ def test_f2_2_lifecycle_stages_are_five_identities_from_the_canonical_funnel():
         assert spec["consumers"] == [("dashboard/overview", f"kpis.lifecycle_{stage}")]
 
 
-def test_f2_2b_the_three_sql_populations_are_never_compared():
-    """Lifecycle SQLs, campaign-attributable SQLs and source-group SQLs are three
-    questions. Forcing them to match would file the answer as a bug."""
+def test_f2_2b_the_sql_populations_are_never_compared():
+    """Lifecycle SQLs and campaign-attributable SQLs are two questions.
+    Forcing them to match would file the answer as a bug. PR-ADS-181A: the
+    third, source-group SQLs, was Dashboard → Channels' legacy qualified-lead
+    count; it is retired with the tab, so it is no identity and no pair."""
     from services.cross_page_parity_service import DISTINCT_BY_DESIGN, METRIC_IDENTITIES
 
     scopes = {k: METRIC_IDENTITIES[k]["scope"] for k in
-              ("lifecycle_sqls", "google_ads_cohort_sqls", "source_group_sqls")}
-    assert len(set(scopes.values())) == 3, scopes
+              ("lifecycle_sqls", "google_ads_cohort_sqls")}
+    assert len(set(scopes.values())) == 2, scopes
+    assert "source_group_sqls" not in METRIC_IDENTITIES
 
     pairs = {frozenset((d["left"], d["right"])) for d in DISTINCT_BY_DESIGN}
-    assert frozenset(("google_ads_cohort_sqls", "source_group_sqls")) in pairs
     assert frozenset(("google_ads_cohort_sqls", "lifecycle_sqls")) in pairs
+    # Every pair names two registered identities (none names a retired one).
+    for d in DISTINCT_BY_DESIGN:
+        assert d["left"] in METRIC_IDENTITIES and d["right"] in METRIC_IDENTITIES, d
     # And no identity puts two of them under one roof.
     for key, spec in METRIC_IDENTITIES.items():
         paths = {p for _, p in spec["consumers"]}
@@ -1277,7 +1274,8 @@ def test_f2_2d_all_source_outcomes_span_every_page_that_publishes_them(monkeypat
 
     # PR-ADS-178B: the Pipeline page is a seventh surface (Dashboard → Deals
     # republishes it); nothing was removed.
-    pages = {"dashboard/overview", "dashboard/revenue", "dashboard/channels",
+    # PR-ADS-181A: "dashboard/channels" is retired with its tab.
+    pages = {"dashboard/overview", "dashboard/revenue",
              "dashboard/deals", "pipeline", "revenue_decision_mart"}
     # PR-ADS-166A added a sixth surface for customers (and closed-won deals):
     # the Leads page's "Customers won" block, which publishes no revenue. The
@@ -1354,16 +1352,21 @@ def test_f2_3c_an_omitted_contract_field_fails_rather_than_comparing_equal(
 
 
 def test_f2_3d_each_consumer_must_name_the_authority_it_actually_reads(monkeypatch):
-    """Channels renders the all-source totals from the source-group taxonomy, so
-    that is what it must declare — and it may not claim the mart instead."""
-    from services.cross_page_parity_service import METRIC_IDENTITIES, expected_source
+    """A consumer that reads another authority must declare THAT one — and it
+    may not claim the mart instead. PR-ADS-181A: the example was Dashboard →
+    Channels (the source-group taxonomy), retired with its tab; the Pipeline
+    page's Customers won block reads the deal ledger directly, so the same
+    rule is held on it."""
+    from services.cross_page_parity_service import (
+        CONSUMER_PIPELINE_CUSTOMERS_WON, METRIC_IDENTITIES, expected_source)
 
-    spec = METRIC_IDENTITIES["closed_won_revenue_usd"]
-    assert expected_source(spec, "dashboard/channels") == contract_mod.SOURCE_REVENUE_BY_SOURCE
+    spec = METRIC_IDENTITIES["closed_won_deals"]
+    assert expected_source(spec, CONSUMER_PIPELINE_CUSTOMERS_WON) \
+        == contract_mod.SOURCE_CANONICAL_DEAL_LEDGER
     assert expected_source(spec, "dashboard/deals") == contract_mod.SOURCE_REVENUE_DECISION_MART
 
-    out = _audit_with(monkeypatch, _payloads(dashboard__channels={
-        f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_revenue_usd.data_source":
+    out = _audit_with(monkeypatch, _payloads(pipeline__customers_won={
+        f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_deals.data_source":
             contract_mod.SOURCE_REVENUE_DECISION_MART}))
     assert out["ok"] is False
     assert parity.V_CONTRACT_INVALID in out["violation_codes"]
@@ -1480,8 +1483,8 @@ def test_f2_4d_an_empty_contacts_table_is_not_a_measured_zero(monkeypatch):
                       "readiness.lead_metrics_ready": False}):
         out = _audit_with(monkeypatch, _payloads(revenue_decision_mart=override))
         assert out["ok"] is False
-        for key in ("google_ads_cohort_sqls", "google_ads_cohort_leads",
-                    "source_group_sqls"):
+        # PR-ADS-181A: "source_group_sqls" is retired with Dashboard → Channels.
+        for key in ("google_ads_cohort_sqls", "google_ads_cohort_leads"):
             entry = next(m for m in out["metrics"] if m["metric"] == key)
             assert entry["status"] == "unproven", (key, override)
         assert parity.V_AGREEMENT_ON_UNPROVEN_COVERAGE in out["violation_codes"]
@@ -1571,7 +1574,9 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
     # PR-ADS-177B: 25 — Dashboard → Campaigns reads the SETTLED campaign view,
     # so its five figures are five `*__settled_days` identities compared with
     # the settled campaign reference, not with the through-today pages.
-    assert len(payload["results"][0]["metrics"]) == 25
+    # PR-ADS-181A: 24 — "source_group_sqls" (Dashboard → Channels' one
+    # identity of its own) is retired with the tab.
+    assert len(payload["results"][0]["metrics"]) == 24
     assert all(c["certified"] for c in payload["results"][0]["consumer_certification"])
 
 

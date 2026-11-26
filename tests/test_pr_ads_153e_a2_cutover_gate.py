@@ -1091,7 +1091,7 @@ CONSUMER_MODULES = [
     "services/dashboard_campaigns_service.py",
     "services/dashboard_countries_service.py",
     "services/dashboard_deals_service.py",
-    "services/dashboard_channels_service.py",
+    # PR-ADS-181A: "services/dashboard_channels_service.py" is deleted.
     "services/revenue_attribution_service.py",
     "services/source_attribution_service.py",
     # PR-ADS-165A: "services/canonical_unit_economics_service.py" stood here;

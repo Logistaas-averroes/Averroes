@@ -287,7 +287,7 @@ def test_all_views_use_the_same_window_resolver(monkeypatch):
         "start": "2026-01-01", "through": "2026-06-21",
         "through_reason": "today_not_settled", "empty": False,
         "disclosure": ("Through 21 Jun 2026 — today is not included until tomorrow "
-                       "morning's sync. Other revenue pages, such as Deals, already "
+                       "morning's sync. Other revenue pages, such as Pipeline, already "
                        "count deals closed today.")}
 
 

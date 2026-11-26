@@ -176,7 +176,9 @@ def test_01_every_won_deal_is_on_exactly_one_row_and_the_rows_reconcile(monkeypa
     assert _row(out, "PAID_SEARCH")["closed_won_deals"] == 2
     assert _row(out, "DIRECT_TRAFFIC")["closed_won_deals"] == 1
     un = _row(out, "__deal_source_unresolved__")
-    assert un["label"] == "Source not resolved" and un["outcome_only"] is True
+    # PR-ADS-181A: the row's label is "Deals with no single source" (was
+    # "Source not resolved"); its identifier, members and figures are unchanged.
+    assert un["label"] == "Deals with no single source" and un["outcome_only"] is True
     assert un["closed_won_deals"] == 6
     assert un["unresolved_by_class"] == p["unresolved_by_class"] == {
         "contacts_disagree": 1, "no_associated_contact": 1,
@@ -668,48 +670,65 @@ def _page(monkeypatch, out=None, **funnel_over):
 
 
 def _tr(html, label):
-    """The table row whose first cell names ``label``."""
+    """The table row whose channel cell names ``label`` (PR-ADS-181A: the one
+    ranked table; the "All channels" row is its first)."""
     table = html[html.index("<tbody>"):html.index("</tbody>")]
     for tr in re.findall(r"<tr[^>]*>.*?</tr>", table, re.S):
-        if f">{label}<" in tr:
+        if f'<span class="channels-name">{label}<' in tr or f"<strong>{label}<" in tr:
             return tr
     raise AssertionError(label)
 
 
 def _cells(tr):
-    return [_text(c) for c in re.findall(r'<td class="num channel-outcome-cell">(.*?)</td>', tr, re.S)]
+    """A row's outcome cells: [customers, revenue] (PR-ADS-181A: the deal
+    count is the drawer's and the group's; spend and the period ratios live on
+    the Google Ads card, never on a channel row)."""
+    return [_text(c) for c in re.findall(
+        r'<td class="num channels-col--(?:customers|revenue)">(.*?)</td>', tr, re.S)]
+
+
+def _group(html, label="Deals closed"):
+    i = html.index(f'aria-label="{label}"')
+    return html[i:html.index("</section>", i)]
+
+
+def _card(html, which):
+    i = html.index(f"channels-paid__card--{which}")
+    return html[i:html.index("channels-paid__card", i + 30)] if which == "google" \
+        else html[i:html.index("</section>", i)]
 
 
 def test_21_published_zeros_render_as_zero_and_gaps_as_the_word_and_reason(monkeypatch):
     html = _render(_page(monkeypatch))
-    social = _cells(_tr(html, "Paid Social"))
-    assert social[:3] == ["0", "0", "$0"]
-    assert social[3].startswith("Unavailable no spend source is connected for this channel")
-    assert social[4].startswith("Unavailable no spend source is connected for this channel")
-    ps = _cells(_tr(html, "Paid Search"))
-    assert ps[:3] == ["1", "1", "$1,000"]
-    assert ps[3].startswith("Unavailable Google Ads spend is shown on the Google Ads line")
-    assert ps[4].startswith("Unavailable this channel's deals are not the population "
-                            "Google Ads spend paid for — see the Google Ads line")
+    assert _cells(_tr(html, "Paid Social")) == ["0", "$0"]
+    assert _cells(_tr(html, "Paid Search")) == ["1", "$1.0k"]
+    # PR-ADS-181A: no channel row carries a spend or ratio cell any more (the
+    # ~30 "Unavailable" paid-media cells are gone by design). The only spend
+    # and ratio figures are the Google Ads card's, with their own verdicts.
+    table = html[html.index("<table"):html.index("</table>")]
+    for gone in ("no spend source is connected", "Google Ads spend is shown on",
+                 "Non-cohort operational ratio", PERIOD_LABEL):
+        assert gone not in table, gone
+    assert "$4.0k" in _text(_card(html, "google"))
+
+
+PERIOD_LABEL = "Period Revenue / Ad Spend"
 
 
 def test_21b_the_probe_renders_paid_search_refused_and_the_google_ads_line(monkeypatch):
     html = _render(_page(monkeypatch, _probe_ledger(monkeypatch)))
-    ps = _cells(_tr(html, "Paid Search"))
-    assert ps[:3] == ["2", "2", "$60,000"]
-    assert "$4,000" not in _tr(html, "Paid Search")
-    assert ps[3].startswith("Unavailable Google Ads spend is shown on the Google Ads line")
-    assert ps[4].startswith("Unavailable this channel's deals are not the population")
-    assert ps[5].startswith("Unavailable this channel's deals are not the population")
-    g = _tr(html, "Google Ads (canonical evidence)")
-    assert "2 deals: 2 with a Google click ID, 0 by HubSpot source only" in _text(g)
-    assert "n/a — paid-media line, not a contact source" in g
-    assert "not part of the rows above and not added to the total" in _text(g)
-    cells = _cells(g)
-    assert cells[:4] == ["2", "2", "$30,000", "$4,000"]
-    assert cells[4].startswith("7.50x Non-cohort operational ratio")
-    assert cells[5].startswith("$2,000 Non-cohort operational ratio")
-    assert _cells(_tr(html, "Direct Traffic"))[:3] == ["1", "1", "$20,000"]
+    ps = _tr(html, "Paid Search")
+    assert _cells(ps) == ["2", "$60.0k"]
+    # Paid Search is never set against Google Ads spend: no spend, no ratio.
+    assert "$4.0k" not in ps and "7.50x" not in ps and "15.00x" not in html
+    g = _text(_card(html, "google"))
+    assert "2 deals: 2 with a Google click ID, 0 by HubSpot source only" in g
+    assert "Spend $4.0k" in g and "Revenue $30.0k" in g
+    assert f"{PERIOD_LABEL} 7.50x Non-cohort operational ratio" in g
+    assert "Spend per Customer Won This Period $2.0k Non-cohort operational ratio" in g
+    assert "2 customers from 2 deals with a Google click ID or HubSpot Paid Search." in g
+    assert "Deals closed in these days may come from earlier ads." in g
+    assert _cells(_tr(html, "Direct Traffic")) == ["1", "$20.0k"]
     text = _text(html)
     assert "leaves out campaign labels approved as not Google Ads" in text
     assert "it does not by itself exclude other search engines" in text
@@ -721,9 +740,12 @@ def test_21c_a_failed_outcomes_payload_has_no_context_line(monkeypatch):
               "totals": None, "channels": None, "partition": None,
               "google_ads_line": None,
               "metric_family": "closed_won_outcomes", "window_basis": "deal_close_date"}
-    text = _text(_render({**_funnel(), "outcomes": failed}))
-    assert "undefined" not in text and "all time" not in text
-    assert "Closed-won deals Unavailable the channel outcomes could not be loaded" in text
+    html = _render({**_funnel(), "outcomes": failed})
+    text = _text(html)
+    assert "undefined" not in text and "all time" not in text.lower()
+    group = _text(_group(html))
+    assert "Customers won Unavailable the channel outcomes could not be loaded" in group
+    assert "Closed-won deals: Unavailable the channel outcomes could not be loaded" in group
 
 
 def test_21d_a_funnel_source_the_label_table_does_not_know_reads_a_measured_zero(monkeypatch):
@@ -737,31 +759,30 @@ def test_21d_a_funnel_source_the_label_table_does_not_know_reads_a_measured_zero
     out = build_channel_outcomes("180d", now=NOW, channel_sources=[
         c["source"] for c in funnel["channels"]])
     html = _render({**funnel, "outcomes": json.loads(json.dumps(out))})
-    cells = _cells(_tr(html, "NEW_HUBSPOT_SOURCE"))
-    assert cells[:3] == ["0", "0", "$0"]
+    assert _cells(_tr(html, "NEW_HUBSPOT_SOURCE")) == ["0", "$0"]
     assert "no outcome row" not in html
 
 
 def test_22_no_outcome_cell_carries_a_percentage(monkeypatch):
     html = _render(_page(monkeypatch))
-    cells = re.findall(r'<td class="num channel-outcome-cell">(.*?)</td>', html, re.S)
+    cells = re.findall(r'<td class="num channels-col--(?:customers|revenue)">(.*?)</td>', html, re.S)
     assert cells and not any("%" in c for c in cells)
 
 
 def test_23_total_customers_is_the_windows_count_when_rows_sum_higher(monkeypatch):
     page = _page(monkeypatch)
     html = _render(page)
-    assert _cells(_tr(html, "All channels"))[1] == "1"
-    assert _cells(_tr(html, "Paid Search"))[1] == "1"
-    assert _cells(_tr(html, "Direct Traffic"))[1] == "1"
-    strip = html[html.index("channel-outcome-totals"):]
-    assert "Customers won" in strip and "not additive across channels" in strip
+    assert _cells(_tr(html, "All channels"))[0] == "1"
+    assert _cells(_tr(html, "Paid Search"))[0] == "1"
+    assert _cells(_tr(html, "Direct Traffic"))[0] == "1"
+    group = _text(_group(html))
+    assert "Customers won 1 distinct companies" in group
+    assert "the rows don't add up to 1" in _text(html)
     # Counterfactual: a renderer that sums the rows shows 2 and is caught.
     summed = _render(page, mutate={
-        "outcome: outRows ? channelOutcomeCellsHtml(o.totals, oOpts)":
-        "outcome: outRows ? channelOutcomeCellsHtml({ ...o.totals, metrics: { ...o.totals.metrics, "
-        "customers: { status: 'published', value: o.channels.reduce((n, r) => n + (r.customers || 0), 0) } } }, oOpts)"})
-    assert _cells(_tr(summed, "All channels"))[1] == "2"
+        'case "customers": return canonicalMetricHtml(channelOutcomeMetric(o, "customers"), channelOutcomeInt, ctx.oOpts);':
+        'case "customers": return String(o.channels.reduce((n, r) => n + (r.customers || 0), 0));'})
+    assert _cells(_tr(summed, "All channels"))[0] == "2"
 
 
 def test_24_a_withheld_row_renders_the_word_even_if_a_figure_leaked(monkeypatch):
@@ -772,13 +793,15 @@ def test_24_a_withheld_row_renders_the_word_even_if_a_figure_leaked(monkeypatch)
         r["customers"] = 3                    # a leaked figure the page must ignore
     page = _page(monkeypatch, out)
     html = _render(page)
-    cell = _cells(_tr(html, "Paid Search"))[1]
+    cell = _cells(_tr(html, "Paid Search"))[0]
     assert cell.startswith("Withheld a won deal has no company, or several") and "3" not in cell
+    # A withheld row is no leader: "Most from" is not said on customers.
+    assert "Most from" not in _text(_group(html)).split("Closed-won revenue")[0]
     # Counterfactual: a renderer that drops the window gate shows the figure.
     ungated = _render(page, mutate={
-        'rowMetricHtml(r, "customers", channelOutcomeInt, opts)':
-        'dashValue(r.customers, channelOutcomeInt)'})
-    assert _cells(_tr(ungated, "Paid Search"))[1] == "3"
+        'rowMetricHtml(row.out, "customers", channelOutcomeInt, ctx.oOpts)':
+        'dashValue(row.out.customers, channelOutcomeInt)'})
+    assert _cells(_tr(ungated, "Paid Search"))[0] == "3"
 
 
 def test_25_view_blockers_is_admin_only_and_names_the_evidence_window(monkeypatch):
@@ -799,10 +822,11 @@ def test_26_each_half_renders_when_the_other_is_withheld(monkeypatch, which):
                                                "reason": "source_last_incremental_failed"})
         html = _render(page)
         assert "<strong>Withheld</strong>" in html and "the last contact sync failed" in html
-        assert "2,951" not in html and "data-channel-sort" not in html
-        assert _cells(_tr(html, "Paid Search"))[:2] == ["1", "1"]
-        assert "Funnel · contacts acquired" not in html
-        assert "Outcomes · deals closed" in html
+        assert "2,951" not in html and 'data-channel-sort="sqls"' not in html
+        assert _cells(_tr(html, "Paid Search")) == ["1", "$1.0k"]
+        head = html[html.index("<thead>"):html.index("</thead>")]
+        assert "New contacts" not in head and "Customers" in head
+        assert "New contacts, SQLs and SQL rate are withheld" in _text(html)
     else:
         rows = [_deal("a")]
         _ledger(monkeypatch, rows, [_contact("a", 1, "PAID_SEARCH")],
@@ -810,23 +834,25 @@ def test_26_each_half_renders_when_the_other_is_withheld(monkeypatch, which):
         _spend(monkeypatch)
         page = _page(monkeypatch, _outcomes())
         html = _render(page)
-        assert "2,951" in html and "data-channel-sort" in html
-        assert "Outcomes · deals closed" not in html
-        strip = _text(html[html.index("channel-outcome-totals"):])
-        assert "Closed-won deals Unavailable the deal sync is overdue" in strip
+        assert "2,951" in html and 'data-channel-sort="sqls"' in html
+        head = html[html.index("<thead>"):html.index("</thead>")]
+        assert "Customers" not in head and "Revenue" not in head
+        group = _text(_group(html))
+        assert "Customers won Unavailable the deal sync is overdue" in group
+        assert "Customers and revenue are unavailable" in _text(html)
 
 
 def test_27_the_page_names_both_cohorts_and_the_rule_and_no_attribution_ratio(monkeypatch):
     html = _render(_page(monkeypatch))
     text = _text(html)
-    assert "Funnel · contacts acquired" in text and "Outcomes · deals closed" in text
-    assert "Paid media · same days" in text
-    assert "Customer stage (contacts)" in text
-    assert "Customers won (distinct companies)" in text
-    assert "Deals closed 2026-05-25 to 2026-11-19" in text
+    # The two groups, each with its own days and its own metadata.
+    assert "Deals closed 25 May – 19 Nov" in _text(_group(html))
+    assert "Contacts acquired 23 May – 18 Nov" in _text(_group(html, "Contacts acquired"))
+    assert 'data-metric-family="closed_won_outcomes" data-window-basis="deal_close_date"' in html
+    assert "Customers won" in text and "distinct companies" in text
     assert "Through 19 Nov 2026 — today is not included until tomorrow morning's sync." in text
-    assert "today included: a different group, so no rate joins the two" in text
-    assert "not additive across channels" in text
+    assert "so no rate joins the two" in text
+    assert "a company can appear under two channels, so the rows don't add up" in text
     assert "recorded as Direct Traffic is counted under Direct Traffic" in text
     assert "Non-cohort operational ratio" in text
     assert "not on this page yet" not in text
@@ -836,14 +862,21 @@ def test_27_the_page_names_both_cohorts_and_the_rule_and_no_attribution_ratio(mo
 def test_28_the_unresolved_row_is_outcome_only_and_drill_rows_carry_no_figure(monkeypatch):
     _mixed_ledger(monkeypatch)
     _spend(monkeypatch)
-    html = _render(_page(monkeypatch, _outcomes()))
-    un = _tr(html, "Source not resolved")
-    assert "n/a — not a contact source" in un
-    assert "contacts have different sources: 1" in _text(un)
+    page = _page(monkeypatch, _outcomes())
+    html = _render(page)
+    un = _tr(html, "Deals with no single source")
+    assert un.count("n/a") == 2                     # new contacts, SQLs
     assert _cells(un)[0] == "6"
-    for child in re.findall(r'<tr class="channel-funnel-child".*?</tr>', html, re.S):
-        assert "channel-outcome-cell" not in child
-    assert "n/a — counted under Source not resolved" not in html   # no such funnel row here
+    # Its drawer says why each deal has no single source; no funnel.
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    drawer = _run_app("channelDrawerHtml(%s, '__deal_source_unresolved__')" % json.dumps(page))
+    assert "contacts have different sources: 1" in _text(drawer)
+    assert "funnel-block" not in drawer
+    # A source drill-down in a drawer carries a contact count, never an outcome.
+    for k in ("PAID_SEARCH", "PAID_SOCIAL"):
+        d = _text(_run_app("channelDrawerHtml(%s, %s)" % (json.dumps(page), json.dumps(k))))
+        assert "Top sources" in d
+        assert "$" not in d[d.index("Top sources"):]
 
 
 def test_29_the_reader_inventory_and_the_evidence_pass_include_channel_outcomes():
@@ -920,7 +953,7 @@ def test_31_the_line_is_the_platforms_google_ads_evidence_and_shows_its_split(mo
     assert sum(p["closed_won_deals"]["value"] for p in sp.values()) == g["closed_won_deals"]
     html = _render(_page(monkeypatch, json.loads(json.dumps(out))))
     assert "2 deals: 1 with a Google click ID, 1 by HubSpot source only" in _text(
-        _tr(html, "Google Ads (canonical evidence)"))
+        _card(html, "google"))
     assert "does not by itself exclude other search engines" in out["notes"]["spend"]
 
 
@@ -960,5 +993,5 @@ def test_33_a_gated_spend_does_not_leave_a_verified_state_beside_it(monkeypatch)
     assert sp["google_ads_state"] == "unavailable" and sp["native_spend"] is None
     assert out["google_ads_line"]["spend"]["status"] == "unavailable"
     html = _render(_page(monkeypatch, json.loads(json.dumps(out))))
-    strip = _text(html[html.index("channel-outcome-totals"):])
-    assert "Google Ads spend Unavailable the Google Ads account time zone differs" in strip
+    card = _text(_card(html, "google"))
+    assert "Spend Unavailable the Google Ads account time zone differs" in card

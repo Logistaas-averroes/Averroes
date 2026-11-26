@@ -244,7 +244,7 @@ def test_10_a_customer_lower_bound_is_never_published_as_the_total():
                 "services/revenue_decision_mart.py",
                 "services/revenue_attribution_service.py",
                 "services/dashboard_overview_service.py",
-                "services/dashboard_channels_service.py",
+                # PR-ADS-181A: services/dashboard_channels_service.py is deleted.
                 "services/dashboard_campaigns_service.py",
                 "services/dashboard_deals_service.py"):
         # PR-ADS-165A: the Unit Economics service was the last file here; it

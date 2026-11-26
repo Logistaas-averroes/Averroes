@@ -137,20 +137,10 @@ def test_e_the_revenue_tab_rate_card_prints_the_cohort_through_the_gate():
     assert "Withheld" in card and "backfill is still running" in card
 
 
-def test_f_the_channels_momentum_toggle_and_every_channels_label_say_lead_status():
-    label = _render('CHAN_METRICS.find((m) => m.key === "sqls").label')
-    assert label == "Qualified (lead status)"
-    # JS constants and labels, not only payload strings: every string literal
-    # in the Channels renderers and CHAN_METRICS (all lead-status counts).
-    i = APP.index("const CHAN_METRICS = [")
-    sources = [APP[i:APP.index("];", i)]] + [
-        _fn(n) for n in ("renderChanKpiRow", "renderChanMomentumPanel",
-                         "chanMomentumChartSVG", "renderChanMixPanel",
-                         "renderChanQualityPanel", "renderChanPlatformMatrix",
-                         "renderChanChannelList", "wireChanChannelDrawers")]
-    for src in sources:
-        for text in _literals(src):
-            assert not _BARE_SQL.search(text), text[:120]
+# PR-ADS-181A: test_f_the_channels_momentum_toggle_and_every_channels_label_say_lead_status
+# stood here. It read CHAN_METRICS and the Dashboard → Channels renderers, all
+# deleted with the retired tab. LEAD_STATUS_QUALIFIED_LABEL survives (Revenue
+# Health's mapping cards) and keeps its words.
 
 
 def test_g_the_deals_legacy_renderers_carry_no_sql_literal():

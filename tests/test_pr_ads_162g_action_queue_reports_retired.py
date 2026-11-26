@@ -188,7 +188,9 @@ def test_05_no_dashboard_card_or_signal_targets_a_page_that_does_not_exist():
     EVERY dashboard service, against the real PAGES list."""
     pages = _pages()
     services = sorted((ROOT / "services").glob("dashboard_*_service.py"))
-    assert len(services) >= 6, [p.name for p in services]
+    # PR-ADS-181A: five — dashboard_channels_service.py is deleted with the
+    # Dashboard → Channels tab.
+    assert len(services) >= 5, [p.name for p in services]
     seen = set()
     for path in services:
         literals, unresolved = _target_pages(path.read_text(encoding="utf-8"),

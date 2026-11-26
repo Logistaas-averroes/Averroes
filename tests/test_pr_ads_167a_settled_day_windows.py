@@ -46,7 +46,7 @@ def test_01_an_open_window_ends_yesterday_and_says_so():
         "start": "2026-01-01", "through": "2026-11-19",
         "through_reason": "today_not_settled", "empty": False,
         "disclosure": ("Through 19 Nov 2026 — today is not included until tomorrow "
-                       "morning's sync. Other revenue pages, such as Deals, already "
+                       "morning's sync. Other revenue pages, such as Pipeline, already "
                        "count deals closed today.")}
     # Revenue bounds are on the ACCOUNT calendar: London midnight of the start
     # and of today (GMT in November, so UTC midnight).

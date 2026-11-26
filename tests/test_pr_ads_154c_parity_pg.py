@@ -311,8 +311,8 @@ def test_f3_pg_no_consumer_publishes_a_partial_total_over_all_time(pg):
 
     for consumer, path in (("dashboard/overview", "kpis.closed_won_revenue_usd"),
                            ("dashboard/revenue", "kpis.closed_won_revenue_usd"),
-                           ("dashboard/deals", "kpis.closed_won_revenue_usd"),
-                           ("dashboard/channels", "kpis.closed_won_revenue_usd")):
+                           # PR-ADS-181A: dashboard/channels is retired.
+                           ("dashboard/deals", "kpis.closed_won_revenue_usd")):
         payload = built[consumer]["payload"] or {}
         assert parity._dig(payload, path) is None, consumer
 

@@ -206,20 +206,27 @@ def _render(payload_js: str) -> str:
 
 
 def test_13_the_page_renders_channels_stages_and_shares():
-    html = _render("""{publication:{status:"published"},
+    """PR-ADS-181A: the table shows each channel's SQL rate; every stage's
+    share and a channel's sources are in its drawer."""
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    payload = """{publication:{status:"published"},
       window:{start_date:"2026-05-23",end_date:"2026-11-18"},
-      freshness:{as_of:"2026-11-18T06:00:00+00:00"},
+      freshness:{as_of:"2026-11-18T06:00:00+00:00"}, contacts_without_created_at:0,
       stages:[{key:"reached_mql",label:"MQL"},{key:"reached_sql",label:"SQL"}],
       totals:{contacts:10,reached_mql:6,reached_sql:2},
       channels:[{source:"PAID_SOCIAL",label:"Paid Social",contacts:4,
         reached_mql:3,reached_sql:1,drilldowns:[
           {value:"linkedin",contacts:3,reached_mql:2,reached_sql:1},
           {value:"facebook",contacts:1,reached_mql:1,reached_sql:0}]}],
-      notes:{}}""")
+      notes:{}}"""
+    html, social, total, updated = _run_app(
+        f"const p = {payload}; [renderChannelFunnel(p), channelDrawerHtml(p, 'PAID_SOCIAL'),"
+        " channelDrawerHtml(p, '__all__'), channelsUpdatedText(p)]")
     assert "All channels" in html and "Paid Social" in html
-    assert "linkedin" in html and "facebook" in html
-    assert "(25.0%)" in html and "(60.0%)" in html
-    assert "measured as of 2026-11-18 06:00 UTC" in html
+    assert "25.0%" in html and "20.0%" in html          # 1 of 4, 2 of 10
+    assert "linkedin" in social and "facebook" in social
+    assert "60.0% of contacts" in total                  # MQL: 6 of 10
+    assert updated == "Contacts updated 18 Nov, 06:00 UTC"
 
 
 @pytest.mark.parametrize("status,word", [("withheld", "Withheld"),

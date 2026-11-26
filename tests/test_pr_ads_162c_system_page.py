@@ -498,11 +498,18 @@ def test_24_a_certified_day_reads_as_a_plain_yes_with_what_to_fix():
 
 
 def test_25_the_pass_wording_claims_only_what_the_six_audits_check():
-    """No audit reads a spend table, the Channels page, Leads or search terms.
-    The page must say so, and must not promise them."""
+    """No audit reads a spend table, the Channels page's contact counts, the
+    Pipeline page's lead counts or search terms. The page must say so, and
+    must not promise them. PR-ADS-181A: the wording named the Channels page
+    whole and the retired Leads page. The reader-cutover audit's evidence pass
+    (PR-ADS-168A) does check the Channels page's won-deal figures, so the
+    exclusion is its contact counts; Leads is the Pipeline page since
+    PR-ADS-178B."""
     html = _render(_payload())
     card = html[:html.index("Is the data up to date?")]
-    assert "It does not re-check ad spend, the Channels page, Leads or search terms" in card
+    assert ("It does not re-check ad spend, the Channels page's contact counts, "
+            "the Pipeline page's lead counts or search terms") in card
+    assert "Leads or search terms" not in card
     assert "cannot see a deal or contact that was never entered in HubSpot" in card
     for overclaim in ("spend and results add up", "Google Ads records",
                       "Every figure", "every number", "today"):

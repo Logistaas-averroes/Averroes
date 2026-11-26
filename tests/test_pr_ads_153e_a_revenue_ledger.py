@@ -1454,7 +1454,8 @@ CONSUMER_MODULES = [
     "services/dashboard_campaigns_service.py",
     "services/dashboard_countries_service.py",
     "services/dashboard_deals_service.py",
-    "services/dashboard_channels_service.py",
+    # PR-ADS-181A: "services/dashboard_channels_service.py" is deleted with the
+    # Dashboard → Channels tab (it was skipped here as "not present").
     "services/revenue_attribution_service.py",
     "services/source_attribution_service.py",
     "services/revenue_decision_mart.py",

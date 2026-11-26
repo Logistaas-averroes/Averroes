@@ -50,7 +50,7 @@
           </button>
         </form>
         <div class="login-phase-note">
-          <span class="phase-badge">Phase 1 — Read Only</span>
+          <span class="phase-badge">Read-only</span>
         </div>
       </div>
     </div>
@@ -127,7 +127,7 @@
       </ul>
 
       <div class="sidebar__footer">
-        <div class="phase-badge sidebar__phase-badge">Phase 1 — Read Only</div>
+        <div class="phase-badge sidebar__phase-badge">Read-only</div>
         <div class="sidebar__user" id="sidebar-user">
           <span class="sidebar__username" id="sidebar-user-name"></span>
           <span class="sidebar__role" id="sidebar-user-role"></span>
@@ -202,11 +202,11 @@
         </header>
         <div id="page-explanation-dashboard" hidden></div>
 
-        <!-- Inner dashboard tabs — Overview (134) + Revenue (135) + Channels (136) + Campaigns (137) + Countries (138) -->
+        <!-- Inner dashboard tabs — Overview (134) + Revenue (135) + Campaigns (137) + Countries (138) + Deals.
+             PR-ADS-181A: the Channels tab (136) is retired; the Channels page is the one channel surface. -->
         <nav class="dashboard-tabs" aria-label="Dashboard sections">
           <button type="button" class="dashboard-tab is-active" data-dash-tab="overview" aria-current="page">Overview</button>
           <button type="button" class="dashboard-tab" data-dash-tab="revenue">Revenue</button>
-          <button type="button" class="dashboard-tab" data-dash-tab="channels">Channels</button>
           <button type="button" class="dashboard-tab" data-dash-tab="campaigns">Campaigns</button>
           <button type="button" class="dashboard-tab" data-dash-tab="countries">Countries</button>
           <button type="button" class="dashboard-tab" data-dash-tab="deals">Deals</button>
@@ -239,9 +239,6 @@
         </div>
         <div id="dashboard-revenue-root" class="dashboard-overview" hidden>
           <p class="empty-state">Loading revenue &amp; customers…</p>
-        </div>
-        <div id="dashboard-channels-root" class="dashboard-overview" hidden>
-          <p class="empty-state">Loading channels &amp; platforms…</p>
         </div>
         <div id="dashboard-campaigns-root" class="dashboard-overview" hidden>
           <p class="empty-state">Loading campaigns &amp; keywords…</p>
@@ -418,21 +415,24 @@
       <!-- Channels (PR-ADS-162A; outcomes PR-ADS-168A) -->
       <section id="page-channels" class="page" hidden>
         <header class="page-header channels-header">
-          <div>
-            <h1 class="page-title">Channels</h1>
-            <p class="page-subtitle">Where your contacts come from, how far each channel's contacts get, and which deals closed through each channel in the same days. Counts every marketing channel, not only Google Ads.</p>
-          </div>
-          <div id="channels-window" class="channel-funnel-seg" role="group" aria-label="Period">
-            <span class="channel-funnel-seg__label">The last</span>
-            <button type="button" class="channel-funnel-seg__btn" data-channels-window="30d" aria-pressed="false">30 days</button>
-            <button type="button" class="channel-funnel-seg__btn" data-channels-window="60d" aria-pressed="false">60 days</button>
-            <button type="button" class="channel-funnel-seg__btn is-active" data-channels-window="180d" aria-pressed="true">180 days</button>
-            <button type="button" class="channel-funnel-seg__btn" data-channels-window="all_time" aria-pressed="false">All time</button>
+          <h1 class="page-title">Channels</h1>
+          <p class="page-subtitle">Where your customers come from.</p>
+          <div class="channels-bar">
+            <div id="channels-window" class="channel-funnel-seg" role="group" aria-label="Period">
+              <button type="button" class="channel-funnel-seg__btn" data-channels-window="30d" aria-pressed="false">30 days</button>
+              <button type="button" class="channel-funnel-seg__btn" data-channels-window="60d" aria-pressed="false">60 days</button>
+              <button type="button" class="channel-funnel-seg__btn is-active" data-channels-window="180d" aria-pressed="true">180 days</button>
+              <button type="button" class="channel-funnel-seg__btn" data-channels-window="all_time" aria-pressed="false">All time</button>
+            </div>
+            <span id="channels-updated" class="dash-chip" hidden></span>
+            <span class="dash-chip dash-chip--readonly">Read-only</span>
           </div>
         </header>
         <div id="channels-body">
           <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
         </div>
+        <!-- PR-ADS-181A: the channel drawer (opened from a table row). -->
+        <div id="channels-drawer-root" hidden></div>
       </section>
 
       <!-- GCLID Attribution -->
