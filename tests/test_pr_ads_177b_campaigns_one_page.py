@@ -70,7 +70,7 @@ _WINDOW = {"key": "current_quarter", "label": "Current Quarter",
                             "through_reason": "today_not_settled", "empty": False,
                             "disclosure": "Through 23 Nov 2026 — today is not included "
                                           "until tomorrow morning's sync. Other revenue "
-                                          "pages, such as Deals, already count deals "
+                                          "pages, such as Pipeline, already count deals "
                                           "closed today."}}
 
 
@@ -252,7 +252,8 @@ def test_03_campaign_revenue_and_spend_is_deleted_whole():
     assert "Campaign Revenue & Spend\"" not in JS
     assert "Open Campaign Revenue & Spend" not in JS
     for svc in ("dashboard_overview_service", "dashboard_revenue_service",
-                "dashboard_channels_service", "dashboard_campaigns_service"):
+                # PR-ADS-181A: dashboard_channels_service is deleted.
+                "dashboard_campaigns_service"):
         src = (ROOT / "services" / f"{svc}.py").read_text(encoding="utf-8")
         assert "roas-campaigns" not in src and "Open Campaign Revenue & Spend" not in src, svc
 

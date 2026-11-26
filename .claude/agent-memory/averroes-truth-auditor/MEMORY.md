@@ -1042,3 +1042,25 @@ truncated list. Verified by execution on exported copies of both commits.
   and no reader.
 - Evidence: 226 tests (180C, 178B/C, 166A, 180A/B, 180B-F1, revenue audit,
   179A/B, 115) passed, PG ran, no skips.
+
+## PR-ADS-180C-F2 re-check (be74b66 on 8964dee, PR 241, 2026-11-26) — merge
+- F1 Major closed without editing any 159/160/161C test: readers pass
+  `[effective_date_sql(e) ...]` into `any_stage_date_in_window`, which raises
+  ValueError unless the list is exactly the shared expressions in order. The
+  helper then builds from its OWN list, so the check changes no SQL: it exists
+  so the lexical audit can read the shared expression in the reader's own
+  source. The audit (`reader_effective_date_status`) follows one level into
+  `_SHARED_WINDOW_HELPERS`; a helper that is bare or cannot be found certifies nothing.
+- Still lexical (as it always was): mutation H2, where the reader names the
+  marker and then rewrites its clause to bare `f.date_entered_sql`, passes
+  `check_effective_date_consistency`. The behavioural layer catches it: 10 PG
+  failures (159 test_53, plus the audit's runtime reader reconciliation in
+  test_97/114/115-118). Never rely on the static check alone.
+- `one_read_snapshot` now waits `WEB_SNAPSHOT_LOCK_WAIT_SECONDS` = 5 s
+  (certification keeps 60 s; the nested call shares the outer pin). PG 06 holds
+  the schema lock: all three sites unreadable within 3–20 s. Mutations Sf
+  (silent fallback), W (60 s at the call site) and W2 (60 s in
+  `pinned_read_snapshot`) each fail PG 06.
+- Evidence: 159 + 160 + 161C + 161A1 + 180C unit/PG + 178C PG + 115:
+  508 passed, PG ran, no skips. The builder's 151-module list includes
+  159/160/161A1/161C/180C.

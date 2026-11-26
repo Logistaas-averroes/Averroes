@@ -1,4 +1,5 @@
-"""PR-ADS-171B — Meta spend on the Channels page and the Dashboard's Channels tab.
+"""PR-ADS-171B — Meta spend on the Channels page (and, until PR-ADS-181A
+retired it, the Dashboard's Channels tab).
 
 * A separate "Meta Ads (spend)" line, fed ONLY by
   ``meta_ads_spend_truth_service.build_meta_ads_spend_truth_for_days`` over the
@@ -21,8 +22,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -503,40 +502,48 @@ def _text(html):
 def _tr(html, label):
     table = html[html.index("<tbody>"):html.index("</tbody>")]
     for tr in re.findall(r"<tr[^>]*>.*?</tr>", table, re.S):
-        if f">{label}<" in tr:
+        if f'<span class="channels-name">{label}<' in tr:
             return tr
     raise AssertionError(label)
+
+
+def _meta_card(html):
+    """PR-ADS-181A: the Meta Ads card of the paid channels block (it replaces
+    the strip cell and the "Meta Ads (spend)" table line)."""
+    i = html.index("channels-paid__card--meta")
+    return html[i:html.index("</section>", i)]
+
+
+def _drawer(payload, key):
+    from tests.test_pr_ads_161b_marketing_outcome_cohorts import _run_app
+    return _run_app("channelDrawerHtml(%s, %s)" % (json.dumps(payload), json.dumps(key)))
 
 
 def test_07_published_the_meta_row_shows_the_spend_and_each_account(monkeypatch):
     published(monkeypatch)
     html = _render_channels(_page(monkeypatch, _outcomes(monkeypatch)))
-    row = _text(_tr(html, "Meta Ads (spend)"))
-    assert "$5,928" in row
+    card = _text(_meta_card(html))
+    assert "Spend $5.9k" in card
     assert (f"Ad account {AMMAN} (Logistaas) · USD · Asia/Amman days · verified "
-            "through 2026-11-21 · 5,927.77 USD") in row
+            "through 2026-11-21 · 5,927.77 USD") in card
     assert (f"Ad account {LA} (Logistaas Limited) · GBP · America/Los_Angeles days · "
-            "verified through 2026-11-21 · 0.00 GBP") in row
-    assert "The same date is a different 24 hours in each account" in row
-    assert "n/a — Meta spend is not matched to HubSpot deals" in row
-    assert "n/a — no rate: HubSpot's Paid Social contacts and deals are not proven" in row
-    # The strip names it, and keeps Google Ads' own cell.
-    strip = _text(html[html.index("channel-outcome-totals"):])
-    assert "Meta Ads spend $5,928" in strip
-    assert "Google Ads spend" in strip
+            "verified through 2026-11-21 · 0.00 GBP") in card
+    assert "The same date is a different 24 hours in each account" in card
+    assert "Not yet matched to HubSpot deals, so there is no revenue ratio" in card
+    assert "Not matched to HubSpot's Paid Social contacts or deals — no rate is calculated" in card
+    # The Google Ads card keeps its own spend beside it.
+    assert "channels-paid__card--google" in html
 
 
 def test_07b_withheld_the_page_shows_the_word_and_why_and_no_number(monkeypatch):
     _state_store(monkeypatch, "coverage_incomplete")
     html = _render_channels(_page(monkeypatch, _outcomes(monkeypatch)))
-    row = _text(_tr(html, "Meta Ads (spend)"))
-    assert ("Withheld some ad account's spend is not verified and settled for every day"
-            in row)
-    assert f"account {LA} is not verified for every day through 2026-11-21" in row
+    card = _text(_meta_card(html))
+    assert ("Spend Withheld some ad account's spend is not verified and settled for every day"
+            in card)
+    assert f"account {LA} is not verified for every day through 2026-11-21" in card
     assert _no_meta_figure(html) == []
-    assert "$5" not in row
-    strip = _text(html[html.index("channel-outcome-totals"):])
-    assert "Meta Ads spend Withheld" in strip
+    assert "$5" not in card
 
 
 def test_07c_the_retired_disclosure_is_beside_the_figure_on_the_page(monkeypatch):
@@ -544,38 +551,37 @@ def test_07c_the_retired_disclosure_is_beside_the_figure_on_the_page(monkeypatch
     out = _outcomes(monkeypatch, window="30d")
     disclosure = out["meta_ads_line"]["owner_declared_retired_disclosure"]
     html = _render_channels(_page(monkeypatch, out))
-    assert disclosure in _text(_tr(html, "Meta Ads (spend)"))
-    strip = _text(html[html.index("channel-outcome-totals"):])
-    assert disclosure in strip
+    card = _meta_card(html)
+    assert disclosure in _text(card)
+    # Beside the figure, in view — never behind "Account details".
+    shown = card[:card.index('data-channels-panel="meta"')] if 'data-channels-panel="meta"' in card else card
+    assert disclosure in _text(shown)
     # A payload with the marker and no disclosure shows no figure.
     stripped = json.loads(json.dumps(out))
     stripped["meta_ads_line"]["owner_declared_retired_disclosure"] = None
     bare = _render_channels(_page(monkeypatch, stripped))
     assert ("Withheld the figure rests on the owner's retirement declaration and its "
-            "disclosure is missing") in _text(_tr(bare, "Meta Ads (spend)"))
+            "disclosure is missing") in _text(_meta_card(bare))
     # Counterfactual: a gate that ignores the marker shows the bare figure.
     leaky = _render_channels(_page(monkeypatch, stripped), mutate={
         "if (metaLineRetired(l) && !l.owner_declared_retired_disclosure) {\n    return { value: null":
         "if (false) {\n    return { value: null"})
-    assert "$0" in _text(_tr(leaky, "Meta Ads (spend)"))
+    assert "$0" in _text(_meta_card(leaky))
 
 
-def test_07d_paid_social_sub_rows_render_with_the_funnel_columns(monkeypatch):
+def test_07d_paid_social_platforms_render_with_their_contacts_in_its_drawer(monkeypatch):
     from services.channel_funnel_service import build_funnel
     published(monkeypatch)
     out = _outcomes(monkeypatch)
     channels = json.loads(json.dumps(build_funnel(PAID_SOCIAL_ROWS)["channels"]))
-    html = _render_channels(_page(monkeypatch, out, funnel_channels=channels))
-    meta = _tr(html, "Meta (facebook + instagram)")
-    assert "channel-funnel-platform-row" in meta and "hidden" not in meta.split(">")[0]
-    cells = re.findall(r'<td class="num channel-funnel-cell">(.*?)</td>', meta, re.S)
-    assert len(cells) == 4                      # MQL, SQL, Opportunity, Customer stage
-    assert _text(_tr(html, "LinkedIn")).startswith("LinkedIn drill-down: linkedin 2")
-    unknown = _text(_tr(html, "Drill-down not recorded (unknown)"))
-    assert "never counted as Meta" in unknown and " 2 " in f" {unknown} "
-    assert "n/a — deals are counted per channel, not per platform" in meta
-    # Nothing on a platform row puts Meta spend beside its contacts.
-    assert "$" not in _text(meta)
+    page = _page(monkeypatch, out, funnel_channels=channels)
+    drawer = _text(_drawer(page, "PAID_SOCIAL"))
+    block = drawer[drawer.index("By platform"):]
+    assert "Meta (facebook + instagram) drill-down: facebook, instagram 3" in block
+    assert "LinkedIn drill-down: linkedin 2" in block
+    assert "Drill-down not recorded (unknown) no drill-down recorded — never counted as Meta 2" in block
+    # Nothing on a platform line puts Meta spend beside its contacts.
+    assert "$" not in block and "%" not in block
 
 
 def test_08_no_column_or_cell_reads_as_a_cost_per(monkeypatch):
@@ -586,112 +592,22 @@ def test_08_no_column_or_cell_reads_as_a_cost_per(monkeypatch):
         assert bad.lower() not in _text(head).lower()
     assert not re.search(r"(?i)meta[^\n]{0,80}(?:per (?:lead|contact|sql)|/\s*(?:contacts|leads|sqls))",
                          APP_JS)
-    meta_row = _tr(html, "Meta Ads (spend)")
-    assert "%" not in meta_row
+    card = _meta_card(html)
+    assert "%" not in card
+    for bad in ("per lead", "per contact", "per SQL", "per customer", "/ ad spend"):
+        assert bad.lower() not in _text(card).lower(), bad
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 7. The Dashboard's Channels tab
+# 7. The Dashboard's Channels tab — retired (PR-ADS-181A)
 # ═════════════════════════════════════════════════════════════════════════════
-def _dashboard(monkeypatch, store):
-    import tests.test_pr_ads_136_dashboard_channels as t136
-    store(monkeypatch)
-    return json.loads(json.dumps(t136._channels(monkeypatch, window="current_quarter"),
-                                 default=str))
-
-
-def _june_published(monkeypatch):
-    meta_store(monkeypatch, [
-        amman(chunks=[_chunk("2026-04-01", "2026-06-21", "2026-06-22T06:02:00+00:00")]),
-        los_angeles(chunks=[_chunk("2026-04-01", "2026-06-21",
-                                   "2026-06-22T09:00:00+00:00")])])
-
-
-def _june_withheld(monkeypatch):
-    meta_store(monkeypatch, [
-        amman(chunks=[_chunk("2026-04-01", "2026-06-21", "2026-06-22T06:02:00+00:00")]),
-        los_angeles(chunks=[_chunk("2026-04-01", "2026-06-20",
-                                   "2026-06-22T06:02:00+00:00")])])
-
-
-def test_09_the_dashboard_shows_the_same_line_over_the_windows_settled_days(monkeypatch):
-    d = _dashboard(monkeypatch, _june_published)
-    line = d["meta_ads_line"]
-    assert line["spend"]["value"] == AMMAN_USD and line["spend"]["status"] == "published"
-    # Current quarter on 22 Jun, ended at yesterday (the PR-ADS-167A rule).
-    assert (line["start_date"], line["end_date"]) == ("2026-04-01", "2026-06-21")
-    assert line["through_disclosure"].startswith("Through 21 Jun 2026")
-    assert "Other revenue pages" not in line["through_disclosure"]
-    assert d["truth_status"]["meta_ads_spend"] == "ready"
-    social = next(c for c in d["channel_mix"] if c["channel"] == "paid_social")
-    assert social["spend_usd"] is None and social["period_revenue_per_ad_spend"] is None
-    assert social["status"].startswith("Revenue-only — Meta spend is on its own line")
-    from scripts.audit_customer_revenue_reader_cutover import (
-        meta_line_violations, ratio_name_violations)
-    assert meta_line_violations(line) == [] and ratio_name_violations(d) == []
-    # No platform row carries Meta spend.
-    for p in d["platform_matrix"]:
-        if p["platform"] != "google_ads":
-            assert p["spend_usd"] is None and p["native_spend"] is None
-
-
-def test_09b_the_dashboard_withholds_the_same_way(monkeypatch):
-    d = _dashboard(monkeypatch, _june_withheld)
-    assert d["meta_ads_line"]["spend"]["status"] == "withheld"
-    assert _no_meta_figure(d) == []
-    assert d["truth_status"]["meta_ads_spend"] == "partial"
-
-
-def test_09c_not_set_up_the_dashboard_reads_as_before(monkeypatch):
-    d = _dashboard(monkeypatch, lambda mp: meta_store(mp, []))
-    assert d["truth_status"]["meta_ads_spend"] == "not_connected"
-    social = next(c for c in d["channel_mix"] if c["channel"] == "paid_social")
-    assert social["status"] == "Revenue-only — no connected spend source"
-    card = next(c for c in d["decision_cards"] if c["type"] == "unavailable")
-    assert card["body"].startswith("Only Google Ads spend is connected.")
-
-
-def _render_dashboard_panel(line, mutate=None) -> str:
-    node = shutil.which("node")
-    assert node, "node is a CI dependency (node --check static/app.js)"
-    from tests.test_pr_ads_168a_channel_outcomes import _js_extract
-    src = APP_JS
-    parts = [re.search(r'const PERIOD_RATIO_DISCLOSURE =[\s\S]*?";', src).group(0)]
-    parts += [_js_extract(src, f"const {c} = ") for c in (
-        "CANONICAL_REASON_LABELS", "CRM_BLOCKER_FAMILY", "CANONICAL_BASIS_LABELS",
-        "META_ACCOUNT_STATE_LABELS")]
-    parts += [_js_extract(src, f"function {f}(") for f in (
-        "escapeHtml", "fmtMoney", "canonicalReasonLabel", "crmBlockerFamily",
-        "crmBlockersHref", "canonicalBlockingReason", "canonicalMetricHtml",
-        "metaLineRetired", "metaLineSpendMetric", "metaNativeMoney",
-        "metaLineAccountTexts", "metaLineNotes", "metaLineNativeHtml",
-        "renderChanMetaPanel")]
-    script = "let _currentUser = null;\n" + "\n".join(parts)
-    for old, new in (mutate or {}).items():
-        assert old in script, old
-        script = script.replace(old, new)
-    script += f"\nprocess.stdout.write(renderChanMetaPanel({json.dumps(line)}));"
-    res = subprocess.run([node, "-e", script], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
-    return _text(res.stdout)
-
-
-def test_09d_the_dashboard_panel_renders_published_withheld_and_the_disclosure(monkeypatch):
-    pub = _render_dashboard_panel(_dashboard(monkeypatch, _june_published)["meta_ads_line"])
-    assert "Meta Ads (spend)" in pub and "Meta Ads spend $5.9k USD" in pub
-    assert "not matched to HubSpot's Paid Social contacts or deals, so no ratio is shown" in pub
-    assert "Through 21 Jun 2026" in pub
-    held = _render_dashboard_panel(_dashboard(monkeypatch, _june_withheld)["meta_ads_line"])
-    assert "Meta Ads spend Withheld some ad account's spend is not verified" in held
-    assert "5.9k" not in held and "5,927" not in held
-    from services.meta_ads_spend_line_service import line_from_truth
-    retired = line_from_truth({
-        "state": "verified", "usd_spend": 0.0, "native_spend": 0.0,
-        "native_currency": "GBP", "accounts": [],
-        "owner_declared_retired": [{"account_id": AMMAN, "last_spend_day": "2026-06-30",
-                                    "relied_from": "2026-07-01"}],
-        "owner_declared_retired_disclosure": "This total assumes ad account X …"})
-    assert "This total assumes ad account X …" in _render_dashboard_panel(retired)
+# test_09, 09b, 09c and 09d stood here. They built /api/dashboard/channels
+# (build_dashboard_channels) over business windows and rendered its Meta panel
+# (renderChanMetaPanel). The owner retired the tab; its route, builder and
+# renderer are deleted, and the reader-cutover audit fails if one returns. The
+# rules they held on the tab hold on the Channels page, the line's one page:
+# the line's settled days and no figure under a withheld total (01, 02, 03,
+# 07b), the retirement disclosure (04, 07c), no rate over Meta spend (06, 08).
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -716,13 +632,15 @@ def test_10_checks_19_and_20_hold_on_this_tree():
     ("if (metaLineRetired(l) && !l.owner_declared_retired_disclosure) {\n    return { value: null, status: \"withheld\", reason: \"meta_retired_disclosure_missing\" };\n  }\n",
      ""),
     # A renderer reads the figure around the gate.
-    ("const usd = canonicalMetricHtml(metaLineSpendMetric(line), channelOutcomeMoney, opts);",
-     "const usd = canonicalMetricHtml(line.spend, channelOutcomeMoney, opts); const _m = metaLine.spend;"),
-    # The Dashboard panel stops going through the gate.
-    ("${canonicalMetricHtml(metaLineSpendMetric(l), fmtMoney)}", "${canonicalMetricHtml(l.spend, fmtMoney)}"),
-    # A cost per contact column appears.
-    ('function channelPaidHeads() { return ["Spend",',
-     'function channelPaidHeads() { const metaCost = "Meta spend per contact"; return ["Spend",'),
+    ("const usd = canonicalMetricHtml(metaLineSpendMetric(line), channelMoney, opts);",
+     "const usd = canonicalMetricHtml(line.spend, channelMoney, opts); const _m = metaLine.spend;"),
+    # PR-ADS-181A: the Meta card stops going through the gate (it replaces
+    # the retired Dashboard panel's case).
+    ("    : canonicalMetricHtml(metaLineSpendMetric(null), channelMoney, opts);",
+     "    : canonicalMetricHtml((o || {}).spend, channelMoney, opts);"),
+    # A cost per contact label appears.
+    ('function channelPaidFigure(label, html) {',
+     'function channelPaidFigure(label, html) { const metaCost = "Meta spend per contact";'),
 ])
 def test_10b_each_guard_fails_on_its_mutation(old, new):
     assert old in APP_JS, old
@@ -792,59 +710,31 @@ def test_13_the_line_is_read_only():
 # ═════════════════════════════════════════════════════════════════════════════
 # 10. Review round 1
 # ═════════════════════════════════════════════════════════════════════════════
-def _strip(html):
-    return _text(html[html.index("channel-outcome-totals"):html.index("channel-outcome-totals") + 4000])
-
-
-def test_14_the_strip_cell_says_each_account_is_read_on_its_own_days(monkeypatch):
+def test_14_the_meta_card_says_each_account_is_read_on_its_own_days(monkeypatch):
     published(monkeypatch)
-    strip = _strip(_render_channels(_page(monkeypatch, _outcomes(monkeypatch))))
-    cell = strip[strip.index("Meta Ads spend"):]
-    assert "Each ad account is read on its own calendar days" in cell
-    assert "Asia/Amman" in cell and "America/Los_Angeles" in cell
-    assert "not the Europe/London days" in cell
-    # With no account on record the cell still says so.
-    _state_store(monkeypatch, "not_connected")
-    bare = _strip(_render_channels(_page(monkeypatch, _outcomes(monkeypatch))))
-    assert ("Each ad account is read on its own calendar days, not this page's "
-            "Europe/London days") in bare[bare.index("Meta Ads spend"):]
+    card = _text(_meta_card(_render_channels(_page(monkeypatch, _outcomes(monkeypatch)))))
+    assert "Each ad account is read on its own calendar days" in card
+    assert "Asia/Amman" in card and "America/Los_Angeles" in card
+    assert "not the Europe/London days" in card
 
 
-def _dashboard_at(monkeypatch, now, window="current_quarter"):
-    import tests.test_pr_ads_136_dashboard_channels as t136
-    t136._patch_durable(monkeypatch)
-    from services.dashboard_channels_service import build_dashboard_channels
-    return json.loads(json.dumps(build_dashboard_channels(window, now=now), default=str))
-
-
-@pytest.mark.parametrize("case", ["first_day_of_quarter", "store_unreadable"])
-def test_15_could_not_tell_is_never_worded_as_not_connected(monkeypatch, case):
-    if case == "first_day_of_quarter":
-        # Meta IS configured; 1 Oct has no settled day in the current quarter.
-        meta_store(monkeypatch, [amman(), los_angeles()])
-        d = _dashboard_at(monkeypatch, datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc))
-        assert d["meta_ads_line"]["spend"]["reason"] == "no_settled_day_in_window"
-    else:
-        meta_store(monkeypatch, [amman(), los_angeles()], available=False)
-        d = _dashboard_at(monkeypatch, datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc))
-    assert d["meta_ads_line"]["connected"] is None
-    text = json.dumps(d).lower()
-    assert "not connected" not in text
-    assert "only google ads spend is connected" not in text
-    social = next(c for c in d["channel_mix"] if c["channel"] == "paid_social")
-    assert "no connected spend source" not in social["status"]
-    from services.dashboard_channels_service import STATUS_META_UNKNOWN
-    assert social["status"] == STATUS_META_UNKNOWN
-    assert "no connected spend source" not in social["status"]
-    for p in d["platform_matrix"]:
-        if p["channel"] == "paid_social" and p["platform"] == "meta":
-            assert p["status"] == STATUS_META_UNKNOWN
-    card = next(c for c in d["decision_cards"] if c["type"] == "unavailable")
-    assert "could not be told" in card["body"]
-    reason = next(u["reason"] for u in d["unavailable"]
-                  if u["metric"] == "paid_social_period_revenue_per_ad_spend")
-    assert reason.startswith("Could not tell whether Meta Ads spend is set up")
-    assert d["truth_status"]["meta_ads_spend"] == "unavailable"
+def test_15_could_not_tell_is_never_worded_as_not_connected(monkeypatch):
+    """PR-ADS-181A: ported from the retired Dashboard tab to the Channels page.
+    A Meta store that could not be read says so — never "not connected", never
+    "not set up". (The tab's first-day-of-quarter case was a BUSINESS window
+    with no settled day; the Channels page's evidence windows always hold
+    settled days, and test_03b holds an empty settled window on the line.)"""
+    meta_store(monkeypatch, [amman(), los_angeles()], available=False)
+    out = _outcomes(monkeypatch)
+    assert out["meta_ads_line"]["connected"] is None
+    html = _render_channels(_page(monkeypatch, out))
+    # Everything the page says about Meta: its card (the Google Ads notes'
+    # "LinkedIn and ChatGPT spend are not connected" is about other sources).
+    card = _text(_meta_card(html)).lower()
+    assert "not connected" not in card and "not set up" not in card
+    assert "spend unavailable stored meta spend could not be read" in card
+    assert not re.search(r"meta[^.]{0,60}not (?:connected|set up)", _text(html).lower())
+    assert _no_meta_figure(html) == []
 
 
 def test_15b_the_footer_dot_tells_not_set_up_from_unavailable():
@@ -861,8 +751,8 @@ def test_15b_the_footer_dot_tells_not_set_up_from_unavailable():
     "Meta spend / lead", "Meta spend / contact", "Meta spend / SQL",
     "Meta spend per lead", "Meta CPL", "Meta cost per lead", "meta COST-PER contact"])
 def test_16_check_20_catches_singular_and_abbreviated_rate_labels(label):
-    old = 'function channelPaidHeads() { return ["Spend",'
+    old = 'function channelPaidFigure(label, html) {'
     assert old in APP_JS
     a = _structural(APP_JS.replace(
-        old, f'function channelPaidHeads() {{ const x = "{label}"; return ["Spend",'))
+        old, f'function channelPaidFigure(label, html) {{ const x = "{label}";'))
     assert any(v.startswith("no_rate_over_meta_spend") for v in a.violations), label

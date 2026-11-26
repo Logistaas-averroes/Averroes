@@ -339,8 +339,9 @@ CONSUMERS: list[dict] = [
        # PR-ADS-168B: the Revenue by Source page, its two routes, its drawer and
        # the mart `source` view are deleted. build_revenue_by_source survives as
        # the library behind the Dashboard source breakdowns.
+       # PR-ADS-181A: /api/dashboard/channels is retired with its tab.
        endpoint="(library; surfaced by /api/dashboard/overview, /api/dashboard/revenue, "
-                "/api/dashboard/deals, /api/dashboard/channels)",
+                "/api/dashboard/deals)",
        service_function="services.source_attribution_service.build_revenue_by_source",
        repository_source="db.revenue_repository.fetch_source_leads",
        source_table="contact_source_classification (+ leads)",
@@ -353,19 +354,9 @@ CONSUMERS: list[dict] = [
                        "(explicit legacy fallback).",
        truth_status="mismatch → None; unavailable → raw legacy count retained",
        headline=True, row=True, decision=True, executive=True, operational=True),
-    _c("Dashboard Channels", "Channel/platform sqls rollup, total_sqls KPI, SQL trend.",
-       endpoint="GET /api/dashboard/channels",
-       service_function="services.dashboard_channels_service._build_channels_and_platforms / _build_kpis / _build_trend",
-       repository_source="source_attribution_service groups + db.revenue_repository.fetch_source_leads_daily",
-       source_table="contact_source_classification",
-       sql_definition="status_category == 'qualified' (trend: != 'qualified' → skip)",
-       date_field=LEGACY_DATE, dedup_key="none (classification row)", windows=BUSINESS,
-       scope="source group", classification=CLS_MIXED,
-       code_location="services/dashboard_channels_service.py:_build_kpis",
-       migration_notes="total_sqls = sum(c.get('sqls') or 0) renders a withheld channel as 0 "
-                       "(Campaigns/Countries use None-if-any-None).",
-       truth_status="KPI sums None as 0 — outlier",
-       headline=True, row=True, sorting=True, decision=True, executive=True),
+    # PR-ADS-181A: the "Dashboard Channels" consumer (GET /api/dashboard/channels,
+    # its total_sqls legacy qualified-lead rollup) stood here. The owner retired
+    # the tab; its service, route and repository read are deleted.
     _c("Dashboard Campaigns", "Campaign rows sqls, kpis.sqls, SQL producer status, period delta.",
        endpoint="GET /api/dashboard/campaigns",
        service_function="services.dashboard_campaigns_service._build_campaign_rows / _campaign_status / _build_kpis",
@@ -665,7 +656,7 @@ _OVW_LC = "Dashboard Overview lifecycle activity / cohort"
 _MART = "Revenue Decision Mart summary.sqls / row sqls"
 _RAS = "Revenue attribution service (Campaign Revenue & Spend / Country, verdicts)"
 _SRC = "Revenue by Source (source_attribution_service)"
-_CHAN = "Dashboard Channels"
+# PR-ADS-181A: _CHAN ("Dashboard Channels") is retired with the tab.
 _CAMP = "Dashboard Campaigns"
 _CTRY = "Dashboard Countries"
 _REV = "Dashboard Revenue"
@@ -866,10 +857,6 @@ RULES: list[dict] = [
     _r("src", "services/source_attribution_service.py", CLS_MIXED, _SRC,
        symbol=["_finalize_channels", "_unavailable_revenue_by_source",
                "build_revenue_by_source", "classify_contact_row"]),
-    _r("chan", "services/dashboard_channels_service.py", CLS_MIXED, _CHAN,
-       symbol=["_accumulate", "_build_channels_and_platforms", "_build_decision_cards",
-               "_build_kpis", "_build_period_change", "_build_quality_matrix", "_build_trend",
-               "_build_truth_status", "_new_bucket", "build_dashboard_channels"]),
     _m("camp.module", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP, ["sql_verdict_ref"]),
     _r("camp", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP,
        symbol=["_build_campaign_rows", "_build_kpis",
@@ -1196,7 +1183,8 @@ RULES: list[dict] = [
     _r("revrepo.lead_missing_dates", "db/revenue_repository.py", CLS_LEGACY, _LEADREC,
        symbol=["fetch_missing_event_date_leads"]),
     _r("revrepo.source", "db/revenue_repository.py", CLS_LEGACY, _SRC,
-       symbol=["fetch_source_leads", "fetch_source_leads_daily"]),
+       # PR-ADS-181A: fetch_source_leads_daily is deleted with Dashboard Channels.
+       symbol=["fetch_source_leads"]),
     _r("revrepo.series", "db/revenue_repository.py", CLS_LEGACY, _REV, symbol="fetch_lead_daily_series"),
     # PR-ADS-178B: "revrepo.sql_details" (fetch_sql_lead_details) removed with
     # the Dashboard Deals lead-status backlog it fed.
@@ -1301,8 +1289,16 @@ RULES: list[dict] = [
     # PR-ADS-162I: the Channels page names its SQL stage "SQLs" in a ranking
     # title. It is the acquisition cohort published by
     # `channelfunnel.service`; the page computes no SQL figure of its own.
+    # PR-ADS-181A: channelFunnelPlural is deleted with the ranking panels. The
+    # redesigned page names the cohort's SQL stage "SQLs" / "Reached SQL so
+    # far" (the KPI card, the table's SQLs and SQL rate columns, the legend)
+    # and reads `reached_sql` from the published funnel rows to show and sort
+    # them. It is the acquisition cohort published by `channelfunnel.service`,
+    # read through the shared model (channelFunnelModel); the page computes no
+    # SQL figure of its own, only a channel's SQLs over its own new contacts.
     _r("ui.channelfunnel", "static/app.js", CLS_CANONICAL, _CHANNEL_FUNNEL,
-       symbol="channelFunnelPlural", pattern="frontend_sqls_label"),
+       symbol=["channelFunnelGroupHtml", "channelSortValue", "channelCellHtml",
+               "channelTotalCellHtml", "channelTableHtml", "channelLegendHtml"]),
     # PR-ADS-180A: the one funnel block names the window basis its payload
     # declares. `contact_created_at` is the Channels acquisition cohort's
     # (channel_funnel_service `window_basis`); the block computes nothing on it.
@@ -1315,10 +1311,8 @@ RULES: list[dict] = [
     # lifecycleColumnLabels, which the scanner credits.
     _r("ui.funnel_block_columns", "static/app.js", CLS_CANONICAL, _OVW_LC,
        symbol="lifecycleColumnLabels", pattern="frontend_sqls_label"),
-    _r("ui.channels", "static/app.js", CLS_MIXED, _CHAN,
-       symbol=["renderDashboardChannels", "renderChanKpiRow", "chanQualityBubbleSVG",
-               "renderChanQualityPanel", "wireChanQualityHover", "renderChanPlatformMatrix",
-               "renderChanChannelList", "wireChanChannelDrawers", "renderChanTruthFooter"]),
+    # PR-ADS-181A: "ui.channels" (the Dashboard → Channels tab renderers) is
+    # deleted with the tab.
     _r("ui.campaigns_tab", "static/app.js", CLS_CANONICAL, _CAMP,
        symbol=["renderDashboardCampaigns", "renderCampKpiRow", "campBubbleSVG",
                "renderCampPerformanceMap", "wireCampBubbleHover", "renderCampLeaderboard",
@@ -1540,9 +1534,9 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
                 "date_entered_sql column; the headline read COALESCEs recovered history dates. "
                 "Headline SQL count can exceed the contact-page total.",
      "code_location": "db/crm_funnel_repository.py:fetch_funnel_contact_page"},
-    {"id": "ui.channels_sums_none_as_zero",
-     "summary": "Dashboard Channels total_sqls sums withheld channels as 0.",
-     "code_location": "services/dashboard_channels_service.py:_build_kpis"},
+    # PR-ADS-181A: "ui.channels_sums_none_as_zero" stood here (Dashboard
+    # Channels' total_sqls summed a withheld channel as 0). Closed by deletion:
+    # the tab, its service and its KPI are retired.
     # PR-ADS-177C: "ui.campaign_drawer_tdz" stood here (fixed in PR-ADS-161B);
     # renderCampaignDrawer is deleted with the Campaign Evidence drawer.
     # PR-ADS-177A: "verdict.withheld_sql_becomes_zero" stood here —

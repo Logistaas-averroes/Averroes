@@ -602,7 +602,8 @@ CHANNEL_OUTCOMES_METRIC_FAMILY = "closed_won_outcomes"
 CHANNEL_OUTCOMES_WINDOW_BASIS = "deal_close_date"
 
 UNRESOLVED_SOURCE = "__deal_source_unresolved__"
-UNRESOLVED_LABEL = "Source not resolved"
+# PR-ADS-181A: renamed from "Source not resolved" (the Channels page redesign).
+UNRESOLVED_LABEL = "Deals with no single source"
 
 #: Why a won deal is on the unresolved row. One class per deal, checked in
 #: this order (the first that applies).
@@ -656,7 +657,7 @@ CHANNEL_OUTCOME_NOTES = {
     "attribution": (
         "A won deal is placed on a channel only when every contact associated "
         "with it has that HubSpot original source. Otherwise it is counted under "
-        "'Source not resolved': its contacts have different sources, it has no "
+        "'Deals with no single source': its contacts have different sources, it has no "
         "associated contact, the contact lookup failed, a contact is not in the "
         "contact data, or a contact has no original source."),
     "original_source": (

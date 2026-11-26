@@ -141,7 +141,7 @@ INVENTORY = (
      "window_cohort": "business window · close-date cohort; Channels: evidence "
                       "window ended yesterday · close-date cohort",
      "ui_effect": "Customer Rate column retired; customers per bucket, not additive. "
-                  "Channels: outcome columns per channel, Source not resolved row",
+                  "Channels: outcome columns per channel, the deals-with-no-single-source row",
      "families": ("customers", "revenue", "period_ratios"),
      "canonical_via": "reader_row", "status": "migrated"},
     {"consumer": "services/campaign_identity_service.py",
@@ -213,16 +213,12 @@ INVENTORY = (
                   "+ reason; customers never summed; SQL→customer unavailable",
      "families": ("customers", "revenue", "sql_to_customer"),
      "canonical_via": "subset_metrics", "status": "migrated"},
-    {"consumer": "services/dashboard_channels_service.py",
-     "surface": "/api/dashboard/channels",
-     "existing_source": "per-channel won deals summed as customers",
-     "existing_meaning": "won deals as customers, summed",
-     "canonical_replacement": "per-channel closed_won_deals; window customers "
-                              "from the mart's canonical metric",
-     "window_cohort": "business window · close-date cohort",
-     "ui_effect": "Momentum / mix / matrix count won deals; Customers KPI canonical",
-     "families": ("customers", "revenue", "period_ratios"),
-     "canonical_via": "customers_status", "status": "migrated"},
+    # PR-ADS-181A: the row for services/dashboard_channels_service.py
+    # (/api/dashboard/channels, Dashboard → Channels) stood here. The owner
+    # retired the tab; its route answers 404 and its builder is deleted, and
+    # RETIRED_READER_ROUTES / RETIRED_READER_SYMBOLS keep them that way. The
+    # Channels page reads closed-won outcomes through source_attribution_service
+    # (build_channel_outcomes, the evidence pass below).
     {"consumer": "services/dashboard_campaigns_service.py",
      "surface": "/api/dashboard/campaigns",
      "existing_source": "per-campaign won deals summed as customers",
@@ -379,8 +375,11 @@ READER_ENTRY_POINTS = (
 #: the builder only one of them served. A route registered under one of these
 #: paths, a page requesting one, or a production module that defines or calls
 #: the builder again is a violation (``retired_readers_absent``).
-RETIRED_READER_ROUTES = ("/api/revenue-deals", "/api/crm-funnel/customers-won")
-RETIRED_READER_SYMBOLS = ("build_customers_won",)
+#: PR-ADS-181A — the Dashboard → Channels tab's route and builder joined them
+#: (owner decision: the Channels page is the one channel surface).
+RETIRED_READER_ROUTES = ("/api/revenue-deals", "/api/crm-funnel/customers-won",
+                         "/api/dashboard/channels")
+RETIRED_READER_SYMBOLS = ("build_customers_won", "build_dashboard_channels")
 #: The legacy gate this PR removes, by name.
 LEGACY_GATE = "revenue_integration_connected"
 FORBIDDEN_IMPORTS = ("db.writers", "writers", "connectors.hubspot_pull",
@@ -629,7 +628,8 @@ def structural_checks(a: Audit) -> dict:
         a.check("no_external_calls_no_writes", gone not in server,
                 f"{SERVER} references the deleted legacy ROAS chain: {gone}")
 
-    # 21 — PR-ADS-178C: the retired Leads / Deals readers stay retired.
+    # 21 — PR-ADS-178C: the retired Leads / Deals readers stay retired
+    # (PR-ADS-181A: and the retired Dashboard → Channels reader).
     retired_reader_checks(a, js)
 
     # 18 — no UI text presents a period ratio as ROAS or CAC.
@@ -705,7 +705,8 @@ def _js_requests(js: str, path: str) -> bool:
 
 
 def retired_reader_checks(a: Audit, js: str) -> None:
-    """21 — PR-ADS-178C: no retired Leads / Deals reader is back.
+    """21 — PR-ADS-178C: no retired Leads / Deals reader is back
+    (PR-ADS-181A: nor the retired Dashboard → Channels reader).
 
     * no route is registered under a retired path (it would answer again);
     * no page requests one (a fetch to a 404 is a page that never loads);
@@ -738,7 +739,7 @@ META_SPEND_TRUTH = "services/meta_ads_spend_truth_service.py"
 META_TRUTH_ENTRY = "build_meta_ads_spend_truth_for_days"
 META_SPEND_READERS = (
     {"consumer": "services/meta_ads_spend_line_service.py",
-     "surface": "the Meta Ads (spend) line (Channels, Dashboard Channels)"},
+     "surface": "the Meta Ads (spend) line (Channels)"},
     {"consumer": "services/meta_ads_adset_truth_service.py",
      "surface": "ad-set breakdown (PR-ADS-171C); read by the Campaigns page's "
                 "Meta Ads — ad sets table (PR-ADS-177B)"},
@@ -759,13 +760,15 @@ META_LINE_ENTRY = "build_meta_ads_spend_line"
 META_LINE_PAGES = (
     {"consumer": "services/source_attribution_service.py",
      "surface": "/api/channel-funnel `outcomes.meta_ads_line`; Channels"},
-    {"consumer": "services/dashboard_channels_service.py",
-     "surface": "/api/dashboard/channels `meta_ads_line`; Dashboard Channels"},
+    # PR-ADS-181A: services/dashboard_channels_service.py (Dashboard → Channels)
+    # is retired with its tab; the Channels page is the line's one page.
 )
 #: The JS that renders the line, and the one gate every renderer goes through.
 META_JS_GATE = "metaLineSpendMetric"
-META_JS_RENDERERS = ("channelMetaSpendCellHtml", "channelOutcomeStripHtml",
-                     "renderChanMetaPanel")
+#: PR-ADS-181A: the strip cell (channelOutcomeStripHtml) and the retired
+#: Dashboard tab's panel (renderChanMetaPanel) are gone; the Meta Ads card of
+#: the Channels page's paid block is the one place the figure is drawn.
+META_JS_RENDERERS = ("channelMetaSpendCellHtml", "channelMetaCardHtml")
 #: Keys the line must never carry: a HubSpot count, or a figure over one.
 #: (``[l]`` keeps the SQL doctrine scanner from reading a field name here.)
 META_LINE_FORBIDDEN_KEYS = re.compile(
@@ -1415,8 +1418,6 @@ def _page_builders():
                                    "build_dashboard_overview")),
         ("dashboard_revenue", mod("services.dashboard_revenue_service",
                                   "build_dashboard_revenue")),
-        ("dashboard_channels", mod("services.dashboard_channels_service",
-                                   "build_dashboard_channels")),
         ("dashboard_campaigns", mod("services.dashboard_campaigns_service",
                                     "build_dashboard_campaigns")),
         ("dashboard_countries", mod("services.dashboard_countries_service",

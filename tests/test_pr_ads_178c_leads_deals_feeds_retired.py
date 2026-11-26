@@ -153,7 +153,11 @@ def test_03_the_reader_cutover_audit_holds_the_retirement_and_fails_when_one_ret
     ``audit_customer_revenue_reader_cutover`` — in the production
     certification's AUDITS — so a reintroduction goes red there too."""
     from scripts import audit_customer_revenue_reader_cutover as audit
-    assert audit.RETIRED_READER_ROUTES == RETIRED_ROUTES
+    # PR-ADS-181A: the list grew by the retired Dashboard → Channels route;
+    # both of these stay on it (tests/test_pr_ads_181a_channels_redesign.py
+    # holds the new entry).
+    assert audit.RETIRED_READER_ROUTES[:2] == RETIRED_ROUTES
+    assert set(RETIRED_ROUTES) <= set(audit.RETIRED_READER_ROUTES)
     assert "build_customers_won" in audit.RETIRED_READER_SYMBOLS
     from scripts.audit_platform_certification import AUDITS
     assert any(m == "scripts.audit_customer_revenue_reader_cutover" for _, m, _ in AUDITS)

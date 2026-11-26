@@ -365,17 +365,34 @@ def test_04_a_a_contact_with_no_created_date_bounds_every_column(monkeypatch):
 
 
 def test_04_b_the_channels_strip_reads_contacts_without_created_at():
-    """180A's re-audit: app.js never read it. It now bounds the strip."""
+    """180A's re-audit: app.js never read it. It now bounds the strip.
+    PR-ADS-181A: the strip is the "All channels" drawer's block, and the same
+    bound reaches the page's KPI cards and table (one rule, the model's)."""
     from tests.test_pr_ads_162i_channels_page_revamp import _payload
     p = {**_payload(), "metric_family": "acquisition_cohort_outcomes",
          "window_basis": "contact_created_at"}
-    out = _run_app("[renderChannelFunnel(%s, {}), renderChannelFunnel(%s, {})]"
-                   % (json.dumps({**p, "contacts_without_created_at": 2}),
-                      json.dumps({**p, "contacts_without_created_at": 0})))
+    bounded = {**p, "contacts_without_created_at": 2}
+    exactp = {**p, "contacts_without_created_at": 0}
+    out = _run_app("[channelDrawerHtml(%s, '__all__'), channelDrawerHtml(%s, '__all__'),"
+                   " renderChannelFunnel(%s, {}), renderChannelFunnel(%s, {})]"
+                   % (json.dumps(bounded), json.dumps(exactp), json.dumps(bounded),
+                      json.dumps(exactp)))
     bound, exact = _cells(out[0]), _cells(out[1])
     assert bound["contacts"].startswith("Contacts acquired at least 2,951 ")
     assert bound["opportunity"].startswith("Reached Opportunity at least 231 share unknown")
     assert exact["opportunity"].startswith("Reached Opportunity 231 7.8% of contacts")
+    text = lambda h: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", h))  # noqa: E731
+    page_bound, page_exact = text(out[2]), text(out[3])
+    assert "New contacts at least 2,951" in page_bound
+    assert "Reached SQL so far at least 377" in page_bound and "12.8%" not in page_bound
+    assert "2 contacts have no created date" in page_bound
+    assert "Reached SQL so far 377 12.8% of contacts" in page_exact
+    # "Most from" survives a known bound only when the undated contacts could
+    # not change the leader (1,147 > 746 + 2); an unstated count names none.
+    assert "Most from Paid Social · 1,147" in page_bound
+    unstated = text(_run_app("renderChannelFunnel(%s, {})"
+                             % json.dumps({**p, "contacts_without_created_at": None})))
+    assert "Most from" not in unstated.split("Channels ranked")[0]
 
 
 # ═════════════════════════════════════════════════════════════════════════════

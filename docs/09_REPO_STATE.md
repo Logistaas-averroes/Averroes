@@ -7713,3 +7713,42 @@ with minors".
   note appended to its MEMORY.md.
 * **Tests.** Unit 05_a, 05_b, 06_a, 07, 08 and PG 06; mutations N, Nb, H,
   Sf, W, P, U each fail a test (`docs/65` §8.4).
+
+---
+
+## PR-ADS-181A — Channels leads with customers; Dashboard → Channels retired; System tidy-up
+
+`docs/66`. Presentation change over the same `/api/channel-funnel` response:
+no figure and no publication verdict changes.
+
+* **Channels page.** Header with the period in the hash
+  (`#/channels?window=60d`) and an "Updated … UTC" chip; two labelled KPI
+  groups, each on its own verdict — Deals closed (customers won, closed-won
+  revenue) and Contacts acquired (new contacts, reached SQL, through the shared
+  funnel model) — with a "Most from" line only when the published rows make
+  the leader certain; one 7-column ranked table (default: customers won; every
+  column sorts; "All channels" is the window's own distinct customers; "Deals
+  with no single source" renamed from "Source not resolved"); a channel drawer
+  whose funnel is the shared block in a vertical layout; a paid block (Google
+  Ads card with the period-ratio disclosure beside each value; Meta spend only).
+  Ranking panels, stage picker, 14-column table, outcome strip and per-cell
+  paid-media "Unavailable" cells removed.
+* **Dashboard → Channels retired** (owner decision): the tab, loader and
+  renderers; `GET /api/dashboard/channels`; `services/dashboard_channels_service.py`;
+  `db.revenue_repository.fetch_source_leads_daily`. The route and builder are
+  in `RETIRED_READER_ROUTES` / `RETIRED_READER_SYMBOLS`; parity drops the
+  consumer and `source_group_sqls`; the SQL doctrine registry drops its rules.
+  `#/dashboard?tab=channels` opens Channels. `CHANNELS_LINK_LABEL` kept on the
+  seven remaining business-window links (a truth disclosure).
+* **System.** Run types in plain words (unknown shown as itself); `partial`
+  in the dataset strip's fallback labels; status colours that actually apply;
+  "Phase 1" badge and stale Leads / Deals wording fixed; 263 unused CSS classes
+  (≈1,570 lines) deleted, pixel-identical on every rendered page.
+* **Tests.** New `tests/test_pr_ads_181a_channels_redesign.py` (30; all fail on
+  `bb4d4a0`; 12 mutations caught). `test_pr_ads_136_dashboard_channels.py` and
+  six tab-only cases removed; 162A, 162I, 168A, 168B, 171B, 180A, 180B, 154C
+  (+F3, PG), 161E, 153E-A/A2/B, 162C, 162G, 165A, 174A, 177B, 178C, 179A and
+  the "such as Deals" string tests ported (`docs/66` §4). Auditor's 180C-F2 re-check note appended
+  to its MEMORY.md.
+* **Open.** CLAUDE.md's "two baseline deselects" is stale (one test exists;
+  the workflow already deselects only it) — left for its owner.

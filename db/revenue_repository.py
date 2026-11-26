@@ -778,42 +778,6 @@ def fetch_source_leads(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
-def fetch_source_leads_daily(start: date | None, end: date) -> dict:
-    """Per-day classified contacts by acquisition group (PR-ADS-136). Read-only.
-
-    Same durable `contact_source_classification` table and window semantics as
-    fetch_source_leads, but also returns the contact_created_at event date so the
-    Dashboard Channels tab can draw an SQL-over-time series per channel. Read-only.
-
-    Returns {available, rows:[{event_date, acquisition_group, status_category,
-             source_primary_raw, source_detail_raw}]}.
-    """
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return {"available": False, "rows": []}
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT (contact_created_at AT TIME ZONE 'UTC')::date AS event_date,
-                           acquisition_group, status_category,
-                           source_primary_raw, source_detail_raw
-                    FROM contact_source_classification
-                    WHERE contact_created_at IS NOT NULL
-                      AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
-                      AND contact_created_at < (%s::date + INTERVAL '1 day')
-                    """,
-                    (start, end),
-                )
-                rows = _rows_as_dicts(cur)
-                for r in rows:
-                    r["event_date"] = _as_date(r.get("event_date"))
-                return {"available": True, "rows": rows}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("fetch_source_leads_daily failed: %s", exc)
-        return {"available": False, "rows": []}
-
-
 def fetch_source_revenue(start: date | None, end: date) -> dict:
     """Closed-won deals in the window, by acquisition group. Read-only.
 

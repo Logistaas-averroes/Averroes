@@ -126,7 +126,8 @@ MIGRATED_CONSUMERS = [
     "services/dashboard_campaigns_service.py",
     "services/dashboard_countries_service.py",
     "services/dashboard_deals_service.py",
-    "services/dashboard_channels_service.py",
+    # PR-ADS-181A: "services/dashboard_channels_service.py" is deleted with
+    # the Dashboard → Channels tab.
     "services/revenue_attribution_service.py",
     "services/source_attribution_service.py",
     "services/revenue_decision_mart.py",
@@ -180,8 +181,6 @@ def _patch_business_total_stack(monkeypatch, rows=None, *, available=True):
                                       "excluded_non_paid_count": 0,
                                       "excluded_pseudo_campaign_count": 0})
     monkeypatch.setattr(repo, "fetch_source_leads",
-                        lambda s, e: {"available": True, "rows": []})
-    monkeypatch.setattr(repo, "fetch_source_leads_daily",
                         lambda s, e: {"available": True, "rows": []})
     monkeypatch.setattr(repo, "fetch_lead_daily_series",
                         lambda s, e: {"available": True, "rows": []})
@@ -553,33 +552,11 @@ def test_13b2_iso_emission_handles_date_datetime_string_and_none():
         datetime(2026, 4, 1, tzinfo=timezone.utc))
 
 
-def test_13c_channel_trend_bounds_are_explicit_utc_datetimes(monkeypatch):
-    """A DATE cast to `timestamptz` resolves against the SESSION time zone.
-
-    On a non-UTC session that shifts the window by hours and mis-buckets deals
-    that closed near a boundary, so the bounds must already be UTC datetimes
-    before they reach the ledger read.
-    """
-    from datetime import date, timezone
-
-    import db.deal_ledger_repository as ledger_repo
-    from services import dashboard_channels_service as channels
-
-    seen = []
-    patch_canonical_ledger(monkeypatch, [])
-    # PR-ADS-161E: membership is evaluated by the canonical truth.
-    from tests.canonical_ledger_fixtures import capture_canonical_bounds
-    capture_canonical_bounds(monkeypatch, seen)
-
-    channels._canonical_daily_revenue(date(2026, 4, 1), date(2026, 6, 30))
-    (start, end), = seen
-    for bound in (start, end):
-        assert isinstance(bound, datetime), bound
-        assert bound.tzinfo is not None and bound.utcoffset().total_seconds() == 0
-    assert start.date() == date(2026, 4, 1)
-    # Inclusive 30 June becomes the EXCLUSIVE 1 July bound.
-    assert end.date() == date(2026, 7, 1)
-    assert timezone.utc
+# PR-ADS-181A: test_13c_channel_trend_bounds_are_explicit_utc_datetimes stood
+# here. It called dashboard_channels_service._canonical_daily_revenue, deleted
+# with the Dashboard → Channels tab. Its rule — bounds reach the ledger read as
+# UTC datetimes — is held for EVERY consumer at the one boundary by
+# test_13c2 below, which is unchanged.
 
 
 def test_13c2_the_contract_normalizes_bounds_so_no_consumer_can_recreate_it(monkeypatch):

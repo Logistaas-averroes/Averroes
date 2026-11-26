@@ -400,7 +400,7 @@ def test_08_a_deal_closed_today_is_on_the_deals_page_and_not_on_the_country_page
     assert s["closed_won_deals"] == 1
     assert s["won_revenue_usd"] == pytest.approx(1000.0)
     assert country["window"]["window_range"]["disclosure"].endswith(
-        "Other revenue pages, such as Deals, already count deals closed today.")
+        "Other revenue pages, such as Pipeline, already count deals closed today.")
     # The campaign view keeps today: one more deal than the country view.
     campaign = build_revenue_decision_mart(view="campaign", window="last_6_months")
     assert campaign["summary"]["closed_won_deals"] == 2

@@ -55,7 +55,7 @@ from tests.test_pr_ads_138_dashboard_countries import (  # noqa: E402
 _REVENUE_PATHS = {
     "dashboard/overview": "kpis.closed_won_revenue_usd",
     "dashboard/revenue": "kpis.closed_won_revenue_usd",
-    "dashboard/channels": "kpis.closed_won_revenue_usd",
+    # PR-ADS-181A: "dashboard/channels" is retired with its tab.
     "dashboard/campaigns": "kpis.won_revenue_usd",
     "dashboard/countries": "kpis.won_revenue_usd",
     # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder, whose
@@ -68,7 +68,7 @@ _ALL_CONSUMERS = tuple(_REVENUE_PATHS)
 
 #: The subset of those that publish the ALL-SOURCE business total.
 _ALL_SOURCE_CONSUMERS = ("dashboard/overview", "dashboard/revenue",
-                         "dashboard/channels", "dashboard/deals", "pipeline",
+                         "dashboard/deals", "pipeline",
                          "revenue_decision_mart")
 
 
@@ -258,17 +258,19 @@ def test_f3_6_a_withheld_component_is_not_a_conservation_failure(monkeypatch):
     assert parity.V_CONSERVATION_BROKEN not in out["violation_codes"]
 
 
-@pytest.mark.parametrize("other", ["lifecycle_sqls", "source_group_sqls"])
+# PR-ADS-181A: "source_group_sqls" (Dashboard → Channels' legacy qualified-lead
+# count) is retired with its tab; the populations that remain are each still
+# their own question.
+@pytest.mark.parametrize("other", ["lifecycle_sqls", "google_ads_cohort_sqls"])
 def test_f3_7_country_sqls_are_never_compared_with_the_other_populations(other):
-    """Requirements 6 and 7. Five SQL populations, five questions."""
+    """Requirements 6 and 7. Four SQL populations, four questions."""
     pairs = {frozenset((d["left"], d["right"])) for d in parity.DISTINCT_BY_DESIGN}
     assert frozenset(("country_attributed_sqls", other)) in pairs
 
     scopes = {k: parity.METRIC_IDENTITIES[k]["scope"] for k in
               ("google_ads_cohort_sqls", "country_attributed_sqls",
-               "country_unattributed_residual_sqls", "source_group_sqls",
-               "lifecycle_sqls")}
-    assert len(set(scopes.values())) == 5, scopes
+               "country_unattributed_residual_sqls", "lifecycle_sqls")}
+    assert len(set(scopes.values())) == 4, scopes
 
 
 def test_f3_8_no_sql_is_assigned_to_a_guessed_country(monkeypatch):
@@ -585,7 +587,7 @@ def test_f3_22_production_revenue_reads_no_retired_ledger():
               "gclid_attribution", "campaign_performance.json")
     offenders = []
     for name in ("dashboard_overview_service", "dashboard_revenue_service",
-                 "dashboard_channels_service", "dashboard_campaigns_service",
+                 "dashboard_campaigns_service",
                  "dashboard_countries_service", "dashboard_deals_service",
                  "revenue_decision_mart", "canonical_revenue_service"):
         f = _ROOT / "services" / f"{name}.py"

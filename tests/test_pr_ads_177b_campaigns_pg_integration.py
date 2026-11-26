@@ -102,7 +102,7 @@ def test_01_a_deal_closed_today_is_on_overview_and_deals_and_not_on_campaigns(
     assert settled["settled_days"] is True
     assert (w["end_date"], w["through_reason"]) == (yesterday.isoformat(), "today_not_settled")
     assert w["window_range"]["disclosure"].endswith(
-        "Other revenue pages, such as Deals, already count deals closed today.")
+        "Other revenue pages, such as Pipeline, already count deals closed today.")
     uk = _row(settled, "brand - uk")
     assert uk["deal_ids"] == ["d-uk1"] and uk["closed_won_deals"] == 1
     assert settled["campaign_totals"]["closed_won_deals"] == 1
@@ -122,7 +122,7 @@ def test_01_a_deal_closed_today_is_on_overview_and_deals_and_not_on_campaigns(
 
     # And the Campaigns page says why, beside the range.
     html, rng = _render(settled)
-    assert "Other revenue pages, such as Deals, already count deals closed today." in rng
+    assert "Other revenue pages, such as Pipeline, already count deals closed today." in rng
     assert yesterday.isoformat() in rng
     assert "ends yesterday" in (ROOT / "static" / "index.html").read_text()
 

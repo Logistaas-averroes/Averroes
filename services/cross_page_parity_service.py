@@ -56,7 +56,6 @@ from services.canonical_contract import (
     SOURCE_CANONICAL_FUNNEL,
     SOURCE_CANONICAL_GEO,
     SOURCE_CANONICAL_SPEND,
-    SOURCE_REVENUE_BY_SOURCE,
     SOURCE_REVENUE_DECISION_MART,
     NO_SETTLED_DAY_IN_WINDOW,
     THROUGH_TODAY_NOT_SETTLED,
@@ -410,14 +409,14 @@ METRIC_IDENTITIES = {
         "consumers": [
             ("dashboard/overview", "kpis.closed_won_revenue_usd"),
             ("dashboard/revenue", "kpis.closed_won_revenue_usd"),
-            ("dashboard/channels", "kpis.closed_won_revenue_usd"),
             # PR-ADS-178B: Dashboard → Deals republishes the Pipeline builder;
             # both read the mart deal view's reader-contract summary.
             ("dashboard/deals", "kpis.won_revenue_usd.value"),
             (CONSUMER_PIPELINE, "kpis.won_revenue_usd.value"),
             ("revenue_decision_mart", "summary.won_revenue_usd"),
         ],
-        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
+        # PR-ADS-181A: Dashboard → Channels (the one consumer that read the
+        # source-group taxonomy, SOURCE_REVENUE_BY_SOURCE) is retired.
     },
     # PR-ADS-161E: deals and customers are two identities. A closed-won DEAL is a
     # HubSpot deal; a CUSTOMER is a distinct proven HubSpot company behind them.
@@ -429,7 +428,6 @@ METRIC_IDENTITIES = {
         "consumers": [
             ("dashboard/overview", "kpis.closed_won_deals"),
             ("dashboard/revenue", "kpis.closed_won_deals"),
-            ("dashboard/channels", "kpis.total_closed_won_deals"),
             ("dashboard/deals", "kpis.closed_won_deals.value"),
             (CONSUMER_PIPELINE, "kpis.closed_won_deals.value"),
             ("revenue_decision_mart", "summary.closed_won_deals"),
@@ -439,7 +437,6 @@ METRIC_IDENTITIES = {
             (CONSUMER_PIPELINE_CUSTOMERS_WON, "closed_won_deals.value"),
         ],
         "consumer_sources": {
-            "dashboard/channels": SOURCE_REVENUE_BY_SOURCE,
             CONSUMER_PIPELINE_CUSTOMERS_WON: SOURCE_CANONICAL_DEAL_LEDGER},
     },
     "customers": {
@@ -450,7 +447,6 @@ METRIC_IDENTITIES = {
         "consumers": [
             ("dashboard/overview", "kpis.customers"),
             ("dashboard/revenue", "kpis.customers"),
-            ("dashboard/channels", "kpis.customers"),
             ("dashboard/deals", "kpis.customers.value"),
             (CONSUMER_PIPELINE, "kpis.customers.value"),
             ("revenue_decision_mart", "summary.customers"),
@@ -564,20 +560,10 @@ METRIC_IDENTITIES = {
             ("dashboard/countries", "residual.sqls"),
         ],
     },
-    # Channels counts SQLs by SOURCE GROUP, which is a different population and
-    # genuinely differs from the campaign-attributable subset — 0 against 25 in
-    # the reference fixture, and that difference is the answer, not a defect.
-    # Registered as its own identity so it is checked, and never compared with
-    # the one above.
-    "source_group_sqls": {
-        "label": "SQLs by source group (channel taxonomy)",
-        "canonical_source": SOURCE_REVENUE_BY_SOURCE,
-        "scope": "source_group_sqls",
-        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
-        "consumers": [
-            ("dashboard/channels", "kpis.total_sqls"),
-        ],
-    },
+    # PR-ADS-181A: "source_group_sqls" (SQLs by source group, the legacy
+    # qualified-lead count of Dashboard → Channels) stood here. Its one consumer
+    # is retired with the tab, so it is no identity, and its two
+    # DISTINCT_BY_DESIGN pairs went with it.
     "google_ads_cohort_leads": {
         "label": "Leads · Google Ads contacts acquired in the window (acquisition cohort)",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
@@ -745,15 +731,6 @@ DISTINCT_BY_DESIGN = [
     },
     {
         "left": "google_ads_cohort_sqls",
-        "right": "source_group_sqls",
-        "reason": (
-            "Cohort SQLs count Google Ads-sourced contacts created in the window "
-            "that reached SQL; source-group SQLs count legacy qualified leads by "
-            "CRM acquisition source across every channel. Different populations "
-            "under one word."),
-    },
-    {
-        "left": "google_ads_cohort_sqls",
         "right": "country_attributed_sqls",
         "reason": (
             "Countries sums the cohort SQLs whose contact's own country is a REAL "
@@ -768,13 +745,6 @@ DISTINCT_BY_DESIGN = [
             "The two halves of the country split. An SQL is in exactly one of "
             "them, and a residual SQL is never assigned to a guessed country to "
             "make the real-country total look complete."),
-    },
-    {
-        "left": "country_attributed_sqls",
-        "right": "source_group_sqls",
-        "reason": (
-            "Country assignment and CRM acquisition source are different axes "
-            "over different populations; neither is a rollup of the other."),
     },
     {
         "left": "country_attributed_sqls",
@@ -1080,7 +1050,6 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
     from services.dashboard_revenue_service import build_dashboard_revenue  # noqa: PLC0415
     from services.dashboard_countries_service import build_dashboard_countries  # noqa: PLC0415
     from services.dashboard_campaigns_service import build_dashboard_campaigns  # noqa: PLC0415
-    from services.dashboard_channels_service import build_dashboard_channels  # noqa: PLC0415
     from services.dashboard_deals_service import build_dashboard_deals  # noqa: PLC0415
     from services.pipeline_service import build_pipeline  # noqa: PLC0415
     from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
@@ -1088,7 +1057,6 @@ def _build_consumers(window: str, now: datetime | None) -> dict:
     builders = {
         "dashboard/overview": lambda: build_dashboard_overview(window=window, now=now),
         "dashboard/revenue": lambda: build_dashboard_revenue(window=window, now=now),
-        "dashboard/channels": lambda: build_dashboard_channels(window=window, now=now),
         "dashboard/campaigns": lambda: build_dashboard_campaigns(window=window, now=now),
         "dashboard/countries": lambda: build_dashboard_countries(window=window, now=now),
         "dashboard/deals": lambda: build_dashboard_deals(window=window, now=now),

@@ -19,7 +19,7 @@ rests on numbers, not hope:
    the spend window a cohort figure must wait for before it means anything.
 4. **Channel placement** (PR-ADS-168A). How many won deals in each Channels
    window take one HubSpot original source (every associated contact agrees),
-   and how many sit on "Source not resolved", by reason — the Channels page's
+   and how many sit on "Deals with no single source" (was "Source not resolved"), by reason — the Channels page's
    own rule (``source_attribution_service.deal_channel``), over the truth's
    own window membership.
 

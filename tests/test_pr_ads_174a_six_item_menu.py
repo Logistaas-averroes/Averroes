@@ -492,5 +492,5 @@ def test_16_phone_width_the_items_fit_and_the_strip_wraps():
 
 def test_17_the_dashboard_inner_tabs_are_untouched():
     assert re.findall(r'class="dashboard-tab(?: is-active)?" data-dash-tab="([a-z]+)"', HTML) == [
-        "overview", "revenue", "channels", "campaigns", "countries", "deals"]
+        "overview", "revenue", "campaigns", "countries", "deals"]   # PR-ADS-181A: Channels retired
     assert 'data-dash-tab="overview" aria-current="page">Overview</button>' in HTML

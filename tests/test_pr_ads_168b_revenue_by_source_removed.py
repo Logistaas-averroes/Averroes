@@ -142,9 +142,10 @@ def test_04_code_used_only_by_the_routes_is_deleted():
     # PR-ADS-178B: Dashboard → Deals no longer does — it republishes the
     # Pipeline builder (its source breakdown is the deal list by each deal's
     # own source group, through the reader contract).
+    # PR-ADS-181A: services/dashboard_channels_service.py is deleted with the
+    # Dashboard → Channels tab.
     for rel in ("services/dashboard_overview_service.py",
-                "services/dashboard_revenue_service.py",
-                "services/dashboard_channels_service.py"):
+                "services/dashboard_revenue_service.py"):
         assert "build_revenue_by_source(" in (ROOT / rel).read_text(), rel
     assert "build_revenue_by_source(" not in (
         ROOT / "services/dashboard_deals_service.py").read_text()
@@ -306,20 +307,31 @@ def test_13_the_sql_doctrine_registry_names_no_deleted_symbol():
 
 
 def test_14_channels_carries_per_channel_deals_customers_and_revenue():
-    """The real channelOutcomeCellsHtml renders the three canonical figures per
-    channel row, each through rowMetricHtml (status + reason, never a dash)."""
+    """Each channel's three canonical figures, each through rowMetricHtml
+    (status + reason, never a dash). PR-ADS-181A: customers and revenue are the
+    ranked table's columns; the deal count is in the channel's drawer."""
     script = "\n".join([
         "const calls = [];",
         "function rowMetricHtml(r, key) { calls.push(key); return `[${key}]`; }",
-        "function canonicalMetricHtml() { return '[spend]'; }",
-        "const channelOutcomeInt = 0, channelOutcomeMoney = 0, channelOutcomeRatio = 0;",
-        _fn("channelOutcomeCellsHtml"),
-        "const html = channelOutcomeCellsHtml({}, {});",
-        "process.stdout.write(JSON.stringify({ calls, html }));",
+        "function canonicalMetricHtml() { return '[metric]'; }",
+        "function channelOutcomesPublished(o) { return true; }",
+        "function channelOutcomeOpts() { return {}; }",
+        "function channelsRange() { return ''; }",
+        "function escapeHtml(s) { return String(s); }",
+        "const channelOutcomeInt = 0, channelMoney = 0, CHANNELS_ALL = '__all__',",
+        "  CHANNEL_OUTCOME_NO_SOURCE = '(no source recorded)', CHANNELS_UNRESOLVED_LABEL = 'x';",
+        _fn("channelCellHtml"),
+        _fn("channelDrawerOutcomesHtml"),
+        "const row = {kind: 'channel', out: {}, f: {}};",
+        "const cells = ['customers', 'revenue'].map((key) => channelCellHtml(row, {key}, {}));",
+        "const drawer = channelDrawerOutcomesHtml({channels: [{source: 'S'}]}, 'S');",
+        "process.stdout.write(JSON.stringify({ calls, cells, drawer }));",
     ])
     out = json.loads(_node(script))
-    assert out["calls"][:3] == ["closed_won_deals", "customers", "won_revenue"]
-    assert "[closed_won_deals]" in out["html"] and "[won_revenue]" in out["html"]
+    assert out["calls"] == ["customers", "revenue_usd", "closed_won_deals", "customers",
+                            "revenue_usd"]
+    assert out["cells"] == ["[customers]", "[revenue_usd]"]
+    assert "[closed_won_deals]" in out["drawer"] and "[revenue_usd]" in out["drawer"]
     # And the server builds those rows through the reader contract.
     import inspect
     from services import source_attribution_service as sas
@@ -336,9 +348,11 @@ def test_14_channels_carries_per_channel_deals_customers_and_revenue():
 # other must not promise the same number.
 
 LINK_LABEL = "Open Channels (different windows and grouping)"
+# PR-ADS-181A: services/dashboard_channels_service.py (three links) is deleted
+# with the Dashboard → Channels tab.
 BUSINESS_WINDOW_SERVICES = (
     "services/dashboard_overview_service.py", "services/dashboard_revenue_service.py",
-    "services/dashboard_deals_service.py", "services/dashboard_channels_service.py",
+    "services/dashboard_deals_service.py",
 )
 
 
@@ -375,7 +389,9 @@ def test_15_every_dashboard_link_to_channels_discloses_the_difference():
         assert '"Open Channels"' not in (ROOT / rel).read_text(), rel
     # PR-ADS-178B: 10 — the six on Dashboard → Deals went with its decision
     # cards (scale ×3, watch ×3); every remaining link still carries the label.
-    assert total == 10
+    # PR-ADS-181A: 7 — the three on the retired Dashboard → Channels tab went
+    # with it; the Overview's four and Revenue's three keep the label.
+    assert total == 7
 
 
 def test_16_the_overview_best_source_signal_carries_the_label(monkeypatch):
