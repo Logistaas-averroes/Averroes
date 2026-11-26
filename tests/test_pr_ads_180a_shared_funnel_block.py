@@ -481,6 +481,9 @@ def _activity(**over):
                        # PR-ADS-180B: the gap over every contact that could
                        # belong to the window (none here).
                        "undated_contacts_could_belong": 0,
+                       # PR-ADS-180C: the server's verdict the producer always
+                       # sets; the page reads a missing one as a bound.
+                       "count_is_bound": False,
                        "previous_period": {"status": "no_comparison"}})
     conv = [{"from_event": a, "to_event": b, "available": True, "basis": "cohort",
              "rate_pct": r, "cohort_size": c, "converted": k, "cohort_label": f"in the {lab} cohort",
@@ -524,7 +527,8 @@ def _bound_activity(stage, n):
         reconciliation={"status": "partial", "reasons": ["missing_stage_entry_date"]},
         coverage={"stage_reached_without_entry_date": cov},
         undated_reach={"available": True, "counts": cov},
-        stages=[{**s, "undated_contacts_could_belong": cov[s["event"]]}
+        stages=[{**s, "undated_contacts_could_belong": cov[s["event"]],
+                 "count_is_bound": cov[s["event"]] > 0}
                 for s in _activity()["stages"]])
 
 

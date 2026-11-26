@@ -384,8 +384,14 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
     """The lifecycle funnel (stage-entry events), trimmed to what the page
     shows. An unreadable funnel is unavailable with the reason, never 0."""
     try:
-        f = crm_funnel.build("business", window, scope=scope,
-                             acquisition_group=acquisition_group, now=now)
+        # PR-ADS-180C-F1: the window's rows and the undated reach in ONE
+        # database snapshot (crm_funnel.one_read_snapshot) — two reads at two
+        # instants could tear "outside the rows" and print a false exact.
+        with crm_funnel.one_read_snapshot():
+            f = crm_funnel.build("business", window, scope=scope,
+                                 acquisition_group=acquisition_group, now=now)
+            reach = (crm_funnel.undated_stage_reach(f.get("window"))
+                     if f.get("available") else None)
     except ValueError:
         raise
     except Exception:  # noqa: BLE001 — an unreadable funnel is not a page outage
@@ -394,6 +400,35 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
                 "label": FUNNEL_LABEL,
                 "metric_family": crm_funnel.METRIC_FAMILY_STAGE_EVENTS,
                 "events": {}, "conversions": None}
+    coverage = _funnel_coverage(f.get("coverage"), scope)
+    available = bool(f.get("available"))
+    # PR-ADS-180C (docs/65): the undated reach over EVERY contact that could
+    # belong to the window — the read Overview → Lifecycle Activity bounds its
+    # counts with, read above in the SAME database snapshot as the rows
+    # (PR-ADS-180C-F1). The window's own rows (coverage) never see an undated
+    # contact with no date in the window, so "0 there" does not prove a count
+    # exact. Unread is None, and None is a bound.
+    undated = (crm_funnel.undated_reach_for_population(
+        reach, coverage,
+        whole=scope == crm_funnel.SCOPE_ALL_SOURCE and acquisition_group is None)
+        if available else None)
+    counts = (undated or {}).get("counts") if (undated or {}).get("available") else None
+    all_source = (undated or {}).get("all_source_counts") or {}
+    events = {}
+    for event, block in (f.get("events") or {}).items():
+        events[event] = {
+            **(block or {}),
+            # The same two per-stage fields the Activity block publishes.
+            "undated_contacts_could_belong": (counts or {}).get(event) if available else None,
+            "count_is_bound": (crm_funnel.stage_count_is_bound(event, coverage, undated)
+                               if available else None),
+            # Under a lead filter: the all-source figure the subset's is
+            # bounded by — named as all sources, never as the subset's count.
+            "undated_contacts_all_sources": (
+                all_source.get(event)
+                if available and undated and not undated.get("covers_selected_population")
+                else None),
+        }
     return {
         "available": f.get("available"),
         "reason": None if f.get("available") else "canonical_contact_store_unavailable",
@@ -404,14 +439,15 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
         "acquisition_group": f.get("acquisition_group"),
         "acquisition_group_label": f.get("acquisition_group_label"),
         "campaign_identity_available": f.get("campaign_identity_available"),
-        "events": f.get("events") or {},
+        "events": events,
         "conversions": f.get("conversions"),
         # Which stages were reached without an entry date: the page marks
         # those counts as lower bounds under partial evidence (F1 o1).
         # PR-ADS-178C: for the SELECTED scope only (the counts shown are that
         # scope's), so a narrow Scope no longer over-marks a stage that is
         # complete for it.
-        "coverage": _funnel_coverage(f.get("coverage"), scope),
+        "coverage": coverage,
+        "undated_reach": undated,
         "reconciliation": f.get("reconciliation"),
         "sync": f.get("sync"),
     }

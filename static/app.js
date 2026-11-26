@@ -3084,7 +3084,7 @@ function dashActivityFunnelModel(activity) {
     return { family, verdict: { status: "unavailable", reason: dashActivityReasonLabel(a.reason) },
       stages: lifecycleColumnLabels(stages) };
   }
-  const bounds = dashActivityLowerBounds(a, stages);
+  const bounds = stageEntryCountBounds(a, stages);
   const conversions = Array.isArray(a.conversions) ? a.conversions : [];
   const byPair = {};
   conversions.forEach((c) => { byPair[`${c.from_event}>${c.to_event}`] = c; });
@@ -3111,30 +3111,45 @@ function dashActivityFunnelModel(activity) {
 }
 
 /**
- * PR-ADS-180B (docs/63 §8 b) — the activity's lower bounds. The Pipeline rule
- * (stageEntryLowerBounds) reads the gap in the window's OWN rows; a contact
- * that reached a stage undated but has no date in the window is not among
- * them, so "0 there" never proved a count exact. Each stage also reads
- * `undated_contacts_could_belong`: the same gap over EVERY contact that could
- * belong to the window. Above zero, or not measured, the count is a bound.
+ * The lower bounds of a stage-entry funnel, each with its reason in words —
+ * ONE rule for both stage-entry funnels: Overview's Lifecycle Activity
+ * (PR-ADS-180B) and the Pipeline funnel (PR-ADS-180C, docs/65).
+ *
+ * `block` is the funnel block (`lifecycle_activity`, or Pipeline's `funnel`);
+ * `stages` are its stages, each `{event, undated_contacts_could_belong,
+ * count_is_bound, undated_contacts_all_sources?}`.
+ *
+ * The window-row rule (stageEntryLowerBounds) reads the gap in the window's
+ * OWN rows; a contact that reached a stage undated but has no date in the
+ * window is not among them, so "0 there" never proved a count exact. Each
+ * stage also reads `undated_contacts_could_belong`: the same gap over EVERY
+ * contact that could belong to the window. Above zero, or not measured, the
+ * count is a bound. A stage whose server verdict (`count_is_bound`) is not
+ * an explicit `false` is a bound too: missing is not "complete".
  */
-function dashActivityLowerBounds(a, stages) {
-  const out = stageEntryLowerBounds(a, stages.map((s) => s.event));
-  const measured = ((a || {}).undated_reach || {}).available === true;
-  stages.forEach((s) => {
+function stageEntryCountBounds(block, stages) {
+  const list = Array.isArray(stages) ? stages : [];
+  const out = stageEntryLowerBounds(block, list.map((s) => s.event));
+  const measured = ((block || {}).undated_reach || {}).available === true;
+  list.forEach((s) => {
     const n = s.undated_contacts_could_belong;
-    if (!measured || n === null || n === undefined) {
+    const all = s.undated_contacts_all_sources;
+    if (measured && (n === null || n === undefined) && all !== null && all !== undefined
+        && Number(all) > 0) {
+      // A lead filter narrows the funnel; the undated reach is counted over
+      // all sources. Its figure bounds the subset's, it is not the subset's.
+      out[s.event] = `${fmtCount(all)} contact${Number(all) === 1 ? "" : "s"} across all sources reached this stage with no entry date recorded in HubSpot and could belong to this window; how many of them the lead filters select is not measured`;
+    } else if (!measured || n === null || n === undefined) {
       out[s.event] = "the contacts that reached this stage with no entry date could not all be counted, so this count may be missing some";
     } else if (Number(n) > 0) {
       out[s.event] = `${fmtCount(n)} contact${Number(n) === 1 ? "" : "s"} reached this stage with no entry date recorded in HubSpot and could belong to this window`;
     }
     // PR-ADS-180B-F1: the server's own verdict on the count is republished,
-    // never overruled. A stage the server marks a lower bound
-    // (`count_is_bound: true`) is one even where the evidence above names no
-    // reason — e.g. a build whose coverage does not report the stage
-    // (`_stage_count_is_bound`). The page's own rules above still bound a
-    // stage the server states exact; they only ever add a bound.
-    if (!out[s.event] && s.count_is_bound === true) {
+    // never overruled. PR-ADS-180C: fail closed — a stage the server does
+    // not state complete (`count_is_bound` true, or missing) is a bound even
+    // where the evidence above names no reason. The page's own rules still
+    // bound a stage the server states exact; they only ever add a bound.
+    if (!out[s.event] && s.count_is_bound !== false) {
       out[s.event] = "the server does not state this count complete: the evidence does not show every contact that reached this stage with an entry date";
     }
   });
@@ -6953,7 +6968,11 @@ function pipelineFunnelModel(f) {
   const family = { key: f.metric_family,
     basis: stageEntryWindowBasis(LEADS_STAGES.map((s) => events[s.event])) };
   const convByPair = {};
-  const lowerBound = stageEntryLowerBounds(f, LEADS_STAGES.map((s) => s.event));
+  // PR-ADS-180C: the Overview Activity rule, whole (stageEntryCountBounds) —
+  // the window's rows AND the undated reach over every contact that could
+  // belong to the window, and the server's own `count_is_bound`.
+  const lowerBound = stageEntryCountBounds(f,
+    LEADS_STAGES.map((s) => ({ ...(events[s.event] || {}), event: s.event })));
   (f.conversions || []).forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
   const verdict = mismatch
     ? { status: "withheld", word: "Reconciliation required",
@@ -7981,10 +8000,10 @@ function renderRevenueHealth(audit) {
     </div>
 
     <div class="revenue-summary-strip revenue-summary-strip--four">
-      <div><span>Included paid leads missing dates</span><strong>${fmtCount(audit.missing_contact_created_at_count)}</strong></div>
-      <div><span>Legacy paid rows excluded from revenue truth</span><strong>${fmtCount(audit.legacy_excluded_count)}</strong></div>
-      <div><span>Excluded non-paid rows</span><strong>${fmtCount(audit.excluded_non_paid_count)}</strong></div>
-      <div><span>Excluded pseudo campaigns</span><strong>${fmtCount(audit.excluded_pseudo_campaign_count)}</strong></div>
+      <div><span>Included paid leads missing dates</span><strong>${fmtCountOrUnknown(audit.missing_contact_created_at_count)}</strong></div>
+      <div><span>Legacy paid rows excluded from revenue truth</span><strong>${fmtCountOrUnknown(audit.legacy_excluded_count)}</strong></div>
+      <div><span>Excluded non-paid rows</span><strong>${fmtCountOrUnknown(audit.excluded_non_paid_count)}</strong></div>
+      <div><span>Excluded pseudo campaigns</span><strong>${fmtCountOrUnknown(audit.excluded_pseudo_campaign_count)}</strong></div>
     </div>
 
     <div class="panel">
@@ -8144,7 +8163,7 @@ function renderRecoveryResult(status) {
     <div class="recovery-result">
       <div class="recovery-result__head">${escapeHtml(mode)} · ${escapeHtml(status.date_from || "")} → ${escapeHtml(status.date_to || "")} · <strong>${escapeHtml(status.status || "")}</strong></div>
       <div class="revenue-summary-strip revenue-summary-strip--four">
-        ${rows.map(([label, val]) => `<div><span>${label}</span><strong>${fmtCount(val)}</strong></div>`).join("")}
+        ${rows.map(([label, val, fmt]) => `<div><span>${label}</span><strong>${(fmt || fmtCount)(val)}</strong></div>`).join("")}
       </div>
       ${errorsHtml}
     </div>
@@ -8571,7 +8590,8 @@ function renderReconResult(status) {
     ["No usable contact identity", s.no_usable_contact_identity],
     ["HubSpot contact not found", s.hubspot_contact_not_found],
     ["HubSpot contact has no createdate", s.hubspot_contact_no_createdate],
-    ["Already excluded legacy rows", s.already_excluded_legacy],
+    // PR-ADS-180C-F2: None when the exclusions table could not be read.
+    ["Already excluded legacy rows", s.already_excluded_legacy, fmtCountOrUnknown],
     ["Remaining unresolved", unresolved],
   ];
   const errorsHtml = (status.errors && status.errors.length)
@@ -8583,7 +8603,7 @@ function renderReconResult(status) {
     <div class="recovery-result">
       <div class="recovery-result__head">${escapeHtml(mode)} · <strong>${escapeHtml(status.status || "")}</strong></div>
       <div class="revenue-summary-strip revenue-summary-strip--four">
-        ${rows.map(([label, val]) => `<div><span>${label}</span><strong>${fmtCount(val)}</strong></div>`).join("")}
+        ${rows.map(([label, val, fmt]) => `<div><span>${label}</span><strong>${(fmt || fmtCount)(val)}</strong></div>`).join("")}
       </div>
       ${readyLine}
       ${errorsHtml}
@@ -15079,6 +15099,13 @@ function fmtNum(v, decimals) {
 function fmtCount(v) {
   if (v === null || v === undefined) return "—";
   return Number(v).toLocaleString();
+}
+
+// PR-ADS-180C(-F1): a count the server could not read (None) is "Unknown" —
+// never 0, and never a dash a reader can take for "none".
+function fmtCountOrUnknown(v) {
+  if (v === null || v === undefined) return "Unknown";
+  return fmtCount(v);
 }
 
 // ── Business revenue windows (PR-ADS-107A) ────────────────────────────────

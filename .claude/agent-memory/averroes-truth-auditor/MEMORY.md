@@ -947,3 +947,98 @@ truncated list. Verified by execution on exported copies of both commits.
   23 related contract/PG modules 676 passed, 0 skipped; full suite with -x
   reached ~92% with no failure before my own 50-min `timeout` cut it (NOT a
   complete run). Lesson: give the full suite >60 min or run it unbounded.
+
+## PR-ADS-180B-F1 re-review (7cd5e22 on 46f5396, PR 240, 2026-11-25)
+- Verdict: merge with minors. No Major. 10 of 13 new unit tests fail on
+  46f5396; 01_b / 01_c / 05_b pass there by design (they guard existing
+  branches / the unchanged rule). Mutations G, H, K, L and removing the page's
+  `count_is_bound === true` clause each now fail a test for the intended reason.
+- m4 verified: `contacts_without_created_at` = `SELECT COUNT(*) FROM
+  hubspot_contact_funnel WHERE created_at IS NULL` (whole table, no window, no
+  source). It is read in the same try as the cohort rows; failure yields None
+  for both. cohort, readiness (via source_health) and the Overview block all
+  come from ONE `cohort_outcomes` read, so `created_at_disclosure_problems` is
+  an invariant guard, not an independent re-derivation. The UI reads the field
+  only under a published verdict (`martCohortFunnelData`,
+  `acquisitionFunnelModel`). Channels still withholds its copy (declared, §12.3).
+- Page `count_is_bound`: a missing key keeps the page's own rules. Probe: a
+  synthetic stage with undated measured 0, coverage silent and reconciliation
+  ok, and no key, renders "MQL 12" exact. No production path. The only producer
+  is `_lifecycle_activity_block`, which always sets the key when available. There
+  is no cache. A pre-180B payload lacks `undated_reach`, and the page bounds that
+  anyway. Accepted.
+- Still open (pre-existing since 167A/177A, not F1): `_withhold_cohort` keeps
+  `metadata.coverage_notes` from a PUBLISHED cohort. Probe: a no-settled-day
+  window's withheld block still says "4 cohort SQL contact(s) are proven by
+  lifecycle stage..." while sql_status is unavailable. It is in the API body
+  only (app.js never renders coverage_notes), and `mart_withheld_exposures`
+  does not scan the notes.
+- Same key, different figure: `build_revenue_attribution_audit`'s
+  `missing_contact_created_at_count` is the legacy lead-date-grain count and
+  still defaults to 0 (`grain.get(..., 0)`). It is not the readiness/cohort figure.
+
+## PR-ADS-180C audit (98cd829 on 7cd5e22, 2026-11-25) — merge with minors
+- Pipeline `_funnel` now calls `crm_funnel.undated_stage_reach` +
+  `undated_reach_for_population` + `stage_count_is_bound` (moved from
+  dashboard_overview_service). Under a Scope/Source filter a stage is exact
+  only if all-source undated n == 0, or `outside_window_rows[e] == 0` AND the
+  scope's own window-row gap is 0. Logic verified sound on ONE snapshot.
+- `outside_window_rows` predicate: verified by capturing executed SQL that
+  fetch_funnel_contacts' window clause appears verbatim (5 FILTERs + WHERE),
+  same params. But it is a SECOND COPY: mutations widening only the outside
+  copy's end (+2 days) or start (-1 day) edge — the UNSAFE direction (false
+  exact) — survive every 180C/178C/180B test (no edge-day fixture).
+- NOT one snapshot. `single_snapshot`/`one_snapshot` only memoise the
+  closed-won universe; get_conn() is a fresh READ COMMITTED txn per read
+  except inside a certification `pinned_read_snapshot`. PG probe: a sync commit
+  between fetch_funnel_contacts and fetch_undated_stage_reach (g-out gains an
+  in-window MQL date) made Google Ads SQL print "2" exact; both consistent
+  states say "at least 2". docs/65 §1 "inside build_pipeline's snapshot" is
+  overclaimed. Same tear exists for Overview Activity (whole scope) since 180B.
+- 178C PG test_05 change is a legit correction (c-nolb/c-uk/c-fj are PAID,
+  undated SQL+, created in window, no stage date in it). Its keyword
+  `== all five bounds` pins OVER-marking (no keyword contact exists; 178C's
+  keyword exactness was true, docs/65 §1.2 implies it was false).
+- `undated_reach.population` says "all_source" over narrowed counts.
+- Unknown-as-zero still on the Revenue Health strip on an outage (probe:
+  "Unknown | 0 | 0 | 0"): excluded_non_paid / pseudo (declared), plus
+  `legacy_excluded_count = 0` on exception and zero-initialised
+  `counts_by_source_type` (NOT declared). Legacy leads table; Minor.
+- Withheld mart cohort (`_withhold_cohort`): probe found no numeric leaf but
+  the table-wide `contacts_without_created_at`; notes rebuilt; mart
+  lifecycle_event_coverage is always counts_withheld. No new leak path found.
+- Evidence: 16/16 new tests fail on 7cd5e22 (git archive copy); 159 tests in
+  180C/178B/178C/166A/180A/180B/180B-F1 modules pass, PG ran, no skips;
+  60 related modules (grep for the touched symbols) 2007 passed, 0 skipped,
+  HEAD stable. Full suite NOT run.
+
+## PR-ADS-180C-F1 re-review (8964dee on 98cd829, PR 241, 2026-11-26) — do not merge as is
+- MAJOR (CI red, false production-audit violation): F1 moved the window
+  clause into `crm_funnel_repository.any_stage_date_in_window`, so
+  `fetch_funnel_contacts`' own source no longer contains `effective_date_sql(`.
+  `scripts/audit_lifecycle_sql_coverage.check_effective_date_consistency` is
+  LEXICAL per reader (`_function_source`) and now reports a violation; the
+  coverage audit exits 1 and `audit_sql_coverage_gate` reports
+  `canonical_readers_agree` broken. 12 tests fail on 8964dee and pass on
+  98cd829: 159 test_26[fetch_funnel_contacts]/44/60/61/97/118, 160
+  test_29/63/88/89/90, 161C test_70. The builder ran only the 180C/180B/178B/
+  178C modules. Lesson: a refactor that moves SQL into a helper breaks every
+  lexical "reader uses X" guard; grep `_function_source` / `_EFFECTIVE_DATE_READERS`.
+- `one_read_snapshot` = `pinned_read_snapshot`. Verified on PG: a real _Pin,
+  no violations, campaign identity resolves inside it. Mutation S
+  (nullcontext) fails PG 04_a/b/c. With the schema lock held, or queued
+  behind a waiting init_db while a certification window holds it shared,
+  Pipeline waits the full lock timeout (60 s in prod) and then reads
+  `lifecycle_funnel_unreadable` (fail closed). Overview pins twice (current
+  and previous period). A silent two-read fallback on a snapshot failure
+  (mutation Sf) passes every test: the fail-closed path is real but untested.
+- Edge guard works: PG 05 kills an undated-read-only end drift of +1 day and a
+  strict start edge in the shared helper (also test_02).
+- `count_lead_exclusions` -> None: the only other caller is
+  lead_reconciliation_service summary `already_excluded_legacy` (no
+  arithmetic; renders "—" via fmtCount). Pre-existing: an unreadable
+  `fetch_missing_event_date_leads` gives [] -> status success, ready True.
+- `population: "selected_population_narrowed"` has no test (mutation survives)
+  and no reader.
+- Evidence: 226 tests (180C, 178B/C, 166A, 180A/B, 180B-F1, revenue audit,
+  179A/B, 115) passed, PG ran, no skips.

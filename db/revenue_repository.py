@@ -571,8 +571,9 @@ def fetch_lead_date_grain_health(start: date | None, end: date) -> dict:
     (distinct contacts in the window, by source_type). Read-only.
     """
     base = fetch_lead_quality(start, end)
-    counts = {k: 0 for k in
-              ("paid_search", "organic_search", "direct", "referral", "email", "other", "null")}
+    # PR-ADS-180C-F1: the per-source counts are None until the query has
+    # actually run — an unread table is unknown, never a row of zeros.
+    counts = None
     try:
         with get_conn() as conn:
             if conn is not None:
@@ -589,20 +590,29 @@ def fetch_lead_date_grain_health(start: date | None, end: date) -> dict:
                         """,
                         (start, end),
                     )
+                    read = {k: 0 for k in ("paid_search", "organic_search", "direct",
+                                           "referral", "email", "other", "null")}
                     for st, n in cur.fetchall():
-                        counts[st if st in counts else "other"] = (
-                            counts.get(st if st in counts else "other", 0) + int(n)
+                        read[st if st in read else "other"] = (
+                            read.get(st if st in read else "other", 0) + int(n)
                         )
+                    counts = read
     except Exception as exc:  # noqa: BLE001
+        counts = None
         logger.warning("fetch_lead_date_grain_health counts failed: %s", exc)
 
     return {
         "available": base.get("available", False),
         "lead_event_date_field_available": base.get("lead_event_date_field_available", False),
         "lead_window_safe": base.get("event_date_safe", False),
-        "missing_contact_created_at_count": base.get("missing_contact_created_at_count", 0),
-        "excluded_non_paid_count": base.get("excluded_non_paid_count", 0),
-        "excluded_pseudo_campaign_count": base.get("excluded_pseudo_campaign_count", 0),
+        # PR-ADS-180C: an unread count is None — unknown is not zero.
+        "missing_contact_created_at_count": (base.get("missing_contact_created_at_count")
+                                             if base.get("available") else None),
+        # PR-ADS-180C-F1: likewise None when unread.
+        "excluded_non_paid_count": (base.get("excluded_non_paid_count")
+                                    if base.get("available") else None),
+        "excluded_pseudo_campaign_count": (base.get("excluded_pseudo_campaign_count")
+                                           if base.get("available") else None),
         "counts_by_source_type": counts,
     }
 

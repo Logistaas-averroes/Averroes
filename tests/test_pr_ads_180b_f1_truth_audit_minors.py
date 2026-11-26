@@ -196,6 +196,13 @@ def test_04_c_a_window_with_no_settled_day_keeps_the_disclosure(monkeypatch):
                          "no_settled_day_in_window")
     assert all(c["totals"][f] is None for f in STAGE_FIELDS)
     assert c["contacts_without_created_at"] == 2
+    # PR-ADS-180C (carried minor a): withheld means absent — no note may state
+    # the cohort SQL gap ("4 cohort SQL contact(s) are proven by lifecycle
+    # stage…"), a floor on the withheld SQL count. The table-wide
+    # no-created-date note survives.
+    notes = c["metadata"]["coverage_notes"]
+    assert not any(re.match(r"^\d+ cohort SQL contact", n) for n in notes), notes
+    assert any(n.startswith("2 canonical contact(s) have no created date") for n in notes)
 
 
 def test_04_d_the_audit_holds_every_copy_to_one_value(monkeypatch):

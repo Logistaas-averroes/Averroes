@@ -1583,9 +1583,14 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
     try:
         from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
 
-        payload = _funnel.build(
-            _funnel.WINDOW_BUSINESS, window,
-            scope=_funnel.SCOPE_ALL_SOURCE, now=now)
+        # PR-ADS-180C-F1: the funnel rows and the undated reach in ONE
+        # database snapshot; two transactions could tear between them.
+        with _funnel.one_read_snapshot():
+            payload = _funnel.build(
+                _funnel.WINDOW_BUSINESS, window,
+                scope=_funnel.SCOPE_ALL_SOURCE, now=now)
+            undated = (_undated_reach(payload.get("window"))
+                       if payload.get("available") else None)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[dashboard_overview] canonical lifecycle funnel failed: %s", exc)
         return {**empty, "available": False, "status": "unavailable",
@@ -1632,7 +1637,7 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         "campaign_identity_available": payload.get("campaign_identity_available"),
         # PR-ADS-180B (docs/63 §8 b): undated stage reach over EVERY contact
         # that could belong to this window, not only the window's own rows.
-        "undated_reach": _undated_reach(payload.get("window")) if available else None,
+        "undated_reach": undated if available else None,
         # PR-ADS-155 §1: one Lead-anchored cohort followed forward. PR-ADS-180B
         # took it off the Overview page (the acquisition cohort replaced it);
         # it is still published here because the cross-page parity audit reads
@@ -1681,8 +1686,12 @@ def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
     try:
         from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
 
-        payload = _funnel.build(_funnel.WINDOW_BUSINESS, prev_key,
-                                scope=_funnel.SCOPE_ALL_SOURCE, now=prev_now)
+        # PR-ADS-180C-F1: one database snapshot for the build and its reach.
+        with _funnel.one_read_snapshot():
+            payload = _funnel.build(_funnel.WINDOW_BUSINESS, prev_key,
+                                    scope=_funnel.SCOPE_ALL_SOURCE, now=prev_now)
+            undated = (_undated_reach(payload.get("window"))
+                       if payload.get("available") else None)
     except Exception as exc:  # noqa: BLE001 — a comparison is optional; truth is not
         logger.warning("[dashboard_overview] previous-period lifecycle funnel "
                        "failed: %s", exc)
@@ -1698,7 +1707,6 @@ def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
     # PR-ADS-180B (docs/63 §8, carried from the 180A re-audit): a previous
     # count that is a lower bound is no baseline. "+X% vs prior" against it is
     # a change nobody measured, and its sign can flip.
-    undated = _undated_reach(payload.get("window"))
     return {
         "available": True,
         "label": label,
@@ -1720,26 +1728,12 @@ REASON_CURRENT_LOWER_BOUND = "current count is a lower bound"
 def _undated_reach(window: dict | None) -> dict:
     """``fetch_undated_stage_reach`` for one funnel window payload: per stage,
     the undated contacts that could belong to it, over the whole table. A read
-    that fails is ``available: False`` with no counts — never zeros."""
-    from db import crm_funnel_repository as funnel_repo  # noqa: PLC0415
+    that fails is ``available: False`` with no counts — never zeros.
 
-    w = window or {}
-
-    def _day(value):
-        if value in (None, ""):
-            return None
-        return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
-
-    try:
-        read = funnel_repo.fetch_undated_stage_reach(_day(w.get("start_date")),
-                                                     _day(w.get("end_date")))
-    except Exception as exc:  # noqa: BLE001 — unknown, never zero
-        logger.warning("[dashboard_overview] undated stage reach unreadable: %s", exc)
-        read = {"available": False, "counts": None}
-    counts = read.get("counts") if read.get("available") else None
-    return {"available": counts is not None,
-            "counts": dict(counts) if counts is not None else None,
-            "rule": read.get("rule") or getattr(funnel_repo, "UNDATED_REACH_RULE", None)}
+    PR-ADS-180C: the rule lives in ``canonical_crm_funnel_service`` so the
+    Pipeline funnel reads the same bound (docs/65); this is that function."""
+    from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
+    return _funnel.undated_stage_reach(window)
 
 
 def _stage_count_is_bound(event: str, coverage: dict | None,
@@ -1749,15 +1743,10 @@ def _stage_count_is_bound(event: str, coverage: dict | None,
     A bound when the build's own coverage does not report the stage, or
     reports undated contacts in the window's rows; or when the undated reach
     over every contact that could belong to the window is unknown or above
-    zero. Missing is never read as zero."""
-    missing = ((coverage or {}).get("stage_reached_without_entry_date") or {})
-    own = missing.get(event) if isinstance(missing, dict) else None
-    if own is None or own > 0:
-        return True
-    counts = (undated or {}).get("counts") if (undated or {}).get("available") else None
-    if counts is None or counts.get(event) is None:
-        return True
-    return counts[event] > 0
+    zero. Missing is never read as zero. PR-ADS-180C: one rule, shared with
+    the Pipeline funnel (``canonical_crm_funnel_service.stage_count_is_bound``)."""
+    from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
+    return _funnel.stage_count_is_bound(event, coverage, undated)
 
 
 def _activity_trend(current, previous, *, current_bound: bool, previous_bound: bool) -> dict:

@@ -3593,8 +3593,8 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     try:
         import db.writers as _db_writers  # noqa: PLC0415
         legacy_excluded_count = _db_writers.count_lead_exclusions()
-    except Exception:  # noqa: BLE001
-        legacy_excluded_count = 0
+    except Exception:  # noqa: BLE001 — PR-ADS-180C-F1: unread is None, never 0
+        legacy_excluded_count = None
 
     return {
         "window": {
@@ -3605,10 +3605,12 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
             "is_closed_window": resolved.get("is_closed_window", False),
         },
         "date_grain_health": date_grain_health,
-        "counts_by_source_type": grain.get("counts_by_source_type", {}),
-        "excluded_non_paid_count": grain.get("excluded_non_paid_count", 0),
-        "excluded_pseudo_campaign_count": grain.get("excluded_pseudo_campaign_count", 0),
-        "missing_contact_created_at_count": grain.get("missing_contact_created_at_count", 0),
+        # PR-ADS-180C-F1: an unread figure is None, never 0 or {}.
+        "counts_by_source_type": (grain or {}).get("counts_by_source_type"),
+        "excluded_non_paid_count": (grain or {}).get("excluded_non_paid_count"),
+        "excluded_pseudo_campaign_count": (grain or {}).get("excluded_pseudo_campaign_count"),
+        # PR-ADS-180C: an unread count is None, never 0 (unknown is not zero).
+        "missing_contact_created_at_count": (grain or {}).get("missing_contact_created_at_count"),
         "legacy_excluded_count": legacy_excluded_count,
         "pseudo_campaign_rows": pollution.get("pseudo_campaign_rows", []),
         "email_campaign_rows": pollution.get("email_campaign_rows", []),

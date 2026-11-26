@@ -101,15 +101,32 @@ def _ledger(monkeypatch, *, companies=True, sync_state=None, available=True,
     return rows
 
 
-def _pipeline(monkeypatch, funnel=None, **kwargs) -> dict:
+_EVENTS = ("lead", "mql", "sql", "opportunity", "customer")
+
+
+def _no_undated_anywhere(_start, _end):
+    """``fetch_undated_stage_reach`` for the hand-built slice: no contact
+    reached a stage without its entry date, in the window's rows or outside."""
+    return {"available": True, "counts": dict.fromkeys(_EVENTS, 0),
+            "outside_window_rows": dict.fromkeys(_EVENTS, 0)}
+
+
+def _pipeline(monkeypatch, funnel=None, *, undated=_no_undated_anywhere, **kwargs) -> dict:
     """PR-ADS-178C (m7): the REAL Pipeline builder's payload for the window,
     JSON-normalised as the route serves it. Its one substituted input is the
     lifecycle funnel slice (``crm_funnel.build``): the production-shaped
-    slice by default, or the real funnel's own payload (database cases)."""
+    slice by default, or the real funnel's own payload (database cases).
+
+    PR-ADS-180C: the builder also reads the undated stage reach; a slice is
+    paired with its own (``undated``) — ``None`` keeps the real read
+    (database cases)."""
+    from db import crm_funnel_repository as repo
     from services import canonical_crm_funnel_service as crm_funnel
     from services.pipeline_service import build_pipeline
     slice_ = _funnel_payload() if funnel is None else funnel
     monkeypatch.setattr(crm_funnel, "build", lambda *a, **k: slice_)
+    if undated is not None:
+        monkeypatch.setattr(repo, "fetch_undated_stage_reach", undated)
     return json.loads(json.dumps(build_pipeline(WINDOW, now=NOW, **kwargs),
                                  default=str))
 
@@ -136,6 +153,13 @@ def _funnel_payload(count=STAGE_MOVES, window_key=WINDOW):
     """The slice of ``/api/crm-funnel`` the customer figures read."""
     return {"available": True, "window": {"window_key": window_key},
             "reconciliation": {"status": "ok"},
+            # PR-ADS-180C: a real build always reports its coverage; without
+            # it no stage is proven complete (the stage would be a bound).
+            "coverage": {"stage_reached_without_entry_date": {"customer": 0},
+                         "stage_reached_without_entry_date_by_scope": {
+                             "customer": {"all_source": 0, "google_ads_source": 0,
+                                          "campaign_attributable": 0,
+                                          "keyword_attributable": 0}}},
             "events": {"customer": {
                 "count": count, "metric_family": "lifecycle_stage_events",
                 "window_basis": "date_entered_customer"}}}
@@ -930,7 +954,7 @@ def test_23_the_production_quarter_over_the_real_funnel_219_moves_beside_8_won_d
     _ledger(monkeypatch, durable=False)
     # PR-ADS-178C (m7): the real Pipeline builder over the real funnel's
     # payload and this ledger.
-    p = _pipeline(monkeypatch, funnel=payload)
+    p = _pipeline(monkeypatch, funnel=payload, undated=None)
     won = p["customers_won"]
     assert won["customers"]["value"] == WON_COMPANIES
     assert won["closed_won_deals"]["value"] == WON_DEALS

@@ -123,7 +123,48 @@ def _function_source(path: Path, name: str) -> str | None:
     return None
 
 
-def check_effective_date_consistency(f: Findings) -> dict:
+#: PR-ADS-180C-F2 — repository helpers a reader may delegate its window
+#: predicate to. A call to one counts as the shared expression ONLY when the
+#: helper's own source uses it and builds no bare stage-entry column; a bare
+#: column in the helper is a violation of every reader that calls it.
+_SHARED_WINDOW_HELPERS = ("any_stage_date_in_window",)
+
+_SHARED_EXPR_MARKERS = ("effective_date_sql(", "_effective_date_sql(")
+_BARE_COLUMN_MARKER = "EVENT_DATE_COLUMN[event]"
+
+
+def reader_effective_date_status(repo_file: Path, name: str) -> dict:
+    """How ONE reader resolves its stage-entry dates, lexically, following ONE
+    level into a known window helper (``_SHARED_WINDOW_HELPERS``).
+
+    ``shared``: the reader's own source uses the shared expression, or it
+    calls a known helper whose own source does and builds no bare column.
+    ``bare``: the reader, or a helper it calls, resolves a bare column.
+    ``unfound``: names that could not be located (the reader or a helper) —
+    a helper that cannot be read certifies nothing."""
+    src = _function_source(repo_file, name)
+    if src is None:
+        return {"found": False, "shared": False, "bare": False, "unfound": [name],
+                "helpers": []}
+    shared = any(m in src for m in _SHARED_EXPR_MARKERS)
+    bare = _BARE_COLUMN_MARKER in src
+    unfound: list = []
+    helpers = [h for h in _SHARED_WINDOW_HELPERS if f"{h}(" in src]
+    for helper in helpers:
+        hsrc = _function_source(repo_file, helper)
+        if hsrc is None:
+            unfound.append(helper)
+            continue
+        helper_bare = _BARE_COLUMN_MARKER in hsrc
+        bare = bare or helper_bare
+        if any(m in hsrc for m in _SHARED_EXPR_MARKERS) and not helper_bare:
+            shared = True
+    return {"found": True, "shared": shared, "bare": bare, "unfound": unfound,
+            "helpers": helpers}
+
+
+def check_effective_date_consistency(f: Findings, *, repo_file: Path | None = None,
+                                     readers: tuple | None = None) -> dict:
     """Every canonical SQL read must use the ONE shared effective expression.
 
     Before PR-ADS-159 the headline coalesced the recovered date and the detail
@@ -142,16 +183,25 @@ def check_effective_date_consistency(f: Findings) -> dict:
                           f"the funnel repository could not be imported: {exc}")
         return out
 
-    for name in _EFFECTIVE_DATE_READERS:
-        src = _function_source(_REPO_FILE, name)
-        if src is None:
+    repo_file = repo_file or _REPO_FILE
+    readers = tuple(readers or _EFFECTIVE_DATE_READERS)
+    for name in readers:
+        status = reader_effective_date_status(repo_file, name)
+        if not status["found"]:
             f.violation("effective_date_consistency",
                         f"{name} could not be located in the funnel repository "
                         "— the audit cannot certify a reader it cannot find")
             out["readers"][name] = "not_found"
             continue
-        uses_shared = "effective_date_sql(" in src or "_effective_date_sql(" in src
-        uses_bare = "EVENT_DATE_COLUMN[event]" in src
+        if status["unfound"]:
+            f.violation("effective_date_consistency",
+                        f"{name} delegates its window predicate to "
+                        f"{', '.join(status['unfound'])}, which could not be located "
+                        "— the audit cannot certify a helper it cannot read")
+            out["readers"][name] = "not_found"
+            continue
+        uses_shared = status["shared"]
+        uses_bare = status["bare"]
         out["readers"][name] = "shared" if uses_shared else "bare"
         if not uses_shared:
             f.violation(
@@ -167,7 +217,7 @@ def check_effective_date_consistency(f: Findings) -> dict:
 
     if not f.violations:
         f.passed("effective_date_consistency",
-                 f"{len(_EFFECTIVE_DATE_READERS)} canonical reads share one "
+                 f"{len(readers)} canonical reads share one "
                  "effective SQL-entry expression")
 
     # The precedence itself, asserted rather than assumed.

@@ -118,9 +118,19 @@ def _payload(*, deals=None, deals_status="published", deals_reason=None, cohort=
             "metric_family": "lifecycle_stage_events",
             "window": {"window_key": "current_quarter"}, "scope_label": "All Sources",
             "acquisition_group_label": "All sources",
-            "events": {e: {"count": c, "event_date_property": f"hs_v2_date_entered_{e}"}
+            # PR-ADS-180C: each stage carries the undated reach and the
+            # server's verdict, as pipeline_service._funnel publishes them
+            # (here: no undated contact anywhere, every count complete).
+            "events": {e: {"count": c, "event_date_property": f"hs_v2_date_entered_{e}",
+                           "undated_contacts_could_belong": 0, "count_is_bound": False,
+                           "undated_contacts_all_sources": None}
                        for e, c in (("lead", 120), ("mql", 40), ("sql", 11),
                                     ("opportunity", 6), ("customer", 219))},
+            "coverage": {"stage_reached_without_entry_date": dict.fromkeys(
+                ("lead", "mql", "sql", "opportunity", "customer"), 0), "scope": "all_source"},
+            "undated_reach": {"available": True, "covers_selected_population": True,
+                              "counts": dict.fromkeys(
+                                  ("lead", "mql", "sql", "opportunity", "customer"), 0)},
             "conversions": [], "reconciliation": {"status": "reconciled"},
             "sync": {"bootstrap_status": "complete"}},
         "deals": deals if deals_status == "published" else None,

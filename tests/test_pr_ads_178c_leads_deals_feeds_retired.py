@@ -392,7 +392,8 @@ def test_08_the_funnel_counts_undated_stage_reaches_per_scope_and_unknown_is_nev
     assert by["all_source"] == 1
 
 
-def test_09_the_pipeline_marks_a_lower_bound_only_where_the_selected_scope_has_a_gap():
+def test_09_the_pipeline_marks_a_lower_bound_only_where_the_selected_scope_has_a_gap(
+        monkeypatch):
     from services.pipeline_service import _funnel_coverage
     events = ("lead", "mql", "sql", "opportunity", "customer")
     whole = {e: 0 for e in events} | {"sql": 1}
@@ -413,12 +414,27 @@ def test_09_the_pipeline_marks_a_lower_bound_only_where_the_selected_scope_has_a
         == {"stage_reached_without_entry_date": whole, "scope": None}
     assert _funnel_coverage(None, "all_source") is None
 
-    def funnel(coverage):
-        return {"available": True, "events": {e: {"count": 3} for e in events},
-                "conversions": [], "reconciliation": {"status": "partial"},
-                "coverage": coverage}
+    # PR-ADS-180C: each funnel is the REAL producer's (`pipeline_service._funnel`
+    # over this build), so it carries the undated reach it now publishes. The
+    # one undated contact (organic, SQL) is in the window's rows: the read
+    # counts it, and nothing lies outside the rows (docs/65).
+    from db import crm_funnel_repository as repo
+    from services import canonical_crm_funnel_service as crm_funnel
+    from services import pipeline_service as ps
+    monkeypatch.setattr(crm_funnel, "build", lambda *a, **k: {
+        "available": True, "window": {"start_date": "2026-07-01", "end_date": "2026-09-30"},
+        "events": {e: {"count": 3} for e in events}, "conversions": [],
+        "reconciliation": {"status": "partial"}, "coverage": cov})
+    monkeypatch.setattr(repo, "fetch_undated_stage_reach", lambda s, e: {
+        "available": True, "counts": dict(whole),
+        "outside_window_rows": dict.fromkeys(events, 0)})
+
+    def funnel(scope):
+        return json.loads(json.dumps(ps._funnel("last_quarter", None, scope, None), default=str))
+    built = [funnel(s) for s in ("all_source", "google_ads_source", "keyword_attributable")]
+    assert [b["coverage"] for b in built] == [_funnel_coverage(cov, "all_source"), narrow, unknown]
     html = _run("[%s].map((f) => pipelineFunnelHtml({funnel: f}))" % ", ".join(
-        json.dumps(funnel(c)) for c in (_funnel_coverage(cov, "all_source"), narrow, unknown)))
+        json.dumps(b) for b in built))
     marked = [re.findall(r'data-lower-bound="([a-z]+)"', h) for h in html]
     assert marked[0] == ["sql"]           # all sources: the organic gap
     assert marked[1] == []                # Google Ads-source: complete, exact

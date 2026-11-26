@@ -2431,18 +2431,19 @@ def write_lead_exclusion(
         return False
 
 
-def count_lead_exclusions() -> int:
-    """Return the number of durable lead-truth exclusions. Never raises."""
+def count_lead_exclusions() -> int | None:
+    """Return the number of durable lead-truth exclusions, or None when it
+    could not be read (PR-ADS-180C-F1: unknown is not zero). Never raises."""
     try:
         with get_conn() as conn:
             if conn is None:
-                return 0
+                return None
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM lead_truth_exclusions")
                 return int(cur.fetchone()[0])
     except Exception as exc:  # noqa: BLE001
         log.error("count_lead_exclusions failed: %s", exc)
-        return 0
+        return None
 
 
 def backfill_event_date_for_contact(contact_id, created_at) -> int:

@@ -7624,3 +7624,92 @@ the "full funnel on every page" request.
   `fetch_undated_stage_reach`) is the next PR.
 * **Tests.** `test_pr_ads_180b_f1_truth_audit_minors.py` (13); 180B's 02_b,
   02_d, 03_b and PG 03 assert the published disclosure.
+
+#### PR-ADS-180C — Pipeline reads the undated-reach bound; withheld cohort notes
+
+`docs/65`. One commit on `7cd5e22` (PR-ADS-180B-F1, open PR 240).
+
+* **m3 (180B audit).** Same window, same contacts: Overview Activity read
+  "Leads at least 10 … 7 contacts …", Pipeline "Entered Lead 10" exact. The
+  undated reach and the stage-count bound moved to
+  `canonical_crm_funnel_service` (`undated_stage_reach`,
+  `stage_count_is_bound`); Overview and `pipeline_service._funnel` both call
+  them. The Pipeline payload publishes `funnel.undated_reach` and, per stage,
+  `undated_contacts_could_belong` / `count_is_bound`. The page has one rule,
+  `stageEntryCountBounds` (was `dashActivityLowerBounds`), called by both
+  stage-entry adapters.
+* **Lead filters.** `fetch_undated_stage_reach` also returns
+  `outside_window_rows` (no stage date in the window, `fetch_funnel_contacts`'
+  own clause). Under a Scope/Source filter the all-source figure is never the
+  subset's: where nothing lies outside the rows the scope's own coverage
+  decides (178C's narrowing); otherwise the stage is a bound naming the
+  all-source figure. 178C's PG case had printed Google Ads-source SQL exact
+  beside an undated Google Ads SQL contact outside the rows (`c-nolb`); it is
+  now a bound.
+* **Hardening.** A stage without an explicit `count_is_bound: false` is a
+  bound on the page.
+* **Carried minor (a).** `_withhold_cohort` rebuilds `coverage_notes` /
+  `coverage_status` for the unpublished verdict
+  (`unpublished_coverage_notes`, shared with `coverage_notes`); no
+  "N cohort SQL contact(s)" note survives a withheld block.
+  `mart_withheld_exposures` scans the notes.
+* **Carried minor (b).** The legacy audit's `missing_contact_created_at_count`
+  is None when unread (repository and service); Revenue Health says
+  "Unknown".
+* **Tests.** `test_pr_ads_180c_pipeline_undated_bound.py` (12) and its PG
+  module (4, in the CI PG step and did-run list): all fail on `7cd5e22`.
+  Ported: 178B `_payload`, 178C test_09 and PG test_05, 166A `_pipeline`,
+  180A activity fixtures, 180B-F1 04_c (`docs/65` §5). Mutation table in
+  `docs/65` §4.
+* **Open.** A scope-aware undated reach; the sibling legacy counts that still
+  default to 0; production cost of the extra read not measured (`docs/65` §6).
+
+#### PR-ADS-180C-F1 — one snapshot for the Pipeline funnel reads; shared window clause
+
+`docs/65` §7. One commit on `98cd829`; the 180C truth audit returned "merge
+with minors".
+
+* **Minor 1 (a figure).** The window's rows and the undated reach were two
+  READ COMMITTED transactions (`@single_snapshot` memoises the closed-won
+  universe only). A sync committing between them printed Google Ads-source
+  SQL "2" exact where both consistent states say "at least 2"; Overview
+  Activity had the same tear since 180B. `canonical_crm_funnel_service.
+  one_read_snapshot()` (= PR-ADS-179A's `pinned_read_snapshot`, one
+  REPEATABLE READ snapshot) now wraps the build and its reach in
+  `pipeline_service._funnel` and Overview's current and previous periods.
+* **Minor 2.** One window clause, `crm_funnel_repository.
+  any_stage_date_in_window`, for `fetch_funnel_contacts` and the undated
+  read's outside count; a PG edge test (start −1 min, start, end of last day
+  −1 min, day after).
+* **Minor 3.** Revenue Health: `excluded_non_paid_count`,
+  `excluded_pseudo_campaign_count`, `counts_by_source_type`,
+  `count_lead_exclusions` / `legacy_excluded_count` are None when unread;
+  every strip cell reads "Unknown".
+* **Minor 4.** The Keyword-attributable bounds in 178C PG test_05 are called
+  over-marking (accepted, docs/65 §6), not a correction; assertion unchanged.
+* `funnel.undated_reach.population` reads "selected_population_narrowed"
+  for narrowed counts. Auditor's 180C note appended to its MEMORY.md.
+* **Tests.** 180C PG 04_a, 04_b, 04_c, 05 and unit 03_c; 04_a/04_b/04_c and
+  03_c fail on `98cd829`; mutations m2, m3, m2h, m3h, S, Sp, So, Spp, R1–R5
+  all fail a test (docs/65 §7.6).
+
+#### PR-ADS-180C-F2 — the effective-date audit follows the shared window helper
+
+`docs/65` §8. One commit on `8964dee`; the F1 re-review found a Major.
+
+* **Major (CI red).** F1's window helper left `fetch_funnel_contacts` without
+  `effective_date_sql(` in its own source; the lexical effective-date audit
+  and 159 test_26 failed (12 tests; coverage audit exit 1, gate
+  `canonical_readers_agree` broken). `any_stage_date_in_window` now takes the
+  reader's expressions and refuses anything but the shared ones; the audit
+  follows one level into a known helper, counting it only when the helper
+  names the shared expression and builds no bare column. The 12 tests pass
+  unchanged.
+* **Fail closed, fast.** Web-request snapshots wait 5 s for the schema lock
+  (`WEB_SNAPSHOT_LOCK_WAIT_SECONDS`; certification keeps 60 s); past it the
+  Pipeline funnel, Overview Activity and its previous period read unavailable.
+* Reconciliation summary "Already excluded legacy rows" says "Unknown" when
+  unread; `undated_reach.population` pinned by a test. Auditor's F1 re-review
+  note appended to its MEMORY.md.
+* **Tests.** Unit 05_a, 05_b, 06_a, 07, 08 and PG 06; mutations N, Nb, H,
+  Sf, W, P, U each fail a test (`docs/65` §8.4).
