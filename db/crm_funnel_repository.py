@@ -222,11 +222,13 @@ def any_stage_date_in_window(date_exprs, start: date | None,
     end]``" predicate, as ``(sql, params)``.
 
     ``fetch_funnel_contacts`` selects the window's rows with it, and
-    ``fetch_undated_stage_reach`` uses it to say which undated contacts lie
-    OUTSIDE those rows. A lead-filtered Pipeline funnel states a narrow scope
-    exact only when nothing undated lies outside them (docs/65), so the two
+    ``fetch_undated_stage_reach`` uses it to keep counted every undated
+    contact the window's own read returns (a contact is ruled out only when
+    it was created after the window AND has no stage date in it). The two
     predicates must be the same text: a second copy whose edge drifted would
-    turn "outside" into "inside" and a lower bound into a false exact.
+    let the reach rule out a contact the window's rows hold. (PR-ADS-180C also
+    used it for ``outside_window_rows``, the Pipeline lead-filter narrowing;
+    PR-ADS-182A removed both with Pipeline's stage-entry funnel.)
 
     PR-ADS-180C-F2: each caller passes the stage-entry expressions it filters
     on (``date_exprs``), so the reader's own source names the shared effective
@@ -320,18 +322,15 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
     ``start=None`` / ``end=None`` are open bounds (All Time rules out nothing).
     Read-only.
 
-    PR-ADS-180C: ``outside_window_rows`` counts, per event, the part of each
-    figure that is NOT in the window's own rows — the contacts with no stage
-    date in the window (the predicate below is ``fetch_funnel_contacts``'
-    window clause — one helper, ``any_stage_date_in_window``). Where it is 0, every undated
-    contact that could belong to the window is among the rows the funnel
-    build read, so the build's own per-scope coverage holds all of them: that
-    is what lets a lead-filtered Pipeline funnel state a narrow scope exact
-    (docs/65). It never dates a contact.
+    The "no stage date in the window" half of the rule is
+    ``fetch_funnel_contacts``' own window clause (one helper,
+    ``any_stage_date_in_window``). PR-ADS-182A removed ``outside_window_rows``
+    (the part of each figure outside the window's rows): its one reader was
+    the Pipeline lead-filter narrowing, gone with Pipeline's stage-entry
+    funnel (docs/67).
     """
     # PR-ADS-180C-F1: the SAME clause object fetch_funnel_contacts uses, not a
-    # second copy — "outside the window's rows" can only be trusted while the
-    # two predicates cannot drift apart.
+    # second copy — the two predicates cannot drift apart.
     in_window, window_params = any_stage_date_in_window(
         [effective_date_sql(e) for e in FUNNEL_EVENTS], start, end)
     stage_counts = []
@@ -341,13 +340,6 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
             f"COUNT(*) FILTER (WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s) "
             f"AND {effective_date_sql(event)} IS NULL) AS {event}")
         params.append(list(stages_implying_event(event)))
-    for event in FUNNEL_EVENTS:
-        stage_counts.append(
-            f"COUNT(*) FILTER (WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s) "
-            f"AND {effective_date_sql(event)} IS NULL "
-            f"AND COALESCE(({in_window}), FALSE) IS FALSE) AS {event}__outside")
-        params.append(list(stages_implying_event(event)))
-        params.extend(window_params)
     params.extend(window_params)
     params.extend([end, end])
     try:
@@ -371,7 +363,6 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
                 )
                 row = _rows_as_dicts(cur)[0]
         return {"available": True, "counts": {e: int(row[e]) for e in FUNNEL_EVENTS},
-                "outside_window_rows": {e: int(row[f"{e}__outside"]) for e in FUNNEL_EVENTS},
                 "table": FUNNEL_TABLE, "rule": UNDATED_REACH_RULE}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_undated_stage_reach failed: %s", exc)

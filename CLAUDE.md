@@ -434,9 +434,15 @@ disclosure. A re-read never takes a day with verified spend to zero
   request's verdict. Closed-won deals are not published on Campaign Evidence
   (`docs/44` §5); never call deals customers.
 
+  **Pipeline's funnel is the acquisition cohort** (by create date, PR-ADS-182A,
+  `docs/67_*`): one shared block and producer with Overview
+  (`dashboard_overview_service.acquisition_funnel_block`). Stage-entry counts
+  are not Pipeline's; never write a Pipeline-local funnel.
+
 - **"Moved to Customer stage" is a lifecycle event, never a customer**
-  (PR-ADS-166A, `docs/49_*`). The Leads page's stage count
-  (`hubspot_contact_funnel.date_entered_customer`) counts contacts whose
+  (PR-ADS-166A, `docs/49_*`). The stage count
+  (`hubspot_contact_funnel.date_entered_customer`; counted on Overview →
+  Lifecycle Activity, listed by the Pipeline contact list) counts contacts whose
   HubSpot lifecycle stage was changed, old contacts edited in bulk included:
   219 for Q3 2026 against 8 won deals. Never label it "Customers", add it to,
   or derive it from a customer figure. "Customers won" comes only from the
@@ -506,8 +512,9 @@ disclosure. A re-read never takes a day with verified spend to zero
   Reader-contract rows get them from `derive_period_revenue_per_ad_spend` /
   `derive_period_spend_per_customer_won`, with `ratio_kind` and the
   disclosure. The Campaigns and Countries dashboard rows republish the mart
-  row's reader-contract ratio, with its metadata; the Channels dashboard rows
-  divide the same published inputs themselves and carry no metadata. A
+  row's reader-contract ratio, with its metadata. (Dashboard → Channels, whose
+  rows divided the same published inputs themselves and carried no metadata,
+  was retired in PR-ADS-181A.) A
   published zero revenue over verified positive spend is a published 0.00 with
   its disclosure; unknown or withheld revenue, or zero or unknown spend, is
   never 0. The UI shows the disclosure beside every period value. **Never put a figure under a key named `roas` / `cac`
@@ -538,7 +545,7 @@ disclosure. A re-read never takes a day with verified spend to zero
   `channel_funnel_service.source_key`, read in the closed-won universe's own
   snapshot; any disagreement, missing contact, failed lookup, contact outside
   the funnel or blank source puts the deal on `__deal_source_unresolved__`
-  ("Source not resolved") with its class. Never place a deal by the ledger's
+  ("Deals with no single source", `UNRESOLVED_LABEL`) with its class. Never place a deal by the ledger's
   `source_primary_raw` (the lowest contact id's source when contacts
   disagree), never by GCLID (a GCLID deal HubSpot recorded as Direct is
   Direct), and never fill the unresolved row from a guess. The rows must add

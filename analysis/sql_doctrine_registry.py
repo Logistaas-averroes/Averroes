@@ -411,22 +411,25 @@ CONSUMERS: list[dict] = [
        migration_notes="PR-ADS-178B: no figure of its own; the delta is the same builder over the previous window.",
        truth_status="kpis.sqls {value: None, status, reason} unless the cohort is published",
        headline=True, executive=True),
-    # PR-ADS-178B: the one Pipeline page (leads and deals). Two SQL ideas,
-    # never one word: the KPI is the acquisition cohort; the funnel is the
-    # canonical lifecycle stage-ENTRY count ("Entered stage in window").
-    _c("Pipeline page", "kpis.sqls (acquisition cohort) beside the lifecycle funnel's stage-entry counts.",
+    # PR-ADS-178B: the one Pipeline page (leads and deals). PR-ADS-182A (owner
+    # decision): its funnel is the ACQUISITION COHORT too — the same cohort
+    # block as the KPI (Google Ads slot), read at the all-sources slot or the
+    # source-group slot the lead filters select; no stage-entry count is
+    # published on the page (docs/67).
+    _c("Pipeline page", "kpis.sqls (Google Ads acquisition cohort) beside the acquisition-cohort funnel (all sources, or the selected source group).",
        endpoint="GET /api/pipeline",
-       service_function="services.pipeline_service.build_pipeline / _metric_truth",
-       repository_source="revenue_decision_mart summary.metrics.sqls + canonical_crm_funnel_service.build",
+       service_function="services.pipeline_service.build_pipeline / _funnel / _metric_truth",
+       repository_source="revenue_decision_mart cohort (summary.metrics.sqls; breakdown.all_sources / by_source_group)",
        source_table=LIFECYCLE_TABLE,
-       sql_definition="kpis.sqls: " + COHORT_DEF + "; funnel: " + LIFECYCLE_DEF,
-       date_field=COHORT_DATE + " | " + LIFECYCLE_DATE, dedup_key=COHORT_DEDUP,
-       windows=BUSINESS, scope="google_ads_cohort | all_source lifecycle events",
+       sql_definition="kpis.sqls and funnel.totals.reached_sql: " + COHORT_DEF,
+       date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
+       windows=BUSINESS, scope="google_ads_cohort | all_source or source-group acquisition cohort",
        classification=CLS_CANONICAL,
        code_location="services/pipeline_service.py:build_pipeline",
-       migration_notes="Replaces the Leads page (/api/crm-funnel) and the Closed-Won Deals page; "
-                       "the funnel is labelled 'Entered stage in window', never 'SQLs'.",
-       truth_status="kpis.sqls withheld (value None) with the cohort's reason; funnel counts None when the store is unavailable",
+       migration_notes="Replaces the Leads page (/api/crm-funnel) and the Closed-Won Deals page. "
+                       "PR-ADS-182A: the stage-entry funnel ('Entered stage in window') is gone; "
+                       "the funnel is the shared acquisition-cohort block.",
+       truth_status="kpis.sqls and every funnel column withheld (None) with the cohort's reason; a lead Scope the cohort is not split by is unavailable, never the unfiltered cohort",
        headline=True, row=True, executive=True, operational=True),
 
     # ── Operational ─────────────────────────────────────────────────────────
@@ -756,9 +759,9 @@ RULES: list[dict] = [
                "_contact_scopes", "_event_counts", "scope_keys", "scopes_are_nested",
                "lead_cohort_progression", "event_definition",
                # PR-ADS-180C: the undated stage reach and the stage-count
-               # bound, one rule for Overview Activity and Pipeline (docs/65).
-               "undated_stage_reach", "undated_reach_for_population",
-               "stage_count_is_bound"]),
+               # bound (docs/65) — Overview Activity's; PR-ADS-182A removed
+               # Pipeline's lead-filter narrowing (docs/67).
+               "undated_stage_reach", "stage_count_is_bound"]),
     _m("engine.funnel.repo.module", "db/crm_funnel_repository.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        ["lifecycle_funnel_service_ref", "lifecycle_sql_column_ref"]),
     _r("engine.funnel.repo.legacy_rows", "db/crm_funnel_repository.py", CLS_DIAGNOSTIC, _FUNNELREC,
@@ -879,12 +882,14 @@ RULES: list[dict] = [
     _m("deals.module", "services/dashboard_deals_service.py", CLS_CANONICAL, _DEALS, ["sqls_field_ref"]),
     _r("deals", "services/dashboard_deals_service.py", CLS_CANONICAL, _DEALS,
        symbol=["_build_period_change", "build_dashboard_deals"]),
-    # PR-ADS-178B: the Pipeline builder — the mart's cohort SQL KPI and the
-    # canonical lifecycle funnel, each under its own name.
+    # PR-ADS-178B: the Pipeline builder — the mart's cohort SQL KPI and, since
+    # PR-ADS-182A, the acquisition-cohort funnel from the same cohort block
+    # (docs/67); the lead-filter constants still come from the canonical
+    # funnel service.
     _m("pipeline.module", "services/pipeline_service.py", CLS_CANONICAL, _PIPELINE,
        ["sqls_field_ref", "lifecycle_funnel_service_ref"]),
     _r("pipeline", "services/pipeline_service.py", CLS_CANONICAL, _PIPELINE,
-       symbol=["_metric_truth", "build_pipeline", "_funnel"]),
+       symbol=["_metric_truth", "build_pipeline", "_funnel", "_cohort_selection"]),
 
     # ── scheduled outputs ───────────────────────────────────────────────────
     # PR-ADS-162H: the report rules (report.core.module, report.core,
@@ -1336,7 +1341,9 @@ RULES: list[dict] = [
     _r("ui.deals_tab", "static/app.js", CLS_CANONICAL, _DEALS,
        symbol=["renderDashboardDeals"]),
     _r("ui.pipeline", "static/app.js", CLS_CANONICAL, _PIPELINE,
-       symbol=["pipelineKpiCardsHtml", "pipelineFunnelHtml"]),
+       symbol=["pipelineKpiCardsHtml", "pipelineFunnelHtml",
+               # PR-ADS-182A: the shared acquisition adapter over d.funnel.
+               "pipelineFunnelModel", "pipelineFunnelPopulationText"]),
     _r("ui.mart", "static/app.js", CLS_CANONICAL, _MART,
        symbol=["renderMartSummaryStrip", "getBusinessVerdictBadge"]),
     # PR-ADS-177A: the one SQL-count gate for every mart / Dashboard leads and

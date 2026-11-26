@@ -27,6 +27,10 @@ HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 BUSINESS_WINDOWS = ["current_quarter", "last_quarter", "last_6_months", "ytd", "all_time"]
 #: A figure no legitimate rendering of the fixture produces.
 SENTINEL = 7919
+#: PR-ADS-182A-F1 (m3): the sentinel in ANY rendering ("7919", "7,919",
+#: "7.919", "7 919", "$7,919.00") — a plain substring check could not fail
+#: once the page formats the figure.
+_SENTINEL_ANY = re.compile(r"7[,.\s\u202f\u00a0]?919")
 
 
 def _run(script, *, js=None):
@@ -59,7 +63,20 @@ def _m(value, status="published", reason=None, **extra):
 
 _COHORT = {"sql_status": "published", "sql_reason": None,
            "metric_family": "acquisition_cohort_outcomes", "window_basis": "contact_created_at",
-           "window": {"start_date": "2026-10-01", "end_date": "2026-11-25"}}
+           "window": {"start_date": "2026-10-01", "end_date": "2026-11-25"},
+           # PR-ADS-182A: the cohort's all-sources slot — the Pipeline funnel.
+           "contacts_without_created_at": 0,
+           "breakdown": {"all_sources": {
+               "contacts_acquired": 120, "reached_mql": 40, "sqls": 11,
+               "sqls_missing_event_timestamp": 0, "reached_opportunity": 6,
+               "reached_customer_stage": 3}}}
+
+
+def _funnel_block(cohort=None, scope="all_source", group=None):
+    """PR-ADS-182A: the Pipeline funnel as the builder publishes it — the REAL
+    block producer (``pipeline_service._funnel``) over the response's cohort."""
+    from services import pipeline_service as ps
+    return json.loads(json.dumps(ps._funnel(cohort or _COHORT, scope, group), default=str))
 _WINDOW = {"key": "current_quarter", "label": "Current Quarter", "start_date": "2026-10-01",
            "end_date": "2026-11-25", "is_closed_window": False, "through_reason": None}
 
@@ -113,26 +130,8 @@ def _payload(*, deals=None, deals_status="published", deals_reason=None, cohort=
         "metrics": {"closed_won_deals": k["closed_won_deals"], "customers": k["customers"],
                     "revenue_usd": k["won_revenue_usd"]},
         "closed_won_population": population or k["closed_won_deals"],
-        "funnel": funnel or {
-            "available": True, "label": "Entered stage in window",
-            "metric_family": "lifecycle_stage_events",
-            "window": {"window_key": "current_quarter"}, "scope_label": "All Sources",
-            "acquisition_group_label": "All sources",
-            # PR-ADS-180C: each stage carries the undated reach and the
-            # server's verdict, as pipeline_service._funnel publishes them
-            # (here: no undated contact anywhere, every count complete).
-            "events": {e: {"count": c, "event_date_property": f"hs_v2_date_entered_{e}",
-                           "undated_contacts_could_belong": 0, "count_is_bound": False,
-                           "undated_contacts_all_sources": None}
-                       for e, c in (("lead", 120), ("mql", 40), ("sql", 11),
-                                    ("opportunity", 6), ("customer", 219))},
-            "coverage": {"stage_reached_without_entry_date": dict.fromkeys(
-                ("lead", "mql", "sql", "opportunity", "customer"), 0), "scope": "all_source"},
-            "undated_reach": {"available": True, "covers_selected_population": True,
-                              "counts": dict.fromkeys(
-                                  ("lead", "mql", "sql", "opportunity", "customer"), 0)},
-            "conversions": [], "reconciliation": {"status": "reconciled"},
-            "sync": {"bootstrap_status": "complete"}},
+        # PR-ADS-182A: the acquisition-cohort funnel, from the real producer.
+        "funnel": funnel or _funnel_block(),
         "deals": deals if deals_status == "published" else None,
         "deals_status": deals_status, "deals_reason": deals_reason,
         "source_breakdown": _breakdown(deals) if deals_status == "published" else None,
@@ -228,31 +227,42 @@ def test_03_the_sql_kpi_is_the_acquisition_cohort_gated_on_the_responses_own_coh
     assert ">4" in card(cases["published"]) and "through 25 Nov 2026" in card(cases["published"])
     for key in ("withheld", "no_cohort"):
         c = card(cases[key])
-        assert str(SENTINEL) not in c, key
+        assert not _SENTINEL_ANY.search(c), key
         assert ("Withheld" in c) or ("Unavailable" in c), key
     assert "Withheld" in card(cases["withheld"])
     kpi = _fn("pipelineKpiCardsHtml")
     assert "cohortCountHtml(sqls.value, d.cohort, null)" in kpi
 
 
-# ── 4. the funnel: stage entries, never a bare "SQLs" ────────────────────────
-def test_04_the_funnel_is_labelled_entered_stage_in_window_and_keeps_the_customer_stage_help():
+# ── 4. the funnel: the acquisition cohort, never a bare "SQLs" ───────────────
+def test_04_the_funnel_is_the_acquisition_cohort_and_the_list_keeps_the_customer_stage_help():
+    """PR-ADS-182A (owner decision): the funnel counts by contact create date
+    — "Entered stage in window" is gone from the funnel. Its stages are the
+    acquisition cohort's; the contact list (its own stage picker) keeps the
+    stage-entry labels and the stage-move help."""
     summary, _ = _page(_payload())
     funnel = summary[summary.index('id="pipeline-funnel"'):]
-    assert "Entered stage in window" in funnel
+    assert "Lifecycle funnel · Acquisition cohort" in _text(funnel)
+    assert "Entered stage in window" not in funnel
     labels = re.findall(r'class="dash-funnel__stage-label">(.*?)</span>', funnel)
-    assert labels == ["Entered Lead", "Entered MQL", "Entered SQL", "Entered Opportunity",
-                      "Moved to Customer stage in HubSpot"]
-    assert not re.search(r"\bSQLs\b", _text(funnel).replace(
-        "a different metric from the SQL card above", "")), \
-        "no bare 'SQLs' on the lifecycle funnel"
-    assert "including old contacts updated by the team. It is not new customers." in funnel
-    # Every stage opens the leads list.
-    assert re.findall(r'data-funnel-event="([a-z]+)"', funnel) == [
+    assert labels == ["Contacts acquired", "Reached MQL", "Reached SQL", "Reached Opportunity",
+                      "Reached Customer stage"]
+    assert not re.search(r"\bSQLs\b", _text(funnel)), "no bare 'SQLs' on the lifecycle funnel"
+    assert "never companies, never deals" in _text(funnel)
+    # The contact list's stage picker: every stage opens the list, under the
+    # stage-entry labels, the stage move with its help.
+    assert re.findall(r'data-leads-stage="([a-z]+)"', funnel) == [
         "lead", "mql", "sql", "opportunity", "customer"]
-    assert "219" in funnel and "11" in funnel
-    # An unavailable store is Unavailable, never 0.
-    s2, _ = _page(_payload(funnel={"available": False, "events": {}}))
+    picker = re.findall(r'data-leads-stage="[a-z]+"[^>]*>(.*?)</button>', funnel, re.S)
+    assert picker == ["Entered Lead", "Entered MQL", "Entered SQL", "Entered Opportunity",
+                      "Moved to Customer stage in HubSpot"]
+    assert "including old contacts updated by the team. It is not new customers." in funnel
+    assert "120" in _text(funnel)
+    assert "11" in _text(funnel)
+    # An unreadable cohort is Unavailable, never 0.
+    s2, _ = _page(_payload(funnel=_funnel_block(
+        {"sql_status": "unavailable", "sql_reason": "canonical_funnel_unreadable",
+         "metric_family": "acquisition_cohort_outcomes", "window_basis": "contact_created_at"})))
     f2 = s2[s2.index('id="pipeline-funnel"'):]
     assert f2.count("Unavailable") >= 5 and ">0<" not in f2
 
@@ -260,7 +270,8 @@ def test_04_the_funnel_is_labelled_entered_stage_in_window_and_keeps_the_custome
 # ── 5. the leads list opens on a stage click; names, no emails ───────────────
 def test_05_the_leads_list_opens_on_a_stage_click_with_names_and_never_an_email():
     closed = _run('_leadsView = null; leadsRenderActiveView(); __els["leads-table-body"].innerHTML')
-    assert "Click a stage in the funnel above" in closed
+    # PR-ADS-182A: the list opens from the stage picker under the funnel.
+    assert "Pick a stage under the funnel above" in closed
     rows = [{"contact_id": "101", "contact_name": "Rana Haddad", "contact_name_status": "recorded",
              "company": "Acme Freight", "event_date": "2026-11-20",
              "lifecycle_stage_label": "SQL", "email": "rana@acme.example"}]
@@ -275,9 +286,10 @@ def test_05_the_leads_list_opens_on_a_stage_click_with_names_and_never_an_email(
     assert "row.email" not in contacts and "r.email" not in contacts
     assert "leadsContactNameHtml(r)" in contacts
     assert "Contacts that entered the ${stage.stage} stage in this window" in contacts
-    # The page wires a click on each funnel stage to the list.
+    # The page wires a click on each stage of the list's picker to the list
+    # (PR-ADS-182A: the cohort funnel's columns are not buttons onto it).
     wire = _fn("pipelineWireFunnel")
-    assert '_leadsView = btn.getAttribute("data-funnel-event")' in wire
+    assert '_leadsView = btn.getAttribute("data-leads-stage")' in wire
     assert "leadsRenderActiveView()" in wire
     # The contact drawer is the existing one.
     assert 'id="leads-drawer"' in HTML and "leadsOpenDrawer(rows[" in contacts
@@ -294,7 +306,7 @@ def test_06_the_deal_list_is_shown_only_when_its_length_equals_the_published_cou
     extra = _deal(9, "organic", "2026-11-01T00:00:00+00:00", float(SENTINEL))
     _, bad = _page(_payload(deals=_DEALS + [extra], kpis={"closed_won_deals": _m(4)},
                             population=_m(4)))
-    assert 'data-pipeline-deal="' not in bad and str(SENTINEL) not in bad
+    assert 'data-pipeline-deal="' not in bad and not _SENTINEL_ANY.search(bad)
     assert "Unavailable" in bad and "Deal 1" not in bad
     assert "the deal rows received do not match the published count" in bad
     # The population withheld: the PR-ADS-164A card, no list, never "none".

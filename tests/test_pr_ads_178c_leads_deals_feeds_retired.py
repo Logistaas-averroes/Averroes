@@ -396,50 +396,28 @@ def test_08_the_funnel_counts_undated_stage_reaches_per_scope_and_unknown_is_nev
     assert by["all_source"] == 1
 
 
-def test_09_the_pipeline_marks_a_lower_bound_only_where_the_selected_scope_has_a_gap(
-        monkeypatch):
-    from services.pipeline_service import _funnel_coverage
-    events = ("lead", "mql", "sql", "opportunity", "customer")
-    whole = {e: 0 for e in events} | {"sql": 1}
-    by_scope = {e: {"all_source": whole[e], "google_ads_source": 0,
-                    "campaign_attributable": 0, "keyword_attributable": None}
-                for e in events}
-    cov = {"stage_reached_without_entry_date": whole,
-           "stage_reached_without_entry_date_by_scope": by_scope}
-    narrow = _funnel_coverage(cov, "google_ads_source")
-    assert narrow == {"stage_reached_without_entry_date": {e: 0 for e in events},
-                      "scope": "google_ads_source"}
-    assert _funnel_coverage(cov, "all_source")["stage_reached_without_entry_date"] == whole
-    # An unknown scope figure stays unknown (the page reads it as a bound).
-    unknown = _funnel_coverage(cov, "keyword_attributable")
-    assert set(unknown["stage_reached_without_entry_date"].values()) == {None}
-    # A funnel with no per-scope figure passes the whole one (fails safe).
-    assert _funnel_coverage({"stage_reached_without_entry_date": whole}, "google_ads_source") \
-        == {"stage_reached_without_entry_date": whole, "scope": None}
-    assert _funnel_coverage(None, "all_source") is None
-
-    # PR-ADS-180C: each funnel is the REAL producer's (`pipeline_service._funnel`
-    # over this build), so it carries the undated reach it now publishes. The
-    # one undated contact (organic, SQL) is in the window's rows: the read
-    # counts it, and nothing lies outside the rows (docs/65).
-    from db import crm_funnel_repository as repo
-    from services import canonical_crm_funnel_service as crm_funnel
-    from services import pipeline_service as ps
-    monkeypatch.setattr(crm_funnel, "build", lambda *a, **k: {
-        "available": True, "window": {"start_date": "2026-07-01", "end_date": "2026-09-30"},
-        "events": {e: {"count": 3} for e in events}, "conversions": [],
-        "reconciliation": {"status": "partial"}, "coverage": cov})
-    monkeypatch.setattr(repo, "fetch_undated_stage_reach", lambda s, e: {
-        "available": True, "counts": dict(whole),
-        "outside_window_rows": dict.fromkeys(events, 0)})
-
-    def funnel(scope):
-        return json.loads(json.dumps(ps._funnel("last_quarter", None, scope, None), default=str))
-    built = [funnel(s) for s in ("all_source", "google_ads_source", "keyword_attributable")]
-    assert [b["coverage"] for b in built] == [_funnel_coverage(cov, "all_source"), narrow, unknown]
-    html = _run("[%s].map((f) => pipelineFunnelHtml({funnel: f}))" % ", ".join(
-        json.dumps(b) for b in built))
-    marked = [re.findall(r'data-lower-bound="([a-z]+)"', h) for h in html]
-    assert marked[0] == ["sql"]           # all sources: the organic gap
-    assert marked[1] == []                # Google Ads-source: complete, exact
-    assert marked[2] == list(events)      # unknown: every stage a bound
+def test_09_the_pipeline_marks_a_lower_bound_only_where_the_cohort_has_a_gap(monkeypatch):
+    """PR-ADS-182A: the Pipeline funnel is the acquisition cohort, which needs
+    no stage-entry date, so the per-scope stage-entry gap this case held
+    (``_funnel_coverage``) is gone with the stage-entry funnel. The cohort's
+    one gap is a contact with no created date: with none, every scope the
+    cohort honours is exact; with any, every column of every scope is a
+    bound (a table-wide count — over-marking a narrow scope, failing safe,
+    docs/64 §7.4); a scope it cannot honour shows no figure at all."""
+    from tests.test_pr_ads_182a_pipeline_cohort_funnel import (
+        cohort_contract, funnel_panel, page, pipeline,
+    )
+    filters = ({}, {"scope": "google_ads_source"}, {"acquisition_group": "organic"},
+               {"scope": "keyword_attributable"})
+    slots = ["contacts", "mql", "sql", "opportunity", "customer"]
+    for missing, expect in ((0, []), (2, slots)):
+        contract = cohort_contract(monkeypatch, missing_created_at=missing)
+        for f in filters:
+            html = funnel_panel(page(pipeline(monkeypatch, contract, **f)))
+            marked = re.findall(r'data-lower-bound="([a-z_]+)"', html)
+            if f.get("scope") == "keyword_attributable":
+                assert marked == [] and "Unavailable" in html, f
+                continue
+            assert sorted(marked) == sorted(
+                ["contacts", "reached_mql", "reached_sql", "reached_opportunity",
+                 "reached_customer_stage"] if expect else []), (missing, f, marked)

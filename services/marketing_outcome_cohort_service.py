@@ -418,6 +418,12 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
     :func:`reconcile_cohort`. A contact whose duplicate rows disagree on the
     key is put under the key of an empty row (``group_key({})``) — never under
     whichever row came first. ``by_group`` is None when no key is given.
+
+    ``by_source_group`` (PR-ADS-182A) partitions EVERY contact (all sources)
+    by its acquisition source group — the rule the Pipeline Source filter
+    uses (``canonical_crm_funnel_service.derive_acquisition_group``). Every
+    group is seeded with a zero slot; ``Σ by_source_group == all_sources``,
+    re-checked by :func:`reconcile_cohort`.
     """
     grouped: dict[str, list[dict]] = {}
     fallback_identities = 0
@@ -432,6 +438,16 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
         grouped.setdefault(ident, []).append(row)
 
     duplicate_rows = sum(len(v) - 1 for v in grouped.values())
+    # PR-ADS-182A: the ALL-SOURCE partition by the contact's acquisition source
+    # group — the Pipeline Source / Scope filters' own rule
+    # (``canonical_crm_funnel_service.derive_acquisition_group``: HubSpot
+    # Original Source + its Drill-Down). Every group is seeded, so a group with
+    # no contact in the window is a counted 0 from the producer, never a
+    # reader's inference from an absent key.
+    from services.canonical_crm_funnel_service import (  # noqa: PLC0415
+        ACQUISITION_GROUPS, derive_acquisition_group,
+    )
+    by_source_group: dict[str, dict] = {g: _new_slot() for g in ACQUISITION_GROUPS}
 
     by_campaign: dict[str, dict] = {}
     unattributed_by_label: dict[str, dict] = {}
@@ -457,6 +473,12 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
         flags = stage_flags(group)
 
         _bump(all_sources, proof, flags)
+        groups_seen = {derive_acquisition_group(r) for r in group}
+        # Duplicate rows that disagree on the group go under the group of an
+        # empty row (Unclassified) — never under whichever row came first.
+        sgroup = (next(iter(groups_seen)) if len(groups_seen) == 1
+                  else derive_acquisition_group({}))
+        _bump(by_source_group.setdefault(sgroup, _new_slot()), proof, flags)
         if proof is not None:
             proof_counts[proof] += 1
             sql_identities[ident] = {"proof": proof, "bucket": bucket,
@@ -505,6 +527,7 @@ def build_cohort(rows: list[dict], *, resolve_label: LabelResolver,
         "rows_outside_window": rows_outside_window,
         "sql_identities": sql_identities,
         "by_group": by_group,
+        "by_source_group": by_source_group,
     }
 
 
@@ -543,6 +566,14 @@ def reconcile_cohort(cohort: dict) -> list[str]:
             grouped = sum(s.get(f, 0) for s in groups.values())
             if grouped != ga[f]:
                 problems.append(f"google_ads.{f} {ga[f]} != groups {grouped}")
+    sources = cohort.get("by_source_group")
+    if sources is not None:
+        # PR-ADS-182A: the all-source partition by source group conserves the
+        # whole cohort, every field (the Pipeline funnel reads one part).
+        for f in fields:
+            parted = sum(s.get(f, 0) for s in sources.values())
+            if parted != al[f]:
+                problems.append(f"all_sources.{f} {al[f]} != source groups {parted}")
     if sum(cohort["proof_counts"].values()) != al["sqls"]:
         problems.append("proof counts do not sum to all-source SQLs")
     if len(cohort["sql_identities"]) != al["sqls"]:
@@ -748,6 +779,8 @@ def _jsonable_cohort(cohort: dict) -> dict:
     """The cohort without its per-identity working set (contact ids stay server-side)."""
     # ``by_group`` is the caller's second partition (PR-ADS-177A, the mart's
     # countries); Campaign Evidence's breakdown has never carried it.
+    # ``by_source_group`` (PR-ADS-182A) is kept: per-group counts only, no
+    # contact id — the Pipeline funnel reads one of its slots.
     return {k: v for k, v in cohort.items() if k not in ("sql_identities", "by_group")}
 
 

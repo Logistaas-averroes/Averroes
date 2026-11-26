@@ -166,13 +166,16 @@ def test_m2_a_the_deals_funnel_holds_no_legacy_stage_and_the_backlog_is_its_own_
         monkeypatch):
     # PR-ADS-178B (owner decision 4): the legacy lead-status backlog is
     # dropped, not kept beside the funnel; Dashboard → Deals publishes the
-    # Pipeline builder, whose funnel is the lifecycle stage-entry funnel.
+    # Pipeline builder, whose funnel was the lifecycle stage-entry funnel and,
+    # since PR-ADS-182A, is the acquisition cohort.
     d = _deals_payload(monkeypatch)
     assert "lead_status_backlog" not in d
     assert "lead_status_qualified_no_won_deal" not in json.dumps(d)
     assert "sqls_not_closed_won" not in json.dumps(d)
-    assert d["funnel"]["label"] == "Entered stage in window"
-    assert not any("Not Yet" in str(k) for k in (d["funnel"].get("events") or {}))
+    assert d["funnel"]["label"] == "Acquisition cohort"
+    assert d["funnel"]["metric_family"] == "acquisition_cohort_outcomes"
+    assert not any("Not Yet" in str(st.get("key")) or "Not Yet" in str(st.get("label"))
+                   for st in (d["funnel"].get("stages") or []))
 
 
 def test_m2_b_the_real_deals_payload_never_puts_a_legacy_count_under_sql(monkeypatch):

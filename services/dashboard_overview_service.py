@@ -1433,9 +1433,34 @@ ACQUISITION_FUNNEL_STAGES = (
 )
 REASON_ACQUISITION_COUNTS_MISSING = "acquisition_funnel_counts_missing"
 ACQUISITION_FUNNEL_POPULATION = "all_source_contacts_acquired_in_window"
+#: PR-ADS-182A — one source group's part of the same cohort (the Pipeline
+#: Source / Scope filters): ``<this>:<group>``. Never the all-source figure.
+ACQUISITION_FUNNEL_SOURCE_GROUP_POPULATION = "source_group_contacts_acquired_in_window"
+#: The scope a source-group block names (the parity audit compares only the
+#: all-source scope across pages).
+ACQUISITION_FUNNEL_SOURCE_GROUP_SCOPE = "source_group_acquisition_cohort"
 
 
-def _acquisition_funnel_block(cohort: dict | None) -> dict:
+def acquisition_funnel_block(cohort: dict | None, *, source_group: str | None = None,
+                             unavailable_reason: str | None = None) -> dict:
+    """PR-ADS-182A — the ONE acquisition-cohort funnel block producer, for the
+    Overview (all sources) and the Pipeline page (all sources, or the part of
+    the SAME cohort its Source / Scope filters select).
+
+    ``source_group`` reads the cohort's ``by_source_group`` slot for that
+    group (the all-source partition by the Source filter's own rule) instead
+    of ``all_sources``. A published verdict whose breakdown carries no such
+    slot is unavailable (``acquisition_funnel_counts_missing``), never 0.
+    ``unavailable_reason`` is a caller's filter the cohort cannot honour: the
+    block is then unavailable with that reason, whatever the verdict, and
+    carries no count. Neither re-decides the cohort's verdict; both can only
+    withhold."""
+    return _acquisition_funnel_block(cohort, source_group=source_group,
+                                     unavailable_reason=unavailable_reason)
+
+
+def _acquisition_funnel_block(cohort: dict | None, *, source_group: str | None = None,
+                              unavailable_reason: str | None = None) -> dict:
     """PR-ADS-180B — the Overview's funnel: the all-source acquisition cohort.
 
     Every HubSpot contact CREATED in the window (all sources), and how many
@@ -1461,8 +1486,15 @@ def _acquisition_funnel_block(cohort: dict | None) -> dict:
     reason = c.get("sql_reason")
     if not status:
         status, reason = cohort_svc.STATUS_UNAVAILABLE, cohort_svc.SQL_REASON_FUNNEL_UNREADABLE
-    slot = ((c.get("breakdown") or {}).get("all_sources")
-            if status == cohort_svc.STATUS_PUBLISHED else None)
+    if unavailable_reason:
+        # PR-ADS-182A: a filter this cohort cannot honour — said, never ignored.
+        status, reason = cohort_svc.STATUS_UNAVAILABLE, unavailable_reason
+    breakdown = (c.get("breakdown") or {}) if status == cohort_svc.STATUS_PUBLISHED else {}
+    if source_group is None:
+        slot = breakdown.get("all_sources")
+    else:
+        groups = breakdown.get("by_source_group")
+        slot = groups.get(source_group) if isinstance(groups, dict) else None
     fields = ["contacts_acquired"] + [st["field"] for st in ACQUISITION_FUNNEL_STAGES]
     if status == cohort_svc.STATUS_PUBLISHED and (
             not isinstance(slot, dict)
@@ -1477,8 +1509,11 @@ def _acquisition_funnel_block(cohort: dict | None) -> dict:
     return {
         "metric_family": c.get("metric_family"),
         "window_basis": c.get("window_basis"),
-        "scope": revenue_scope.SCOPE_ALL_SOURCE,
-        "population": ACQUISITION_FUNNEL_POPULATION,
+        "scope": (revenue_scope.SCOPE_ALL_SOURCE if source_group is None
+                  else ACQUISITION_FUNNEL_SOURCE_GROUP_SCOPE),
+        "population": (ACQUISITION_FUNNEL_POPULATION if source_group is None
+                       else f"{ACQUISITION_FUNNEL_SOURCE_GROUP_POPULATION}:{source_group}"),
+        "source_group": source_group,
         "publication": {"status": status, "reason": None if published else reason},
         "window": c.get("window"),
         "as_of": c.get("as_of"),
@@ -1490,7 +1525,9 @@ def _acquisition_funnel_block(cohort: dict | None) -> dict:
         # it only beside published counts (`acquisitionFunnelModel`).
         "contacts_without_created_at": c.get("contacts_without_created_at"),
         "producer": ("services.marketing_outcome_cohort_service.build_cohort "
-                     "all_sources slot (the Revenue Decision Mart's cohort)"),
+                     + ("all_sources slot" if source_group is None
+                        else f"by_source_group[{source_group}] slot")
+                     + " (the Revenue Decision Mart's cohort)"),
         "notes": {"customer_stage": ("'Customer stage' counts contacts whose HubSpot "
                                      "lifecycle stage reached Customer, counted in "
                                      "contacts; never companies, never deals."),
@@ -1730,8 +1767,8 @@ def _undated_reach(window: dict | None) -> dict:
     the undated contacts that could belong to it, over the whole table. A read
     that fails is ``available: False`` with no counts — never zeros.
 
-    PR-ADS-180C: the rule lives in ``canonical_crm_funnel_service`` so the
-    Pipeline funnel reads the same bound (docs/65); this is that function."""
+    PR-ADS-180C: the rule lives in ``canonical_crm_funnel_service`` (the
+    Pipeline funnel read it too until PR-ADS-182A, docs/67)."""
     from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
     return _funnel.undated_stage_reach(window)
 
@@ -1743,8 +1780,9 @@ def _stage_count_is_bound(event: str, coverage: dict | None,
     A bound when the build's own coverage does not report the stage, or
     reports undated contacts in the window's rows; or when the undated reach
     over every contact that could belong to the window is unknown or above
-    zero. Missing is never read as zero. PR-ADS-180C: one rule, shared with
-    the Pipeline funnel (``canonical_crm_funnel_service.stage_count_is_bound``)."""
+    zero. Missing is never read as zero. PR-ADS-180C: the rule is
+    ``canonical_crm_funnel_service.stage_count_is_bound`` (shared with the
+    Pipeline funnel until PR-ADS-182A moved it to the acquisition cohort)."""
     from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
     return _funnel.stage_count_is_bound(event, coverage, undated)
 

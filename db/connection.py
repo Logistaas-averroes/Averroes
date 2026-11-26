@@ -185,7 +185,8 @@ SCHEMA_LOCK_KEY = 179_000_001
 #: snapshot and runs unpinned (the pre-179A behaviour: every read on its own).
 WINDOW_SCHEMA_LOCK_WAIT_SECONDS = 60
 #: PR-ADS-180C-F2: the same wait for a WEB request's pinned snapshot (the
-#: funnel reads of Pipeline and Overview, ``one_read_snapshot``). A page must
+#: funnel reads of Overview's Lifecycle Activity, ``one_read_snapshot``; the
+#: Pipeline funnel took one until PR-ADS-182A). A page must
 #: not hang for a minute behind a queued migration; past this it fails closed
 #: (the funnel reads "could not be read"), never a torn read.
 WEB_SNAPSHOT_LOCK_WAIT_SECONDS = 5

@@ -1110,3 +1110,36 @@ truncated list. Verified by execution on exported copies of both commits.
 - Evidence: compileall, node --check, diff --check clean. 87 related modules
   (grep for the touched symbols plus every edited test module, 12 PG modules):
   3207 passed, 1 skip (the 123 self-guard, not PG). Full suite NOT run.
+
+## 181A-F1 re-check (eb15747 on ccdfdc1, 2026-11-26) — merge
+- M1–M6 and the `stale` tally all close, checked by node render.
+  - The leader and table counts now go through `funnelBlockValueHtml` ("at least N" under a bound).
+  - The SQL-rate sort keeps API order under a bound.
+  - The Google card without a line takes the window's own reason (stale / withheld / unreadable); only a published window says partition.
+- The 180B 04_b edit is a correction (it now requires "at least"), not a weakening.
+- M5: the drawer stays readable at 0.55 opacity during a reload, then is redrawn, closed when its key is gone, and closed on a failed load. This is the same pattern as the dimmed body table. Accepted.
+- 181A/180B/180A/162A/162I/168A/171B/162C: 296 passed. Full suite not run (CI).
+
+## PR-ADS-182A audit (dc7e326 on 6de7818, 2026-11-26) — Pipeline funnel = acquisition cohort; merge with minors
+- The Pipeline `funnel` is now `dashboard_overview_service.acquisition_funnel_block(mart deal-view cohort, source_group=, unavailable_reason=)`. It has no DB read or snapshot of its own. Verified by reading the code:
+  - `unavailable_reason` forces `unavailable`.
+  - `source_group` only picks a slot; a missing slot means `acquisition_funnel_counts_missing`.
+  - Neither can publish under a verdict that is not `published`.
+  - With both None the Overview block is byte-identical to before, apart from a new `source_group: None` key.
+- `by_source_group` (build_cohort) is bumped in the SAME loop, right after `all_sources`, from the same rows. So it is conserved by construction and is in the same snapshot. `reconcile_cohort` cannot newly withhold, short of a code bug. Cohort rows carry `hs_analytics_source_data_1`, so the drill-down rule applies.
+- POPULATION: Scope Google Ads-source == `by_source_group[google_ads]` == Paid Search by original source. That is WIDER than the SQL card's Google Ads cohort (`contact_bucket` excludes not-Google-Ads labels). Probe: card 1 against a "Google Ads" funnel Reached SQL of 3 on one page. The page does not name why.
+- Test gaps:
+  - 182A 03_d's `str(SENTINEL) not in panel` is vacuous: 7919 renders as "7,919". A mutation that prints the server's totals in the funnel subtitle survives 182A, 180A, 178B, 178B-F1, 166A and 180C. The same vacuous pattern is in older 180A/178B cases (180A 642 does check "7,919").
+  - The page draws counts under `lead_filters.honoured=false` if the server says published. The server cannot emit that; the audit (06_a) catches it.
+- Stale copy left behind:
+  - `static/index.html:323`, the Pipeline subtitle.
+  - `static/app.js:271` PAGE_EXPLANATIONS.pipeline.purpose, and `:274` emptyMeans.
+  - The `api/server.py` /api/pipeline docstring ("Entered stage in window"; shown in OpenAPI).
+  - The app.js Pipeline section comment (~5925).
+  - docs/61 and docs/65 have no supersession pointer.
+  - `app.js:3198` DASH_ACTIVITY_SUBTITLE is CORRECT: it is Overview Activity's (stage entries), not Pipeline's.
+- Deleted helpers: no live caller remains. Activity's stageEntryConversion bound rule is still guarded behaviourally (a mutation fails 180A 06_b). The 180C unit fake `_reach` still emits `outside_window_rows`, which production no longer emits (harmless drift).
+- Evidence:
+  - 65 related modules (11 of them PG): 2147 passed, 0 skipped. 182A unit + PG: 21 passed.
+  - compileall, node --check and diff --check are clean. The SQL doctrine inventory `--static-only` gives 0 unknown.
+  - Full suite not run.

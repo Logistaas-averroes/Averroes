@@ -230,8 +230,13 @@ def test_frontend_renders_unavailable_scope_as_dash_never_zero():
     # PR-ADS-180A: the Pipeline adapter (pipelineFunnelModel) hands each count
     # to funnelCountMetric — null/undefined is an "unavailable" verdict that
     # the shared block renders as the word through canonicalMetricHtml.
+    # PR-ADS-182A: the Pipeline funnel is the acquisition cohort; its adapter
+    # is the shared acquisition adapter, which does exactly that.
     funnel = _APP_JS.split("function pipelineFunnelModel(")[1].split("\n}\n")[0]
-    assert "funnelCountMetric(count," in funnel
+    assert "acquisitionFunnelModel(f," in funnel
+    adapter = _APP_JS.split("function acquisitionFunnelModel(")[1].split("\n}\n")[0]
+    assert "funnelCountMetric(channelFunnelCount(" in adapter
+    assert "|| 0" not in adapter
     metric = _APP_JS.split("function funnelCountMetric(")[1].split("\n}\n")[0]
     assert "value !== null && value !== undefined" in metric and '"unavailable"' in metric
     assert '"Unavailable"' in _APP_JS.split("function canonicalMetricHtml(")[1].split("\n}\n")[0]
@@ -385,34 +390,51 @@ def test_mismatch_withholds_the_count():
 
 def test_frontend_withholds_counts_on_mismatch():
     # PR-ADS-180A: the Pipeline funnel's model (the shared block's adapter).
-    strip = _APP_JS.split("function pipelineFunnelModel(")[1].split("\nfunction ")[0]
-    assert 'reconciliation || {}).status === "mismatch"' in strip
-    assert "(!available || mismatch) ? null : block.count" in strip
+    # PR-ADS-182A: the funnel is the acquisition cohort. Its "mismatch" is the
+    # cohort's own bucket reconciliation (`cohort_reconciliation_failed`),
+    # decided server-side; the shared adapter reads no total under any
+    # unpublished verdict — the totals are touched only after that return.
+    strip = _APP_JS.split("function acquisitionFunnelModel(")[1].split("\n}\n")[0]
+    unpublished = strip.index('if (pub.status !== "published" || !d.totals)')
+    assert strip.index("const totals = d.totals") > unpublished
+    assert "totals" not in strip[unpublished:strip.index("const totals = d.totals")].split(
+        "return {", 1)[1].split("};", 1)[0].replace("d.totals", "")
 
 
 def test_frontend_surfaces_partial_and_unavailable_states():
-    truth = _APP_JS.split("function leadsTruthStateHtml(")[1].split("\nfunction ")[0]
-    assert '"mismatch"' in truth and '"partial"' in truth
-    assert "withheld" in truth
-    assert "not zero" in truth
+    # PR-ADS-182A: the stage-event truth banner (leadsTruthStateHtml) went with
+    # the stage-event funnel. The cohort funnel's state is its verdict line:
+    # Withheld / Unavailable with the reason, never a number.
+    verdict = _APP_JS.split("function funnelBlockVerdictHtml(")[1].split("\n}\n")[0]
+    assert '"Withheld"' in verdict and '"Unavailable"' in verdict
+    assert "verdict.reason" in verdict
+    value = _APP_JS.split("function funnelBlockValueHtml(")[1].split("\n}\n")[0]
+    first = value.index('if (verdict.status !== "published")')
+    assert value.index("stage.metric") > first
 
 
 def test_incomplete_bootstrap_is_surfaced_and_all_time_is_qualified():
-    truth = _APP_JS.split("function leadsTruthStateHtml(")[1].split("\nfunction ")[0]
-    assert "Historical CRM sync in progress" in truth
-    assert "all_time" in truth
-    assert "does not yet represent complete history" in truth
+    # PR-ADS-182A: an incomplete contact-funnel bootstrap WITHHOLDS the cohort
+    # funnel (analysis/sql_coverage_freshness: source_bootstrap_incomplete) —
+    # stronger than the old "All Time is not complete" qualifier — and the
+    # Pipeline funnel names it in words through the cohort's reasons.
+    model = _APP_JS.split("function pipelineFunnelModel(")[1].split("\n}\n")[0]
+    assert "cohortFunnelReasonText(code)" in model
+    reasons = _APP_JS.split("const CAMPAIGN_COHORT_REASONS = {")[1].split("\n};\n")[0]
+    assert "source_bootstrap_incomplete:" in reasons
+    assert "backfill is still running" in reasons
 
 
 def test_conversions_render_only_when_cohort_safe():
-    # PR-ADS-180A: the Pipeline adapter builds each connector with
-    # stageEntryConversion (shared with Overview's activity block), which
-    # returns a rate only for an available, cohort-basis conversion.
-    strip = _APP_JS.split("function pipelineFunnelModel(")[1].split("\nfunction ")[0]
-    assert "stageEntryConversion(conv," in strip
-    conv = _APP_JS.split("function stageEntryConversion(")[1].split("\nfunction ")[0]
-    assert 'conv.basis === "cohort"' in conv
-    assert "conv.available" in conv
+    # PR-ADS-180A: the Pipeline adapter built each connector with
+    # stageEntryConversion. PR-ADS-182A: the Pipeline funnel is the
+    # acquisition cohort, which publishes no step rate: the adapter draws none
+    # (`shares: false`, no conversions) — nothing is divided in the browser.
+    strip = _APP_JS.split("function pipelineFunnelModel(")[1].split("\n}\n")[0]
+    assert "shares: false" in strip
+    assert "stageEntryConversion" not in strip and "conversions" not in strip
+    adapter = _APP_JS.split("function acquisitionFunnelModel(")[1].split("\n}\n")[0]
+    assert "conversions: []" in adapter
 
 
 def test_dashboard_conversion_helper_requires_cohort_basis():

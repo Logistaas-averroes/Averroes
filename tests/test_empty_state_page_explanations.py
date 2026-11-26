@@ -213,11 +213,17 @@ class TestBuildEmptyStateIntegration:
         PR-ADS-180A: the funnel is the shared block — the Pipeline adapter
         hands each stage count to funnelCountMetric, which makes a missing one
         an "unavailable" verdict, and the block renders that verdict through
-        canonicalMetricHtml as the word "Unavailable"."""
+        canonicalMetricHtml as the word "Unavailable". PR-ADS-182A: the
+        Pipeline funnel is the acquisition cohort, drawn through the shared
+        acquisition adapter, which hands each count to funnelCountMetric the
+        same way."""
         fn = self._get_function_slice("async function loadPipeline()", window=2200)
         assert "leadsRenderActiveView" in fn
         model = APP_JS.split("function pipelineFunnelModel(")[1].split("\n}\n")[0]
-        assert "funnelCountMetric(count," in model
+        assert "acquisitionFunnelModel(f," in model
+        adapter = APP_JS.split("function acquisitionFunnelModel(")[1].split("\n}\n")[0]
+        assert "funnelCountMetric(channelFunnelCount(" in adapter
+        assert "|| 0" not in model and "|| 0" not in adapter
         metric = APP_JS.split("function funnelCountMetric(")[1].split("\n}\n")[0]
         assert "value !== null && value !== undefined" in metric
         assert '"unavailable"' in metric

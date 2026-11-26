@@ -193,24 +193,19 @@ def _undated_contacts():
     ])
 
 
-def test_05_the_funnel_marks_a_lower_bound_only_for_stages_the_selected_scope_is_missing(
+def test_05_the_funnel_counts_the_undated_stage_contacts_exactly_on_the_cohort_basis(
         live_db, monkeypatch):
-    """Under All Sources the SQL stage is a lower bound (the organic c-ox);
-    under Google Ads-source the window's OWN rows have no SQL gap — 178B
-    marked it there from the all-source gap, 178C stopped — while its own
-    Opportunity gap (c-gx) stays marked.
+    """178C: under All Sources the stage-entry SQL count was a lower bound
+    (the organic c-ox) and under Google Ads-source the window's own rows had
+    no SQL gap; 180C added the undated contacts outside the rows (c-nolb …).
 
-    PR-ADS-180C (docs/65): the window's rows are not every contact that could
-    belong to the window. The 177A cohort's c-nolb is Google Ads, at SQL,
-    with NO SQL-entry date and created in the window: it may have entered SQL
-    in it, and the rows never see it (no stage date in the window). So
-    Google Ads-source SQL was never exact here; it is a lower bound naming
-    the all-source figure. Every Keyword-attributable stage is a bound too,
-    but that is OVER-MARKING, accepted per docs/65 §6: no contact here
-    carries a keyword, so 178C's exact keyword counts were true — the
-    all-source undated reach cannot say how many of its contacts a scope
-    holds, and the stage fails safe. Where nothing lies outside the rows,
-    the scope's own gap decides alone — test_pr_ads_180c PG case 03."""
+    PR-ADS-182A (owner decision): the Pipeline funnel counts by contact
+    CREATE date. A stage needs no entry date there, so these contacts are
+    counted exactly: no stage of any scope the cohort honours is a lower
+    bound (every fixture contact has a created date), and Keyword-attributable
+    — not on the cohort basis — shows no figure at all. The stage-entry
+    coverage per scope (178C) is still the canonical funnel's own, read here
+    from the real build: it is no longer Pipeline's to publish."""
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _seed(live_db)
     _undated_contacts()
@@ -229,25 +224,18 @@ def test_05_the_funnel_marks_a_lower_bound_only_for_stages_the_selected_scope_is
     every = _pipeline()
     google = _pipeline(scope="google_ads_source")
     keyword = _pipeline(scope="keyword_attributable")
-    assert every["funnel"]["coverage"] == {
-        "stage_reached_without_entry_date": whole, "scope": "all_source"}
-    assert google["funnel"]["coverage"]["stage_reached_without_entry_date"]["sql"] == 0
+    for p in (every, google, keyword):
+        assert "coverage" not in p["funnel"] and "undated_reach" not in p["funnel"]
+    assert every["funnel"]["contacts_without_created_at"] == 0
 
     def bounds(payload):
-        return re.findall(r'data-lower-bound="([a-z]+)"', _render(payload))
-    assert "sql" in bounds(every) and "opportunity" in bounds(every)
-    assert "opportunity" in bounds(google)
-    # PR-ADS-180C: undated contacts outside the window's rows (c-nolb, c-fj,
-    # c-uk: Google Ads, at SQL or later, no SQL-entry date) bound the scope's
-    # SQL count; how many of them the filter selects is not measured.
-    reach = google["funnel"]["undated_reach"]
-    assert reach["outside_window_rows"]["sql"] > 0
-    assert google["funnel"]["events"]["sql"]["undated_contacts_could_belong"] is None
-    assert google["funnel"]["events"]["sql"]["count_is_bound"] is True
-    assert "sql" in bounds(google)
-    assert "how many of them the lead filters select is not measured" in _render(google)
-    # Over-marking, accepted per docs/65 §6 (no keyword contact exists; the
-    # all-source reach cannot be split by scope): fails safe.
-    assert bounds(keyword) == ["lead", "mql", "sql", "opportunity", "customer"]
+        return re.findall(r'data-lower-bound="([a-z_]+)"', _render(payload))
+    assert bounds(every) == [] and bounds(google) == []
+    assert every["funnel"]["totals"]["reached_sql"] \
+        == every["cohort"]["breakdown"]["all_sources"]["sqls"]
+    assert google["funnel"]["totals"]["reached_opportunity"] \
+        == google["cohort"]["breakdown"]["by_source_group"]["google_ads"]["reached_opportunity"]
+    assert keyword["funnel"]["publication"]["reason"] == "lead_scope_not_on_cohort_basis"
+    assert bounds(keyword) == [] and keyword["funnel"]["totals"] is None
     # The deal figures are untouched by the scope (a lead filter).
     assert google["kpis"] == keyword["kpis"] == every["kpis"]
