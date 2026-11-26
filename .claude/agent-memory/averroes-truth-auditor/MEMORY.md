@@ -976,3 +976,38 @@ truncated list. Verified by execution on exported copies of both commits.
 - Same key, different figure: `build_revenue_attribution_audit`'s
   `missing_contact_created_at_count` is the legacy lead-date-grain count and
   still defaults to 0 (`grain.get(..., 0)`). It is not the readiness/cohort figure.
+
+## PR-ADS-180C audit (98cd829 on 7cd5e22, 2026-11-25) — merge with minors
+- Pipeline `_funnel` now calls `crm_funnel.undated_stage_reach` +
+  `undated_reach_for_population` + `stage_count_is_bound` (moved from
+  dashboard_overview_service). Under a Scope/Source filter a stage is exact
+  only if all-source undated n == 0, or `outside_window_rows[e] == 0` AND the
+  scope's own window-row gap is 0. Logic verified sound on ONE snapshot.
+- `outside_window_rows` predicate: verified by capturing executed SQL that
+  fetch_funnel_contacts' window clause appears verbatim (5 FILTERs + WHERE),
+  same params. But it is a SECOND COPY: mutations widening only the outside
+  copy's end (+2 days) or start (-1 day) edge — the UNSAFE direction (false
+  exact) — survive every 180C/178C/180B test (no edge-day fixture).
+- NOT one snapshot. `single_snapshot`/`one_snapshot` only memoise the
+  closed-won universe; get_conn() is a fresh READ COMMITTED txn per read
+  except inside a certification `pinned_read_snapshot`. PG probe: a sync commit
+  between fetch_funnel_contacts and fetch_undated_stage_reach (g-out gains an
+  in-window MQL date) made Google Ads SQL print "2" exact; both consistent
+  states say "at least 2". docs/65 §1 "inside build_pipeline's snapshot" is
+  overclaimed. Same tear exists for Overview Activity (whole scope) since 180B.
+- 178C PG test_05 change is a legit correction (c-nolb/c-uk/c-fj are PAID,
+  undated SQL+, created in window, no stage date in it). Its keyword
+  `== all five bounds` pins OVER-marking (no keyword contact exists; 178C's
+  keyword exactness was true, docs/65 §1.2 implies it was false).
+- `undated_reach.population` says "all_source" over narrowed counts.
+- Unknown-as-zero still on the Revenue Health strip on an outage (probe:
+  "Unknown | 0 | 0 | 0"): excluded_non_paid / pseudo (declared), plus
+  `legacy_excluded_count = 0` on exception and zero-initialised
+  `counts_by_source_type` (NOT declared). Legacy leads table; Minor.
+- Withheld mart cohort (`_withhold_cohort`): probe found no numeric leaf but
+  the table-wide `contacts_without_created_at`; notes rebuilt; mart
+  lifecycle_event_coverage is always counts_withheld. No new leak path found.
+- Evidence: 16/16 new tests fail on 7cd5e22 (git archive copy); 159 tests in
+  180C/178B/178C/166A/180A/180B/180B-F1 modules pass, PG ran, no skips;
+  60 related modules (grep for the touched symbols) 2007 passed, 0 skipped,
+  HEAD stable. Full suite NOT run.

@@ -384,8 +384,14 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
     """The lifecycle funnel (stage-entry events), trimmed to what the page
     shows. An unreadable funnel is unavailable with the reason, never 0."""
     try:
-        f = crm_funnel.build("business", window, scope=scope,
-                             acquisition_group=acquisition_group, now=now)
+        # PR-ADS-180C-F1: the window's rows and the undated reach in ONE
+        # database snapshot (crm_funnel.one_read_snapshot) — two reads at two
+        # instants could tear "outside the rows" and print a false exact.
+        with crm_funnel.one_read_snapshot():
+            f = crm_funnel.build("business", window, scope=scope,
+                                 acquisition_group=acquisition_group, now=now)
+            reach = (crm_funnel.undated_stage_reach(f.get("window"))
+                     if f.get("available") else None)
     except ValueError:
         raise
     except Exception:  # noqa: BLE001 — an unreadable funnel is not a page outage
@@ -398,11 +404,12 @@ def _funnel(window: str, now, scope: str, acquisition_group) -> dict:
     available = bool(f.get("available"))
     # PR-ADS-180C (docs/65): the undated reach over EVERY contact that could
     # belong to the window — the read Overview → Lifecycle Activity bounds its
-    # counts with, in this snapshot. The window's own rows (coverage, above)
-    # never see an undated contact with no date in the window, so "0 there"
-    # does not prove a count exact. Unread is None, and None is a bound.
+    # counts with, read above in the SAME database snapshot as the rows
+    # (PR-ADS-180C-F1). The window's own rows (coverage) never see an undated
+    # contact with no date in the window, so "0 there" does not prove a count
+    # exact. Unread is None, and None is a bound.
     undated = (crm_funnel.undated_reach_for_population(
-        crm_funnel.undated_stage_reach(f.get("window")), coverage,
+        reach, coverage,
         whole=scope == crm_funnel.SCOPE_ALL_SOURCE and acquisition_group is None)
         if available else None)
     counts = (undated or {}).get("counts") if (undated or {}).get("available") else None

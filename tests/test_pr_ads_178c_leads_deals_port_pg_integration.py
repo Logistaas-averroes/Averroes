@@ -205,9 +205,12 @@ def test_05_the_funnel_marks_a_lower_bound_only_for_stages_the_selected_scope_is
     with NO SQL-entry date and created in the window: it may have entered SQL
     in it, and the rows never see it (no stage date in the window). So
     Google Ads-source SQL was never exact here; it is a lower bound naming
-    the all-source figure, and so is every Keyword-attributable stage (178C
-    asserted them exact). Where nothing lies outside the rows, the scope's
-    own gap decides alone — test_pr_ads_180c PG case 03."""
+    the all-source figure. Every Keyword-attributable stage is a bound too,
+    but that is OVER-MARKING, accepted per docs/65 §6: no contact here
+    carries a keyword, so 178C's exact keyword counts were true — the
+    all-source undated reach cannot say how many of its contacts a scope
+    holds, and the stage fails safe. Where nothing lies outside the rows,
+    the scope's own gap decides alone — test_pr_ads_180c PG case 03."""
     monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", CUSTOMER)
     _seed(live_db)
     _undated_contacts()
@@ -243,6 +246,8 @@ def test_05_the_funnel_marks_a_lower_bound_only_for_stages_the_selected_scope_is
     assert google["funnel"]["events"]["sql"]["count_is_bound"] is True
     assert "sql" in bounds(google)
     assert "how many of them the lead filters select is not measured" in _render(google)
+    # Over-marking, accepted per docs/65 §6 (no keyword contact exists; the
+    # all-source reach cannot be split by scope): fails safe.
     assert bounds(keyword) == ["lead", "mql", "sql", "opportunity", "customer"]
     # The deal figures are untouched by the scope (a lead filter).
     assert google["kpis"] == keyword["kpis"] == every["kpis"]

@@ -1583,9 +1583,14 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
     try:
         from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
 
-        payload = _funnel.build(
-            _funnel.WINDOW_BUSINESS, window,
-            scope=_funnel.SCOPE_ALL_SOURCE, now=now)
+        # PR-ADS-180C-F1: the funnel rows and the undated reach in ONE
+        # database snapshot; two transactions could tear between them.
+        with _funnel.one_read_snapshot():
+            payload = _funnel.build(
+                _funnel.WINDOW_BUSINESS, window,
+                scope=_funnel.SCOPE_ALL_SOURCE, now=now)
+            undated = (_undated_reach(payload.get("window"))
+                       if payload.get("available") else None)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[dashboard_overview] canonical lifecycle funnel failed: %s", exc)
         return {**empty, "available": False, "status": "unavailable",
@@ -1632,7 +1637,7 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         "campaign_identity_available": payload.get("campaign_identity_available"),
         # PR-ADS-180B (docs/63 §8 b): undated stage reach over EVERY contact
         # that could belong to this window, not only the window's own rows.
-        "undated_reach": _undated_reach(payload.get("window")) if available else None,
+        "undated_reach": undated if available else None,
         # PR-ADS-155 §1: one Lead-anchored cohort followed forward. PR-ADS-180B
         # took it off the Overview page (the acquisition cohort replaced it);
         # it is still published here because the cross-page parity audit reads
@@ -1681,8 +1686,12 @@ def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
     try:
         from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
 
-        payload = _funnel.build(_funnel.WINDOW_BUSINESS, prev_key,
-                                scope=_funnel.SCOPE_ALL_SOURCE, now=prev_now)
+        # PR-ADS-180C-F1: one database snapshot for the build and its reach.
+        with _funnel.one_read_snapshot():
+            payload = _funnel.build(_funnel.WINDOW_BUSINESS, prev_key,
+                                    scope=_funnel.SCOPE_ALL_SOURCE, now=prev_now)
+            undated = (_undated_reach(payload.get("window"))
+                       if payload.get("available") else None)
     except Exception as exc:  # noqa: BLE001 — a comparison is optional; truth is not
         logger.warning("[dashboard_overview] previous-period lifecycle funnel "
                        "failed: %s", exc)
@@ -1698,7 +1707,6 @@ def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
     # PR-ADS-180B (docs/63 §8, carried from the 180A re-audit): a previous
     # count that is a lower bound is no baseline. "+X% vs prior" against it is
     # a change nobody measured, and its sign can flip.
-    undated = _undated_reach(payload.get("window"))
     return {
         "available": True,
         "label": label,

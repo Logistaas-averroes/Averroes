@@ -419,6 +419,8 @@ jobs:
                            # population, one reading on both pages; the read's
                            # outside-the-rows count; a lead filter exact only
                            # where nothing undated lies outside the rows.
+                           # PR-ADS-180C-F1: both reads in one snapshot under
+                           # a concurrent sync; the window clause's edges.
                            "tests.test_pr_ads_180c_pipeline_undated_bound_pg_integration",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")

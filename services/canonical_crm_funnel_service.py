@@ -1024,6 +1024,29 @@ def _cohort_block(populations: dict, scope: str, window: dict, *,
 # here so the Pipeline funnel reads the SAME bound over the same population
 # (docs/65). Overview and Pipeline both call these two functions; neither keeps
 # a copy.
+def one_read_snapshot():
+    """PR-ADS-180C-F1 — ONE ``REPEATABLE READ, READ ONLY`` database snapshot
+    for a funnel build and its undated reach.
+
+    Each ``get_conn()`` is its own READ COMMITTED transaction, so the window's
+    rows (``fetch_funnel_contacts``, inside :func:`build`) and the undated
+    reach (``fetch_undated_stage_reach``) were two reads at two instants. A
+    contact-funnel sync committing between them could move a contact out of
+    "undated, outside the rows" before the second read saw it, and a count
+    both consistent states call "at least N" printed "N", exact. (A page
+    builder's ``@single_snapshot`` memoises the closed-won universe; it holds
+    no database snapshot.) Every caller that pairs the two reads
+    opens this block around both — Overview's Lifecycle Activity (and its
+    previous period) and the Pipeline funnel.
+
+    It is ``db.connection.pinned_read_snapshot`` (PR-ADS-179A): nested inside
+    a certification window it shares that window's snapshot; with no database
+    configured it changes nothing. A snapshot that cannot be taken raises, and
+    the caller reports the funnel unreadable — never a torn read."""
+    from db.connection import pinned_read_snapshot  # noqa: PLC0415
+    return pinned_read_snapshot()
+
+
 def undated_stage_reach(window: dict | None) -> dict:
     """``fetch_undated_stage_reach`` for one funnel window payload: per stage,
     the canonical contacts (ALL sources, the whole table) that reached the
@@ -1094,7 +1117,11 @@ def undated_reach_for_population(undated: dict | None, coverage: dict | None, *,
             "all_source_counts": dict(counts) if counts is not None else None,
             "outside_window_rows": dict(outside) if isinstance(outside, dict) else None,
             "covers_selected_population": bool(whole),
-            "rule": u.get("rule"), "population": u.get("population")}
+            # PR-ADS-180C-F1: `counts` are the SELECTED population's when it
+            # is narrowed; the all-source figures are `all_source_counts`.
+            "rule": u.get("rule"),
+            "population": (u.get("population") if whole
+                           else "selected_population_narrowed")}
 
 
 def stage_count_is_bound(event: str, coverage: dict | None, undated: dict | None) -> bool:

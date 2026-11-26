@@ -460,3 +460,41 @@ def test_03_b_the_audit_and_revenue_health_say_unknown(monkeypatch):
     read = json.loads(json.dumps(t._audit(), default=str))
     assert read["missing_contact_created_at_count"] == 0
     assert strip(read) == "0"
+
+
+def test_03_c_a_database_outage_leaves_every_revenue_health_count_unknown(monkeypatch):
+    """PR-ADS-180C-F1 (minor 3): through a simulated outage (no connection
+    anywhere), every legacy count the audit reports is None and Revenue
+    Health says "Unknown" in each cell. On 98cd829 the excluded counts, the
+    legacy exclusions and the per-source counts read 0 — "0" on the page."""
+    import db.writers as writers
+    from db import revenue_repository as repo
+    import tests.test_revenue_attribution_audit as t
+    monkeypatch.setattr(repo, "fetch_lead_quality",
+                        lambda s, e: repo._unavailable("leads", {"event_date_safe": False}))
+    monkeypatch.setattr(repo, "get_conn", _no_conn)
+    monkeypatch.setattr(writers, "get_conn", _no_conn)
+    grain = repo.fetch_lead_date_grain_health(None, date(2026, 11, 19))
+    for key in ("missing_contact_created_at_count", "excluded_non_paid_count",
+                "excluded_pseudo_campaign_count", "counts_by_source_type"):
+        assert grain[key] is None, key
+    assert writers.count_lead_exclusions() is None
+    a = json.loads(json.dumps(t._audit(grain=grain), default=str))
+    for key in ("missing_contact_created_at_count", "excluded_non_paid_count",
+                "excluded_pseudo_campaign_count", "legacy_excluded_count",
+                "counts_by_source_type"):
+        assert a[key] is None, key
+    html = _run_app('_currentUser = {"username": "u", "role": "admin"}; '
+                    "renderRevenueHealth(%s)" % json.dumps(a))
+    for label in ("Included paid leads missing dates",
+                  "Legacy paid rows excluded from revenue truth",
+                  "Excluded non-paid rows", "Excluded pseudo campaigns"):
+        m = re.search(re.escape(label) + r"</span><strong>(.*?)</strong>", html, re.S)
+        assert _text(m.group(1)).strip() == "Unknown", (label, m.group(1))
+
+    # A count lookup that RAISES is unknown too, not 0.
+    def boom():
+        raise RuntimeError("connection reset")
+    monkeypatch.setattr(writers, "count_lead_exclusions", boom)
+    assert json.loads(json.dumps(t._audit(grain=grain), default=str))[
+        "legacy_excluded_count"] is None

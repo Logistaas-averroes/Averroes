@@ -216,6 +216,34 @@ def _unavailable(**extra) -> dict:
     return payload
 
 
+def any_stage_date_in_window(start: date | None, end: date | None) -> tuple[str, list]:
+    """PR-ADS-180C-F1 — the ONE "some stage-entry date falls in ``[start,
+    end]``" predicate, as ``(sql, params)``.
+
+    ``fetch_funnel_contacts`` selects the window's rows with it, and
+    ``fetch_undated_stage_reach`` uses it to say which undated contacts lie
+    OUTSIDE those rows. A lead-filtered Pipeline funnel states a narrow scope
+    exact only when nothing undated lies outside them (docs/65), so the two
+    predicates must be the same text: a second copy whose edge drifted would
+    turn "outside" into "inside" and a lower bound into a false exact.
+
+    Effective dates (direct, else recovered from lifecycle history), the
+    funnel alias ``f`` and the recovery join are the caller's. ``start=None``
+    / ``end=None`` are open bounds. The end is inclusive of the whole day.
+    """
+    sql = " OR ".join(
+        f"""(
+            {expr} IS NOT NULL
+            AND ({expr} >= COALESCE(%s::timestamptz, {expr}))
+            AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
+        )"""
+        for expr in (effective_date_sql(e) for e in FUNNEL_EVENTS))
+    params: list = []
+    for _ in FUNNEL_EVENTS:
+        params.extend([start, end, end])
+    return sql, params
+
+
 def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
     """Canonical contact rows whose ANY stage-entry date falls in ``[start, end]``.
 
@@ -231,18 +259,7 @@ def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
     (All Time). Rows also carry every later-stage date regardless of window, so
     cohort-safe conversions can be computed downstream.
     """
-    date_exprs = [_effective_date_sql(e) for e in FUNNEL_EVENTS]
-    window_clause = " OR ".join(
-        f"""(
-            {expr} IS NOT NULL
-            AND ({expr} >= COALESCE(%s::timestamptz, {expr}))
-            AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
-        )"""
-        for expr in date_exprs
-    )
-    params: list = []
-    for _ in date_exprs:
-        params.extend([start, end, end])
+    window_clause, params = any_stage_date_in_window(start, end)
 
     try:
         with get_conn() as conn:
@@ -293,22 +310,16 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
     PR-ADS-180C: ``outside_window_rows`` counts, per event, the part of each
     figure that is NOT in the window's own rows — the contacts with no stage
     date in the window (the predicate below is ``fetch_funnel_contacts``'
-    window clause, character for character). Where it is 0, every undated
+    window clause — one helper, ``any_stage_date_in_window``). Where it is 0, every undated
     contact that could belong to the window is among the rows the funnel
     build read, so the build's own per-scope coverage holds all of them: that
     is what lets a lead-filtered Pipeline funnel state a narrow scope exact
     (docs/65). It never dates a contact.
     """
-    in_window = " OR ".join(
-        f"""(
-            {expr} IS NOT NULL
-            AND ({expr} >= COALESCE(%s::timestamptz, {expr}))
-            AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
-        )"""
-        for expr in (effective_date_sql(e) for e in FUNNEL_EVENTS))
-    window_params: list = []
-    for _ in FUNNEL_EVENTS:
-        window_params.extend([start, end, end])
+    # PR-ADS-180C-F1: the SAME clause object fetch_funnel_contacts uses, not a
+    # second copy — "outside the window's rows" can only be trusted while the
+    # two predicates cannot drift apart.
+    in_window, window_params = any_stage_date_in_window(start, end)
     stage_counts = []
     params: list = []
     for event in FUNNEL_EVENTS:

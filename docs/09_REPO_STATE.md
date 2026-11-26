@@ -7663,3 +7663,32 @@ the "full funnel on every page" request.
   `docs/65` §4.
 * **Open.** A scope-aware undated reach; the sibling legacy counts that still
   default to 0; production cost of the extra read not measured (`docs/65` §6).
+
+#### PR-ADS-180C-F1 — one snapshot for the Pipeline funnel reads; shared window clause
+
+`docs/65` §7. One commit on `98cd829`; the 180C truth audit returned "merge
+with minors".
+
+* **Minor 1 (a figure).** The window's rows and the undated reach were two
+  READ COMMITTED transactions (`@single_snapshot` memoises the closed-won
+  universe only). A sync committing between them printed Google Ads-source
+  SQL "2" exact where both consistent states say "at least 2"; Overview
+  Activity had the same tear since 180B. `canonical_crm_funnel_service.
+  one_read_snapshot()` (= PR-ADS-179A's `pinned_read_snapshot`, one
+  REPEATABLE READ snapshot) now wraps the build and its reach in
+  `pipeline_service._funnel` and Overview's current and previous periods.
+* **Minor 2.** One window clause, `crm_funnel_repository.
+  any_stage_date_in_window`, for `fetch_funnel_contacts` and the undated
+  read's outside count; a PG edge test (start −1 min, start, end of last day
+  −1 min, day after).
+* **Minor 3.** Revenue Health: `excluded_non_paid_count`,
+  `excluded_pseudo_campaign_count`, `counts_by_source_type`,
+  `count_lead_exclusions` / `legacy_excluded_count` are None when unread;
+  every strip cell reads "Unknown".
+* **Minor 4.** The Keyword-attributable bounds in 178C PG test_05 are called
+  over-marking (accepted, docs/65 §6), not a correction; assertion unchanged.
+* `funnel.undated_reach.population` reads "selected_population_narrowed"
+  for narrowed counts. Auditor's 180C note appended to its MEMORY.md.
+* **Tests.** 180C PG 04_a, 04_b, 04_c, 05 and unit 03_c; 04_a/04_b/04_c and
+  03_c fail on `98cd829`; mutations m2, m3, m2h, m3h, S, Sp, So, Spp, R1–R5
+  all fail a test (docs/65 §7.6).

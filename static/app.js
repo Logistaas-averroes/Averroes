@@ -8000,13 +8000,10 @@ function renderRevenueHealth(audit) {
     </div>
 
     <div class="revenue-summary-strip revenue-summary-strip--four">
-      <div><span>Included paid leads missing dates</span><strong>${
-        // PR-ADS-180C: an unread count is unknown, never 0 and never a dash.
-        audit.missing_contact_created_at_count === null || audit.missing_contact_created_at_count === undefined
-          ? "Unknown" : fmtCount(audit.missing_contact_created_at_count)}</strong></div>
-      <div><span>Legacy paid rows excluded from revenue truth</span><strong>${fmtCount(audit.legacy_excluded_count)}</strong></div>
-      <div><span>Excluded non-paid rows</span><strong>${fmtCount(audit.excluded_non_paid_count)}</strong></div>
-      <div><span>Excluded pseudo campaigns</span><strong>${fmtCount(audit.excluded_pseudo_campaign_count)}</strong></div>
+      <div><span>Included paid leads missing dates</span><strong>${fmtCountOrUnknown(audit.missing_contact_created_at_count)}</strong></div>
+      <div><span>Legacy paid rows excluded from revenue truth</span><strong>${fmtCountOrUnknown(audit.legacy_excluded_count)}</strong></div>
+      <div><span>Excluded non-paid rows</span><strong>${fmtCountOrUnknown(audit.excluded_non_paid_count)}</strong></div>
+      <div><span>Excluded pseudo campaigns</span><strong>${fmtCountOrUnknown(audit.excluded_pseudo_campaign_count)}</strong></div>
     </div>
 
     <div class="panel">
@@ -15101,6 +15098,13 @@ function fmtNum(v, decimals) {
 function fmtCount(v) {
   if (v === null || v === undefined) return "—";
   return Number(v).toLocaleString();
+}
+
+// PR-ADS-180C(-F1): a count the server could not read (None) is "Unknown" —
+// never 0, and never a dash a reader can take for "none".
+function fmtCountOrUnknown(v) {
+  if (v === null || v === undefined) return "Unknown";
+  return fmtCount(v);
 }
 
 // ── Business revenue windows (PR-ADS-107A) ────────────────────────────────
