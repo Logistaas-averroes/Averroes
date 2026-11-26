@@ -1064,3 +1064,49 @@ truncated list. Verified by execution on exported copies of both commits.
 - Evidence: 159 + 160 + 161C + 161A1 + 180C unit/PG + 178C PG + 115:
   508 passed, PG ran, no skips. The builder's 151-module list includes
   159/160/161A1/161C/180C.
+
+## PR-ADS-181A audit (ccdfdc1 on bb4d4a0, 2026-11-26) — Channels redesign; merge with minors
+- Withheld means absent, verified by node render of the real 180d / withheld /
+  ledger_stale payloads plus an ADVERSARIAL payload (withheld verdict carrying
+  full totals/rows). No funnel figure reached the KPI cards, leader line,
+  table, All channels row, drawer or sort order. A withheld half's columns are
+  dropped. Sort falls back when its column is gone. Unknown values sort last
+  in API order. Rows are dimmed only when outcome columns are shown.
+- Customers are never summed. The All channels row, KPI and drawer read
+  `outcomes.totals.metrics.customers` (80 vs a row sum of 81 in the real
+  payload). The outcome leader's margin is the unresolved row's own value. That
+  row is ALWAYS emitted by `build_channel_outcome_rows` whenever rows exist,
+  and it fails closed on null. The funnel leader's margin = the no-source row +
+  `contacts_without_created_at` (null -> no leader).
+- Test gaps found by mutation (both survive 181A/162I/162A/180A/180B/168A/171B):
+  the funnel leader margin set to 0 (null check kept), and `channelSortValue`
+  sql_rate ignoring the bound (this would leak the rate ranking behind "—").
+  Current code is correct on both. Only the outcome margin is pinned
+  (181A test_10 "close").
+- Under a bound the leader prints the bounded count as exact ("Most from X ·
+  1,865" beside "at least 5,747"). 180B 04_b pins it. Masked: production
+  contacts_without_created_at = 0.
+- The Google Ads card under a stale/unreadable ledger: `google_ads_line` is null
+  whenever `base.available` is false, and the card substitutes
+  `google_ads_evidence_partition_unavailable` for the real reason
+  (`canonical_ledger_stale`).
+- The drawer is not re-rendered when `loadChannels` resolves or fails. A drawer
+  opened from the dimmed old table during a refresh keeps the old window's
+  figures, even after a failed load (this contradicts the loader's own comment).
+- The header "Updated <t>" chip = `freshness.last_successful_incremental_at`
+  (contacts only). It is shown under any verdict and says nothing about the
+  deal ledger.
+- Retirement: no live reference to dashboard_channels / fetch_source_leads_daily /
+  source_group_sqls remains. The parity identity had only the retired
+  consumer. The SQL doctrine inventory --static-only gives 0 unknown. No
+  deleted CSS class matches a dynamic `prefix-${}` in app.js, and none is
+  literally in app.js/index.html. The label rename has no Python matcher left.
+  A pre-existing gap: the `stale` fallback status is labelled but counted in no
+  tally.
+- The 171B test_14 port dropped the "no accounts" fallback. The old strip
+  printed a default day-basis sentence; the new card prints none, and its
+  day-basis and withheld_detail are now behind "Account details" (declared in
+  docs/66). There is no figure in that case.
+- Evidence: compileall, node --check, diff --check clean. 87 related modules
+  (grep for the touched symbols plus every edited test module, 12 PG modules):
+  3207 passed, 1 skip (the 123 self-guard, not PG). Full suite NOT run.

@@ -18,8 +18,9 @@ stale sentence ("such as Deals" → "such as Pipeline").
 Top to bottom:
 
 1. **Header.** "Channels" / "Where your customers come from." The period
-   control (30 / 60 / 180 days / All time) and two chips: "Updated 26 Nov,
-   06:06 UTC" (the funnel's `freshness.as_of`) and "Read-only". The period is
+   control (30 / 60 / 180 days / All time) and two chips: "Contacts updated
+   26 Nov, 06:06 UTC" (the funnel's `freshness.as_of`, the contact sync's last
+   successful incremental; F1) and "Read-only". The period is
    in the hash (`#/channels?window=60d`; the default 180 days needs none), so a
    refresh or a shared link holds it (`channelsWindowFromHash`,
    `channelsHashFor`, `navigateToHash`).
@@ -273,3 +274,46 @@ All 30 fail on `bb4d4a0` (git-archive copy). Mutations, each caught:
   (INVENTORY Part 2 #4); its layout was not redesigned here.
 * The funnel note `notes.maturity` mentions CPQL; it is the API's text, shown
   only under "How this is counted".
+
+## §F1 — the truth audit's minors (PR-ADS-181A-F1)
+
+The audit of `ccdfdc1` returned "merge with minors". One commit on top:
+
+* **M3 — a leader under a lower bound read as exact.** With
+  `contacts_without_created_at > 0` the cards said "at least 2,951" but the
+  line under them "Most from Paid Social · 1,147". The leader's figure (and
+  every table count) now goes through the block's own `funnelBlockValueHtml`
+  via `channelCountHtml` — "at least N" with the reason, no local wording.
+  180B test_04_b had pinned "Most from Paid Social · 1,147" under a bound:
+  that assertion pinned the defect and now reads "· at least 1,147".
+* **M4 — a stale ledger was worded as a missing evidence partition.** With
+  no `google_ads_line` the Google Ads card's revenue and ratios now give the
+  window's own verdict (`channelOutcomeMetric(o, …)`: "the deal sync is
+  overdue"); only a published window with no line says the partition is
+  unavailable. Spend still shows.
+* **M5 — a reload could leave the drawer on the previous period.** An open
+  drawer is dimmed while the new response loads, then redrawn from it — or
+  closed when its channel is not in it (`channelDrawerKeyExists`); a failed
+  load closes it. A row of the table being replaced (`is-refreshing`) opens
+  nothing. The period buttons no longer close the drawer.
+* **M6** — the chip says "Contacts updated … UTC": it is the contact sync's
+  time, not the deals'.
+* **M1 (test gap)** — page cases where the funnel leader is refused by the
+  no-source row's margin and by the undated contacts (181A 28). The logic
+  was right in `ccdfdc1` (28 passes there); the forced-zero-margin mutant
+  fails it.
+* **M2** — under a lower bound every SQL rate is unknown, so sorting by it
+  ranks nothing: the small-sample rule now applies only between two known
+  rates, and the API's order stands (181A 29).
+* **Observation** — `datasetDisplayStatus` emits a raw `stale`; it had a label
+  and no tally. It now counts as a warning (181A 30).
+* **M7** is left as declared in §5 (no figure in that case).
+
+Tests: 181A 23 (chip), 25–30 (new). 23, 25, 26, 27, 29 and 30 fail on
+`ccdfdc1`; 28 passes there (a test gap, not a defect). Mutations, each
+caught: margin forced to 0 (28); rate computed under a bound (29); small-sample
+rule on unknown rates (29); leader exact under a bound (25); missing line
+always "partition" (26); drawer not redrawn / vanished channel kept / row
+opened while refreshing (27 ×3); chip "Updated" (23); `stale` dropped from the
+tally (30). Ported: 162A 13, 162I 01 (chip wording), 180B 04_b (above).
+The auditor's "PR-ADS-181A audit" note is appended to its MEMORY.md.

@@ -1833,7 +1833,7 @@ function renderPageDatasetFreshness(sectionKey) {
     s === "fresh_but_empty" || s === "stale_with_data" || s === "dependency_blocked"
     || s === "data_available_latest_sync_failed" || s === "not_run_but_derivable"
     || s === "empty_success" || s === "data_available_latest_sync_partial"
-    || s === "partial"
+    || s === "partial" || s === "stale"
   ).length;
   const errorCount   = statuses.filter((s) =>
     s === "failed" || s === "stale_and_empty" || s === "db_unavailable"
@@ -8449,11 +8449,14 @@ function channelsRange(w) {
   return `${channelsDay(x.start_date, years)} – ${channelsDay(x.end_date, years)}`;
 }
 
-/** "Updated 26 Nov, 06:06 UTC" from the funnel's freshness.as_of. */
+/**
+ * "Contacts updated 26 Nov, 06:06 UTC" — the funnel's freshness.as_of, which
+ * is the contact sync's last successful incremental (not the deals' time).
+ */
 function channelsUpdatedText(data) {
   const asOf = String(((data || {}).freshness || {}).as_of || "");
   const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(asOf);
-  return m ? `Updated ${channelsDay(m[1])}, ${m[2]} UTC` : "Update time not stated";
+  return m ? `Contacts updated ${channelsDay(m[1])}, ${m[2]} UTC` : "Contacts update time not stated";
 }
 
 // ── the published inputs, per population ────────────────────────────────────
@@ -8506,9 +8509,11 @@ function channelLeader(candidates, uncertain) {
   return { label: top.label, value: top.value };
 }
 
-function channelLeaderHtml(leader, fmt) {
+// `valueHtml` renders the figure: a lower-bound cohort count goes through the
+// block's own renderer (channelCountHtml), so a leader is "at least N" too.
+function channelLeaderHtml(leader, valueHtml) {
   if (!leader) return "";
-  return `<div class="channels-kpi__lead">Most from <strong>${escapeHtml(leader.label)}</strong> · ${escapeHtml(fmt(leader.value))}</div>`;
+  return `<div class="channels-kpi__lead">Most from <strong>${escapeHtml(leader.label)}</strong> · ${valueHtml(leader.value)}</div>`;
 }
 
 /** The outcome leader for one metric: channel rows only. */
@@ -8559,9 +8564,9 @@ function channelOutcomeGroupHtml(o) {
       <div class="channels-group__head"><span>Deals closed</span>${range ? `<em${w.disclosure ? ` title="${escapeHtml(w.disclosure)}"` : ""}>${escapeHtml(range)}</em>` : ""}</div>
       <div class="channels-group__cards">
         ${channelsKpiCard("Customers won", canonicalMetricHtml(customers, channelOutcomeInt, opts), "distinct companies",
-          channelLeaderHtml(channelOutcomeLeader(o, "customers"), channelOutcomeInt))}
+          channelLeaderHtml(channelOutcomeLeader(o, "customers"), (v) => escapeHtml(channelOutcomeInt(v))))}
         ${channelsKpiCard("Closed-won revenue", canonicalMetricHtml(revenue, channelMoney, opts), dealSub,
-          channelLeaderHtml(channelOutcomeLeader(o, "revenue_usd"), channelMoney))}
+          channelLeaderHtml(channelOutcomeLeader(o, "revenue_usd"), (v) => escapeHtml(channelMoney(v))))}
       </div>
     </section>`;
 }
@@ -8584,9 +8589,9 @@ function channelFunnelGroupHtml(data, st) {
       ${funnelBlockVerdictHtml(verdict)}
       <div class="channels-group__cards">
         ${channelsKpiCard("New contacts", value(contacts), st.ok ? "created in these days" : "",
-          channelLeaderHtml(channelFunnelLeader(d, st, "contacts"), channelOutcomeInt) + bound)}
+          channelLeaderHtml(channelFunnelLeader(d, st, "contacts"), (v) => channelCountHtml(v, st.bound, "contacts")) + bound)}
         ${channelsKpiCard("Reached SQL so far", value(sql), sqlSub,
-          channelLeaderHtml(channelFunnelLeader(d, st, "reached_sql"), channelOutcomeInt))}
+          channelLeaderHtml(channelFunnelLeader(d, st, "reached_sql"), (v) => channelCountHtml(v, st.bound, "reached_sql")))}
       </div>
     </section>`;
 }
@@ -8683,9 +8688,11 @@ function channelTableSorted(rows, sort, st) {
   const rest = rows.filter((r) => r.kind !== "channel");
   const sign = sort.dir === "asc" ? 1 : -1;
   chans.sort((a, b) => {
-    if (sort.key === "sql_rate" && a.small !== b.small) return a.small ? 1 : -1;
     const x = channelSortValue(a, sort.key, st);
     const y = channelSortValue(b, sort.key, st);
+    // Only between two KNOWN rates: an unknown rate (a lower-bound cohort)
+    // ranks nothing, so the API's order stands.
+    if (sort.key === "sql_rate" && x !== null && y !== null && a.small !== b.small) return a.small ? 1 : -1;
     if (x === null && y === null) return a.order - b.order;
     if (x === null) return 1;
     if (y === null) return -1;
@@ -8699,12 +8706,16 @@ function channelNa(title) {
   return `<span class="channels-na" title="${escapeHtml(title)}">n/a</span>`;
 }
 
-/** A funnel count in the table: "—" when not sent, "at least N" when bounded. */
-function channelCountHtml(v, bound) {
+/**
+ * A cohort count off the funnel block: "—" when not sent; otherwise the
+ * block's own value renderer (funnelBlockValueHtml) — the count, or "at least
+ * N" with the reason under a lower bound. No local wording.
+ */
+function channelCountHtml(v, bound, key) {
   const n = channelFunnelCount(v);
   if (n === null) return '<span class="channels-unknown" title="the server sent no count">—</span>';
-  if (bound) return `<span class="dash-lower-bound" title="Lower bound: ${escapeHtml(bound)}">at least ${escapeHtml(fmtCount(n))}</span>`;
-  return escapeHtml(fmtCount(n));
+  return funnelBlockValueHtml({ key: key || "count", metric: funnelCountMetric(n, null),
+    bound_reason: bound || null }, { status: "published" });
 }
 
 function channelRateHtml(f, bound) {
@@ -8854,8 +8865,17 @@ function channelGoogleCardHtml(o) {
   const line = (o && o.google_ads_line) || null;
   const spend = (line && line.spend) || ((o || {}).spend || {}).google_ads
     || { status: "unavailable", reason: o ? "google_ads_usd_spend_unavailable" : "channel_outcomes_failed" };
-  const missing = { status: "unavailable", reason: o ? "google_ads_evidence_partition_unavailable" : "channel_outcomes_failed" };
-  const metric = (key) => (line && (line.metrics || {})[key]) || missing;
+  // No line: when the window's own figure is not published (a stale ledger,
+  // an unreadable one) the card says THAT reason; only a published window
+  // with no line is a missing evidence partition.
+  const missing = (windowKey) => {
+    const m = channelOutcomeMetric(o, windowKey);
+    return m.status === "published"
+      ? { status: "unavailable", reason: "google_ads_evidence_partition_unavailable" } : m;
+  };
+  const basis = { revenue_usd: "revenue_usd", period_revenue_per_ad_spend: "revenue_usd",
+    period_spend_per_customer_won: "customers" };
+  const metric = (key) => (line && (line.metrics || {})[key]) || missing(basis[key] || key);
   const customers = channelOutcomeValue(line, "customers");
   const deals = channelOutcomeValue(line, "closed_won_deals");
   const count = customers !== null && deals !== null
@@ -9079,6 +9099,16 @@ function renderChannelDrawer() {
   if (btn) btn.focus();
 }
 
+/** Whether `key` is a row of THIS response (the drawer's channel survives a reload). */
+function channelDrawerKeyExists(data, key) {
+  const d = data || {};
+  if (key === CHANNELS_ALL) return true;
+  const inFunnel = Array.isArray(d.channels) && d.channels.some((c) => c.source === key);
+  const o = d.outcomes || null;
+  const inOutcomes = channelOutcomesPublished(o) && o.channels.some((r) => r.source === key);
+  return inFunnel || inOutcomes;
+}
+
 function closeChannelDrawer() {
   if (!_channelsView.drawer) return;
   _channelsView.drawer = null;
@@ -9091,9 +9121,10 @@ async function loadChannels() {
   const window_ = channelsWindowFromHash(window.location.hash) || _channelsWindow || "180d";
   _channelsWindow = window_;
   const token = ++_channelsReqSeq;
-  // A new load (a new period, or coming back to the page) opens no drawer.
-  _channelsView.drawer = null;
-  renderChannelDrawer();
+  // An open drawer is dimmed until the new response arrives, then redrawn
+  // from it (or closed): it never shows one period beside another's table.
+  const drawerRoot = document.getElementById("channels-drawer-root");
+  if (drawerRoot && _channelsView.drawer) drawerRoot.classList.add("is-refreshing");
   document.querySelectorAll("[data-channels-window]").forEach((btn) => {
     const on = btn.dataset.channelsWindow === window_;
     btn.classList.toggle("is-active", on);
@@ -9110,11 +9141,17 @@ async function loadChannels() {
     _channelsData = data;
     if (updated) { updated.textContent = channelsUpdatedText(data); updated.hidden = false; }
     if (body) { body.classList.remove("is-refreshing"); body.innerHTML = renderChannelFunnel(data, _channelsView); }
+    if (_channelsView.drawer && !channelDrawerKeyExists(data, _channelsView.drawer)) _channelsView.drawer = null;
+    if (drawerRoot) drawerRoot.classList.remove("is-refreshing");
+    renderChannelDrawer();
   } catch (err) {
     console.error("[loadChannels]", err);
     if (token !== _channelsReqSeq) return;
     // A failed load never leaves the previous window's figures on screen.
     _channelsData = null;
+    _channelsView.drawer = null;
+    if (drawerRoot) drawerRoot.classList.remove("is-refreshing");
+    renderChannelDrawer();
     if (updated) updated.hidden = true;
     if (body) {
       body.classList.remove("is-refreshing");
@@ -14468,12 +14505,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     const btn = e.target.closest("[data-channels-window]");
     if (!btn) return;
     _channelsWindow = btn.dataset.channelsWindow;
-    _channelsView.drawer = null;
     history.replaceState(null, "", channelsHashFor(_channelsWindow));
     loadChannels();
   });
   const channelsBody = document.getElementById("channels-body");
   const openChannel = (row) => {
+    // A row of the table being replaced opens nothing: its figures are the
+    // previous period's.
+    if (channelsBody.classList.contains("is-refreshing")) return;
     _channelsView.drawer = row.dataset.channelOpen;
     renderChannelDrawer();
   };

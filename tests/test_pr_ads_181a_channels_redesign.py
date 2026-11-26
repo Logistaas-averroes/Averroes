@@ -533,7 +533,7 @@ def test_23_the_header_dates_and_money_use_the_overview_formats():
                 " channelsRange({start_date: '2025-12-01', end_date: '2026-11-25'}),"
                 " channelsRange({is_all_time: true, end_date: '2026-11-25'}),"
                 " channelMoney(896400), channelMoney(5337.24), channelMoney(0)]") == [
-        "Updated 26 Nov, 06:06 UTC", "Update time not stated", "31 May – 25 Nov",
+        "Contacts updated 26 Nov, 06:06 UTC", "Contacts update time not stated", "31 May – 25 Nov",
         "1 Dec 2025 – 25 Nov 2026", "All time, to 25 Nov 2026", "$896.4k", "$5.3k", "$0"]
     page = HTML[HTML.index('id="page-channels"'):]
     page = page[:page.index("</section>")]
@@ -547,3 +547,137 @@ def test_24_the_page_reads_no_page_state_inside_its_renderers():
         body = _fn(name)
         for state in ("_channelsData", "_channelsView", "_channelsWindow"):
             assert state not in body, (name, state)
+
+
+# ── PR-ADS-181A-F1: the truth audit's minors ────────────────────────────────
+
+def test_25_m3_a_leader_under_a_lower_bound_reads_at_least_like_the_block():
+    html = _render(_payload(contacts_without_created_at=3))
+    group = _group(html, "Contacts acquired")
+    text = _text(group)
+    # 400 > 300 + 10 (no source) + 3 (undated): still certain, and a bound.
+    assert "Most from Paid Search · at least 400" in text
+    assert "Most from Paid Search · at least 20" in text
+    lead = group[group.index("channels-kpi__lead"):]
+    assert 'class="dash-lower-bound" data-lower-bound="contacts"' in lead
+    # The block's renderer draws it, not a local string.
+    assert "funnelBlockValueHtml(" in _fn("channelCountHtml")
+    assert "at least" not in _fn("channelCountHtml") and "at least" not in _fn("channelLeaderHtml")
+    # Exact cohort: no "at least" anywhere on the leader.
+    assert "Most from Paid Search · 400" in _text(_group(_render(_payload()), "Contacts acquired"))
+
+
+def _ledger_stale(p=None):
+    p = p or _payload()
+    reason = "canonical_ledger_stale"
+    p["outcomes"] = {**p["outcomes"], "channels": None, "totals": None, "google_ads_line": None,
+                     "spend": {"google_ads": {"value": 186803.57, "status": "published",
+                                              "reason": None}},
+                     "publication": {k: _m(None, "unavailable", reason)
+                                     for k in ("closed_won_deals", "revenue_usd", "customers")}}
+    return p
+
+
+def test_26_m4_no_google_line_under_a_stale_ledger_says_the_ledger_is_stale():
+    html = _render(_ledger_stale())
+    card = html[html.index("channels-paid__card--google"):html.index("channels-paid__card--meta")]
+    text = _text(card)
+    assert "Spend $186.8k" in text                    # spend still shows
+    assert text.count("the deal sync is overdue") == 3   # revenue and both ratios
+    assert "evidence partition" not in text
+    # A PUBLISHED window with no line is still a missing partition.
+    p = _payload()
+    p["outcomes"]["google_ads_line"] = None
+    held = _text(_render(p))
+    assert "the Google Ads evidence partition is unavailable" in held
+
+
+_ASYNC = None
+
+
+def _run_async(script):
+    """The 161B vm harness, awaiting the probe's promise (loadChannels is async)."""
+    import tempfile
+    from tests import test_pr_ads_161b_marketing_outcome_cohorts as t161b
+    node = shutil.which("node")
+    assert node, "node is required: CI runs `node --check static/app.js`"
+    harness = t161b._VM_HARNESS.replace(
+        "process.stdout.write(JSON.stringify(out === undefined ? null : out));",
+        "Promise.resolve(out).then((v) => process.stdout.write(JSON.stringify(v === undefined ? null : v)));")
+    assert harness != t161b._VM_HARNESS
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "h.js").write_text(harness, encoding="utf-8")
+        (d / "app.js").write_text(JS, encoding="utf-8")
+        (d / "p.js").write_text(script, encoding="utf-8")
+        out = subprocess.run([node, str(d / "h.js"), str(d / "app.js"), str(d / "p.js")],
+                             capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout)
+
+
+def test_27_m5_a_reload_redraws_or_closes_the_open_drawer():
+    old, new = _payload(), _payload()
+    new["channels"][0]["contacts"] = 777
+    new["window"]["start_date"] = "2026-09-27"
+    gone = _payload()
+    gone["channels"] = gone["channels"][1:]
+    gone["outcomes"]["channels"] = gone["outcomes"]["channels"][1:]
+    probe = """
+      location = {hash: "#/channels?window=60d"};
+      const run = async (data, fail) => {
+        fetchJSON = async () => { if (fail) throw new Error("x"); return data; };
+        _channelsData = %s; _channelsView.drawer = "PAID_SEARCH"; renderChannelDrawer();
+        const before = __els["channels-drawer-root"].innerHTML;
+        await loadChannels();
+        return [before, __els["channels-drawer-root"].innerHTML, _channelsView.drawer];
+      };
+      (async () => [await run(%s, false), await run(%s, false), await run(null, true)])()
+    """ % (json.dumps(old), json.dumps(new), json.dumps(gone))
+    redrawn, closed, failed = _run_async(probe)
+    assert "400" in _text(redrawn[0]) and "31 May" in redrawn[0]
+    assert "777" in _text(redrawn[1]) and "27 Sep" in redrawn[1] and redrawn[2] == "PAID_SEARCH"
+    assert closed[1] == "" and closed[2] is None       # the channel is not in the new response
+    assert failed[1] == "" and failed[2] is None       # a failed load closes it
+    # A row of the table being replaced opens nothing.
+    wiring = JS[JS.index("// Wire up Channels controls"):JS.index("// Force-close help drawer on startup")]
+    open_fn = wiring[wiring.index("const openChannel = (row) => {"):]
+    open_fn = open_fn[:open_fn.index("};")]
+    assert 'if (channelsBody.classList.contains("is-refreshing")) return;' in open_fn
+    assert "_channelsView.drawer = null;" not in wiring[:wiring.index("const channelsBody")]
+
+
+def test_28_m1_the_funnel_leader_is_refused_when_the_unplaced_contacts_could_flip_it():
+    # (a) the no-source row: 400 > 300 + 150 is false.
+    p = _payload()
+    p["channels"][2]["contacts"] = 150
+    text = _text(_group(_render(p), "Contacts acquired"))
+    assert "Most from Paid Search · 400" not in text and "· 400" not in text
+    # (b) contacts with no created date: 400 > 300 + 10 + 95 is false.
+    text = _text(_group(_render(_payload(contacts_without_created_at=95)), "Contacts acquired"))
+    assert "· at least 400" not in text and "· 400" not in text
+    # The SQL leader keeps its own margin (20 > 9 + 0 + 95 is false too).
+    assert "Most from" not in text
+
+
+def test_29_m2_under_a_lower_bound_sql_rate_ranks_nothing():
+    p = _payload(contacts_without_created_at=3)
+    # API order: a small sample first, then Paid Search 5%, Direct 10%.
+    p["channels"].insert(0, _funnel_row("AI_REFERRALS", "AI Referrals", 20, 5))
+    p["channels"][2]["reached_sql"] = 30
+    names = _names(_render(p, {"sort": "sql_rate"}))
+    # Every rate is unknown under the bound: nothing is ranked, not even the
+    # small sample — the API's order stands.
+    assert names[:3] == ["AI Referrals", "Paid Search", "Direct Traffic"]
+    exact = _names(_render({**p, "contacts_without_created_at": 0}, {"sort": "sql_rate"}))
+    assert exact[:3] == ["Direct Traffic", "Paid Search", "AI Referrals"]
+
+
+def test_30_a_stale_dataset_status_counts_as_a_warning_in_the_strip():
+    tally = JS[JS.index("const warningCount = statuses.filter"):]
+    tally = tally[:tally.index(").length")]
+    assert '|| s === "stale"' in tally
+    detail = JS[JS.index("const _shortLabels = {"):]
+    assert 'stale: "Stale"' in detail[:detail.index("};")]
+    # datasetDisplayStatus is the source of the raw "stale".
+    assert 'return "stale";' in _fn("datasetDisplayStatus")

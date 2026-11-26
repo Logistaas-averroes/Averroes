@@ -7752,3 +7752,14 @@ no figure and no publication verdict changes.
   to its MEMORY.md.
 * **Open.** CLAUDE.md's "two baseline deselects" is stale (one test exists;
   the workflow already deselects only it) — left for its owner.
+
+#### PR-ADS-181A-F1 — audit minors: leader bound, ledger reason, drawer on reload
+
+`docs/66` §F1. One commit on `ccdfdc1`; the 181A truth audit said "merge with
+minors". A "Most from" figure under a lower bound reads "at least N" through
+the block's renderer (180B 04_b had pinned the exact figure — the defect); the
+Google Ads card without a line gives the window's own reason (a stale ledger);
+an open drawer is redrawn from a reloaded response or closed, and a row being
+replaced opens nothing; the chip says "Contacts updated"; SQL rate under a
+bound ranks nothing; a raw `stale` dataset counts as a warning. 181A 23, 25–30;
+10 mutations caught. Auditor's 181A note appended to its MEMORY.md.

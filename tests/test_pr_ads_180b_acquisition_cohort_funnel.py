@@ -389,7 +389,9 @@ def test_04_b_the_channels_strip_reads_contacts_without_created_at():
     assert "Reached SQL so far 377 12.8% of contacts" in page_exact
     # "Most from" survives a known bound only when the undated contacts could
     # not change the leader (1,147 > 746 + 2); an unstated count names none.
-    assert "Most from Paid Social · 1,147" in page_bound
+    # PR-ADS-181A-F1 (audit M3): the leader's figure is a bound too, "at least
+    # 1,147" — this line pinned it as exact before, which was the defect.
+    assert "Most from Paid Social · at least 1,147" in page_bound
     unstated = text(_run_app("renderChannelFunnel(%s, {})"
                              % json.dumps({**p, "contacts_without_created_at": None})))
     assert "Most from" not in unstated.split("Channels ranked")[0]

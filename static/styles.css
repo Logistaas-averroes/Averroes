@@ -5534,6 +5534,7 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .channels-paid__note--disclosure { color: var(--warning-fg, #b45309); }
 /* 4 — the channel drawer: right side on desktop, a full-width sheet on a phone. */
 #channels-drawer-root[hidden] { display: none; }
+#channels-drawer-root.is-refreshing .channels-drawer { opacity: 0.55; transition: opacity 0.15s; }
 .channels-drawer-overlay { position: fixed; inset: 0; background: rgba(1, 25, 49, 0.28); z-index: 900; }
 .channels-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 100vw); background: var(--surface-card); box-shadow: var(--shadow-lg); z-index: 901; overflow-y: auto; padding: var(--space-5); box-sizing: border-box; }
 .channels-drawer__head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-3); }

@@ -135,7 +135,7 @@ def test_01_the_totals_strip_shows_each_published_count_and_its_share():
     assert "Reached SQL 377 12.8% of contacts" in drawer
     assert "Reached Opportunity 231 7.8% of contacts" in drawer
     assert "Reached Customer stage 73 2.5% of contacts" in drawer
-    assert _node(f"channelsUpdatedText({json.dumps(_payload())})") == "Updated 18 Nov, 06:00 UTC"
+    assert _node(f"channelsUpdatedText({json.dumps(_payload())})") == "Contacts updated 18 Nov, 06:00 UTC"
 
 
 # ── the two rankings are the table's SQLs and SQL rate columns ───────────────

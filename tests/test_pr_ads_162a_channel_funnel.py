@@ -226,7 +226,7 @@ def test_13_the_page_renders_channels_stages_and_shares():
     assert "25.0%" in html and "20.0%" in html          # 1 of 4, 2 of 10
     assert "linkedin" in social and "facebook" in social
     assert "60.0% of contacts" in total                  # MQL: 6 of 10
-    assert updated == "Updated 18 Nov, 06:00 UTC"
+    assert updated == "Contacts updated 18 Nov, 06:00 UTC"
 
 
 @pytest.mark.parametrize("status,word", [("withheld", "Withheld"),
