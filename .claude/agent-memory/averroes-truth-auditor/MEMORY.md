@@ -1011,3 +1011,34 @@ truncated list. Verified by execution on exported copies of both commits.
   180C/178B/178C/166A/180A/180B/180B-F1 modules pass, PG ran, no skips;
   60 related modules (grep for the touched symbols) 2007 passed, 0 skipped,
   HEAD stable. Full suite NOT run.
+
+## PR-ADS-180C-F1 re-review (8964dee on 98cd829, PR 241, 2026-11-26) — do not merge as is
+- MAJOR (CI red, false production-audit violation): F1 moved the window
+  clause into `crm_funnel_repository.any_stage_date_in_window`, so
+  `fetch_funnel_contacts`' own source no longer contains `effective_date_sql(`.
+  `scripts/audit_lifecycle_sql_coverage.check_effective_date_consistency` is
+  LEXICAL per reader (`_function_source`) and now reports a violation; the
+  coverage audit exits 1 and `audit_sql_coverage_gate` reports
+  `canonical_readers_agree` broken. 12 tests fail on 8964dee and pass on
+  98cd829: 159 test_26[fetch_funnel_contacts]/44/60/61/97/118, 160
+  test_29/63/88/89/90, 161C test_70. The builder ran only the 180C/180B/178B/
+  178C modules. Lesson: a refactor that moves SQL into a helper breaks every
+  lexical "reader uses X" guard; grep `_function_source` / `_EFFECTIVE_DATE_READERS`.
+- `one_read_snapshot` = `pinned_read_snapshot`. Verified on PG: a real _Pin,
+  no violations, campaign identity resolves inside it. Mutation S
+  (nullcontext) fails PG 04_a/b/c. With the schema lock held, or queued
+  behind a waiting init_db while a certification window holds it shared,
+  Pipeline waits the full lock timeout (60 s in prod) and then reads
+  `lifecycle_funnel_unreadable` (fail closed). Overview pins twice (current
+  and previous period). A silent two-read fallback on a snapshot failure
+  (mutation Sf) passes every test: the fail-closed path is real but untested.
+- Edge guard works: PG 05 kills an undated-read-only end drift of +1 day and a
+  strict start edge in the shared helper (also test_02).
+- `count_lead_exclusions` -> None: the only other caller is
+  lead_reconciliation_service summary `already_excluded_legacy` (no
+  arithmetic; renders "—" via fmtCount). Pre-existing: an unreadable
+  `fetch_missing_event_date_leads` gives [] -> status success, ready True.
+- `population: "selected_population_narrowed"` has no test (mutation survives)
+  and no reader.
+- Evidence: 226 tests (180C, 178B/C, 166A, 180A/B, 180B-F1, revenue audit,
+  179A/B, 115) passed, PG ran, no skips.

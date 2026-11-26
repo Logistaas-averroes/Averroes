@@ -184,6 +184,11 @@ SCHEMA_LOCK_KEY = 179_000_001
 #: How long a window waits for a running migration before it gives up the
 #: snapshot and runs unpinned (the pre-179A behaviour: every read on its own).
 WINDOW_SCHEMA_LOCK_WAIT_SECONDS = 60
+#: PR-ADS-180C-F2: the same wait for a WEB request's pinned snapshot (the
+#: funnel reads of Pipeline and Overview, ``one_read_snapshot``). A page must
+#: not hang for a minute behind a queued migration; past this it fails closed
+#: (the funnel reads "could not be read"), never a torn read.
+WEB_SNAPSHOT_LOCK_WAIT_SECONDS = 5
 
 _PINNED: _contextvars.ContextVar = _contextvars.ContextVar(
     "pinned_read_snapshot", default=None)
@@ -538,7 +543,7 @@ def current_read_snapshot():
 
 
 @contextlib.contextmanager
-def pinned_read_snapshot():
+def pinned_read_snapshot(lock_wait_seconds: float | None = None):
     """Run every ``get_conn()`` in the block on ONE ``REPEATABLE READ, READ
     ONLY`` transaction (see the section comment). Yields the pin, or None when
     no database is configured (the block then runs exactly as it would
@@ -546,7 +551,14 @@ def pinned_read_snapshot():
 
     The snapshot is TAKEN when the block starts (its first statement), so
     every read in the block sees the database as of that instant.
+
+    ``lock_wait_seconds`` (PR-ADS-180C-F2): how long to wait for the shared
+    schema lock behind a running or queued migration before the block raises;
+    ``None`` is the certification wait (``WINDOW_SCHEMA_LOCK_WAIT_SECONDS``).
+    A web request passes a short wait (``WEB_SNAPSHOT_LOCK_WAIT_SECONDS``).
     """
+    wait = (WINDOW_SCHEMA_LOCK_WAIT_SECONDS if lock_wait_seconds is None
+            else lock_wait_seconds)
     if _PINNED.get() is not None:
         yield _PINNED.get()
         return
@@ -563,7 +575,7 @@ def pinned_read_snapshot():
         # migration it waited for has committed.
         with conn.cursor() as cur:
             cur.execute("SET LOCAL lock_timeout = %s",
-                        (f"{int(WINDOW_SCHEMA_LOCK_WAIT_SECONDS * 1000)}ms",))
+                        (f"{max(1, int(wait * 1000))}ms",))
             cur.execute("SELECT pg_advisory_lock_shared(%s)", (SCHEMA_LOCK_KEY,))
         conn.commit()
         locked = True

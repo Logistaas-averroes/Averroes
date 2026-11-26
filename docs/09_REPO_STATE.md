@@ -7692,3 +7692,24 @@ with minors".
 * **Tests.** 180C PG 04_a, 04_b, 04_c, 05 and unit 03_c; 04_a/04_b/04_c and
   03_c fail on `98cd829`; mutations m2, m3, m2h, m3h, S, Sp, So, Spp, R1–R5
   all fail a test (docs/65 §7.6).
+
+#### PR-ADS-180C-F2 — the effective-date audit follows the shared window helper
+
+`docs/65` §8. One commit on `8964dee`; the F1 re-review found a Major.
+
+* **Major (CI red).** F1's window helper left `fetch_funnel_contacts` without
+  `effective_date_sql(` in its own source; the lexical effective-date audit
+  and 159 test_26 failed (12 tests; coverage audit exit 1, gate
+  `canonical_readers_agree` broken). `any_stage_date_in_window` now takes the
+  reader's expressions and refuses anything but the shared ones; the audit
+  follows one level into a known helper, counting it only when the helper
+  names the shared expression and builds no bare column. The 12 tests pass
+  unchanged.
+* **Fail closed, fast.** Web-request snapshots wait 5 s for the schema lock
+  (`WEB_SNAPSHOT_LOCK_WAIT_SECONDS`; certification keeps 60 s); past it the
+  Pipeline funnel, Overview Activity and its previous period read unavailable.
+* Reconciliation summary "Already excluded legacy rows" says "Unknown" when
+  unread; `undated_reach.population` pinned by a test. Auditor's F1 re-review
+  note appended to its MEMORY.md.
+* **Tests.** Unit 05_a, 05_b, 06_a, 07, 08 and PG 06; mutations N, Nb, H,
+  Sf, W, P, U each fail a test (`docs/65` §8.4).

@@ -216,7 +216,8 @@ def _unavailable(**extra) -> dict:
     return payload
 
 
-def any_stage_date_in_window(start: date | None, end: date | None) -> tuple[str, list]:
+def any_stage_date_in_window(date_exprs, start: date | None,
+                             end: date | None) -> tuple[str, list]:
     """PR-ADS-180C-F1 — the ONE "some stage-entry date falls in ``[start,
     end]``" predicate, as ``(sql, params)``.
 
@@ -227,17 +228,28 @@ def any_stage_date_in_window(start: date | None, end: date | None) -> tuple[str,
     predicates must be the same text: a second copy whose edge drifted would
     turn "outside" into "inside" and a lower bound into a false exact.
 
-    Effective dates (direct, else recovered from lifecycle history), the
-    funnel alias ``f`` and the recovery join are the caller's. ``start=None``
-    / ``end=None`` are open bounds. The end is inclusive of the whole day.
+    PR-ADS-180C-F2: each caller passes the stage-entry expressions it filters
+    on (``date_exprs``), so the reader's own source names the shared effective
+    expression — the effective-date audit and its drift guard read each reader
+    lexically — and this helper REFUSES anything but exactly those shared
+    expressions (direct date, else recovered from lifecycle history), one per
+    funnel event in order: a bare column or a different coalesce raises rather
+    than selecting a second population. The funnel alias ``f`` and the
+    recovery join are the caller's. ``start=None`` / ``end=None`` are open
+    bounds. The end is inclusive of the whole day.
     """
+    shared = [effective_date_sql(e) for e in FUNNEL_EVENTS]
+    if list(date_exprs) != shared:
+        raise ValueError("any_stage_date_in_window accepts only the shared effective "
+                         "stage-entry expressions (effective_date_sql, every funnel "
+                         "event, in order)")
     sql = " OR ".join(
         f"""(
             {expr} IS NOT NULL
             AND ({expr} >= COALESCE(%s::timestamptz, {expr}))
             AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
         )"""
-        for expr in (effective_date_sql(e) for e in FUNNEL_EVENTS))
+        for expr in shared)
     params: list = []
     for _ in FUNNEL_EVENTS:
         params.extend([start, end, end])
@@ -259,7 +271,8 @@ def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
     (All Time). Rows also carry every later-stage date regardless of window, so
     cohort-safe conversions can be computed downstream.
     """
-    window_clause, params = any_stage_date_in_window(start, end)
+    window_clause, params = any_stage_date_in_window(
+        [_effective_date_sql(e) for e in FUNNEL_EVENTS], start, end)
 
     try:
         with get_conn() as conn:
@@ -319,7 +332,8 @@ def fetch_undated_stage_reach(start: date | None, end: date | None) -> dict:
     # PR-ADS-180C-F1: the SAME clause object fetch_funnel_contacts uses, not a
     # second copy — "outside the window's rows" can only be trusted while the
     # two predicates cannot drift apart.
-    in_window, window_params = any_stage_date_in_window(start, end)
+    in_window, window_params = any_stage_date_in_window(
+        [effective_date_sql(e) for e in FUNNEL_EVENTS], start, end)
     stage_counts = []
     params: list = []
     for event in FUNNEL_EVENTS:

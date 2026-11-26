@@ -335,3 +335,51 @@ def test_05_the_rows_and_the_outside_count_share_every_window_edge(live_db):
     assert repo.fetch_undated_stage_reach(start, None)["outside_window_rows"]["sql"] == 1
     assert {r["contact_id"] for r in repo.fetch_funnel_contacts(None, end)["rows"]} \
         == {"e-before", "e-start", "e-end"}
+
+
+# ── 6. PR-ADS-180C-F2: a snapshot that cannot be taken fails closed, fast ───
+def test_06_no_snapshot_means_no_funnel_at_every_site_within_the_web_wait(live_db):
+    """A migration holds the schema lock (EXCLUSIVE, on its own connection),
+    so no pinned snapshot can start. Each of the three funnel-read sites must
+    report the funnel unreadable — never fall back to two unpinned reads —
+    and must give up within the web wait (5 s), not certification's 60 s."""
+    import time
+    from db.connection import SCHEMA_LOCK_KEY
+    from services import dashboard_overview_service as O
+    from services import pipeline_service as ps
+    _outside_fixture()
+    now = datetime.now(timezone.utc)
+    # Positive control: with the lock free every site reads its funnel.
+    assert ps._funnel(WINDOW, now, "all_source", None)["available"] is True
+    assert O._lifecycle_funnel_block(WINDOW, now=now)["available"] is True
+    assert O._lifecycle_previous_period(WINDOW, now)["available"] is True
+
+    holder = live_db.connect()
+    try:
+        with holder.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,))
+        holder.commit()
+        t0 = time.monotonic()
+        f = ps._funnel(WINDOW, now, "all_source", None)
+        t1 = time.monotonic()
+        assert (f["available"], f["reason"]) == (False, "lifecycle_funnel_unreadable"), f
+        assert f["events"] == {} and "undated_reach" not in f
+        block = O._lifecycle_funnel_block(WINDOW, now=now)
+        t2 = time.monotonic()
+        assert block["available"] is False and block["lead"] is None
+        assert block["reconciliation"]["reasons"] == ["canonical_funnel_read_failed"]
+        prev = O._lifecycle_previous_period(WINDOW, now)
+        t3 = time.monotonic()
+        assert (prev["available"], prev["counts"], prev["reason"]) == (
+            False, {}, "Previous period unavailable.")
+        # The web wait, not the 60 s certification wait, per site.
+        for elapsed in (t1 - t0, t2 - t1, t3 - t2):
+            assert 3 <= elapsed < 20, elapsed
+    finally:
+        try:
+            with holder.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK_KEY,))
+            holder.commit()
+        finally:
+            holder.close()
+    assert ps._funnel(WINDOW, now, "all_source", None)["available"] is True

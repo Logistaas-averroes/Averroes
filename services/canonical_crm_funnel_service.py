@@ -1042,9 +1042,15 @@ def one_read_snapshot():
     It is ``db.connection.pinned_read_snapshot`` (PR-ADS-179A): nested inside
     a certification window it shares that window's snapshot; with no database
     configured it changes nothing. A snapshot that cannot be taken raises, and
-    the caller reports the funnel unreadable — never a torn read."""
-    from db.connection import pinned_read_snapshot  # noqa: PLC0415
-    return pinned_read_snapshot()
+    the caller reports the funnel unreadable — never a torn read.
+
+    PR-ADS-180C-F2: a web request waits at most
+    ``WEB_SNAPSHOT_LOCK_WAIT_SECONDS`` (5 s) for the shared schema lock
+    behind a migration, not the certification window's 60 s."""
+    from db.connection import (  # noqa: PLC0415
+        WEB_SNAPSHOT_LOCK_WAIT_SECONDS, pinned_read_snapshot,
+    )
+    return pinned_read_snapshot(lock_wait_seconds=WEB_SNAPSHOT_LOCK_WAIT_SECONDS)
 
 
 def undated_stage_reach(window: dict | None) -> dict:

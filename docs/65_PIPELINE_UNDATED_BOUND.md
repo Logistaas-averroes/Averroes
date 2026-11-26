@@ -289,3 +289,82 @@ Each applied alone to a copy of the tree, with the 180C modules, 180B PG,
 178B PG and 178C PG test_05. None survives. (The audit's m2 / m3 can no
 longer be applied as written — there is no second copy — so m2 / m3 drift
 the undated read's call to the shared helper, the same effect.)
+
+## 8. PR-ADS-180C-F2 — the effective-date audit follows the shared window helper
+
+The F1 re-review (`8964dee`) found a Major that turned CI red, and four minors.
+
+### 8.1 The Major: a lexical guard broken by a refactor
+
+F1 moved the window clause into `any_stage_date_in_window`, so
+`fetch_funnel_contacts`' own source no longer named `effective_date_sql(`.
+Two lexical guards read each reader's own source: the production audit
+`audit_lifecycle_sql_coverage.check_effective_date_consistency` (so the
+coverage audit exited 1 and `audit_sql_coverage_gate` reported
+`canonical_readers_agree` broken) and 159 test_26. Twelve tests failed on
+`8964dee` (159 test_26[fetch_funnel_contacts], 44, 60, 61, 97, 118_pg; 160
+test_29, 63, 88, 89, 90; 161C test_70). None of them is edited; all pass.
+
+**Fix, keeping the guarantee:**
+
+* `any_stage_date_in_window(date_exprs, start, end)` takes the expressions
+  the reader filters on, so each reader's own source names the shared
+  expression again (`[effective_date_sql(e) for e in FUNNEL_EVENTS]`); the
+  helper **refuses** anything but exactly those (a bare column, another order,
+  a missing event: `ValueError`). The edges stay in one place (§7.2).
+* The audit follows ONE level into a known window helper
+  (`_SHARED_WINDOW_HELPERS`, `reader_effective_date_status`): a call counts as
+  the shared expression only when the helper's own source names it and builds
+  no bare `EVENT_DATE_COLUMN[event]`; a bare column in the helper is a
+  violation of every reader that calls it; a helper that cannot be found
+  certifies nothing. Unit 05_a runs the check on a synthetic repository whose
+  reader delegates to a helper building the bare column: flagged. Mutation N
+  (any helper call counts as shared) fails it.
+
+### 8.2 Fail closed, and fast, when no snapshot can be taken
+
+A web request's pinned snapshot (`one_read_snapshot`) now waits at most
+`WEB_SNAPSHOT_LOCK_WAIT_SECONDS` = **5 s** for the shared schema lock behind a
+running or queued migration (`pinned_read_snapshot(lock_wait_seconds=…)`);
+certification keeps `WINDOW_SCHEMA_LOCK_WAIT_SECONDS` = 60 s. Overview pins
+twice (current and previous period), so a page waits at most ~10 s, then:
+Pipeline's funnel reads `lifecycle_funnel_unreadable`, Overview's Lifecycle
+Activity is unavailable (`canonical_funnel_read_failed`) and its previous
+period "Previous period unavailable." (no comparison). Never two unpinned
+reads. PG 06 holds the schema lock and asserts all three, each within the
+web wait; mutation Sf (a failed snapshot silently runs without one) and W
+(web requests wait 60 s) each fail it.
+
+Pool pressure: each pinned block holds one pooled connection for the build
+and its reach (the pool is 10); a block waiting on the lock holds it for up
+to 5 s. Not measured on production.
+
+### 8.3 The other minors
+
+* The lead-reconciliation summary's "Already excluded legacy rows" renders
+  `fmtCountOrUnknown` (unit 07; mutation U).
+* `undated_reach.population` is pinned: "all_source" unfiltered,
+  "selected_population_narrowed" under a Scope or Source filter (unit 08;
+  the auditor's mutation P now fails).
+* Recorded, not changed (pre-existing, outside this PR): an unreadable
+  `fetch_missing_event_date_leads` makes the reconciliation report success.
+
+### 8.4 Evidence
+
+New tests: unit 05_a, 05_b, 06_a, 07, 08 and PG 06. On `8964dee`: 05_a fails
+(the check takes no repository), 05_b fails on the Major itself
+(`fetch_funnel_contacts: 'bare'`), 06_a (no web wait), 07 ("—"), PG 06
+(60.0 s per site); 08 passes there by design and is held by mutation P.
+
+| | Mutation | Failed |
+| --- | --- | --- |
+| N | naive audit: any call to a known helper counts as the shared expression | 05_a |
+| Nb | the audit ignores a bare column inside the helper | 05_a |
+| H | the helper accepts any expressions | 05_b |
+| Sf | a snapshot that cannot be taken silently runs without one | PG 06 |
+| W | web snapshots wait the certification 60 s | 06_a, PG 06 |
+| P | the narrowed reach keeps the "all_source" label (the auditor's P) | 08 |
+| U | the reconciliation summary prints a dash for an unread count | 07 |
+
+Each applied alone to a copy of the tree, with both 180C modules, 180B PG,
+178B PG and 178C PG test_05. None survives.

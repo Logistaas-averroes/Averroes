@@ -8163,7 +8163,7 @@ function renderRecoveryResult(status) {
     <div class="recovery-result">
       <div class="recovery-result__head">${escapeHtml(mode)} · ${escapeHtml(status.date_from || "")} → ${escapeHtml(status.date_to || "")} · <strong>${escapeHtml(status.status || "")}</strong></div>
       <div class="revenue-summary-strip revenue-summary-strip--four">
-        ${rows.map(([label, val]) => `<div><span>${label}</span><strong>${fmtCount(val)}</strong></div>`).join("")}
+        ${rows.map(([label, val, fmt]) => `<div><span>${label}</span><strong>${(fmt || fmtCount)(val)}</strong></div>`).join("")}
       </div>
       ${errorsHtml}
     </div>
@@ -8590,7 +8590,8 @@ function renderReconResult(status) {
     ["No usable contact identity", s.no_usable_contact_identity],
     ["HubSpot contact not found", s.hubspot_contact_not_found],
     ["HubSpot contact has no createdate", s.hubspot_contact_no_createdate],
-    ["Already excluded legacy rows", s.already_excluded_legacy],
+    // PR-ADS-180C-F2: None when the exclusions table could not be read.
+    ["Already excluded legacy rows", s.already_excluded_legacy, fmtCountOrUnknown],
     ["Remaining unresolved", unresolved],
   ];
   const errorsHtml = (status.errors && status.errors.length)
@@ -8602,7 +8603,7 @@ function renderReconResult(status) {
     <div class="recovery-result">
       <div class="recovery-result__head">${escapeHtml(mode)} · <strong>${escapeHtml(status.status || "")}</strong></div>
       <div class="revenue-summary-strip revenue-summary-strip--four">
-        ${rows.map(([label, val]) => `<div><span>${label}</span><strong>${fmtCount(val)}</strong></div>`).join("")}
+        ${rows.map(([label, val, fmt]) => `<div><span>${label}</span><strong>${(fmt || fmtCount)(val)}</strong></div>`).join("")}
       </div>
       ${readyLine}
       ${errorsHtml}

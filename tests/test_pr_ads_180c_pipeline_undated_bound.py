@@ -498,3 +498,114 @@ def test_03_c_a_database_outage_leaves_every_revenue_health_count_unknown(monkey
     monkeypatch.setattr(writers, "count_lead_exclusions", boom)
     assert json.loads(json.dumps(t._audit(grain=grain), default=str))[
         "legacy_excluded_count"] is None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-180C-F2 — the effective-date audit follows the shared window helper
+# ═════════════════════════════════════════════════════════════════════════════
+_FAKE_REPO = '''
+EVENT_DATE_COLUMN = {}
+FUNNEL_EVENTS = ()
+
+
+def effective_date_sql(event):
+    return event
+
+
+def any_stage_date_in_window(date_exprs, start, end):
+    return " OR ".join(%(helper_expr)s for e in FUNNEL_EVENTS), []
+
+
+def fetch_funnel_contacts(start, end):
+    window_clause, params = any_stage_date_in_window(None, start, end)
+    return window_clause
+'''
+
+
+def _audit_fake_repo(tmp_path, helper_expr):
+    from scripts import audit_lifecycle_sql_coverage as A
+    repo_file = tmp_path / "crm_funnel_repository.py"
+    repo_file.write_text(_FAKE_REPO % {"helper_expr": helper_expr})
+    f = A.Findings()
+    out = A.check_effective_date_consistency(f, repo_file=repo_file,
+                                             readers=("fetch_funnel_contacts",))
+    return out["readers"]["fetch_funnel_contacts"], [
+        v for v in f.violations if v.startswith("effective_date_consistency")]
+
+
+def test_05_a_the_audit_follows_a_helper_only_when_the_helper_is_shared(tmp_path):
+    """The reader names no expression itself and delegates its window to the
+    helper. It counts as shared ONLY when the helper's own source uses the
+    shared expression and builds no bare column. A naive "any helper call is
+    shared" rule passes the bare helper — this case fails it."""
+    state, problems = _audit_fake_repo(tmp_path, 'f"f.{EVENT_DATE_COLUMN[event]}"')
+    assert problems, "a helper building the bare column must not certify its reader"
+    assert state == "bare"
+    state, problems = _audit_fake_repo(tmp_path, "effective_date_sql(e)")
+    assert (state, problems) == ("shared", [])
+    # A helper that names the shared expression AND a bare column certifies
+    # nothing: still a violation.
+    state, problems = _audit_fake_repo(
+        tmp_path, 'effective_date_sql(e) + f"{EVENT_DATE_COLUMN[event]}"')
+    assert state == "bare" and problems
+    # A helper that names neither: not shared.
+    state, problems = _audit_fake_repo(tmp_path, "'f.created_at'")
+    assert state == "bare" and problems
+
+
+def test_05_b_the_real_readers_pass_and_the_helper_refuses_anything_but_shared():
+    from db import crm_funnel_repository as repo
+    from scripts import audit_lifecycle_sql_coverage as A
+    f = A.Findings()
+    out = A.check_effective_date_consistency(f)
+    assert set(out["readers"].values()) == {"shared"}, out["readers"]
+    assert not [v for v in f.violations if v.startswith("effective_date_consistency")]
+    shared = [repo.effective_date_sql(e) for e in repo.FUNNEL_EVENTS]
+    sql, params = repo.any_stage_date_in_window(shared, date(2026, 7, 1), date(2026, 9, 30))
+    assert len(params) == 3 * len(repo.FUNNEL_EVENTS) and shared[0] in sql
+    import pytest
+    for wrong in ([f"f.{repo.EVENT_DATE_COLUMN[e]}" for e in repo.FUNNEL_EVENTS],
+                  list(reversed(shared)), shared[:-1]):
+        with pytest.raises(ValueError):
+            repo.any_stage_date_in_window(wrong, None, None)
+
+
+# ── F2 minor 2: a web request's snapshot waits briefly for the schema lock ──
+def test_06_a_web_snapshots_wait_briefly_certification_keeps_its_wait(monkeypatch):
+    import db.connection as C
+    from services import canonical_crm_funnel_service as F
+    assert C.WINDOW_SCHEMA_LOCK_WAIT_SECONDS == 60
+    assert C.WEB_SNAPSHOT_LOCK_WAIT_SECONDS == 5
+    seen = []
+    monkeypatch.setattr(C, "pinned_read_snapshot",
+                        lambda **kw: seen.append(kw) or __import__("contextlib").nullcontext())
+    with F.one_read_snapshot():
+        pass
+    assert seen == [{"lock_wait_seconds": 5}]
+    # Certification opens its window with the default (60 s) wait.
+    from pathlib import Path
+    memo = (Path(__file__).resolve().parent.parent / "services" / "snapshot_memo.py").read_text()
+    assert "stack.enter_context(pinned_read_snapshot())" in memo
+
+
+# ── F2 minor 3: the reconciliation summary's unread exclusion count ─────────
+def test_07_the_reconciliation_summary_says_unknown_for_an_unread_exclusion_count():
+    def cell(value):
+        html = _run_app("renderReconResult(%s)" % json.dumps(
+            {"status": "success", "dry_run": True,
+             "summary": {"missing_event_dates": 3, "remaining_unresolved": 0,
+                         "already_excluded_legacy": value}}))
+        m = re.search(r"Already excluded legacy rows</span><strong>(.*?)</strong>", html, re.S)
+        return _text(m.group(1)).strip()
+    assert cell(None) == "Unknown"
+    assert cell(0) == "0" and cell(3276) == "3,276"
+
+
+# ── F2 minor 4: the population label says whose counts these are ───────────
+def test_08_the_undated_reach_names_its_population(monkeypatch):
+    rows = _outside_rows()
+    assert _pipeline_funnel(monkeypatch, rows)["undated_reach"]["population"] == "all_source"
+    for kw in ({"scope": "google_ads_source"}, {"group": "organic"}):
+        reach = _pipeline_funnel(monkeypatch, rows, **kw)["undated_reach"]
+        assert reach["population"] == "selected_population_narrowed", kw
+        assert reach["covers_selected_population"] is False
